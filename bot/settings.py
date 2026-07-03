@@ -142,6 +142,10 @@ class ScannerSettings:
     probability_filter_enabled: bool = True
     outcome_tracking_enabled: bool = True
 
+    # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
+    market_structure_enabled: bool = True
+    market_structure_hours: int = 5
+
     # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
     binance_long_period_minutes: int | None = None
@@ -303,6 +307,8 @@ class ScannerSettings:
             min_probability_percent=float(base.get("min_probability_percent", 70.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
+            market_structure_enabled=bool(base.get("market_structure_enabled", True)),
+            market_structure_hours=int(base.get("market_structure_hours", 5)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),

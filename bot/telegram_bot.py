@@ -26,6 +26,7 @@ from .models import Signal
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .probability_engine import format_probability_from_signal
+from .market_structure import format_market_structure_block
 from .test_signals import build_test_signals
 
 logger = logging.getLogger(__name__)
@@ -874,6 +875,7 @@ class TelegramBot:
             f"⚡ Ускорение: <b>{velocity}×</b> к флету\n"
             f"📈 OI: <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n\n"
             f"<i>Ранний вход в вертикаль, как на графике</i>\n\n"
+            f"{self._market_structure_section(signal)}"
             f"{format_probability_from_signal(signal)}"
         )
 
@@ -920,8 +922,14 @@ class TelegramBot:
             f"{side_emoji} 💲 Изменение цены: <b>{price_text}</b>\n"
             f"⏱ Ранность: <b>{signal.signal_score}</b>/10 "
             f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>\n\n"
+            f"{self._market_structure_section(signal)}"
             f"{format_probability_from_signal(signal)}"
         )
+
+    @staticmethod
+    def _market_structure_section(signal: Signal) -> str:
+        block = format_market_structure_block(signal.details.get("market_structure"))
+        return f"{block}\n" if block else ""
 
     def _is_admin(self, update: Update) -> bool:
         user_id = None

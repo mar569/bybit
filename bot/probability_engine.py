@@ -14,18 +14,20 @@ PROBABILITY_BYPASS_TYPES = frozenset({
 
 # Веса факторов (сумма = 1.0)
 FACTOR_WEIGHTS: dict[str, float] = {
-    "oi_price_sync": 0.20,
-    "threshold_excess": 0.16,
-    "oi_usd_flow": 0.12,
-    "momentum": 0.10,
-    "volume": 0.07,
-    "trend": 0.07,
-    "rsi": 0.06,
+    "oi_price_sync": 0.17,
+    "threshold_excess": 0.13,
+    "oi_usd_flow": 0.10,
+    "momentum": 0.09,
+    "volume": 0.06,
+    "trend": 0.06,
+    "rsi": 0.05,
     "funding": 0.04,
-    "liquidity": 0.04,
-    "pattern": 0.08,
-    "timing": 0.06,
-    "btc": 0.10,
+    "liquidity": 0.03,
+    "pattern": 0.07,
+    "timing": 0.05,
+    "btc": 0.07,
+    "market_phase": 0.06,
+    "htf_oi_context": 0.05,
 }
 
 
@@ -137,6 +139,7 @@ def assess_signal_probability(
     *,
     btc_change_percent: float | None = None,
     vol_spike: bool = False,
+    market_structure: dict[str, object] | None = None,
 ) -> ProbabilityAssessment:
     is_long = signal.side == "long"
     oi = signal.oi_change_percent
@@ -216,6 +219,18 @@ def assess_signal_probability(
     else:
         btc_strength = _clamp(0.5 - btc_change_percent / 0.8, 0.0, 1.0)
 
+    ms = market_structure or signal.details.get("market_structure")
+    if isinstance(ms, dict) and ms.get("phase"):
+        phase_strength = float(ms.get("phase_strength", 0.5))
+        oi_ctx_strength = float(ms.get("oi_context_strength", 0.5))
+        phase_label = str(ms.get("phase_label", ""))
+        oi_label = str(ms.get("oi_narrative_label", ""))
+    else:
+        phase_strength = 0.48
+        oi_ctx_strength = 0.48
+        phase_label = ""
+        oi_label = ""
+
     strengths: dict[str, float] = {
         "oi_price_sync": sync_strength,
         "threshold_excess": threshold_strength,
@@ -229,6 +244,8 @@ def assess_signal_probability(
         "pattern": pattern_strength,
         "timing": timing_strength,
         "btc": btc_strength,
+        "market_phase": phase_strength,
+        "htf_oi_context": oi_ctx_strength,
     }
 
     weighted = sum(FACTOR_WEIGHTS[k] * strengths[k] for k in FACTOR_WEIGHTS)
@@ -344,6 +361,24 @@ def assess_signal_probability(
             f"BTC {btc_change_percent:+.2f}%" if btc_change_percent is not None else "нет данных",
         ),
     ]
+
+    if isinstance(ms, dict) and ms.get("phase"):
+        factors.append(ProbabilityFactor(
+            "market_phase",
+            f"Фаза рынка ({ms.get('hours_analyzed', 5)}ч)",
+            phase_strength,
+            FACTOR_WEIGHTS["market_phase"],
+            phase_strength * FACTOR_WEIGHTS["market_phase"] * 72,
+            phase_label or str(ms.get("phase_detail", "")),
+        ))
+        factors.append(ProbabilityFactor(
+            "htf_oi_context",
+            "Позиции трейдеров",
+            oi_ctx_strength,
+            FACTOR_WEIGHTS["htf_oi_context"],
+            oi_ctx_strength * FACTOR_WEIGHTS["htf_oi_context"] * 72,
+            oi_label or str(ms.get("oi_narrative", "")),
+        ))
 
     if not oi_aligned and abs(oi) >= oi_thr:
         factors.append(ProbabilityFactor(

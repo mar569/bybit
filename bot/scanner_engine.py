@@ -9,10 +9,14 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from .models import Signal, SnapshotPoint
+from .bybit_klines import BybitKlineCache
+from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_time
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 
 HISTORY_MAX_POINTS = 3600
+OI_BAR_INTERVAL_SECONDS = 300
+OI_BAR_MAX_COUNT = 72  # 6 часов по 5 минут
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,8 @@ class SignalEngine:
         self._last_top_refresh = 0.0
         self._dirty_keys: set[str] = set()
         self._btc_history: deque[SnapshotPoint] = deque(maxlen=HISTORY_MAX_POINTS)
+        self._five_min_bars: dict[str, deque[FiveMinOiBar]] = {}
+        self._kline_cache = BybitKlineCache()
         self.lock = asyncio.Lock()
 
     def _reset_daily_counts_if_needed(self) -> None:
@@ -155,8 +161,37 @@ class SignalEngine:
             history.append(point)
             if symbol == "BTCUSDT":
                 self._btc_history.append(point)
+            self._update_five_min_bar(key, point)
 
         self._dirty_keys.add(key)
+
+    def _update_five_min_bar(self, key: str, point: SnapshotPoint) -> None:
+        if point.open_interest is None or point.price is None:
+            return
+        if point.open_interest <= 0 or point.price <= 0:
+            return
+
+        open_time = bar_open_time(point.timestamp, OI_BAR_INTERVAL_SECONDS)
+        bars = self._five_min_bars.setdefault(key, deque(maxlen=OI_BAR_MAX_COUNT))
+
+        if bars and bars[-1].open_time == open_time:
+            bar = bars[-1]
+            bar.oi_high = max(bar.oi_high, point.open_interest)
+            bar.oi_low = min(bar.oi_low, point.open_interest)
+            bar.oi_close = point.open_interest
+            bar.price_close = point.price
+            bar.samples += 1
+            return
+
+        bars.append(FiveMinOiBar(
+            open_time=open_time,
+            oi_open=point.open_interest,
+            oi_high=point.open_interest,
+            oi_low=point.open_interest,
+            oi_close=point.open_interest,
+            price_close=point.price,
+            samples=1,
+        ))
 
     def get_snapshot_for(self, exchange: str, symbol: str) -> SnapshotPoint | None:
         history = self.history.get(f"{exchange}:{symbol}")
@@ -343,6 +378,18 @@ class SignalEngine:
             self.last_signal_time[cooldown_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
+            market_structure_dict = None
+            if "bybit" in exchange.lower() and settings.market_structure_enabled:
+                klines = await self._kline_cache.get_klines(symbol, limit=OI_BAR_MAX_COUNT)
+                oi_bars = list(self._five_min_bars.get(key, []))
+                ms_ctx = analyze_market_structure(
+                    klines,
+                    oi_bars,
+                    is_long=(side == "long"),
+                    hours=settings.market_structure_hours,
+                )
+                market_structure_dict = ms_ctx.to_dict()
+
             signal = Signal(
                 exchange=exchange,
                 symbol=symbol,
@@ -382,6 +429,7 @@ class SignalEngine:
                     "urgency": candidate.urgency,
                     "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
                     **(candidate.breakout_meta or {}),
+                    **({"market_structure": market_structure_dict} if market_structure_dict else {}),
                 },
             )
 
@@ -391,6 +439,7 @@ class SignalEngine:
                 thresholds,
                 btc_change_percent=self.get_btc_change_percent(5),
                 vol_spike=vol_spike,
+                market_structure=market_structure_dict,
             )
             signal.details["probability_percent"] = assessment.percent
             signal.details["probability_verdict"] = assessment.verdict
