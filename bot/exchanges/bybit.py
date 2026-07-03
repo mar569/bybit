@@ -182,6 +182,8 @@ class BybitScanner(ExchangeScanner):
         self.snapshots[symbol] = snapshot
         if snapshot.price and snapshot.open_interest:
             await self._dispatch_update(snapshot)
+
+    async def _dispatch_update(self, snapshot: MarketSnapshot) -> None:
         await self.on_update(
             snapshot.exchange,
             snapshot.symbol,
