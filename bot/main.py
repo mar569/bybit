@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import sys
 from typing import Any
 
 from .config import Config
@@ -18,14 +19,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 async def main() -> None:
     config = Config.load()
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
     scanner = SignalEngine(settings, telegram.dispatch_signal)
 
-    binance = BinanceScanner(on_update=scanner.update_snapshot)
-    bybit = BybitScanner(on_update=scanner.update_snapshot)
+    def scan_interval() -> float:
+        return float(settings.settings.scan_interval_seconds)
+
+    def binance_enabled() -> bool:
+        return settings.settings.enabled_binance
+
+    def bybit_enabled() -> bool:
+        return settings.settings.enabled_bybit
+
+    binance = BinanceScanner(
+        on_update=scanner.update_snapshot,
+        scan_interval=scan_interval,
+        enabled=binance_enabled,
+    )
+    bybit = BybitScanner(
+        on_update=scanner.update_snapshot,
+        scan_interval=scan_interval,
+        enabled=bybit_enabled,
+    )
 
     async def run_scan() -> None:
         await asyncio.gather(
@@ -39,20 +58,37 @@ async def main() -> None:
         stop_event.set()
 
     loop = asyncio.get_running_loop()
-    for signame in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(signame, _handle_stop)
+    if sys.platform != "win32":
+        for signame in [signal.SIGINT, signal.SIGTERM]:
+            loop.add_signal_handler(signame, _handle_stop)
+    else:
+        logger.info("Windows detected: use Ctrl+C to stop the bot")
 
+    scanner_task: asyncio.Task | None = None
     try:
         await telegram.start()
         scanner_task = asyncio.create_task(run_scan())
-        await stop_event.wait()
+
+        if sys.platform == "win32":
+            try:
+                while not stop_event.is_set():
+                    await asyncio.sleep(1)
+            except KeyboardInterrupt:
+                stop_event.set()
+        else:
+            await stop_event.wait()
     finally:
         logger.info("Shutting down")
         binance.stop()
         bybit.stop()
         await telegram.stop()
-        scanner_task.cancel()
-        await asyncio.gather(scanner_task, return_exceptions=True)
+        if scanner_task is not None:
+            scanner_task.cancel()
+            await asyncio.gather(scanner_task, return_exceptions=True)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Stopped by user")

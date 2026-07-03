@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
+
+
+@dataclass
+class ExchangeThresholds:
+    oi_period_minutes: int
+    oi_rise_percent: float
+    oi_drop_percent: float
+    price_rise_percent: float
+    price_drop_percent: float
+
 
 @dataclass
 class ScannerSettings:
@@ -20,19 +33,62 @@ class ScannerSettings:
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
     signal_cooldown_seconds: int = 60
-    # Advanced thresholds
     volume_spike_multiplier: float = 5.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
-    min_signal_score: float = 2.0
+    min_signal_score: float = 1.0
     top_n_symbols: int | None = None
+    priority_score_max: int = 2
+
+    # Per-exchange overrides (None = use global)
+    binance_oi_period_minutes: int | None = None
+    binance_oi_rise_percent: float | None = None
+    binance_oi_drop_percent: float | None = None
+    binance_price_rise_percent: float | None = None
+    binance_price_drop_percent: float | None = None
+    bybit_oi_period_minutes: int | None = None
+    bybit_oi_rise_percent: float | None = None
+    bybit_oi_drop_percent: float | None = None
+    bybit_price_rise_percent: float | None = None
+    bybit_price_drop_percent: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def for_exchange(self, exchange: str) -> ExchangeThresholds:
+        prefix = "bybit" if "bybit" in exchange.lower() else "binance"
+        return ExchangeThresholds(
+            oi_period_minutes=int(
+                getattr(self, f"{prefix}_oi_period_minutes") or self.oi_period_minutes
+            ),
+            oi_rise_percent=float(
+                getattr(self, f"{prefix}_oi_rise_percent") or self.oi_rise_percent
+            ),
+            oi_drop_percent=float(
+                getattr(self, f"{prefix}_oi_drop_percent") or self.oi_drop_percent
+            ),
+            price_rise_percent=float(
+                getattr(self, f"{prefix}_price_rise_percent") or self.price_rise_percent
+            ),
+            price_drop_percent=float(
+                getattr(self, f"{prefix}_price_drop_percent") or self.price_drop_percent
+            ),
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScannerSettings":
+        def opt_int(key: str) -> int | None:
+            if key not in data or data[key] is None:
+                return None
+            return int(data[key])
+
+        def opt_float(key: str) -> float | None:
+            if key not in data or data[key] is None:
+                return None
+            return float(data[key])
+
+        top_n = data.get("top_n_symbols")
         return cls(
             oi_period_minutes=int(data.get("oi_period_minutes", 15)),
             oi_rise_percent=float(data.get("oi_rise_percent", 5.0)),
@@ -47,16 +103,36 @@ class ScannerSettings:
             price_pump_threshold_pct=float(data.get("price_pump_threshold_pct", 8.0)),
             price_pump_window_minutes=int(data.get("price_pump_window_minutes", 5)),
             cvd_divergence_threshold=float(data.get("cvd_divergence_threshold", -0.1)),
-            min_signal_score=float(data.get("min_signal_score", 2.0)),
-            top_n_symbols=(int(data.get("top_n_symbols")) if data.get("top_n_symbols") is not None else None),
+            min_signal_score=float(data.get("min_signal_score", 1.0)),
+            top_n_symbols=(int(top_n) if top_n is not None else None),
+            priority_score_max=int(data.get("priority_score_max", 2)),
             scan_interval_seconds=int(data.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(data.get("signal_cooldown_seconds", 60)),
+            binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),
+            binance_oi_rise_percent=opt_float("binance_oi_rise_percent"),
+            binance_oi_drop_percent=opt_float("binance_oi_drop_percent"),
+            binance_price_rise_percent=opt_float("binance_price_rise_percent"),
+            binance_price_drop_percent=opt_float("binance_price_drop_percent"),
+            bybit_oi_period_minutes=opt_int("bybit_oi_period_minutes"),
+            bybit_oi_rise_percent=opt_float("bybit_oi_rise_percent"),
+            bybit_oi_drop_percent=opt_float("bybit_oi_drop_percent"),
+            bybit_price_rise_percent=opt_float("bybit_price_rise_percent"),
+            bybit_price_drop_percent=opt_float("bybit_price_drop_percent"),
         )
+
 
 class SettingsManager:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or DEFAULT_SETTINGS_FILE
         self.settings = self.load()
+        self._listeners: list[Callable[[ScannerSettings], None]] = []
+
+    def add_listener(self, callback: Callable[[ScannerSettings], None]) -> None:
+        self._listeners.append(callback)
+
+    def reload(self) -> ScannerSettings:
+        self.settings = self.load()
+        return self.settings
 
     def load(self) -> ScannerSettings:
         if not self.path.exists():
@@ -84,4 +160,10 @@ class SettingsManager:
         data.update(kwargs)
         self.settings = ScannerSettings.from_dict(data)
         self.save()
+        logger.info("Settings applied: %s", kwargs)
+        for listener in self._listeners:
+            try:
+                listener(self.settings)
+            except Exception:
+                logger.exception("Settings listener failed")
         return self.settings

@@ -9,16 +9,32 @@ from dataclasses import asdict
 from typing import Any
 
 import redis.asyncio as redis
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Config
 from .models import Signal
+from .scanner_engine import format_oi_usd
+from .set_parser import SET_HELP, parse_set_command
 from .settings import SettingsManager
+from .test_signals import build_test_signals
 
 logger = logging.getLogger(__name__)
+
+EXCHANGE_LABEL = {
+    "binance": ("🟡", "Binance"),
+    "bybit": ("⚫", "ByBit"),
+}
+
 
 class TelegramBot:
     def __init__(self, config: Config, settings_manager: SettingsManager) -> None:
@@ -31,33 +47,43 @@ class TelegramBot:
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
         self.application.add_handler(CommandHandler("start", self.on_start))
-        # init redis (optional) from REDIS_URL env or default docker service name
+        self.application.add_handler(CommandHandler("help", self.on_help))
+        self.application.add_handler(CommandHandler("status", self.on_status))
+        self.application.add_handler(CommandHandler("settings", self.on_settings))
+        self.application.add_handler(CommandHandler("history", self.on_history))
+        self.application.add_handler(CommandHandler("set", self.on_set))
+        self.application.add_handler(CommandHandler("test", self.on_test))
+        self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text_message))
+
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
         try:
             self.redis = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            await self.redis.ping()
             logger.info("Redis client initialized: %s", redis_url)
         except Exception:
             self.redis = None
             logger.info("Redis not available, continuing without persistence")
-        self.application.add_handler(CommandHandler("help", self.on_help))
-        self.application.add_handler(CommandHandler("status", self.on_status))
-        self.application.add_handler(CommandHandler("settings", self.on_settings))
-        self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
 
         await self.application.initialize()
         await self.application.start()
-        # start polling in background
         try:
             await self.application.updater.start_polling()
         except Exception:
-            # fallback: run polling via run_polling in background task
             self._run_task = asyncio.create_task(self.application.run_polling())
 
+        s = self.settings_manager.settings
         try:
             await self.application.bot.send_message(
                 chat_id=self.config.telegram_admin_id,
-                text="✅ Бот успешно запущен и готов к работе.",
+                text=(
+                    "✅ Сканер запущен (Bybit/Binance API v5).\n"
+                    f"Активный период: <b>{s.oi_period_minutes} мин</b>, "
+                    f"OI ≥ <b>{s.oi_rise_percent}%</b>, цена ≥ <b>{s.price_rise_percent}%</b>.\n"
+                    "Настройки меняются мгновенно — без перезапуска."
+                ),
                 parse_mode=ParseMode.HTML,
+                reply_markup=self._reply_keyboard(),
             )
         except Exception as exc:
             logger.warning("Failed to send startup welcome message: %s", exc)
@@ -73,55 +99,71 @@ class TelegramBot:
         if self.redis is not None:
             try:
                 await self.redis.close()
-                await self.redis.wait_closed()
             except Exception:
                 pass
 
-    async def dispatch_signal(self, signal: Signal) -> None:
+    async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
-        message = self._format_signal_message(signal)
+
+        priority_max = self.settings_manager.settings.priority_score_max
+        is_priority = signal.signal_score <= priority_max
+        message = self._format_signal_message(signal, is_priority=is_priority)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
+        ])
         recipient_ids = {self.config.telegram_admin_id}
         if self.config.telegram_alert_chat_id is not None:
             recipient_ids.add(self.config.telegram_alert_chat_id)
 
+        key = f"last_signal:{signal.exchange}:{signal.symbol}"
         try:
-            # Redis-based dedupe: skip send if last sent within cooldown
             should_send = True
-            if self.redis is not None:
+            if not skip_dedupe and self.redis is not None:
                 try:
-                    key = f"last_signal:{signal.exchange}:{signal.symbol}"
                     last = await self.redis.get(key)
                     if last is not None:
-                        last_ts = float(last)
                         cooldown = self.settings_manager.settings.signal_cooldown_seconds
-                        if time.time() - last_ts < cooldown:
+                        if time.time() - float(last) < cooldown:
                             should_send = False
-                    # set/update last send time after sending
                 except Exception:
                     should_send = True
 
             if should_send:
                 for chat_id in recipient_ids:
-                    await self.application.bot.send_message(
+                    sent = await self.application.bot.send_message(
                         chat_id=chat_id,
                         text=message,
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
+                        disable_notification=not is_priority,
+                        reply_markup=keyboard,
                     )
-                if self.redis is not None:
+                    if is_priority:
+                        try:
+                            await self.application.bot.pin_chat_message(
+                                chat_id=chat_id,
+                                message_id=sent.message_id,
+                                disable_notification=True,
+                            )
+                        except Exception:
+                            pass
+                if not skip_dedupe and self.redis is not None:
                     try:
-                        await self.redis.set(key, str(time.time()), ex=self.settings_manager.settings.signal_cooldown_seconds + 5)
+                        await self.redis.set(
+                            key,
+                            str(time.time()),
+                            ex=self.settings_manager.settings.signal_cooldown_seconds + 5,
+                        )
                     except Exception:
                         logger.exception("Failed to update last_signal in Redis")
-        except Exception as exc:
-            logger.exception("Error sending signal message: %s", exc)
-        # persist last signals to Redis (list)
+        except Exception:
+            logger.exception("Error sending signal message")
+
         if self.redis is not None:
             try:
                 raw = json.dumps(asdict(signal), ensure_ascii=False)
                 await self.redis.rpush("signals", raw)
-                # keep list bounded to last 500
                 await self.redis.ltrim("signals", -500, -1)
             except Exception:
                 logger.exception("Failed to persist signal to Redis")
@@ -130,47 +172,67 @@ class TelegramBot:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
-        await update.message.reply_text("Сканер запущен.", reply_markup=self._main_menu())
+        await update.message.reply_text(
+            self._build_settings_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._reply_keyboard(),
+        )
 
     async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
-        help_text = (
-            "Доступные команды:\n"
+        await update.message.reply_text(
+            "Команды:\n"
             "/start — главное меню\n"
-            "/status — показать текущие настройки\n"
-            "/settings — открыть настройки сканера (inline)\n"
-            "/help — показать эту подсказку\n\n"
-            "Настройки через inline-кнопки: период OI, пороги роста/падения, мин OI, мин объём, включение бирж."
+            "/status — текущие настройки\n"
+            "/settings — кнопки порогов\n"
+            "/set — точная настройка (/set help)\n"
+            "/test — тестовые LONG и SHORT\n"
+            "/history [N] — последние сигналы\n\n"
+            "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
+            "🔥 score 1–2 = приоритет (звук + закреп)\n\n"
+            "Все настройки применяются сразу.",
+            reply_markup=self._reply_keyboard(),
         )
-        await update.message.reply_text(help_text)
+
+    async def on_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        args = context.args or []
+        result = parse_set_command(args)
+        if not result.ok and not result.updates:
+            await update.message.reply_text(result.message, parse_mode=ParseMode.HTML)
+            return
+        if result.updates:
+            self.settings_manager.update(**result.updates)
+        await update.message.reply_text(
+            result.message + "\n\n" + self._build_settings_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._settings_keyboard(),
+        )
+
+    async def on_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        await update.message.reply_text("Отправляю тестовые сигналы LONG и SHORT…")
+        for signal in build_test_signals():
+            await self.dispatch_signal(signal, skip_dedupe=True)
+        await update.message.reply_text(
+            "✅ Тест готов: 2 сообщения (🟢 LONG Bybit + 🔴 SHORT Binance).",
+            reply_markup=self._reply_keyboard(),
+        )
 
     async def on_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
-        await update.message.reply_text(self._build_status_text(), parse_mode=ParseMode.HTML)
-
-    def _build_status_text(self) -> str:
-        settings = self.settings_manager.settings
-        return (
-            f"<b>Текущие настройки сканера</b>\n"
-            f"Период OI: {settings.oi_period_minutes} мин\n"
-            f"Порог роста OI: {settings.oi_rise_percent}%\n"
-            f"Порог падения OI: {settings.oi_drop_percent}%\n"
-            f"Порог роста цены: {settings.price_rise_percent}%\n"
-            f"Порог падения цены: {settings.price_drop_percent}%\n"
-            f"Мин. OI: {settings.min_open_interest:.0f}\n"
-            f"Мин. объём: {settings.min_volume:.0f}\n"
-            f"Volume spike x: {settings.volume_spike_multiplier}\n"
-            f"Price pump порог: {settings.price_pump_threshold_pct}%\n"
-            f"Мин. сила сигнала: {settings.min_signal_score}\n"
-            f"Top N symbols: {settings.top_n_symbols or 'all'}\n"
-            f"Откат сигнала: {settings.signal_cooldown_seconds} сек\n"
-            f"Интервал обновления: {settings.scan_interval_seconds} сек\n"
-            f"Binance: {'ON' if settings.enabled_binance else 'OFF'}\n"
-            f"Bybit: {'ON' if settings.enabled_bybit else 'OFF'}"
+        await update.message.reply_text(
+            self._build_settings_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._settings_keyboard(),
         )
 
     async def on_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -193,23 +255,100 @@ class TelegramBot:
                     obj = json.loads(raw)
                 except Exception:
                     continue
-                parts.append(f"{obj.get('exchange')} {obj.get('symbol')} {obj.get('signal_type').upper()} | OI {obj.get('oi_change_percent')}% | Price {obj.get('price_change_percent')}% | Score {obj.get('signal_score')}/10 <a href=\"{obj.get('link')}\">link</a>")
-            text = "\n\n".join(parts)
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as exc:
-            logger.exception("Error reading history: %s", exc)
+                side = obj.get("side", "long")
+                mark = "🟢" if side == "long" else "🔴"
+                parts.append(
+                    f"{mark} {obj.get('exchange')} <a href=\"{obj.get('link')}\">{obj.get('symbol')}</a> | "
+                    f"OI {obj.get('oi_change_percent')}% | "
+                    f"Цена {obj.get('price_change_percent')}% | "
+                    f"Сигнал {obj.get('signal_score')}/10"
+                )
+            await update.message.reply_text(
+                "\n\n".join(parts),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logger.exception("Error reading history")
             await update.message.reply_text("Ошибка при получении истории.")
-        settings = self.settings_manager.settings
-        # (status message moved to on_status)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
         await update.message.reply_text(
-            "Выберите настройку:",
+            self._build_settings_panel_text(),
+            parse_mode=ParseMode.HTML,
             reply_markup=self._settings_keyboard(),
         )
+
+    async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update) or update.message is None:
+            return
+        text = (update.message.text or "").strip()
+        if text in {"📊 Биржи", "Биржи"}:
+            await update.message.reply_text(
+                self._build_exchanges_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._exchanges_keyboard(),
+            )
+        elif text in {"⚙ Настройки", "🔧 Настройки", "Настройки"}:
+            await update.message.reply_text(
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+        elif text in {"📈 Статус", "Статус"}:
+            await update.message.reply_text(
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._reply_keyboard(),
+            )
+
+    def _build_exchanges_text(self) -> str:
+        s = self.settings_manager.settings
+        return (
+            "<b>📊 Биржи</b> (применяется сразу)\n"
+            f"Binance: {'✅ включена' if s.enabled_binance else '❌ выключена'}\n"
+            f"Bybit: {'✅ включена' if s.enabled_bybit else '❌ выключена'}"
+        )
+
+    def _exchange_override_line(self, name: str, prefix: str, s: Any) -> str:
+        period = getattr(s, f"{prefix}_oi_period_minutes")
+        oi = getattr(s, f"{prefix}_oi_rise_percent")
+        price = getattr(s, f"{prefix}_price_rise_percent")
+        if period is None and oi is None and price is None:
+            return f"{name}: глобальные пороги"
+        parts = []
+        if period is not None:
+            parts.append(f"{period}м")
+        if oi is not None:
+            parts.append(f"OI≥{oi}%")
+        if price is not None:
+            parts.append(f"цена≥{price}%")
+        return f"{name}: <b>{', '.join(parts)}</b>"
+
+    def _build_settings_panel_text(self) -> str:
+        s = self.settings_manager.settings
+        top_label = "все" if not s.top_n_symbols else str(s.top_n_symbols)
+        return (
+            "<b>⚙ Настройки сканера</b>\n"
+            "<i>Все изменения применяются мгновенно</i>\n\n"
+            f"📅 Период: <b>{s.oi_period_minutes} мин</b>\n"
+            f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
+            f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
+            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Объём: <b>{s.min_volume:,.0f}</b>\n"
+            f"🏆 Топ монет: <b>{top_label}</b> | Score≥<b>{s.min_signal_score}</b>\n"
+            f"🔥 Приоритет: score ≤ <b>{s.priority_score_max}</b> | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
+            f"{self._exchange_override_line('Binance', 'binance', s)}\n"
+            f"{self._exchange_override_line('Bybit', 'bybit', s)}\n"
+            f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
+            f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n\n"
+            "Точная настройка: /set help"
+        ).replace(",", " ")
+
+    def _mark(self, label: str, is_active: bool) -> str:
+        return f"✅ {label}" if is_active else label
 
     async def _safe_edit_message_text(
         self,
@@ -229,148 +368,211 @@ class TelegramBot:
         query = update.callback_query
         if query is None:
             return
-        await query.answer()
+
         payload = query.data or ""
-        if payload.startswith("set_period:"):
-            value = int(payload.split(":", 1)[1])
-            self.settings_manager.update(oi_period_minutes=value)
-            await self._safe_edit_message_text(query, f"Период анализа установлен: {value} мин")
-        elif payload.startswith("set_volume_spike:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(volume_spike_multiplier=value)
-            await self._safe_edit_message_text(query, f"Volume spike multiplier установлен: {value}x")
-        elif payload.startswith("set_price_pump:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(price_pump_threshold_pct=value)
-            await self._safe_edit_message_text(query, f"Price pump threshold установлен: {value}%")
-        elif payload.startswith("set_min_score:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(min_signal_score=value)
-            await self._safe_edit_message_text(query, f"Минимальная сила сигнала установлена: {value}")
-        elif payload.startswith("set_top_n:"):
-            value = int(payload.split(":", 1)[1])
-            self.settings_manager.update(top_n_symbols=value)
-            await self._safe_edit_message_text(query, f"Top N symbols установлен: {value}")
-        elif payload.startswith("set_oi_rise:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(oi_rise_percent=value)
-            await self._safe_edit_message_text(query, f"Порог роста OI установлен: {value}%")
-        elif payload.startswith("set_oi_drop:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(oi_drop_percent=value)
-            await self._safe_edit_message_text(query, f"Порог падения OI установлен: {value}%")
-        elif payload.startswith("set_price_rise:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(price_rise_percent=value)
-            await self._safe_edit_message_text(query, f"Порог роста цены установлен: {value}%")
-        elif payload.startswith("set_price_drop:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(price_drop_percent=value)
-            await self._safe_edit_message_text(query, f"Порог падения цены установлен: {value}%")
-        elif payload.startswith("set_min_oi:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(min_open_interest=value)
-            await self._safe_edit_message_text(query, f"Минимальный Open Interest установлен: {int(value):,}".replace(",", " "))
-        elif payload.startswith("set_min_volume:"):
-            value = float(payload.split(":", 1)[1])
-            self.settings_manager.update(min_volume=value)
-            await self._safe_edit_message_text(query, f"Минимальный объём установлен: {int(value):,}".replace(",", " "))
-        elif payload == "toggle_binance":
+        changed_label = ""
+
+        handlers: dict[str, tuple[str, type, str]] = {
+            "set_period:": ("oi_period_minutes", int, "Период"),
+            "set_oi_rise:": ("oi_rise_percent", float, "Рост OI"),
+            "set_oi_drop:": ("oi_drop_percent", float, "Падение OI"),
+            "set_price_rise:": ("price_rise_percent", float, "Рост цены"),
+            "set_price_drop:": ("price_drop_percent", float, "Падение цены"),
+            "set_min_oi:": ("min_open_interest", float, "Мин. OI"),
+            "set_min_volume:": ("min_volume", float, "Мин. объём"),
+            "set_min_score:": ("min_signal_score", float, "Мин. сигнал"),
+            "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
+            "set_priority:": ("priority_score_max", int, "Приоритет score"),
+            "set_top:": ("top_n_symbols", int, "Топ монет"),
+        }
+
+        for prefix, (field, caster, label) in handlers.items():
+            if payload.startswith(prefix):
+                raw = payload.split(":", 1)[1]
+                if field == "top_n_symbols":
+                    value = int(raw)
+                    if value <= 0:
+                        self.settings_manager.update(top_n_symbols=None)
+                        changed_label = "Топ монет → все"
+                    else:
+                        self.settings_manager.update(top_n_symbols=value)
+                        changed_label = f"Топ монет → {value}"
+                else:
+                    value = caster(raw)
+                    self.settings_manager.update(**{field: value})
+                    changed_label = f"{label} → {value}"
+                break
+
+        if changed_label:
+            await query.answer(f"✅ {changed_label}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+            return
+
+        await query.answer()
+
+        if payload == "toggle_binance":
             current = self.settings_manager.settings.enabled_binance
             self.settings_manager.update(enabled_binance=not current)
-            await self._safe_edit_message_text(query, f"Binance включён: {not current}")
+            await self._safe_edit_message_text(
+                query,
+                self._build_exchanges_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._exchanges_keyboard(),
+            )
         elif payload == "toggle_bybit":
             current = self.settings_manager.settings.enabled_bybit
             self.settings_manager.update(enabled_bybit=not current)
-            await self._safe_edit_message_text(query, f"Bybit включён: {not current}")
-        elif payload == "menu_scanner":
             await self._safe_edit_message_text(
                 query,
-                "Сканер активен. Используйте /status для просмотра текущих настроек или /settings для изменения порогов.",
-                reply_markup=self._main_menu(),
-            )
-        elif payload == "menu_settings":
-            await self._safe_edit_message_text(
-                query,
-                "Выберите настройку:",
-                reply_markup=self._settings_keyboard(),
-            )
-        elif payload == "menu_notifications":
-            await self._safe_edit_message_text(
-                query,
-                "Уведомления пока доступны через сигналы. Настройки каналов не поддерживаются.",
-                reply_markup=self._main_menu(),
-            )
-        elif payload == "menu_help":
-            await self._safe_edit_message_text(
-                query,
-                "Доступные команды:\n/start /status /settings /help\n" \
-                "Выберите настройки через кнопку \"⚙ Настройки\".",
-                reply_markup=self._main_menu(),
-            )
-        elif payload == "show_settings":
-            await self._safe_edit_message_text(
-                query,
-                self._build_status_text(),
+                self._build_exchanges_text(),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._main_menu(),
+                reply_markup=self._exchanges_keyboard(),
+            )
+        elif payload == "refresh_settings":
+            self.settings_manager.reload()
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
             )
         else:
             await self._safe_edit_message_text(query, "Неизвестное действие.")
 
+    def _reply_keyboard(self) -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("📊 Биржи"), KeyboardButton("🔧 Настройки")],
+            ],
+            resize_keyboard=True,
+        )
+
+    def _exchanges_keyboard(self) -> InlineKeyboardMarkup:
+        s = self.settings_manager.settings
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    self._mark(f"Binance {'ON' if s.enabled_binance else 'OFF'}", s.enabled_binance),
+                    callback_data="toggle_binance",
+                ),
+                InlineKeyboardButton(
+                    self._mark(f"Bybit {'ON' if s.enabled_bybit else 'OFF'}", s.enabled_bybit),
+                    callback_data="toggle_bybit",
+                ),
+            ],
+        ])
+
     def _settings_keyboard(self) -> InlineKeyboardMarkup:
         s = self.settings_manager.settings
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("Период 5 мин", callback_data="set_period:5"), InlineKeyboardButton("15 мин", callback_data="set_period:15")],
-            [InlineKeyboardButton("30 мин", callback_data="set_period:30")],
-            [InlineKeyboardButton("OI +1%", callback_data="set_oi_rise:1.0"), InlineKeyboardButton("+5%", callback_data="set_oi_rise:5.0")],
-            [InlineKeyboardButton("+10%", callback_data="set_oi_rise:10.0")],
-            [InlineKeyboardButton("OI -1%", callback_data="set_oi_drop:1.0"), InlineKeyboardButton("-5%", callback_data="set_oi_drop:5.0")],
-            [InlineKeyboardButton("-10%", callback_data="set_oi_drop:10.0")],
-            [InlineKeyboardButton("Цена +0.5%", callback_data="set_price_rise:0.5"), InlineKeyboardButton("+1%", callback_data="set_price_rise:1.0")],
-            [InlineKeyboardButton("+2%", callback_data="set_price_rise:2.0")],
-            [InlineKeyboardButton("Цена -0.5%", callback_data="set_price_drop:0.5"), InlineKeyboardButton("-1%", callback_data="set_price_drop:1.0")],
-            [InlineKeyboardButton("-2%", callback_data="set_price_drop:2.0")],
-            [InlineKeyboardButton("Мин OI 100k", callback_data="set_min_oi:100000"), InlineKeyboardButton("250k", callback_data="set_min_oi:250000")],
-            [InlineKeyboardButton("500k", callback_data="set_min_oi:500000")],
-            [InlineKeyboardButton("Мин объём 0", callback_data="set_min_volume:0"), InlineKeyboardButton("100k", callback_data="set_min_volume:100000")],
-            [InlineKeyboardButton("500k", callback_data="set_min_volume:500000")],
-            [InlineKeyboardButton("Vol spike x2", callback_data="set_volume_spike:2.0"), InlineKeyboardButton("x5", callback_data="set_volume_spike:5.0")],
-            [InlineKeyboardButton("Price pump 3%", callback_data="set_price_pump:3.0"), InlineKeyboardButton("8%", callback_data="set_price_pump:8.0")],
-            [InlineKeyboardButton("Min score 1.5", callback_data="set_min_score:1.5"), InlineKeyboardButton("2.0", callback_data="set_min_score:2.0")],
-            [InlineKeyboardButton("Top 50", callback_data="set_top_n:50"), InlineKeyboardButton("Top 80", callback_data="set_top_n:80")],
-            [InlineKeyboardButton(f"Binance: {'ON' if s.enabled_binance else 'OFF'}", callback_data="toggle_binance"), InlineKeyboardButton(f"Bybit: {'ON' if s.enabled_bybit else 'OFF'}", callback_data="toggle_bybit")],
-            [InlineKeyboardButton("Показать настройки", callback_data="show_settings")],
+            [
+                InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
+                InlineKeyboardButton(self._mark("5м", s.oi_period_minutes == 5), callback_data="set_period:5"),
+                InlineKeyboardButton(self._mark("15м", s.oi_period_minutes == 15), callback_data="set_period:15"),
+                InlineKeyboardButton(self._mark("30м", s.oi_period_minutes == 30), callback_data="set_period:30"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("OI+0.5%", s.oi_rise_percent == 0.5), callback_data="set_oi_rise:0.5"),
+                InlineKeyboardButton(self._mark("+1%", s.oi_rise_percent == 1.0), callback_data="set_oi_rise:1.0"),
+                InlineKeyboardButton(self._mark("+5%", s.oi_rise_percent == 5.0), callback_data="set_oi_rise:5.0"),
+                InlineKeyboardButton(self._mark("+10%", s.oi_rise_percent == 10.0), callback_data="set_oi_rise:10.0"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("OI-0.5%", s.oi_drop_percent == 0.5), callback_data="set_oi_drop:0.5"),
+                InlineKeyboardButton(self._mark("-1%", s.oi_drop_percent == 1.0), callback_data="set_oi_drop:1.0"),
+                InlineKeyboardButton(self._mark("-5%", s.oi_drop_percent == 5.0), callback_data="set_oi_drop:5.0"),
+                InlineKeyboardButton(self._mark("-10%", s.oi_drop_percent == 10.0), callback_data="set_oi_drop:10.0"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("🟢+0.5%", s.price_rise_percent == 0.5), callback_data="set_price_rise:0.5"),
+                InlineKeyboardButton(self._mark("+1%", s.price_rise_percent == 1.0), callback_data="set_price_rise:1.0"),
+                InlineKeyboardButton(self._mark("+2%", s.price_rise_percent == 2.0), callback_data="set_price_rise:2.0"),
+                InlineKeyboardButton(self._mark("+5%", s.price_rise_percent == 5.0), callback_data="set_price_rise:5.0"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("🔴-0.5%", s.price_drop_percent == 0.5), callback_data="set_price_drop:0.5"),
+                InlineKeyboardButton(self._mark("-1%", s.price_drop_percent == 1.0), callback_data="set_price_drop:1.0"),
+                InlineKeyboardButton(self._mark("-2%", s.price_drop_percent == 2.0), callback_data="set_price_drop:2.0"),
+                InlineKeyboardButton(self._mark("-5%", s.price_drop_percent == 5.0), callback_data="set_price_drop:5.0"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("OI 50k", s.min_open_interest == 50000), callback_data="set_min_oi:50000"),
+                InlineKeyboardButton(self._mark("100k", s.min_open_interest == 100000), callback_data="set_min_oi:100000"),
+                InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),
+                InlineKeyboardButton(self._mark("≥2", s.min_signal_score == 2), callback_data="set_min_score:2"),
+                InlineKeyboardButton(self._mark("≥3", s.min_signal_score == 3), callback_data="set_min_score:3"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("CD 30с", s.signal_cooldown_seconds == 30), callback_data="set_cooldown:30"),
+                InlineKeyboardButton(self._mark("60с", s.signal_cooldown_seconds == 60), callback_data="set_cooldown:60"),
+                InlineKeyboardButton(self._mark("120с", s.signal_cooldown_seconds == 120), callback_data="set_cooldown:120"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("Top50", s.top_n_symbols == 50), callback_data="set_top:50"),
+                InlineKeyboardButton(self._mark("Top100", s.top_n_symbols == 100), callback_data="set_top:100"),
+                InlineKeyboardButton(self._mark("Все", s.top_n_symbols is None), callback_data="set_top:0"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("🔥≤1", s.priority_score_max == 1), callback_data="set_priority:1"),
+                InlineKeyboardButton(self._mark("≤2", s.priority_score_max == 2), callback_data="set_priority:2"),
+                InlineKeyboardButton(self._mark("≤3", s.priority_score_max == 3), callback_data="set_priority:3"),
+            ],
+            [
+                InlineKeyboardButton(self._mark(f"Binance {'ON' if s.enabled_binance else 'OFF'}", s.enabled_binance), callback_data="toggle_binance"),
+                InlineKeyboardButton(self._mark(f"Bybit {'ON' if s.enabled_bybit else 'OFF'}", s.enabled_bybit), callback_data="toggle_bybit"),
+            ],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_settings")],
         ])
 
-    def _main_menu(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📈 Scanner", callback_data="menu_scanner")],
-            [InlineKeyboardButton("⚙ Настройки", callback_data="menu_settings")],
-            [InlineKeyboardButton("🔔 Уведомления", callback_data="menu_notifications")],
-            [InlineKeyboardButton("ℹ Help", callback_data="menu_help")],
-        ])
+    def _format_signal_message(self, signal: Signal, *, is_priority: bool = False) -> str:
+        exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
+        exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
+        period_label = f"{signal.oi_period_minutes}м"
 
-    def _format_signal_message(self, signal: Signal) -> str:
-        parts = [
-            f"<b>Сигнал {signal.exchange}: {signal.signal_type.upper()}</b>",
-            f"Монета: <a href=\"{signal.link}\">{signal.symbol}</a>",
-            f"Период: {signal.oi_period_minutes} мин",
-            f"OI: {signal.oi_direction} {signal.oi_change_percent}% ({signal.oi_change_value:+,.0f})",
-        ]
-        if signal.price_direction:
-            parts.append(f"Цена: {signal.price_direction} {signal.price_change_percent}% ({signal.price_change_value:+.2f})")
-        if signal.volume_change_percent is not None:
-            parts.append(f"Объем 24ч Δ: {signal.volume_change_percent}%")
-        if signal.spread is not None:
-            parts.append(f"Spread: {signal.spread}")
-        if signal.funding_rate is not None:
-            parts.append(f"Funding rate: {signal.funding_rate}")
-        parts.append(f"Текущая цена: {signal.current_price:.4f}" if signal.current_price is not None else "Цена: —")
-        parts.append(f"Open Interest: {signal.current_open_interest:.0f}" if signal.current_open_interest is not None else "OI: —")
-        parts.append(f"Сила сигнала: {signal.signal_score}/10")
-        parts.append("<i>Сигнал для проверки позиции. Решение принимает пользователь.</i>")
-        return "\n".join(parts)
+        is_long = signal.side == "long"
+        side_emoji = "🟢" if is_long else "🔴"
+        side_label = "LONG" if is_long else "SHORT"
+
+        if signal.oi_direction == "up":
+            oi_verb = "вырос"
+            oi_icon = "📈"
+        elif signal.oi_direction == "down":
+            oi_verb = "снизился"
+            oi_icon = "📉"
+        else:
+            oi_verb = "изменился"
+            oi_icon = "📊"
+
+        oi_pct = abs(signal.oi_change_percent)
+        oi_usd = format_oi_usd(signal.oi_change_usd)
+
+        price_pct = signal.price_change_percent or 0.0
+        if price_pct > 0:
+            price_text = f"+{price_pct:.2f}%"
+        else:
+            price_text = f"{price_pct:.2f}%"
+
+        header = ""
+        if is_priority:
+            header = "🔥 <b>РАННИЙ СИГНАЛ</b>\n"
+
+        return (
+            f"{header}"
+            f"{exchange_emoji} <b>{exchange_name} – {period_label}</b>\n"
+            f"{side_emoji} <b>{side_label}</b>\n"
+            f"<a href=\"{signal.link}\"><b>{signal.symbol}</b></a>\n"
+            f"{oi_icon} ОИ {oi_verb} на <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n"
+            f"{side_emoji} 💲 Изменение цены: <b>{price_text}</b>\n"
+            f"🔊 Сигнал за сутки: <b>{signal.signal_score}</b>"
+        )
 
     def _is_admin(self, update: Update) -> bool:
         user_id = None

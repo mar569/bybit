@@ -21,7 +21,9 @@ class Signal:
     oi_period_minutes: int
     oi_change_percent: float
     oi_change_value: float
+    oi_change_usd: float | None
     oi_direction: str
+    signals_today: int
     price_change_percent: float | None
     price_change_value: float | None
     price_direction: str | None
@@ -38,6 +40,7 @@ class Signal:
     volume_24h: float | None
     volume_speed: float | None
     signal_score: int
+    side: str
     current_price: float | None
     current_open_interest: float | None
     link: str
