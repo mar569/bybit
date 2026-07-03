@@ -8,7 +8,7 @@
   "oi_period_minutes": 10,
   "long_period_minutes": 10,
   "short_period_minutes": 10,
-  "oi_rise_percent": 2.5,
+  "oi_rise_percent": 3.0,
   "oi_drop_percent": 3.0,
   "price_rise_percent": 0.8,
   "price_drop_percent": 0.8,

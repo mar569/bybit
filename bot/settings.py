@@ -79,7 +79,7 @@ class ScannerSettings:
     oi_period_minutes: int = 10
     long_period_minutes: int = 10
     short_period_minutes: int = 10
-    oi_rise_percent: float = 2.5
+    oi_rise_percent: float = 3.0
     oi_drop_percent: float = 3.0
     price_rise_percent: float = 0.8
     price_drop_percent: float = 0.8
@@ -104,7 +104,20 @@ class ScannerSettings:
     short_squeeze_min_price: float = 4.0
     short_squeeze_max_oi_change: float = -0.8
     require_oi_for_price_only: bool = True
+    respect_global_floors: bool = True
     mega_cooldown_seconds: int = 30
+
+    # Вертикальный памп: флет → взлёт (вне порогов OI/цены из кнопок)
+    breakout_enabled: bool = True
+    breakout_bypass_top_n: bool = True
+    breakout_consolidation_minutes: int = 25
+    breakout_spike_minutes: int = 3
+    breakout_max_flat_percent: float = 2.0
+    breakout_min_spike_percent: float = 1.8
+    breakout_min_dump_percent: float = 1.8
+    breakout_velocity_multiplier: float = 3.5
+    breakout_min_liquidity_oi_usd: float = 30_000.0
+    breakout_cooldown_seconds: int = 120
 
     min_open_interest: float = 75_000.0
     min_volume: float = 0.0
@@ -255,7 +268,18 @@ class ScannerSettings:
             short_squeeze_min_price=float(base["short_squeeze_min_price"]),
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
+            respect_global_floors=bool(base.get("respect_global_floors", True)),
             mega_cooldown_seconds=int(base["mega_cooldown_seconds"]),
+            breakout_enabled=bool(base.get("breakout_enabled", True)),
+            breakout_bypass_top_n=bool(base.get("breakout_bypass_top_n", True)),
+            breakout_consolidation_minutes=int(base.get("breakout_consolidation_minutes", 25)),
+            breakout_spike_minutes=int(base.get("breakout_spike_minutes", 3)),
+            breakout_max_flat_percent=float(base.get("breakout_max_flat_percent", 2.0)),
+            breakout_min_spike_percent=float(base.get("breakout_min_spike_percent", 1.8)),
+            breakout_min_dump_percent=float(base.get("breakout_min_dump_percent", 1.8)),
+            breakout_velocity_multiplier=float(base.get("breakout_velocity_multiplier", 3.5)),
+            breakout_min_liquidity_oi_usd=float(base.get("breakout_min_liquidity_oi_usd", 30_000.0)),
+            breakout_cooldown_seconds=int(base.get("breakout_cooldown_seconds", 120)),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),

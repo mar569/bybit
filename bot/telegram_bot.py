@@ -213,23 +213,36 @@ class TelegramBot:
             return
 
         priority_max = self.settings_manager.settings.priority_score_max
+        is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_priority = (
-            signal.signal_score <= priority_max
+            is_vertical
+            or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
-        message = self._format_signal_message(signal, is_priority=is_priority)
+        if is_vertical:
+            message = self._format_vertical_breakout_message(signal)
+        else:
+            message = self._format_signal_message(signal, is_priority=is_priority)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
         ])
         notify_chat_id = self.config.notification_chat_id
 
-        key = f"last_signal:{signal.exchange}:{signal.symbol}"
+        key = (
+            f"last_breakout:{signal.exchange}:{signal.symbol}"
+            if is_vertical
+            else f"last_signal:{signal.exchange}:{signal.symbol}"
+        )
         should_send = True
         if not skip_dedupe and self.redis is not None:
             try:
                 last = await self.redis.get(key)
                 if last is not None:
-                    cooldown = self.settings_manager.settings.signal_cooldown_seconds
+                    cooldown = (
+                        self.settings_manager.settings.breakout_cooldown_seconds
+                        if is_vertical
+                        else self.settings_manager.settings.signal_cooldown_seconds
+                    )
                     if time.time() - float(last) < cooldown:
                         should_send = False
             except Exception:
@@ -242,10 +255,15 @@ class TelegramBot:
 
         if sent_any and not skip_dedupe and self.redis is not None:
             try:
+                ex = (
+                    self.settings_manager.settings.breakout_cooldown_seconds + 5
+                    if is_vertical
+                    else self.settings_manager.settings.signal_cooldown_seconds + 5
+                )
                 await self.redis.set(
                     key,
                     str(time.time()),
-                    ex=self.settings_manager.settings.signal_cooldown_seconds + 5,
+                    ex=ex,
                 )
             except Exception:
                 logger.exception("Failed to update last_signal in Redis")
@@ -534,24 +552,43 @@ class TelegramBot:
     def _build_settings_panel_text(self) -> str:
         s = self.settings_manager.settings
         top_label = "все" if not s.top_n_symbols else str(s.top_n_symbols)
+        pulse_oi = (
+            max(s.pulse_oi_rise_percent, s.oi_rise_percent)
+            if s.respect_global_floors
+            else s.pulse_oi_rise_percent
+        )
+        pulse_price = (
+            max(s.pulse_price_rise_percent, s.price_rise_percent)
+            if s.respect_global_floors
+            else s.pulse_price_rise_percent
+        )
+        mega_tiers = (
+            [t for t in s.flash_price_tiers if t >= s.price_rise_percent]
+            if s.respect_global_floors
+            else list(s.flash_price_tiers)
+        )
+        mega_label = ",".join(f"{int(t)}%" if t == int(t) else str(t) for t in mega_tiers) or "—"
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
-            "<i>Все изменения применяются мгновенно</i>\n\n"
+            "<i>Кнопки задают минимум для всех режимов</i>\n\n"
             f"📅 LONG: <b>{s.long_period_minutes} мин</b> | SHORT: <b>{s.short_period_minutes} мин</b>\n"
             f"⚡ Пульс: <b>{s.pulse_period_minutes} мин</b> "
-            f"(OI≥{s.pulse_oi_rise_percent}% / цена≥{s.pulse_price_rise_percent}%)\n"
-            f"🚀 Мега-окна: <b>{','.join(str(m) for m in s.flash_window_minutes)} мин</b> "
-            f"({','.join(f'{int(t)}%' if t == int(t) else str(t) for t in s.flash_price_tiers)})\n"
+            f"(OI≥<b>{pulse_oi}</b>% / цена≥<b>{pulse_price}</b>%)\n"
+            f"🚀 Мега: <b>{','.join(str(m) for m in s.flash_window_minutes)} мин</b> "
+            f"(от <b>{mega_label}</b>)\n"
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
             f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
-            f"🏆 Топ монет: <b>{top_label}</b> | Score≥<b>{s.min_signal_score}</b>\n"
-            f"🔥 Приоритет: score ≤ <b>{s.priority_score_max}</b> | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
+            f"🏆 Топ монет: <b>{top_label}</b> | Ранность≥<b>{s.min_signal_score}</b>/10\n"
+            f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
             f"{self._exchange_effective_line('Binance', 'Binance')}\n"
             f"{self._exchange_effective_line('Bybit', 'Bybit')}\n"
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
-            f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n\n"
+            f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n"
+            f"🚨 Вертикальный памп: <b>{'ON' if s.breakout_enabled else 'OFF'}</b> "
+            f"(флет ≤{s.breakout_max_flat_percent}% → +{s.breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n\n"
+            "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
 
@@ -715,12 +752,14 @@ class TelegramBot:
             [
                 InlineKeyboardButton(self._mark("OI+0.5%", s.oi_rise_percent == 0.5), callback_data="set_oi_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.oi_rise_percent == 1.0), callback_data="set_oi_rise:1.0"),
+                InlineKeyboardButton(self._mark("+3%", s.oi_rise_percent == 3.0), callback_data="set_oi_rise:3.0"),
                 InlineKeyboardButton(self._mark("+5%", s.oi_rise_percent == 5.0), callback_data="set_oi_rise:5.0"),
                 InlineKeyboardButton(self._mark("+10%", s.oi_rise_percent == 10.0), callback_data="set_oi_rise:10.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI-0.5%", s.oi_drop_percent == 0.5), callback_data="set_oi_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.oi_drop_percent == 1.0), callback_data="set_oi_drop:1.0"),
+                InlineKeyboardButton(self._mark("-3%", s.oi_drop_percent == 3.0), callback_data="set_oi_drop:3.0"),
                 InlineKeyboardButton(self._mark("-5%", s.oi_drop_percent == 5.0), callback_data="set_oi_drop:5.0"),
                 InlineKeyboardButton(self._mark("-10%", s.oi_drop_percent == 10.0), callback_data="set_oi_drop:10.0"),
             ],
@@ -728,12 +767,14 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("🟢+0.5%", s.price_rise_percent == 0.5), callback_data="set_price_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.price_rise_percent == 1.0), callback_data="set_price_rise:1.0"),
                 InlineKeyboardButton(self._mark("+2%", s.price_rise_percent == 2.0), callback_data="set_price_rise:2.0"),
+                InlineKeyboardButton(self._mark("+3%", s.price_rise_percent == 3.0), callback_data="set_price_rise:3.0"),
                 InlineKeyboardButton(self._mark("+5%", s.price_rise_percent == 5.0), callback_data="set_price_rise:5.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("🔴-0.5%", s.price_drop_percent == 0.5), callback_data="set_price_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.price_drop_percent == 1.0), callback_data="set_price_drop:1.0"),
                 InlineKeyboardButton(self._mark("-2%", s.price_drop_percent == 2.0), callback_data="set_price_drop:2.0"),
+                InlineKeyboardButton(self._mark("-3%", s.price_drop_percent == 3.0), callback_data="set_price_drop:3.0"),
                 InlineKeyboardButton(self._mark("-5%", s.price_drop_percent == 5.0), callback_data="set_price_drop:5.0"),
             ],
             [
@@ -771,6 +812,8 @@ class TelegramBot:
     def _signal_type_header(self, signal: Signal) -> str:
         flash_tier = signal.details.get("flash_tier")
         labels = {
+            "vertical_pump": "🚨 ВЕРТИКАЛЬНЫЙ ПАМП",
+            "vertical_dump": "🚨 ВЕРТИКАЛЬНЫЙ СЛИВ",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -786,6 +829,41 @@ class TelegramBot:
             tier_text = f"+{flash_tier:g}%" if signal.side == "long" else f"{-flash_tier:g}%"
             label = f"{label} {tier_text}"
         return f"<b>{label}</b>\n" if label else ""
+
+    def _format_vertical_breakout_message(self, signal: Signal) -> str:
+        exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
+        exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
+        is_long = signal.side == "long"
+        side_emoji = "🟢" if is_long else "🔴"
+        side_label = "LONG" if is_long else "SHORT"
+
+        flat_pct = signal.details.get("flat_range_percent", "—")
+        spike_pct = signal.details.get("spike_percent", signal.price_change_percent)
+        velocity = signal.details.get("velocity_ratio", "—")
+        flat_min = int(signal.details.get("consolidation_minutes", 25))
+        spike_min = signal.oi_period_minutes
+
+        if isinstance(spike_pct, (int, float)):
+            spike_text = f"+{spike_pct:.2f}%" if spike_pct > 0 else f"{spike_pct:.2f}%"
+        else:
+            spike_text = str(spike_pct)
+
+        oi_pct = abs(signal.oi_change_percent)
+        oi_usd = format_oi_usd(signal.oi_change_usd)
+
+        title = "🚨 <b>ВЕРТИКАЛЬНЫЙ ПАМП</b>" if is_long else "🚨 <b>ВЕРТИКАЛЬНЫЙ СЛИВ</b>"
+        return (
+            f"{title}\n"
+            f"⚡ <b>Выход из проторговки</b> (вне порогов)\n"
+            f"{exchange_emoji} <b>{exchange_name} – {spike_min}м</b>\n"
+            f"{side_emoji} <b>{side_label}</b>\n"
+            f"<a href=\"{signal.link}\"><b>{signal.symbol}</b></a>\n\n"
+            f"📊 Флет <b>{flat_min}м</b>: диапазон <b>{flat_pct}%</b>\n"
+            f"🚀 Взлёт за <b>{spike_min}м</b>: <b>{spike_text}</b>\n"
+            f"⚡ Ускорение: <b>{velocity}×</b> к флету\n"
+            f"📈 OI: <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n\n"
+            f"<i>Ранний вход в вертикаль, как на графике</i>"
+        )
 
     def _format_signal_message(self, signal: Signal, *, is_priority: bool = False) -> str:
         exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
@@ -828,7 +906,8 @@ class TelegramBot:
             f"<a href=\"{signal.link}\"><b>{signal.symbol}</b></a>\n"
             f"{oi_icon} ОИ {oi_verb} на <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n"
             f"{side_emoji} 💲 Изменение цены: <b>{price_text}</b>\n"
-            f"🔊 Сигнал за сутки: <b>{signal.signal_score}</b>"
+            f"⏱ Ранность: <b>{signal.signal_score}</b>/10 "
+            f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>"
         )
 
     def _is_admin(self, update: Update) -> bool:
