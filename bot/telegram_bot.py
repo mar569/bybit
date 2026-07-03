@@ -25,7 +25,7 @@ from .config import Config
 from .models import Signal
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
-from .settings import SettingsManager
+from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class TelegramBot:
         self.config = config
         self.settings_manager = settings_manager
         self.scanner: SignalEngine | None = None
+        self.outcome_tracker: Any | None = None
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
         self._send_lock = asyncio.Lock()
@@ -171,19 +172,6 @@ class TelegramBot:
                     bucket.append(sent_at)
                     self._minute_send_times[chat_id] = [t for t in bucket if sent_at - t < 60.0]
 
-                    if (
-                        is_priority
-                        and settings.pin_in_private_chat
-                        and chat_id > 0
-                    ):
-                        try:
-                            await self.application.bot.pin_chat_message(
-                                chat_id=chat_id,
-                                message_id=sent.message_id,
-                                disable_notification=True,
-                            )
-                        except Exception as exc:
-                            logger.warning("Pin failed for chat %s: %s", chat_id, exc)
                     return True
                 except RetryAfter as exc:
                     if attempt == 0:
@@ -213,9 +201,11 @@ class TelegramBot:
             return
 
         priority_max = self.settings_manager.settings.priority_score_max
+        prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_priority = (
             is_vertical
+            or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
@@ -251,7 +241,26 @@ class TelegramBot:
         if not should_send:
             return
 
+        if (
+            settings := self.settings_manager.settings
+        ).probability_filter_enabled and not skip_dedupe and not is_vertical:
+            if prob < settings.min_probability_percent:
+                logger.info(
+                    "Telegram skip %s %s: probability %.0f%% < %.0f%%",
+                    signal.exchange,
+                    signal.symbol,
+                    prob,
+                    settings.min_probability_percent,
+                )
+                return
+
         sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
+
+        if sent_any and self.outcome_tracker is not None and self.settings_manager.settings.outcome_tracking_enabled:
+            try:
+                await self.outcome_tracker.schedule(signal)
+            except Exception:
+                logger.exception("Outcome schedule failed")
 
         if sent_any and not skip_dedupe and self.redis is not None:
             try:
@@ -513,7 +522,7 @@ class TelegramBot:
             "/history [N] — последние N сигналов (нужен Redis)\n"
             "/help — эта справка\n\n"
             "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
-            "🔥 score 1–2 = приоритет (звук + закреп в личке)\n\n"
+            "🔥 score 1–2 = приоритет (звук)\n\n"
             "Все настройки применяются сразу."
         )
 
@@ -571,7 +580,7 @@ class TelegramBot:
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
-            "<i>Кнопки задают минимум для всех режимов</i>\n\n"
+            "<i>Кнопки задают минимум OI <b>и</b> цены вместе</i>\n\n"
             f"📅 LONG: <b>{s.long_period_minutes} мин</b> | SHORT: <b>{s.short_period_minutes} мин</b>\n"
             f"⚡ Пульс: <b>{s.pulse_period_minutes} мин</b> "
             f"(OI≥<b>{pulse_oi}</b>% / цена≥<b>{pulse_price}</b>%)\n"
@@ -587,7 +596,9 @@ class TelegramBot:
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
             f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n"
             f"🚨 Вертикальный памп: <b>{'ON' if s.breakout_enabled else 'OFF'}</b> "
-            f"(флет ≤{s.breakout_max_flat_percent}% → +{s.breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n\n"
+            f"(флет ≤{s.breakout_max_flat_percent}% → +{s.breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n"
+            f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
+            f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
@@ -862,7 +873,8 @@ class TelegramBot:
             f"🚀 Взлёт за <b>{spike_min}м</b>: <b>{spike_text}</b>\n"
             f"⚡ Ускорение: <b>{velocity}×</b> к флету\n"
             f"📈 OI: <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n\n"
-            f"<i>Ранний вход в вертикаль, как на графике</i>"
+            f"<i>Ранний вход в вертикаль, как на графике</i>\n\n"
+            f"{format_probability_from_signal(signal)}"
         )
 
     def _format_signal_message(self, signal: Signal, *, is_priority: bool = False) -> str:
@@ -907,7 +919,8 @@ class TelegramBot:
             f"{oi_icon} ОИ {oi_verb} на <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n"
             f"{side_emoji} 💲 Изменение цены: <b>{price_text}</b>\n"
             f"⏱ Ранность: <b>{signal.signal_score}</b>/10 "
-            f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>"
+            f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>\n\n"
+            f"{format_probability_from_signal(signal)}"
         )
 
     def _is_admin(self, update: Update) -> bool:

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from .models import Signal, SnapshotPoint
+from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 
 HISTORY_MAX_POINTS = 3600
@@ -61,6 +62,7 @@ class SignalEngine:
         self._top_symbols: dict[str, set[str]] = {}
         self._last_top_refresh = 0.0
         self._dirty_keys: set[str] = set()
+        self._btc_history: deque[SnapshotPoint] = deque(maxlen=HISTORY_MAX_POINTS)
         self.lock = asyncio.Lock()
 
     def _reset_daily_counts_if_needed(self) -> None:
@@ -151,8 +153,33 @@ class SignalEngine:
         async with self.lock:
             history = self.history.setdefault(key, deque(maxlen=HISTORY_MAX_POINTS))
             history.append(point)
+            if symbol == "BTCUSDT":
+                self._btc_history.append(point)
 
         self._dirty_keys.add(key)
+
+    def get_snapshot_for(self, exchange: str, symbol: str) -> SnapshotPoint | None:
+        history = self.history.get(f"{exchange}:{symbol}")
+        if not history:
+            return None
+        return history[-1]
+
+    def get_btc_change_percent(self, minutes: int = 5) -> float | None:
+        if len(self._btc_history) < 2:
+            return None
+        current = self._btc_history[-1]
+        if current.price is None or current.timestamp is None:
+            return None
+        cutoff = current.timestamp - minutes * 60
+        if self._btc_history[0].timestamp > cutoff:
+            return None
+        earlier = next(
+            (p for p in reversed(self._btc_history) if p.timestamp <= cutoff and p.price),
+            None,
+        )
+        if earlier is None or earlier.price is None:
+            return None
+        return self._percent_change(earlier.price, current.price)
 
     async def run_evaluation_loop(self, interval: float = 2.0) -> None:
         while True:
@@ -316,17 +343,6 @@ class SignalEngine:
             self.last_signal_time[cooldown_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
-            logger.info(
-                "Signal %s %s %s | OI %.2f%% | price %.2f%% | score %d | %dm",
-                exchange,
-                symbol,
-                candidate.signal_type,
-                changes.oi_change_percent,
-                changes.price_change_percent,
-                score,
-                candidate.period_minutes,
-            )
-
             signal = Signal(
                 exchange=exchange,
                 symbol=symbol,
@@ -367,6 +383,42 @@ class SignalEngine:
                     "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
                     **(candidate.breakout_meta or {}),
                 },
+            )
+
+            assessment = assess_signal_probability(
+                signal,
+                settings,
+                thresholds,
+                btc_change_percent=self.get_btc_change_percent(5),
+                vol_spike=vol_spike,
+            )
+            signal.details["probability_percent"] = assessment.percent
+            signal.details["probability_verdict"] = assessment.verdict
+            signal.details["probability_factors"] = [
+                f.to_dict() for f in assessment.factors
+            ]
+
+            if settings.probability_filter_enabled:
+                bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
+                if not bypass and assessment.percent < settings.min_probability_percent:
+                    logger.info(
+                        "Signal filtered %s %s: probability %.0f%% < %.0f%%",
+                        exchange,
+                        symbol,
+                        assessment.percent,
+                        settings.min_probability_percent,
+                    )
+                    return
+
+            logger.info(
+                "Signal %s %s %s | OI %.2f%% | price %.2f%% | prob %.0f%% | %dm",
+                exchange,
+                symbol,
+                candidate.signal_type,
+                changes.oi_change_percent,
+                changes.price_change_percent,
+                assessment.percent,
+                candidate.period_minutes,
             )
 
         await self.on_signal(signal)
@@ -708,7 +760,7 @@ class SignalEngine:
         price = changes.price_change_percent
         if oi >= thresholds.oi_rise_percent and price >= thresholds.price_rise_percent:
             return "pump"
-        if oi >= thresholds.oi_rise_percent:
+        if not settings.require_both_oi_and_price and oi >= thresholds.oi_rise_percent:
             return "oi_pump"
         if settings.require_oi_for_price_only:
             return None
@@ -726,7 +778,7 @@ class SignalEngine:
         price = changes.price_change_percent
         if oi <= -thresholds.oi_drop_percent and price <= -thresholds.price_drop_percent:
             return "dump"
-        if oi <= -thresholds.oi_drop_percent:
+        if not settings.require_both_oi_and_price and oi <= -thresholds.oi_drop_percent:
             return "oi_dump"
         if settings.require_oi_for_price_only:
             return None
@@ -788,10 +840,12 @@ class SignalEngine:
 
     @staticmethod
     def _determine_side(price_change_percent: float, signal_type: str) -> str:
+        if abs(price_change_percent) >= 0.3:
+            return "short" if price_change_percent < 0 else "long"
         short_types = {
             "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump", "vertical_dump",
         }
-        if price_change_percent < 0 or signal_type in short_types:
+        if signal_type in short_types:
             return "short"
         return "long"
 

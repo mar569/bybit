@@ -104,6 +104,7 @@ class ScannerSettings:
     short_squeeze_min_price: float = 4.0
     short_squeeze_max_oi_change: float = -0.8
     require_oi_for_price_only: bool = True
+    require_both_oi_and_price: bool = True
     respect_global_floors: bool = True
     mega_cooldown_seconds: int = 30
 
@@ -136,7 +137,10 @@ class ScannerSettings:
     price_only_min_percent: float = 3.0
     telegram_max_per_minute: int = 10
     telegram_min_interval_seconds: float = 2.0
-    pin_in_private_chat: bool = True
+
+    min_probability_percent: float = 70.0
+    probability_filter_enabled: bool = True
+    outcome_tracking_enabled: bool = True
 
     # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
@@ -268,6 +272,7 @@ class ScannerSettings:
             short_squeeze_min_price=float(base["short_squeeze_min_price"]),
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
+            require_both_oi_and_price=bool(base.get("require_both_oi_and_price", True)),
             respect_global_floors=bool(base.get("respect_global_floors", True)),
             mega_cooldown_seconds=int(base["mega_cooldown_seconds"]),
             breakout_enabled=bool(base.get("breakout_enabled", True)),
@@ -295,7 +300,9 @@ class ScannerSettings:
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
-            pin_in_private_chat=bool(base.get("pin_in_private_chat", True)),
+            min_probability_percent=float(base.get("min_probability_percent", 70.0)),
+            probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
+            outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),

@@ -23,6 +23,8 @@ SET_HELP = (
     "/set top 50 — топ монет по объёму (0 = все)\n"
     "/set cooldown 60\n"
     "/set mega_cooldown 45 — пауза между мега-сигналами\n"
+    "/set prob 70 — мин. вероятность для уведомления\n"
+    "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
     "/set signals on — возобновить уведомления\n\n"
@@ -60,6 +62,8 @@ GLOBAL_ALIASES: dict[str, str] = {
     "topn": "top_n_symbols",
     "cooldown": "signal_cooldown_seconds",
     "mega_cooldown": "mega_cooldown_seconds",
+    "prob": "min_probability_percent",
+    "prob_filter": "probability_filter_enabled",
     "score": "min_signal_score",
     "priority": "priority_score_max",
     "signals": "signals_enabled",
@@ -115,6 +119,7 @@ FLOAT_FIELDS = {
     "bybit_oi_drop_percent",
     "bybit_price_rise_percent",
     "bybit_price_drop_percent",
+    "min_probability_percent",
 }
 
 
@@ -175,6 +180,8 @@ def parse_set_command(args: list[str]) -> SetResult:
                 value = None
         elif field == "signals_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл", "start", "resume"}
+        elif field == "probability_filter_enabled":
+            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field in INT_FIELDS or field.endswith("_period_minutes"):
             value = int(float(raw_value))
             if field in {"oi_period_minutes", "long_period_minutes", "short_period_minutes", "pulse_period_minutes"}:

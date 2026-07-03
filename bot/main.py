@@ -11,7 +11,7 @@ from .settings import SettingsManager
 from .scanner_engine import SignalEngine
 from .telegram_bot import TelegramBot
 from .exchanges.binance import BinanceScanner
-from .exchanges.bybit import BybitScanner
+from .outcome_tracker import OutcomeTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,8 +67,12 @@ async def main() -> None:
 
     scanner_task: asyncio.Task | None = None
     eval_task: asyncio.Task | None = None
+    outcome_task: asyncio.Task | None = None
     try:
         await telegram.start()
+        if telegram.redis is not None:
+            telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
+            outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         scanner_task = asyncio.create_task(run_scan())
 
@@ -89,8 +93,10 @@ async def main() -> None:
             scanner_task.cancel()
         if eval_task is not None:
             eval_task.cancel()
+        if outcome_task is not None:
+            outcome_task.cancel()
         await asyncio.gather(
-            *(t for t in (scanner_task, eval_task) if t is not None),
+            *(t for t in (scanner_task, eval_task, outcome_task) if t is not None),
             return_exceptions=True,
         )
 
