@@ -90,6 +90,21 @@ class TelegramBot:
         except Exception as exc:
             logger.warning("Failed to send startup welcome message: %s", exc)
 
+        alert_chat_id = self.config.telegram_alert_chat_id
+        if alert_chat_id is not None:
+            try:
+                chat = await self.application.bot.get_chat(alert_chat_id)
+                logger.info("Alert chat OK: %s (%s)", chat.title or chat.username or chat.id, alert_chat_id)
+            except BadRequest as exc:
+                logger.warning(
+                    "TELEGRAM_ALERT_CHAT_ID=%s недоступен: %s. "
+                    "Очистите переменную или добавьте бота в чат.",
+                    alert_chat_id,
+                    exc,
+                )
+            except Exception as exc:
+                logger.warning("Could not verify TELEGRAM_ALERT_CHAT_ID=%s: %s", alert_chat_id, exc)
+
         logger.info("Telegram bot started")
 
     async def stop(self) -> None:
@@ -121,48 +136,62 @@ class TelegramBot:
             recipient_ids.add(self.config.telegram_alert_chat_id)
 
         key = f"last_signal:{signal.exchange}:{signal.symbol}"
-        try:
-            should_send = True
-            if not skip_dedupe and self.redis is not None:
-                try:
-                    last = await self.redis.get(key)
-                    if last is not None:
-                        cooldown = self.settings_manager.settings.signal_cooldown_seconds
-                        if time.time() - float(last) < cooldown:
-                            should_send = False
-                except Exception:
-                    should_send = True
+        should_send = True
+        if not skip_dedupe and self.redis is not None:
+            try:
+                last = await self.redis.get(key)
+                if last is not None:
+                    cooldown = self.settings_manager.settings.signal_cooldown_seconds
+                    if time.time() - float(last) < cooldown:
+                        should_send = False
+            except Exception:
+                should_send = True
 
-            if should_send:
-                for chat_id in recipient_ids:
-                    sent = await self.application.bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                        disable_notification=not is_priority,
-                        reply_markup=keyboard,
-                    )
-                    if is_priority:
-                        try:
-                            await self.application.bot.pin_chat_message(
-                                chat_id=chat_id,
-                                message_id=sent.message_id,
-                                disable_notification=True,
-                            )
-                        except Exception:
-                            pass
-                if not skip_dedupe and self.redis is not None:
+        if not should_send:
+            return
+
+        sent_any = False
+        for chat_id in recipient_ids:
+            try:
+                sent = await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    disable_notification=not is_priority,
+                    reply_markup=keyboard,
+                )
+                sent_any = True
+                if is_priority:
                     try:
-                        await self.redis.set(
-                            key,
-                            str(time.time()),
-                            ex=self.settings_manager.settings.signal_cooldown_seconds + 5,
+                        await self.application.bot.pin_chat_message(
+                            chat_id=chat_id,
+                            message_id=sent.message_id,
+                            disable_notification=True,
                         )
-                    except Exception:
-                        logger.exception("Failed to update last_signal in Redis")
-        except Exception:
-            logger.exception("Error sending signal message")
+                    except Exception as exc:
+                        logger.warning("Pin failed for chat %s: %s", chat_id, exc)
+            except BadRequest as exc:
+                if "Chat not found" in str(exc):
+                    logger.warning(
+                        "Chat not found for id %s — проверьте TELEGRAM_ALERT_CHAT_ID "
+                        "или добавьте бота в группу и напишите /start",
+                        chat_id,
+                    )
+                else:
+                    logger.error("Telegram BadRequest for chat %s: %s", chat_id, exc)
+            except Exception:
+                logger.exception("Failed to send signal to chat %s", chat_id)
+
+        if sent_any and not skip_dedupe and self.redis is not None:
+            try:
+                await self.redis.set(
+                    key,
+                    str(time.time()),
+                    ex=self.settings_manager.settings.signal_cooldown_seconds + 5,
+                )
+            except Exception:
+                logger.exception("Failed to update last_signal in Redis")
 
         if self.redis is not None:
             try:

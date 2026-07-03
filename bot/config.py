@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dotenv import load_dotenv
-from pydantic import BaseSettings, Field
+from pydantic import BaseSettings, Field, validator
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -18,6 +18,12 @@ class Config(BaseSettings):
     bybit_api_secret: str | None = Field(None, env="BYBIT_API_SECRET")
 
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
+
+    @validator("telegram_alert_chat_id", pre=True)
+    def empty_alert_chat_id(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
 
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")
