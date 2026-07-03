@@ -18,7 +18,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Config
@@ -41,6 +41,9 @@ class TelegramBot:
         self.config = config
         self.settings_manager = settings_manager
         self.scanner: SignalEngine | None = None
+        self._last_send_time: dict[int, float] = {}
+        self._minute_send_times: dict[int, list[float]] = {}
+        self._send_lock = asyncio.Lock()
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
@@ -121,6 +124,84 @@ class TelegramBot:
             except Exception:
                 pass
 
+    async def _send_to_chat(
+        self,
+        chat_id: int,
+        message: str,
+        keyboard: InlineKeyboardMarkup,
+        is_priority: bool,
+    ) -> bool:
+        if self.application is None:
+            return False
+
+        settings = self.settings_manager.settings
+        async with self._send_lock:
+            now = time.time()
+            recent = [t for t in self._minute_send_times.get(chat_id, []) if now - t < 60.0]
+            if len(recent) >= settings.telegram_max_per_minute:
+                logger.warning(
+                    "Telegram rate limit: skip chat %s (%d msg/min)",
+                    chat_id,
+                    settings.telegram_max_per_minute,
+                )
+                return False
+
+            last = self._last_send_time.get(chat_id, 0.0)
+            wait_for = settings.telegram_min_interval_seconds - (now - last)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+
+            for attempt in range(2):
+                try:
+                    sent = await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        disable_notification=not is_priority,
+                        reply_markup=keyboard,
+                    )
+                    sent_at = time.time()
+                    self._last_send_time[chat_id] = sent_at
+                    bucket = self._minute_send_times.setdefault(chat_id, [])
+                    bucket.append(sent_at)
+                    self._minute_send_times[chat_id] = [t for t in bucket if sent_at - t < 60.0]
+
+                    if (
+                        is_priority
+                        and settings.pin_in_private_chat
+                        and chat_id > 0
+                    ):
+                        try:
+                            await self.application.bot.pin_chat_message(
+                                chat_id=chat_id,
+                                message_id=sent.message_id,
+                                disable_notification=True,
+                            )
+                        except Exception as exc:
+                            logger.warning("Pin failed for chat %s: %s", chat_id, exc)
+                    return True
+                except RetryAfter as exc:
+                    if attempt == 0:
+                        logger.warning("Telegram flood control chat %s, wait %ss", chat_id, exc.retry_after)
+                        await asyncio.sleep(float(exc.retry_after) + 1.0)
+                        continue
+                    logger.warning("Telegram flood control chat %s, message dropped", chat_id)
+                    return False
+                except BadRequest as exc:
+                    if "Chat not found" in str(exc):
+                        logger.warning(
+                            "Chat not found for id %s — проверьте TELEGRAM_ALERT_CHAT_ID",
+                            chat_id,
+                        )
+                    else:
+                        logger.error("Telegram BadRequest for chat %s: %s", chat_id, exc)
+                    return False
+                except Exception:
+                    logger.exception("Failed to send signal to chat %s", chat_id)
+                    return False
+        return False
+
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
@@ -133,9 +214,7 @@ class TelegramBot:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
         ])
-        recipient_ids = {self.config.telegram_admin_id}
-        if self.config.telegram_alert_chat_id is not None:
-            recipient_ids.add(self.config.telegram_alert_chat_id)
+        notify_chat_id = self.config.notification_chat_id
 
         key = f"last_signal:{signal.exchange}:{signal.symbol}"
         should_send = True
@@ -152,38 +231,7 @@ class TelegramBot:
         if not should_send:
             return
 
-        sent_any = False
-        for chat_id in recipient_ids:
-            try:
-                sent = await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    disable_notification=not is_priority,
-                    reply_markup=keyboard,
-                )
-                sent_any = True
-                if is_priority:
-                    try:
-                        await self.application.bot.pin_chat_message(
-                            chat_id=chat_id,
-                            message_id=sent.message_id,
-                            disable_notification=True,
-                        )
-                    except Exception as exc:
-                        logger.warning("Pin failed for chat %s: %s", chat_id, exc)
-            except BadRequest as exc:
-                if "Chat not found" in str(exc):
-                    logger.warning(
-                        "Chat not found for id %s — проверьте TELEGRAM_ALERT_CHAT_ID "
-                        "или добавьте бота в группу и напишите /start",
-                        chat_id,
-                    )
-                else:
-                    logger.error("Telegram BadRequest for chat %s: %s", chat_id, exc)
-            except Exception:
-                logger.exception("Failed to send signal to chat %s", chat_id)
+        sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
 
         if sent_any and not skip_dedupe and self.redis is not None:
             try:

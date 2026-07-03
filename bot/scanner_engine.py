@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from .models import Signal, SnapshotPoint
-from .settings import ExchangeThresholds, SettingsManager
+from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 
 HISTORY_MAX_POINTS = 3600
 
@@ -221,6 +221,7 @@ class SignalEngine:
                 oi_change_percent,
                 price_change_percent,
                 thresholds,
+                settings,
             )
 
             if signal_type is None:
@@ -425,6 +426,7 @@ class SignalEngine:
         oi_change_percent: float,
         price_change_percent: float,
         thresholds: ExchangeThresholds,
+        settings: ScannerSettings,
     ) -> str | None:
         if oi_change_percent >= thresholds.oi_rise_percent and price_change_percent >= thresholds.price_rise_percent:
             return "pump"
@@ -434,9 +436,10 @@ class SignalEngine:
             return "oi_pump"
         if oi_change_percent <= -thresholds.oi_drop_percent:
             return "oi_dump"
-        if price_change_percent >= thresholds.price_rise_percent:
+        price_only_min = settings.price_only_min_percent
+        if price_change_percent >= price_only_min:
             return "price_pump"
-        if price_change_percent <= -thresholds.price_drop_percent:
+        if price_change_percent <= -price_only_min:
             return "price_dump"
         return None
 

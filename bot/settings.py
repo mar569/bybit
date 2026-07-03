@@ -32,7 +32,7 @@ class ScannerSettings:
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 60
+    signal_cooldown_seconds: int = 120
     volume_spike_multiplier: float = 5.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
@@ -41,6 +41,10 @@ class ScannerSettings:
     top_n_symbols: int | None = None
     priority_score_max: int = 2
     signals_enabled: bool = True
+    price_only_min_percent: float = 2.0
+    telegram_max_per_minute: int = 12
+    telegram_min_interval_seconds: float = 1.5
+    pin_in_private_chat: bool = True
 
     # Per-exchange overrides (None = use global)
     binance_oi_period_minutes: int | None = None
@@ -108,6 +112,10 @@ class ScannerSettings:
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(data.get("priority_score_max", 2)),
             signals_enabled=bool(data.get("signals_enabled", True)),
+            price_only_min_percent=float(data.get("price_only_min_percent", 2.0)),
+            telegram_max_per_minute=int(data.get("telegram_max_per_minute", 12)),
+            telegram_min_interval_seconds=float(data.get("telegram_min_interval_seconds", 1.5)),
+            pin_in_private_chat=bool(data.get("pin_in_private_chat", True)),
             scan_interval_seconds=int(data.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(data.get("signal_cooldown_seconds", 60)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),

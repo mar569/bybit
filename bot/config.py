@@ -25,6 +25,13 @@ class Config(BaseSettings):
             return None
         return value
 
+    @property
+    def notification_chat_id(self) -> int:
+        """Куда слать сигналы: группа/канал или личка админу (не оба сразу)."""
+        if self.telegram_alert_chat_id is not None:
+            return self.telegram_alert_chat_id
+        return self.telegram_admin_id
+
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")
     default_oi_rise_percent: float = Field(5.0, env="DEFAULT_OI_PERCENT")
