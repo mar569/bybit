@@ -237,8 +237,10 @@ class TelegramBot:
         priority_max = self.settings_manager.settings.priority_score_max
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
+        is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_priority = (
             is_vertical
+            or is_reversal
             or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
@@ -283,7 +285,7 @@ class TelegramBot:
 
         if (
             settings := self.settings_manager.settings
-        ).probability_filter_enabled and not skip_dedupe and not is_vertical:
+        ).probability_filter_enabled and not skip_dedupe and not is_vertical and not is_reversal:
             if prob < settings.min_probability_percent:
                 logger.info(
                     "Telegram skip %s %s: probability %.0f%% < %.0f%%",
@@ -667,6 +669,8 @@ class TelegramBot:
             f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n"
             f"🚨 Вертикальный памп: <b>{'ON' if s.breakout_enabled else 'OFF'}</b> "
             f"(флет ≤{s.breakout_max_flat_percent}% → +{s.breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n"
+            f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
+            f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
             f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
@@ -895,6 +899,8 @@ class TelegramBot:
         labels = {
             "vertical_pump": "🚨 ВЕРТИКАЛЬНЫЙ ПАМП",
             "vertical_dump": "🚨 ВЕРТИКАЛЬНЫЙ СЛИВ",
+            "reversal_pump": "↩️ РАЗВОРОТ ВВЕРХ",
+            "reversal_dump": "↩️ РАЗВОРОТ ВНИЗ",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -911,6 +917,15 @@ class TelegramBot:
             label = f"{label} {tier_text}"
         return f"<b>{label}</b>\n" if label else ""
 
+    @staticmethod
+    def _symbol_link_and_copy(signal: Signal) -> str:
+        """Ссылка на CoinGlass + code для быстрого копирования тикера."""
+        sym = signal.symbol
+        return (
+            f'<a href="{signal.link}"><b>{sym}</b></a>\n'
+            f"<code>{sym}</code>"
+        )
+
     def _format_vertical_breakout_message(self, signal: Signal, *, compact: bool = False) -> str:
         if compact:
             exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
@@ -924,7 +939,8 @@ class TelegramBot:
             title = "🚨 ВЕРТ. ПАМП" if is_long else "🚨 ВЕРТ. СЛИВ"
             return (
                 f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
-                f"{side_emoji} <b>{signal.symbol}</b> · взлёт {spike_text} · OI {abs(signal.oi_change_percent):.2f}% ({oi_usd})\n"
+                f"{side_emoji} {self._symbol_link_and_copy(signal)}\n"
+                f"взлёт {spike_text} · OI {abs(signal.oi_change_percent):.2f}% ({oi_usd})\n"
                 f"{prob}\n"
             )
 
@@ -954,7 +970,7 @@ class TelegramBot:
             f"⚡ <b>Выход из проторговки</b> (вне порогов)\n"
             f"{exchange_emoji} <b>{exchange_name} – {spike_min}м</b>\n"
             f"{side_emoji} <b>{side_label}</b>\n"
-            f"<a href=\"{signal.link}\"><b>{signal.symbol}</b></a>\n\n"
+            f"{self._symbol_link_and_copy(signal)}\n\n"
             f"📊 Флет <b>{flat_min}м</b>: диапазон <b>{flat_pct}%</b>\n"
             f"🚀 Взлёт за <b>{spike_min}м</b>: <b>{spike_text}</b>\n"
             f"⚡ Ускорение: <b>{velocity}×</b> к флету\n"
@@ -1006,7 +1022,7 @@ class TelegramBot:
             f"{type_header}"
             f"{exchange_emoji} <b>{exchange_name} – {period_label}</b>\n"
             f"{side_emoji} <b>{side_label}</b>\n"
-            f"<a href=\"{signal.link}\"><b>{signal.symbol}</b></a>\n"
+            f"{self._symbol_link_and_copy(signal)}\n"
             f"{oi_icon} ОИ {oi_verb} на <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n"
             f"{side_emoji} 💲 Изменение цены: <b>{price_text}</b>\n"
             f"⏱ Ранность: <b>{signal.signal_score}</b>/10 "
@@ -1034,12 +1050,20 @@ class TelegramBot:
             lines.append(type_header)
         lines.append(
             f"{exchange_emoji} <b>{exchange_name} {signal.oi_period_minutes}м</b> · "
-            f"{side_emoji} <b>{side_label}</b> · <b>{signal.symbol}</b>"
+            f"{side_emoji} <b>{side_label}</b>"
         )
+        lines.append(self._symbol_link_and_copy(signal))
         lines.append(
             f"OI <b>{abs(signal.oi_change_percent):.2f}%</b> ({oi_usd}) · "
             f"цена <b>{price_text}</b> · ⏱ <b>{signal.signal_score}</b>/10"
         )
+        prior = signal.details.get("reversal_prior_move_pct")
+        leg = signal.details.get("reversal_leg_pct")
+        if prior is not None and leg is not None:
+            lines.append(
+                f"↩️ было <b>{float(prior):+.1f}%</b> → сейчас <b>{float(leg):+.1f}%</b> "
+                f"за {signal.oi_period_minutes}м"
+            )
         ms = format_market_structure_compact(signal.details.get("market_structure"))
         if ms:
             lines.append(ms)

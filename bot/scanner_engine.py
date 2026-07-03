@@ -167,7 +167,11 @@ class SignalEngine:
         self._refresh_top_symbols_if_needed()
         settings = self.settings.settings
         in_top = self._is_in_top_n(exchange, symbol)
-        if not in_top and not (settings.breakout_enabled and settings.breakout_bypass_top_n):
+        if not in_top and not (
+            settings.breakout_enabled and settings.breakout_bypass_top_n
+        ) and not (
+            settings.reversal_enabled and settings.reversal_bypass_top_n
+        ):
             return
 
         point = SnapshotPoint(
@@ -319,11 +323,12 @@ class SignalEngine:
 
             oi_usd_now = self._oi_usd_value(current.open_interest, current.price, current.additional)
             is_breakout = candidate.signal_type in {"vertical_pump", "vertical_dump"}
-            min_liquidity = (
-                settings.breakout_min_liquidity_oi_usd
-                if is_breakout
-                else settings.min_open_interest
-            )
+            is_reversal = candidate.signal_type in {"reversal_pump", "reversal_dump"}
+            min_liquidity = settings.min_open_interest
+            if is_breakout:
+                min_liquidity = settings.breakout_min_liquidity_oi_usd
+            elif is_reversal:
+                min_liquidity = settings.reversal_min_liquidity_oi_usd
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 return
 
@@ -331,7 +336,7 @@ class SignalEngine:
                 return
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
-            if not is_mega and not is_breakout and changes.oi_change_usd is not None:
+            if not is_mega and not is_breakout and not is_reversal and changes.oi_change_usd is not None:
                 if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
                     if candidate.signal_type not in {"price_pump", "price_dump"}:
                         return
@@ -340,6 +345,9 @@ class SignalEngine:
             if is_breakout:
                 cooldown_key = f"{key}:breakout"
                 cooldown = settings.breakout_cooldown_seconds
+            elif is_reversal:
+                cooldown_key = f"{key}:reversal"
+                cooldown = settings.reversal_cooldown_seconds
             elif is_mega:
                 cooldown_key = f"{key}:mega"
                 cooldown = settings.mega_cooldown_seconds
@@ -350,8 +358,10 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
-            if is_breakout:
-                score = 1
+            if is_breakout or is_reversal:
+                score = 1 if is_breakout else (
+                    1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
+                )
             else:
                 score = self._calculate_score(
                     changes.oi_change_percent,
@@ -361,7 +371,7 @@ class SignalEngine:
                     flash_tier=candidate.flash_tier,
                 )
 
-            if not is_breakout and settings.min_signal_score and score < settings.min_signal_score:
+            if not is_breakout and not is_reversal and settings.min_signal_score and score < settings.min_signal_score:
                 return
 
             lookback_seconds = changes.lookback_seconds
@@ -653,6 +663,111 @@ class SignalEngine:
 
         return None
 
+    def _detect_sharp_reversal(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+    ) -> SignalCandidate | None:
+        """Памп → резкий слив (или дамп → отскок) без обязательного 25м флета."""
+        if not settings.reversal_enabled or current.price is None:
+            return None
+
+        now = current.timestamp
+        window_sec = settings.reversal_window_minutes * 60
+        spike_sec = settings.reversal_spike_minutes * 60
+        window_start = now - window_sec
+        spike_start = now - spike_sec
+
+        if history[0].timestamp > window_start:
+            return None
+
+        window_points = [
+            p for p in history
+            if p.timestamp >= window_start and p.price is not None and p.price > 0
+        ]
+        if len(window_points) < 12:
+            return None
+
+        spike_earlier = self._point_at_cutoff(history, spike_start)
+        if spike_earlier is None or spike_earlier.price is None:
+            return None
+
+        spike_pct = self._percent_change(spike_earlier.price, current.price)
+        min_rev = settings.reversal_min_reversal_pct
+        min_prior = settings.reversal_min_prior_move_pct
+        max_peak_age = settings.reversal_peak_max_age_minutes * 60.0
+        oi_pct = self._oi_percent_change(spike_earlier, current)
+
+        peak_point = max(window_points, key=lambda p: p.price or 0.0)
+        trough_point = min(window_points, key=lambda p: p.price or float("inf"))
+        peak_price = peak_point.price or 0.0
+        trough_price = trough_point.price or 0.0
+        if peak_price <= 0 or trough_price <= 0:
+            return None
+
+        # --- Разворот вниз: был рост → резкий слив с недавнего хая
+        peak_age = now - peak_point.timestamp
+        if peak_age <= max_peak_age and peak_point.timestamp >= window_start:
+            dump_from_peak = self._percent_change(peak_price, current.price)
+            if dump_from_peak <= -min_rev and spike_pct <= -min_rev * 0.85:
+                prior_low = trough_price
+                if trough_point.timestamp > peak_point.timestamp:
+                    prior_points = [p for p in window_points if p.timestamp < peak_point.timestamp]
+                    if prior_points:
+                        prior_low = min(p.price for p in prior_points if p.price)
+                    else:
+                        prior_low = window_points[0].price or prior_low
+                prior_up = self._percent_change(prior_low, peak_price)
+                if prior_up >= min_prior:
+                    meta = {
+                        "reversal_prior_move_pct": round(prior_up, 2),
+                        "reversal_leg_pct": round(dump_from_peak, 2),
+                        "reversal_peak_age_min": round(peak_age / 60.0, 1),
+                        "spike_percent": round(spike_pct, 2),
+                    }
+                    return SignalCandidate(
+                        signal_type="reversal_dump",
+                        period_minutes=settings.reversal_spike_minutes,
+                        oi_change_percent=oi_pct,
+                        price_change_percent=round(spike_pct, 2),
+                        earlier=spike_earlier,
+                        urgency=0,
+                        breakout_meta=meta,
+                    )
+
+        # --- Разворот вверх: было падение → резкий отскок с недавнего дна
+        trough_age = now - trough_point.timestamp
+        if trough_age <= max_peak_age and trough_point.timestamp >= window_start:
+            bounce_from_trough = self._percent_change(trough_price, current.price)
+            if bounce_from_trough >= min_rev and spike_pct >= min_rev * 0.85:
+                prior_high = peak_price
+                if peak_point.timestamp > trough_point.timestamp:
+                    prior_points = [p for p in window_points if p.timestamp < trough_point.timestamp]
+                    if prior_points:
+                        prior_high = max(p.price for p in prior_points if p.price)
+                    else:
+                        prior_high = window_points[0].price or prior_high
+                prior_down = self._percent_change(prior_high, trough_price)
+                if prior_down <= -min_prior:
+                    meta = {
+                        "reversal_prior_move_pct": round(prior_down, 2),
+                        "reversal_leg_pct": round(bounce_from_trough, 2),
+                        "reversal_peak_age_min": round(trough_age / 60.0, 1),
+                        "spike_percent": round(spike_pct, 2),
+                    }
+                    return SignalCandidate(
+                        signal_type="reversal_pump",
+                        period_minutes=settings.reversal_spike_minutes,
+                        oi_change_percent=oi_pct,
+                        price_change_percent=round(spike_pct, 2),
+                        earlier=spike_earlier,
+                        urgency=0,
+                        breakout_meta=meta,
+                    )
+
+        return None
+
     def _pick_best_candidate(
         self,
         history: deque[SnapshotPoint],
@@ -663,6 +778,10 @@ class SignalEngine:
         breakout = self._detect_vertical_breakout(history, current, settings)
         if breakout is not None:
             return breakout
+
+        reversal = self._detect_sharp_reversal(history, current, settings)
+        if reversal is not None:
+            return reversal
 
         candidates: list[SignalCandidate] = []
         pulse_oi_up, pulse_price_up, pulse_oi_down, pulse_price_down, squeeze_min = (
@@ -943,6 +1062,7 @@ class SignalEngine:
             return "short" if price_change_percent < 0 else "long"
         short_types = {
             "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump", "vertical_dump",
+            "reversal_dump",
         }
         if signal_type in short_types:
             return "short"
@@ -965,6 +1085,9 @@ class SignalEngine:
             if tier >= 10:
                 return 2
             return 3
+
+        if signal_type in {"reversal_pump", "reversal_dump"}:
+            return 1
 
         if signal_type in {"pulse_pump", "pulse_dump", "short_squeeze"}:
             magnitude = abs(oi_change_percent) * 0.55 + abs(price_change_percent) * 0.45

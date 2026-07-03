@@ -10,6 +10,8 @@ from .settings import ExchangeThresholds, ScannerSettings
 PROBABILITY_BYPASS_TYPES = frozenset({
     "vertical_pump",
     "vertical_dump",
+    "reversal_pump",
+    "reversal_dump",
 })
 
 # Веса факторов (сумма = 1.0)
@@ -121,6 +123,8 @@ def _pattern_strength(signal: Signal) -> float:
     base = {
         "vertical_pump": 0.95,
         "vertical_dump": 0.95,
+        "reversal_pump": 0.90,
+        "reversal_dump": 0.90,
         "mega_pump": 0.88,
         "mega_dump": 0.88,
         "pump": 0.82,

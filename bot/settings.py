@@ -120,6 +120,17 @@ class ScannerSettings:
     breakout_min_liquidity_oi_usd: float = 30_000.0
     breakout_cooldown_seconds: int = 120
 
+    # Резкий разворот: памп → слив (или дамп → отскок) без 25м флета
+    reversal_enabled: bool = True
+    reversal_bypass_top_n: bool = True
+    reversal_window_minutes: int = 10
+    reversal_spike_minutes: int = 3
+    reversal_peak_max_age_minutes: int = 6
+    reversal_min_prior_move_pct: float = 2.0
+    reversal_min_reversal_pct: float = 1.5
+    reversal_min_liquidity_oi_usd: float = 25_000.0
+    reversal_cooldown_seconds: int = 90
+
     min_open_interest: float = 75_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
@@ -298,6 +309,15 @@ class ScannerSettings:
             breakout_velocity_multiplier=float(base.get("breakout_velocity_multiplier", 3.5)),
             breakout_min_liquidity_oi_usd=float(base.get("breakout_min_liquidity_oi_usd", 30_000.0)),
             breakout_cooldown_seconds=int(base.get("breakout_cooldown_seconds", 120)),
+            reversal_enabled=bool(base.get("reversal_enabled", True)),
+            reversal_bypass_top_n=bool(base.get("reversal_bypass_top_n", True)),
+            reversal_window_minutes=int(base.get("reversal_window_minutes", 10)),
+            reversal_spike_minutes=int(base.get("reversal_spike_minutes", 3)),
+            reversal_peak_max_age_minutes=int(base.get("reversal_peak_max_age_minutes", 6)),
+            reversal_min_prior_move_pct=float(base.get("reversal_min_prior_move_pct", 2.0)),
+            reversal_min_reversal_pct=float(base.get("reversal_min_reversal_pct", 1.5)),
+            reversal_min_liquidity_oi_usd=float(base.get("reversal_min_liquidity_oi_usd", 25_000.0)),
+            reversal_cooldown_seconds=int(base.get("reversal_cooldown_seconds", 90)),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),
