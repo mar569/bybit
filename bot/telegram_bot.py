@@ -266,19 +266,8 @@ class TelegramBot:
             await update.message.reply_text("Нет доступа.")
             return
         await update.message.reply_text(
-            "Команды:\n"
-            "/start — главное меню\n"
-            "/status — текущие настройки\n"
-            "/settings — кнопки порогов\n"
-            "/set — точная настройка (/set help)\n"
-            "/test — тестовые LONG и SHORT\n"
-            "/scan — диагностика сканера\n"
-            "/pause — остановить сигналы\n"
-            "/resume — возобновить сигналы\n"
-            "/history [N] — последние сигналы\n\n"
-            "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
-            "🔥 score 1–2 = приоритет (звук + закреп)\n\n"
-            "Все настройки применяются сразу.",
+            self._build_help_text(),
+            parse_mode=ParseMode.HTML,
             reply_markup=self._reply_keyboard(),
         )
 
@@ -475,6 +464,31 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
             )
+        elif text in {"📋 Команды", "Команды", "❓ Помощь", "Помощь"}:
+            await update.message.reply_text(
+                self._build_help_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._reply_keyboard(),
+            )
+
+    @staticmethod
+    def _build_help_text() -> str:
+        return (
+            "<b>📋 Доступные команды</b>\n\n"
+            "/start — главное меню\n"
+            "/status — текущие настройки\n"
+            "/settings — inline-настройки порогов\n"
+            "/set help — точная настройка через команды\n"
+            "/test — тестовые сигналы LONG + SHORT\n"
+            "/scan — диагностика сканера\n"
+            "/pause — остановить уведомления\n"
+            "/resume — возобновить уведомления\n"
+            "/history [N] — последние N сигналов (нужен Redis)\n"
+            "/help — эта справка\n\n"
+            "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
+            "🔥 score 1–2 = приоритет (звук + закреп в личке)\n\n"
+            "Все настройки применяются сразу."
+        )
 
     def _build_exchanges_text(self) -> str:
         s = self.settings_manager.settings
@@ -632,6 +646,7 @@ class TelegramBot:
             [
                 [KeyboardButton(self._signals_toggle_button_label())],
                 [KeyboardButton("📊 Биржи"), KeyboardButton("🔧 Настройки")],
+                [KeyboardButton("📋 Команды")],
             ],
             resize_keyboard=True,
         )
