@@ -144,8 +144,11 @@ class TelegramBot:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
+        await update.message.reply_text(self._build_status_text(), parse_mode=ParseMode.HTML)
+
+    def _build_status_text(self) -> str:
         settings = self.settings_manager.settings
-        text = (
+        return (
             f"<b>Текущие настройки сканера</b>\n"
             f"Период OI: {settings.oi_period_minutes} мин\n"
             f"Порог роста OI: {settings.oi_rise_percent}%\n"
@@ -153,10 +156,16 @@ class TelegramBot:
             f"Порог роста цены: {settings.price_rise_percent}%\n"
             f"Порог падения цены: {settings.price_drop_percent}%\n"
             f"Мин. OI: {settings.min_open_interest:.0f}\n"
+            f"Мин. объём: {settings.min_volume:.0f}\n"
+            f"Volume spike x: {settings.volume_spike_multiplier}\n"
+            f"Price pump порог: {settings.price_pump_threshold_pct}%\n"
+            f"Мин. сила сигнала: {settings.min_signal_score}\n"
+            f"Top N symbols: {settings.top_n_symbols or 'all'}\n"
             f"Откат сигнала: {settings.signal_cooldown_seconds} сек\n"
             f"Интервал обновления: {settings.scan_interval_seconds} сек\n"
+            f"Binance: {'ON' if settings.enabled_binance else 'OFF'}\n"
+            f"Bybit: {'ON' if settings.enabled_bybit else 'OFF'}"
         )
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def on_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
@@ -254,8 +263,33 @@ class TelegramBot:
             current = self.settings_manager.settings.enabled_bybit
             self.settings_manager.update(enabled_bybit=not current)
             await query.edit_message_text(f"Bybit включён: {not current}")
+        elif payload == "menu_scanner":
+            await query.edit_message_text(
+                "Сканер активен. Используйте /status для просмотра текущих настроек или /settings для изменения порогов.",
+                reply_markup=self._main_menu(),
+            )
+        elif payload == "menu_settings":
+            await query.edit_message_text(
+                "Выберите настройку:",
+                reply_markup=self._settings_keyboard(),
+            )
+        elif payload == "menu_notifications":
+            await query.edit_message_text(
+                "Уведомления пока доступны через сигналы. Настройки каналов не поддерживаются.",
+                reply_markup=self._main_menu(),
+            )
+        elif payload == "menu_help":
+            await query.edit_message_text(
+                "Доступные команды:\n/start /status /settings /help\n" \
+                "Выберите настройки через кнопку \"⚙ Настройки\".",
+                reply_markup=self._main_menu(),
+            )
         elif payload == "show_settings":
-            await self.on_status(update, context)
+            await query.edit_message_text(
+                self._build_status_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._main_menu(),
+            )
         else:
             await query.edit_message_text("Неизвестное действие.")
 
