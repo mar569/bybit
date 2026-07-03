@@ -40,6 +40,7 @@ class ScannerSettings:
     min_signal_score: float = 1.0
     top_n_symbols: int | None = None
     priority_score_max: int = 2
+    signals_enabled: bool = True
 
     # Per-exchange overrides (None = use global)
     binance_oi_period_minutes: int | None = None
@@ -106,6 +107,7 @@ class ScannerSettings:
             min_signal_score=float(data.get("min_signal_score", 1.0)),
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(data.get("priority_score_max", 2)),
+            signals_enabled=bool(data.get("signals_enabled", True)),
             scan_interval_seconds=int(data.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(data.get("signal_cooldown_seconds", 60)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),

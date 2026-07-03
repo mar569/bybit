@@ -1,124 +1,196 @@
-# Crypto Futures Scanner — быстрый запуск
+# Crypto Futures Scanner — Telegram-бот
 
-Кратко: этот бот сканирует USDT perpetual фьючерсы на Binance и Bybit в реальном времени (приблизительно 1‑сек интервал данных по WebSocket), вычисляет индикаторы (OI Δ, ATR, RSI, EMA9/21, VWAP, скорость объёма, простая эвристика ликвидаций и др.) и шлёт уведомления в Telegram при достижении пользовательских порогов.
+Личный сканер pump/dump сигналов для USDT perpetual фьючерсов на **Binance** и **Bybit**. Бот анализирует Open Interest, цену и объём в реальном времени и присылает уведомления в Telegram. Решение о сделке всегда принимаете вы.
 
-## Основные возможности
+> API-ключи бирж для сканирования **не нужны** — используются публичные REST и WebSocket API v5.
 
-- Pump / Dump детектор (по OI и цене)
-- Open Interest screener (настраиваемый период и пороги)
-- Volume Spike (интервальный объём vs средний интервал)
-- Price Pump за окно (по умолчанию 5 мин, порог 8%)
-- CVD Divergence (эвристика по taker/CVD или OI+vol/price)
-- Индикаторы: ATR, RSI, EMA(9/21), VWAP, скорость объёма
-- Кликабельная ссылка CoinGlass в каждом уведомлении для ручной проверки
-- Inline-настройки в Telegram: период OI, пороги, min OI, min volume, Volume spike x, Price pump %, Min signal score, Top N и включение бирж
-- Redis: хранение истории сигналов и дедупликация (docker-compose включает Redis)
+## Что умеет бот
 
-## Принцип формирования сигнала (кратко)
+- **Pump / Dump / OI screener** — рост или падение OI и цены за настраиваемый период (1–30 мин)
+- **LONG / SHORT** — 🟢 зелёный = лонг, 🔴 красный = шорт
+- **Все USDT perpetual** — список монет обновляется автоматически (500+ на Binance, 700+ на Bybit)
+- **CoinGlass** — кликабельная монета + кнопка под каждым сигналом
+- **Сила сигнала 1–10** — 1 = ранний вход, 10 = поздно
+- **Приоритетные сигналы** (score ≤ 2) — звук, закрепление, метка 🔥 РАННИЙ СИГНАЛ
+- **Пауза сигналов** — ⏸ Стоп / ▶️ Старт (конец торгового дня без перезапуска бота)
+- **Динамические настройки** — меняются мгновенно, сохраняются в `bot/settings.json`
+- **Топ-N монет** по объёму — меньше шума от неликвидных пар
+- **Отдельные пороги** для Binance и Bybit
+- **Redis** (опционально) — история сигналов и дедупликация
 
-- Для каждой пары бот хранит историю снимков (price, open_interest, volume_24h, bid/ask).
-- Для заданного периода (напр., 15 мин) вычисляется Δ OI (%) и Δ Price (%). Также рассчитываются индикаторы и interval volume (дельта 24h-volume между соседними snapshot'ами).
-- Сигнал формируется, если комбинация условий (OI Δ, Price Δ, Volume Spike, индикаторные эвристики) превышает пороги и итоговый `signal_score` >= `min_signal_score`.
-- Перед отправкой сообщения выполняется дедупликация по `last_signal:<exchange>:<symbol>` в Redis: если последний сигнал был отправлен менее, чем cooldown, он не будет повторно отправлен.
+## Источники данных
 
-## Пользовательские пороги (в `bot/settings.json` или через inline-кнопки)
+| Биржа   | Цена / объём              | Open Interest                    |
+|---------|---------------------------|----------------------------------|
+| Bybit   | REST v5 tickers + WS      | в tickers + WS `tickers.{symbol}` |
+| Binance | WS `!ticker@arr`          | WS `{symbol}@openInterest`       |
 
-- `oi_period_minutes` — период OI (по умолчанию 15)
-- `oi_rise_percent` / `oi_drop_percent` — базовые пороги OI
-- `price_pump_threshold_pct` — рост цены за `price_pump_window_minutes` (по умолчанию 8% за 5 минут)
-- `volume_spike_multiplier` — множитель для определения spike (по умолчанию 5x)
-- `min_signal_score` — минимальная сила сигнала для отправки (по умолчанию 2)
-- `min_open_interest` / `min_volume` — фильтры по ликвидности
+## Быстрый старт
 
-## Пример уведомления
-
-"""
-🚀 SIGNAL PUMP — Binance: SOLUSDT
-Монета: SOLUSDT (ссылка на CoinGlass)
-Период: 15 мин
-OI: up +8.12% (+1,420,000)
-Цена: up +3.45% (+6.34)
-Volume Δ (24h): +12.3%
-ATR: 0.321, RSI: 67.2, EMA9: 182.1, EMA21: 178.9
-Сила сигнала: 7/10
-(volume_spike: true, price_pump_window: true, cvd_divergence: false)
-"""
-
-## Prerequisites (Ubuntu 24.04)
-
-- Docker & Docker Compose (plugin)
-- 2 CPU, 2GB RAM (рекомендовано больше для 300+ пар)
-
-## Шаги развёртывания (проверенные)
-
-1. Установить Docker и Compose (как root или через sudo):
-
-```bash
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg lsb-release
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-sudo usermod -aG docker $USER
-```
-
-2. Клонировать репозиторий и перейти в папку проекта:
-
-```bash
-git clone <your-repo-url>
-cd Bybit_bot
-```
-
-3. Скопировать `.env.example` в `.env` и отредактировать (указать `TELEGRAM_TOKEN`, `TELEGRAM_ADMIN_ID` и опционально ключи бирж):
+### 1. Настройка `.env`
 
 ```bash
 cp .env.example .env
-nano .env
-# заполните TELEGRAM_TOKEN и TELEGRAM_ADMIN_ID
 ```
 
-4. (Опционально) проверьте `bot/settings.json` после первого запуска — там сохраняются inline-настройки. Можно заранее создать `bot/settings.json`, но не обязательно.
+Обязательно:
 
-5. Запустить контейнеры (в корне проекта, там где `docker-compose.yml`):
+```env
+TELEGRAM_TOKEN=ваш_токен_от_BotFather
+TELEGRAM_ADMIN_ID=ваш_telegram_user_id
+```
+
+Опционально:
+
+```env
+TELEGRAM_ALERT_CHAT_ID=-1001234567890   # группа/канал для алертов
+```
+
+### 2. Запуск
 
 ```bash
 docker compose build
 docker compose up -d
-```
-
-6. Просмотреть логи бота:
-
-```bash
 docker compose logs -f bot
 ```
 
-7. Проверить работу в Telegram:
+### 3. Telegram
 
-- Отправьте `/start` боту (ваш `TELEGRAM_ADMIN_ID` должен совпадать) — бот покажет меню.
-- `/status` — текущее состояние/пороги.
-- `/settings` — откроется inline-меню для правок порогов.
-- `/history [N]` — посмотреть последние N сигналов (при наличии Redis).
+1. `/start` — главное меню и кнопки внизу чата
+2. `/test` — тестовые LONG + SHORT (проверка формата)
+3. `/status` — текущие настройки
+4. Дождитесь накопления истории (по умолчанию **15 мин**), затем придут реальные сигналы
 
-## Дополнительные заметки и источники данных
+## Кнопки в чате
 
-- Бот использует публичные WebSocket‑потоки Binance и Bybit для получения цен и Open Interest. Эти данные реальны и приходят в реальном времени от бирж.
-- Ликвидации: в текущей версии реализована простая эвристика (если доступны поля `liquidation`/`cvd` в `additional` — они используются). Для точных данных по ликвидациям рекомендуется платный API (CoinGlass) или парсинг биржевых endpoint'ов, если у биржи есть соответствующие публичные каналы.
-- Если вы хотите добавить MEXC или другие биржи — можно реализовать дополнительный `ExchangeScanner` в `bot/exchanges/` аналогично `binance.py` и `bybit.py`.
+| Кнопка | Действие |
+|--------|----------|
+| **⏸ Стоп** / **▶️ Старт** | Выключить / включить уведомления |
+| **📊 Биржи** | Вкл/выкл Binance и Bybit |
+| **🔧 Настройки** | Inline-меню порогов |
 
-## Тюнинг сигналов
+Состояние паузы сохраняется в `settings.json` и переживает перезапуск Docker.
 
-- Если сигналов слишком много — увеличьте `volume_spike_multiplier`, `price_pump_threshold_pct` или `min_signal_score`.
-- Если сигналов нет — уменьшите пороги (например `volume_spike_multiplier` → 2.0, `price_pump_threshold_pct` → 3.0).
+## Команды
+
+| Команда | Описание |
+|---------|----------|
+| `/start` | Главное меню |
+| `/status` | Текущие настройки |
+| `/settings` | Inline-настройки |
+| `/set help` | Точная настройка через команды |
+| `/test` | Тестовые сигналы LONG + SHORT |
+| `/pause` | Остановить уведомления |
+| `/resume` | Возобновить уведомления |
+| `/history [N]` | Последние N сигналов (нужен Redis) |
+| `/help` | Справка |
+
+### Примеры `/set`
+
+```text
+/set period 15
+/set oi 5
+/set oi_drop 5
+/set price 1
+/set price_drop 1
+/set top 50          # только топ-50 по объёму (0 = все)
+/set min_oi 100000
+/set cooldown 60
+/set score 1
+/set signals off     # пауза
+/set signals on      # возобновить
+
+/set binance oi 3    # свой порог для Binance
+/set bybit period 30
+/set binance reset   # сбросить пороги биржи к глобальным
+```
+
+## Формат уведомления
+
+```text
+🔥 РАННИЙ СИГНАЛ          ← только для score ≤ 2
+⚫ ByBit – 15м
+🟢 LONG
+BTCUSDT                   ← ссылка на CoinGlass
+📈 ОИ вырос на 8.42% (1.52 млн. $)
+🟢 💲 Изменение цены: +3.15%
+🔊 Сигнал за сутки: 2
+[📊 CoinGlass]            ← кнопка
+```
+
+Для шорта вместо 🟢 LONG будет 🔴 SHORT и отрицательное изменение цены.
+
+## Настройки (`bot/settings.json`)
+
+| Параметр | По умолчанию | Описание |
+|----------|--------------|----------|
+| `oi_period_minutes` | 15 | Период анализа OI/цены (1–30 мин) |
+| `oi_rise_percent` | 5.0 | Порог роста OI (%) |
+| `oi_drop_percent` | 5.0 | Порог падения OI (%) |
+| `price_rise_percent` | 1.0 | Порог роста цены — LONG (%) |
+| `price_drop_percent` | 1.0 | Порог падения цены — SHORT (%) |
+| `min_open_interest` | 100000 | Минимальный OI |
+| `min_volume` | 0 | Минимальный объём 24ч |
+| `min_signal_score` | 1 | Мин. сила сигнала (1–10) |
+| `priority_score_max` | 2 | Приоритет (звук + pin) для score ≤ N |
+| `top_n_symbols` | null | Топ монет по объёму (null = все) |
+| `signal_cooldown_seconds` | 60 | Пауза между повторами по одной монете |
+| `signals_enabled` | true | Вкл/выкл уведомления |
+| `enabled_binance` | true | Сканировать Binance |
+| `enabled_bybit` | true | Сканировать Bybit |
+
+Переопределения по биржам: `binance_oi_rise_percent`, `bybit_oi_period_minutes` и т.д. (`null` = глобальное значение).
+
+## Как формируется сигнал
+
+1. Для каждой пары накапливается история (цена, OI, объём).
+2. За выбранный период считаются Δ OI (%), Δ OI ($), Δ цены (%).
+3. Если пороги превышены и `signal_score` ≥ `min_signal_score` — отправляется уведомление.
+4. Дедупликация: повтор по той же монете не чаще `signal_cooldown_seconds`.
+5. При `signals_enabled = false` уведомления не отправляются, но данные продолжают собираться.
+
+## Тюнинг
+
+**Слишком много сигналов:**
+- Увеличьте `oi_rise_percent`, `price_rise_percent`, `min_signal_score`
+- Включите `top_n_symbols` (50 или 100)
+- Увеличьте `signal_cooldown_seconds`
+
+**Сигналов нет:**
+- Уменьшите пороги: `/set oi 0.5`, `/set price 0.5`
+- Уменьшите период: `/set period 5`
+- Проверьте: `/status` → `signals_enabled` должен быть ВКЛ
+- Подождите накопления истории за выбранный период
+
+**Быстрый тест:**
+```text
+/set period 1
+/set oi 0.5
+/set price 0.5
+/test
+```
+
+## Структура проекта
+
+```text
+bot/
+  main.py              # точка входа
+  scanner_engine.py    # логика сигналов
+  telegram_bot.py      # Telegram UI
+  settings.py          # настройки (JSON)
+  set_parser.py        # парсер /set
+  exchanges/
+    bybit.py           # Bybit API v5
+    binance.py         # Binance Futures
+docker-compose.yml
+.env
+```
 
 ## Безопасность
 
-- Токен Telegram и ключи бирж хранятся в `.env` — не коммитьте его в публичные репозитории.
+- Не коммитьте `.env` в публичный репозиторий.
+- `TELEGRAM_ADMIN_ID` — только этот пользователь управляет ботом.
 
-## Что можно дальше
+## Полное ТЗ
 
-- подключить дополнительную биржу (MEXC),
-- добавить вызовы платных API (CoinGlass) при наличии ключа,
-- расширить историю сигналов и добавить экспорт в CSV.
+Детальное техническое задание — в файле [`docs/TZ.md`](../docs/TZ.md).

@@ -53,6 +53,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("history", self.on_history))
         self.application.add_handler(CommandHandler("set", self.on_set))
         self.application.add_handler(CommandHandler("test", self.on_test))
+        self.application.add_handler(CommandHandler("pause", self.on_pause))
+        self.application.add_handler(CommandHandler("resume", self.on_resume))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text_message))
 
@@ -78,9 +80,9 @@ class TelegramBot:
                 chat_id=self.config.telegram_admin_id,
                 text=(
                     "✅ Сканер запущен (Bybit/Binance API v5).\n"
-                    f"Активный период: <b>{s.oi_period_minutes} мин</b>, "
-                    f"OI ≥ <b>{s.oi_rise_percent}%</b>, цена ≥ <b>{s.price_rise_percent}%</b>.\n"
-                    "Настройки меняются мгновенно — без перезапуска."
+                    f"{self._signals_status_line()}.\n"
+                    f"Период: <b>{s.oi_period_minutes} мин</b>, "
+                    f"OI ≥ <b>{s.oi_rise_percent}%</b>, цена ≥ <b>{s.price_rise_percent}%</b>."
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
@@ -104,6 +106,8 @@ class TelegramBot:
 
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
+            return
+        if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
             return
 
         priority_max = self.settings_manager.settings.priority_score_max
@@ -189,6 +193,8 @@ class TelegramBot:
             "/settings — кнопки порогов\n"
             "/set — точная настройка (/set help)\n"
             "/test — тестовые LONG и SHORT\n"
+            "/pause — остановить сигналы\n"
+            "/resume — возобновить сигналы\n"
             "/history [N] — последние сигналы\n\n"
             "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
             "🔥 score 1–2 = приоритет (звук + закреп)\n\n"
@@ -282,11 +288,56 @@ class TelegramBot:
             reply_markup=self._settings_keyboard(),
         )
 
+    async def on_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        await self._set_signals_enabled(update, enabled=False)
+
+    async def on_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        await self._set_signals_enabled(update, enabled=True)
+
+    async def _set_signals_enabled(self, update: Update, *, enabled: bool) -> None:
+        self.settings_manager.update(signals_enabled=enabled)
+        if enabled:
+            text = (
+                "▶️ <b>Сигналы включены</b>\n"
+                "Уведомления снова приходят при срабатывании порогов."
+            )
+        else:
+            text = (
+                "⏸ <b>Сигналы остановлены</b>\n"
+                "Уведомления не приходят. Сканер продолжает собирать данные в фоне.\n"
+                "Нажмите <b>▶️ Старт</b> или /resume, когда будете готовы."
+            )
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._reply_keyboard(),
+        )
+
+    def _signals_status_line(self) -> str:
+        if self.settings_manager.settings.signals_enabled:
+            return "🔔 Сигналы: <b>ВКЛ</b> — уведомления приходят"
+        return "🔕 Сигналы: <b>ВЫКЛ</b> — уведомления приостановлены"
+
+    def _signals_toggle_button_label(self) -> str:
+        if self.settings_manager.settings.signals_enabled:
+            return "⏸ Стоп"
+        return "▶️ Старт"
+
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update) or update.message is None:
             return
         text = (update.message.text or "").strip()
-        if text in {"📊 Биржи", "Биржи"}:
+        if text in {"⏸ Стоп", "Стоп", "⏸ Стоп сигналы"}:
+            await self._set_signals_enabled(update, enabled=False)
+        elif text in {"▶️ Старт", "Старт", "▶️ Старт сигналы"}:
+            await self._set_signals_enabled(update, enabled=True)
+        elif text in {"📊 Биржи", "Биржи"}:
             await update.message.reply_text(
                 self._build_exchanges_text(),
                 parse_mode=ParseMode.HTML,
@@ -333,6 +384,7 @@ class TelegramBot:
         top_label = "все" if not s.top_n_symbols else str(s.top_n_symbols)
         return (
             "<b>⚙ Настройки сканера</b>\n"
+            f"{self._signals_status_line()}\n"
             "<i>Все изменения применяются мгновенно</i>\n\n"
             f"📅 Период: <b>{s.oi_period_minutes} мин</b>\n"
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
@@ -433,6 +485,17 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._exchanges_keyboard(),
             )
+        elif payload == "toggle_signals":
+            current = self.settings_manager.settings.signals_enabled
+            self.settings_manager.update(signals_enabled=not current)
+            state = "включены" if not current else "остановлены"
+            await query.answer(f"✅ Сигналы {state}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
         elif payload == "refresh_settings":
             self.settings_manager.reload()
             await self._safe_edit_message_text(
@@ -447,6 +510,7 @@ class TelegramBot:
     def _reply_keyboard(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
+                [KeyboardButton(self._signals_toggle_button_label())],
                 [KeyboardButton("📊 Биржи"), KeyboardButton("🔧 Настройки")],
             ],
             resize_keyboard=True,
@@ -469,7 +533,11 @@ class TelegramBot:
 
     def _settings_keyboard(self) -> InlineKeyboardMarkup:
         s = self.settings_manager.settings
+        signals_btn = (
+            "🔔 Сигналы ON" if s.signals_enabled else "🔕 Сигналы OFF"
+        )
         return InlineKeyboardMarkup([
+            [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
                 InlineKeyboardButton(self._mark("5м", s.oi_period_minutes == 5), callback_data="set_period:5"),

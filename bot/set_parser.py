@@ -16,7 +16,9 @@ SET_HELP = (
     "/set min_volume 0\n"
     "/set top 50 — топ монет по объёму (0 = все)\n"
     "/set cooldown 60\n"
-    "/set score 1 — мин. сила сигнала\n\n"
+    "/set score 1 — мин. сила сигнала\n"
+    "/set signals off — остановить уведомления\n"
+    "/set signals on — возобновить уведомления\n\n"
     "По биржам (переопределяют глобальные):\n"
     "/set binance oi 3\n"
     "/set binance period 10\n"
@@ -42,6 +44,7 @@ GLOBAL_ALIASES: dict[str, str] = {
     "cooldown": "signal_cooldown_seconds",
     "score": "min_signal_score",
     "priority": "priority_score_max",
+    "signals": "signals_enabled",
 }
 
 EXCHANGE_ALIASES: dict[str, str] = {
@@ -135,6 +138,8 @@ def parse_set_command(args: list[str]) -> SetResult:
             value: Any = int(float(raw_value))
             if value <= 0:
                 value = None
+        elif field == "signals_enabled":
+            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл", "start", "resume"}
         elif field in INT_FIELDS or field.endswith("_oi_period_minutes"):
             value = int(float(raw_value))
             if field == "oi_period_minutes" and not 1 <= value <= 30:

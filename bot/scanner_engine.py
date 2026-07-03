@@ -124,6 +124,8 @@ class SignalEngine:
         await self._evaluate_signals(key, exchange, symbol)
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
+        if not self.settings.settings.signals_enabled:
+            return
         async with self.lock:
             history = self.history.get(key)
             if not history or len(history) < 2:
