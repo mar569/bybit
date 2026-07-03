@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict
 from typing import Any
 
-import aioredis
+import redis.asyncio as redis
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -25,14 +25,15 @@ class TelegramBot:
         self.settings_manager = settings_manager
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
-        self.redis: aioredis.Redis | None = None
+        self.redis: redis.Redis | None = None
+
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
         self.application.add_handler(CommandHandler("start", self.on_start))
         # init redis (optional) from REDIS_URL env or default docker service name
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
         try:
-            self.redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            self.redis = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
             logger.info("Redis client initialized: %s", redis_url)
         except Exception:
             self.redis = None
@@ -50,6 +51,16 @@ class TelegramBot:
         except Exception:
             # fallback: run polling via run_polling in background task
             self._run_task = asyncio.create_task(self.application.run_polling())
+
+        try:
+            await self.application.bot.send_message(
+                chat_id=self.config.telegram_admin_id,
+                text="✅ Бот успешно запущен и готов к работе.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send startup welcome message: %s", exc)
+
         logger.info("Telegram bot started")
 
     async def stop(self) -> None:
