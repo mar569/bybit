@@ -11,6 +11,7 @@ from .settings import SettingsManager
 from .scanner_engine import SignalEngine
 from .telegram_bot import TelegramBot
 from .exchanges.binance import BinanceScanner
+from .exchanges.bybit import BybitScanner
 from .outcome_tracker import OutcomeTracker
 
 logging.basicConfig(
