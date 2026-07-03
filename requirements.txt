@@ -1,5 +1,5 @@
 python-telegram-bot==20.5
-aiohttp==3.9.6
+aiohttp==3.9.5
 websockets==11.0.3
 python-dotenv==1.0.0
 pydantic==2.9.1
