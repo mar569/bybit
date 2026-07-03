@@ -1,5 +1,5 @@
 {
-  "settings_version": 2,
+  "settings_version": 3,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -37,10 +37,10 @@
   "priority_score_max": 3,
   "min_signal_score": 1.0,
 
-  "binance_oi_rise_percent": 3.0,
-  "binance_price_rise_percent": 0.8,
-  "bybit_oi_rise_percent": 2.0,
-  "bybit_price_rise_percent": 0.6,
+  "binance_oi_rise_percent": null,
+  "binance_price_rise_percent": null,
+  "bybit_oi_rise_percent": null,
+  "bybit_price_rise_percent": null,
 
   "telegram_max_per_minute": 10,
   "telegram_min_interval_seconds": 2.0,

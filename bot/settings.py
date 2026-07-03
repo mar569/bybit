@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -17,6 +17,47 @@ PRESERVE_ON_MIGRATE = frozenset({
     "enabled_binance",
     "enabled_bybit",
     "top_n_symbols",
+})
+
+# При изменении глобального порога сбрасываем биржевые override — иначе кнопки в боте «не работают».
+GLOBAL_CLEARS_EXCHANGE_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "oi_period_minutes": (
+        "binance_oi_period_minutes",
+        "bybit_oi_period_minutes",
+        "binance_long_period_minutes",
+        "bybit_long_period_minutes",
+        "binance_short_period_minutes",
+        "bybit_short_period_minutes",
+    ),
+    "long_period_minutes": (
+        "binance_long_period_minutes",
+        "bybit_long_period_minutes",
+    ),
+    "short_period_minutes": (
+        "binance_short_period_minutes",
+        "bybit_short_period_minutes",
+    ),
+    "oi_rise_percent": ("binance_oi_rise_percent", "bybit_oi_rise_percent"),
+    "oi_drop_percent": ("binance_oi_drop_percent", "bybit_oi_drop_percent"),
+    "price_rise_percent": ("binance_price_rise_percent", "bybit_price_rise_percent"),
+    "price_drop_percent": ("binance_price_drop_percent", "bybit_price_drop_percent"),
+}
+
+EXCHANGE_OVERRIDE_KEYS = frozenset({
+    "binance_oi_period_minutes",
+    "binance_long_period_minutes",
+    "binance_short_period_minutes",
+    "binance_oi_rise_percent",
+    "binance_oi_drop_percent",
+    "binance_price_rise_percent",
+    "binance_price_drop_percent",
+    "bybit_oi_period_minutes",
+    "bybit_long_period_minutes",
+    "bybit_short_period_minutes",
+    "bybit_oi_rise_percent",
+    "bybit_oi_drop_percent",
+    "bybit_price_rise_percent",
+    "bybit_price_drop_percent",
 })
 
 
@@ -84,20 +125,20 @@ class ScannerSettings:
     telegram_min_interval_seconds: float = 2.0
     pin_in_private_chat: bool = True
 
-    # Per-exchange: Bybit альты агрессивнее, Binance чуть строже
+    # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
     binance_long_period_minutes: int | None = None
     binance_short_period_minutes: int | None = None
-    binance_oi_rise_percent: float | None = 3.0
+    binance_oi_rise_percent: float | None = None
     binance_oi_drop_percent: float | None = None
-    binance_price_rise_percent: float | None = 0.8
+    binance_price_rise_percent: float | None = None
     binance_price_drop_percent: float | None = None
     bybit_oi_period_minutes: int | None = None
     bybit_long_period_minutes: int | None = None
     bybit_short_period_minutes: int | None = None
-    bybit_oi_rise_percent: float | None = 2.0
+    bybit_oi_rise_percent: float | None = None
     bybit_oi_drop_percent: float | None = None
-    bybit_price_rise_percent: float | None = 0.6
+    bybit_price_rise_percent: float | None = None
     bybit_price_drop_percent: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,18 +206,24 @@ class ScannerSettings:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScannerSettings":
-        base = cls.default().to_dict()
-        base.update(data)
+        defaults = cls.default().to_dict()
+        base = {**defaults, **data}
 
         def opt_int(key: str) -> int | None:
-            if key not in base or base[key] is None:
+            if key not in data:
                 return None
-            return int(base[key])
+            value = data[key]
+            if value is None:
+                return None
+            return int(value)
 
         def opt_float(key: str) -> float | None:
-            if key not in base or base[key] is None:
+            if key not in data:
                 return None
-            return float(base[key])
+            value = data[key]
+            if value is None:
+                return None
+            return float(value)
 
         top_n = base.get("top_n_symbols")
         return cls(
@@ -277,6 +324,10 @@ class SettingsManager:
             for key in PRESERVE_ON_MIGRATE:
                 if key in data:
                     merged[key] = data[key]
+            # v3: кнопки бота управляют глобальными порогами — убираем биржевые override
+            if version < 3:
+                for override_key in EXCHANGE_OVERRIDE_KEYS:
+                    merged[override_key] = None
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -293,12 +344,21 @@ class SettingsManager:
     def save(self, settings: ScannerSettings | None = None) -> None:
         if settings is not None:
             self.settings = settings
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(self.settings.to_dict(), handle, indent=2)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(self.settings.to_dict(), handle, indent=2, ensure_ascii=False)
+        except Exception:
+            logger.exception("Failed to save settings to %s", self.path)
+            raise
 
     def update(self, **kwargs: Any) -> ScannerSettings:
         data = self.settings.to_dict()
-        data.update(kwargs)
+        for key, value in kwargs.items():
+            data[key] = value
+            for override_key in GLOBAL_CLEARS_EXCHANGE_OVERRIDES.get(key, ()):
+                data[override_key] = None
+        data["settings_version"] = SETTINGS_VERSION
         self.settings = ScannerSettings.from_dict(data)
         self.save()
         logger.info("Settings applied: %s", kwargs)

@@ -507,21 +507,29 @@ class TelegramBot:
             f"Bybit: {'✅ включена' if s.enabled_bybit else '❌ выключена'}"
         )
 
-    def _exchange_override_line(self, name: str, prefix: str, s: Any) -> str:
-        period = getattr(s, f"{prefix}_long_period_minutes") or getattr(s, f"{prefix}_oi_period_minutes")
-        short_period = getattr(s, f"{prefix}_short_period_minutes") or period
-        oi = getattr(s, f"{prefix}_oi_rise_percent")
-        price = getattr(s, f"{prefix}_price_rise_percent")
-        if period is None and oi is None and price is None and short_period is None:
-            return f"{name}: глобальные пороги"
-        parts = []
-        if period is not None or short_period is not None:
-            parts.append(f"L{period or s.long_period_minutes}м/S{short_period or s.short_period_minutes}м")
-        if oi is not None:
-            parts.append(f"OI≥{oi}%")
-        if price is not None:
-            parts.append(f"цена≥{price}%")
-        return f"{name}: <b>{', '.join(parts)}</b>"
+    def _exchange_effective_line(self, name: str, exchange: str) -> str:
+        s = self.settings_manager.settings
+        prefix = "bybit" if "bybit" in exchange.lower() else "binance"
+        thresholds = s.for_exchange(exchange)
+        has_override = any(
+            getattr(s, f"{prefix}_{field}") is not None
+            for field in (
+                "oi_rise_percent",
+                "oi_drop_percent",
+                "price_rise_percent",
+                "price_drop_percent",
+                "long_period_minutes",
+                "short_period_minutes",
+            )
+        )
+        tag = "свои" if has_override else "глобальные"
+        return (
+            f"{name} (<i>{tag}</i>): "
+            f"L<b>{thresholds.long_period_minutes}</b>м/"
+            f"S<b>{thresholds.short_period_minutes}</b>м, "
+            f"OI↑<b>{thresholds.oi_rise_percent}</b>% "
+            f"OI↓<b>{thresholds.oi_drop_percent}</b>%"
+        )
 
     def _build_settings_panel_text(self) -> str:
         s = self.settings_manager.settings
@@ -540,8 +548,8 @@ class TelegramBot:
             f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
             f"🏆 Топ монет: <b>{top_label}</b> | Score≥<b>{s.min_signal_score}</b>\n"
             f"🔥 Приоритет: score ≤ <b>{s.priority_score_max}</b> | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
-            f"{self._exchange_override_line('Binance', 'binance', s)}\n"
-            f"{self._exchange_override_line('Bybit', 'bybit', s)}\n"
+            f"{self._exchange_effective_line('Binance', 'Binance')}\n"
+            f"{self._exchange_effective_line('Bybit', 'Bybit')}\n"
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
             f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n\n"
             "Точная настройка: /set help"
@@ -567,6 +575,9 @@ class TelegramBot:
     async def on_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if query is None:
+            return
+        if not self._is_admin(update):
+            await query.answer("Нет доступа.", show_alert=True)
             return
 
         payload = query.data or ""
