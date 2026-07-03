@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
@@ -13,6 +14,27 @@ from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 HISTORY_MAX_POINTS = 3600
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SignalCandidate:
+    signal_type: str
+    period_minutes: int
+    oi_change_percent: float
+    price_change_percent: float
+    earlier: SnapshotPoint
+    urgency: int
+    flash_tier: float | None = None
+
+
+@dataclass
+class MarketChanges:
+    oi_change_percent: float
+    price_change_percent: float
+    volume_change_percent: float
+    oi_change_value: float
+    oi_change_usd: float | None
+    lookback_seconds: int
 
 
 def format_oi_usd(value: float | None) -> str:
@@ -156,7 +178,13 @@ class SignalEngine:
                 pairs_with_oi += 1
             exchange = key.split(":", 1)[0]
             thresholds = settings.for_exchange(exchange)
-            lookback_seconds = thresholds.oi_period_minutes * 60
+            min_period = min(
+                thresholds.long_period_minutes,
+                thresholds.short_period_minutes,
+                settings.pulse_period_minutes,
+                min(settings.flash_window_minutes) if settings.flash_window_minutes else 5,
+            )
+            lookback_seconds = min_period * 60
             cutoff = current.timestamp - lookback_seconds
             if len(history) >= 2 and history[0].timestamp <= cutoff:
                 if current.price and current.open_interest:
@@ -165,6 +193,9 @@ class SignalEngine:
         return {
             "signals_enabled": settings.signals_enabled,
             "oi_period_minutes": settings.oi_period_minutes,
+            "long_period_minutes": settings.long_period_minutes,
+            "short_period_minutes": settings.short_period_minutes,
+            "pulse_period_minutes": settings.pulse_period_minutes,
             "oi_rise_percent": settings.oi_rise_percent,
             "price_rise_percent": settings.price_rise_percent,
             "min_open_interest": settings.min_open_interest,
@@ -190,20 +221,45 @@ class SignalEngine:
             if current.open_interest is None or current.price is None:
                 return
 
-            lookback_seconds = thresholds.oi_period_minutes * 60
-            cutoff = current.timestamp - lookback_seconds
-            if history[0].timestamp > cutoff:
-                return
-            earlier = next((point for point in reversed(history) if point.timestamp <= cutoff), None)
-            if earlier is None or earlier.open_interest is None or earlier.price is None:
+            candidate = self._pick_best_candidate(history, current, settings, thresholds)
+            if candidate is None:
                 return
 
-            oi_change_value = current.open_interest - earlier.open_interest
-            oi_change_percent = self._percent_change(earlier.open_interest, current.open_interest)
-            price_change_value = current.price - earlier.price
-            price_change_percent = self._percent_change(earlier.price, current.price)
-            volume_change_percent = self._percent_change(earlier.volume_24h or 0.0, current.volume_24h or 0.0)
+            earlier = candidate.earlier
+            changes = self._compute_changes(current, earlier, candidate.period_minutes * 60)
 
+            oi_usd_now = self._oi_usd_value(current.open_interest, current.price, current.additional)
+            if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
+                return
+
+            if settings.min_volume > 0 and (current.volume_24h or 0.0) < settings.min_volume:
+                return
+
+            is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
+            if not is_mega and changes.oi_change_usd is not None:
+                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
+                    if candidate.signal_type not in {"price_pump", "price_dump"}:
+                        return
+
+            now = time.time()
+            cooldown_key = f"{key}:mega" if is_mega else key
+            cooldown = settings.mega_cooldown_seconds if is_mega else settings.signal_cooldown_seconds
+            last_time = self.last_signal_time.get(cooldown_key, 0.0)
+            if now - last_time < cooldown:
+                return
+
+            score = self._calculate_score(
+                changes.oi_change_percent,
+                changes.price_change_percent,
+                changes.volume_change_percent,
+                candidate.signal_type,
+                flash_tier=candidate.flash_tier,
+            )
+
+            if settings.min_signal_score and score < settings.min_signal_score:
+                return
+
+            lookback_seconds = changes.lookback_seconds
             interval_volume = None
             try:
                 prev_vol = history[-2].volume_24h if len(history) >= 2 else None
@@ -214,44 +270,9 @@ class SignalEngine:
 
             spread = self._compute_spread(current.bid_price, current.ask_price)
             funding_rate = self._extract_funding(current.additional)
-            price_speed = self._safe_div(price_change_percent, max(lookback_seconds / 60.0, 1.0))
-            oi_direction = self._direction(oi_change_percent)
-            price_direction = self._direction(price_change_percent)
-            signal_type = self._determine_signal_type(
-                oi_change_percent,
-                price_change_percent,
-                thresholds,
-                settings,
-            )
-
-            if signal_type is None:
-                return
-
-            oi_usd_now = self._oi_usd_value(current.open_interest, current.price, current.additional)
-            if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
-                return
-
-            if settings.min_volume > 0 and (current.volume_24h or 0.0) < settings.min_volume:
-                return
-
-            now = time.time()
-            last_time = self.last_signal_time.get(key, 0.0)
-            if now - last_time < settings.signal_cooldown_seconds:
-                return
-
-            current_oi_usd = self._oi_usd_value(current.open_interest, current.price, current.additional)
-            earlier_oi_usd = self._oi_usd_value(earlier.open_interest, earlier.price, earlier.additional)
-            oi_change_usd = None
-            if current_oi_usd is not None and earlier_oi_usd is not None:
-                oi_change_usd = current_oi_usd - earlier_oi_usd
-
-            score = self._calculate_score(
-                oi_change_percent,
-                price_change_percent,
-                volume_change_percent,
-                signal_type,
-            )
-
+            price_speed = self._safe_div(changes.price_change_percent, max(lookback_seconds / 60.0, 1.0))
+            oi_direction = self._direction(changes.oi_change_percent)
+            price_direction = self._direction(changes.price_change_percent)
             indicators = self._compute_indicators(history, lookback_seconds)
 
             vol_spike = False
@@ -271,68 +292,35 @@ class SignalEngine:
             except Exception:
                 vol_spike = False
 
-            price_pump = False
-            try:
-                window_seconds = settings.price_pump_window_minutes * 60
-                cutoff2 = current.timestamp - window_seconds
-                earlier2 = next((point for point in reversed(history) if point.timestamp <= cutoff2), history[0])
-                if earlier2 and earlier2.price is not None:
-                    price_window_pct = self._percent_change(earlier2.price, current.price)
-                    if price_window_pct >= settings.price_pump_threshold_pct:
-                        price_pump = True
-            except Exception:
-                price_pump = False
-
-            cvd_div = False
-            try:
-                cvd_value = None
-                if current.additional:
-                    for k in ("cvd", "CVD", "taker_buy_base_volume", "taker_buy_quote_volume"):
-                        if k in current.additional:
-                            try:
-                                cvd_value = float(current.additional.get(k))
-                                break
-                            except Exception:
-                                continue
-                if cvd_value is not None:
-                    if cvd_value <= settings.cvd_divergence_threshold and price_change_percent > 0:
-                        cvd_div = True
-                elif price_change_percent > 0 and current.open_interest <= earlier.open_interest and vol_spike:
-                    cvd_div = True
-            except Exception:
-                cvd_div = False
-
-            if settings.min_signal_score and score < settings.min_signal_score:
-                return
-
             self._reset_daily_counts_if_needed()
             self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
-            self.last_signal_time[key] = now
-            side = self._determine_side(price_change_percent, signal_type)
+            self.last_signal_time[cooldown_key] = now
+            side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             logger.info(
-                "Signal %s %s %s | OI %.2f%% | price %.2f%% | score %d",
+                "Signal %s %s %s | OI %.2f%% | price %.2f%% | score %d | %dm",
                 exchange,
                 symbol,
-                signal_type,
-                oi_change_percent,
-                price_change_percent,
+                candidate.signal_type,
+                changes.oi_change_percent,
+                changes.price_change_percent,
                 score,
+                candidate.period_minutes,
             )
 
             signal = Signal(
                 exchange=exchange,
                 symbol=symbol,
-                signal_type=signal_type,
-                oi_period_minutes=thresholds.oi_period_minutes,
-                oi_change_percent=round(oi_change_percent, 2),
-                oi_change_value=round(oi_change_value, 2),
-                oi_change_usd=round(oi_change_usd, 2) if oi_change_usd is not None else None,
+                signal_type=candidate.signal_type,
+                oi_period_minutes=candidate.period_minutes,
+                oi_change_percent=round(changes.oi_change_percent, 2),
+                oi_change_value=round(changes.oi_change_value, 2),
+                oi_change_usd=round(changes.oi_change_usd, 2) if changes.oi_change_usd is not None else None,
                 oi_direction=oi_direction,
-                price_change_percent=round(price_change_percent, 2),
-                price_change_value=round(price_change_value, 6),
+                price_change_percent=round(changes.price_change_percent, 2),
+                price_change_value=round(current.price - earlier.price, 6),
                 price_direction=price_direction,
-                volume_change_percent=round(volume_change_percent, 2),
+                volume_change_percent=round(changes.volume_change_percent, 2),
                 trade_count=int(current.additional.get("trade_count")) if current.additional.get("trade_count") is not None else None,
                 spread=spread,
                 funding_rate=funding_rate,
@@ -355,13 +343,235 @@ class SignalEngine:
                     "lookback_seconds": lookback_seconds,
                     "history_points": len(history),
                     "volume_spike": vol_spike,
-                    "price_pump_window": price_pump,
-                    "cvd_divergence": cvd_div,
-                    "oi_usd_formatted": format_oi_usd(oi_change_usd),
+                    "flash_tier": candidate.flash_tier,
+                    "urgency": candidate.urgency,
+                    "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
                 },
             )
 
         await self.on_signal(signal)
+
+    def _pick_best_candidate(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        thresholds: ExchangeThresholds,
+    ) -> SignalCandidate | None:
+        candidates: list[SignalCandidate] = []
+
+        if settings.flash_enabled:
+            for window in settings.flash_window_minutes:
+                earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+                if earlier is None:
+                    continue
+                changes = self._compute_changes(current, earlier, window * 60)
+                for tier in sorted(settings.flash_price_tiers, reverse=True):
+                    bypass_oi = tier >= settings.flash_bypass_oi_tier_pct
+                    if changes.price_change_percent >= tier:
+                        if bypass_oi or changes.oi_change_percent >= settings.flash_min_oi_rise_percent:
+                            candidates.append(SignalCandidate(
+                                signal_type="mega_pump",
+                                period_minutes=window,
+                                oi_change_percent=changes.oi_change_percent,
+                                price_change_percent=changes.price_change_percent,
+                                earlier=earlier,
+                                urgency=1,
+                                flash_tier=tier,
+                            ))
+                            break
+                    if changes.price_change_percent <= -tier:
+                        if bypass_oi or changes.oi_change_percent <= -settings.flash_min_oi_drop_percent:
+                            candidates.append(SignalCandidate(
+                                signal_type="mega_dump",
+                                period_minutes=window,
+                                oi_change_percent=changes.oi_change_percent,
+                                price_change_percent=changes.price_change_percent,
+                                earlier=earlier,
+                                urgency=1,
+                                flash_tier=tier,
+                            ))
+                            break
+
+        pulse_earlier = self._point_at_cutoff(
+            history, current.timestamp - settings.pulse_period_minutes * 60
+        )
+        if pulse_earlier is not None:
+            pulse = self._compute_changes(
+                current, pulse_earlier, settings.pulse_period_minutes * 60
+            )
+            if (
+                pulse.oi_change_percent >= settings.pulse_oi_rise_percent
+                and pulse.price_change_percent >= settings.pulse_price_rise_percent
+            ):
+                candidates.append(SignalCandidate(
+                    signal_type="pulse_pump",
+                    period_minutes=settings.pulse_period_minutes,
+                    oi_change_percent=pulse.oi_change_percent,
+                    price_change_percent=pulse.price_change_percent,
+                    earlier=pulse_earlier,
+                    urgency=2,
+                ))
+            if (
+                pulse.oi_change_percent <= -settings.pulse_oi_drop_percent
+                and pulse.price_change_percent <= -settings.pulse_price_drop_percent
+            ):
+                candidates.append(SignalCandidate(
+                    signal_type="pulse_dump",
+                    period_minutes=settings.pulse_period_minutes,
+                    oi_change_percent=pulse.oi_change_percent,
+                    price_change_percent=pulse.price_change_percent,
+                    earlier=pulse_earlier,
+                    urgency=2,
+                ))
+            if (
+                pulse.price_change_percent >= settings.short_squeeze_min_price
+                and pulse.oi_change_percent <= settings.short_squeeze_max_oi_change
+            ):
+                candidates.append(SignalCandidate(
+                    signal_type="short_squeeze",
+                    period_minutes=settings.pulse_period_minutes,
+                    oi_change_percent=pulse.oi_change_percent,
+                    price_change_percent=pulse.price_change_percent,
+                    earlier=pulse_earlier,
+                    urgency=2,
+                ))
+
+        long_earlier = self._point_at_cutoff(
+            history, current.timestamp - thresholds.long_period_minutes * 60
+        )
+        if long_earlier is not None:
+            long_chg = self._compute_changes(
+                current, long_earlier, thresholds.long_period_minutes * 60
+            )
+            st = self._classify_long_signal(long_chg, thresholds, settings)
+            if st:
+                candidates.append(SignalCandidate(
+                    signal_type=st,
+                    period_minutes=thresholds.long_period_minutes,
+                    oi_change_percent=long_chg.oi_change_percent,
+                    price_change_percent=long_chg.price_change_percent,
+                    earlier=long_earlier,
+                    urgency=3,
+                ))
+
+        short_earlier = self._point_at_cutoff(
+            history, current.timestamp - thresholds.short_period_minutes * 60
+        )
+        if short_earlier is not None:
+            short_chg = self._compute_changes(
+                current, short_earlier, thresholds.short_period_minutes * 60
+            )
+            st = self._classify_short_signal(short_chg, thresholds, settings)
+            if st:
+                candidates.append(SignalCandidate(
+                    signal_type=st,
+                    period_minutes=thresholds.short_period_minutes,
+                    oi_change_percent=short_chg.oi_change_percent,
+                    price_change_percent=short_chg.price_change_percent,
+                    earlier=short_earlier,
+                    urgency=3,
+                ))
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item.urgency,
+                -(item.flash_tier or 0),
+                -(abs(item.price_change_percent) + abs(item.oi_change_percent)),
+            ),
+        )
+        return candidates[0]
+
+    @staticmethod
+    def _point_at_cutoff(
+        history: deque[SnapshotPoint],
+        cutoff: float,
+    ) -> SnapshotPoint | None:
+        if history[0].timestamp > cutoff:
+            return None
+        return next((point for point in reversed(history) if point.timestamp <= cutoff), None)
+
+    def _compute_changes(
+        self,
+        current: SnapshotPoint,
+        earlier: SnapshotPoint,
+        lookback_seconds: int,
+    ) -> MarketChanges:
+        oi_change_percent = self._oi_percent_change(earlier, current)
+        price_change_percent = self._percent_change(earlier.price or 0.0, current.price or 0.0)
+        volume_change_percent = self._percent_change(
+            earlier.volume_24h or 0.0, current.volume_24h or 0.0
+        )
+        oi_change_value = (current.open_interest or 0.0) - (earlier.open_interest or 0.0)
+        earlier_usd = self._oi_usd_value(
+            earlier.open_interest, earlier.price, earlier.additional
+        )
+        current_usd = self._oi_usd_value(
+            current.open_interest, current.price, current.additional
+        )
+        oi_change_usd = None
+        if earlier_usd is not None and current_usd is not None:
+            oi_change_usd = current_usd - earlier_usd
+        return MarketChanges(
+            oi_change_percent=oi_change_percent,
+            price_change_percent=price_change_percent,
+            volume_change_percent=volume_change_percent,
+            oi_change_value=oi_change_value,
+            oi_change_usd=oi_change_usd,
+            lookback_seconds=lookback_seconds,
+        )
+
+    def _oi_percent_change(self, earlier: SnapshotPoint, current: SnapshotPoint) -> float:
+        earlier_usd = self._oi_usd_value(
+            earlier.open_interest, earlier.price, earlier.additional
+        )
+        current_usd = self._oi_usd_value(
+            current.open_interest, current.price, current.additional
+        )
+        if earlier_usd is not None and current_usd is not None and earlier_usd > 0:
+            return self._percent_change(earlier_usd, current_usd)
+        return self._percent_change(
+            earlier.open_interest or 0.0, current.open_interest or 0.0
+        )
+
+    @staticmethod
+    def _classify_long_signal(
+        changes: MarketChanges,
+        thresholds: ExchangeThresholds,
+        settings: ScannerSettings,
+    ) -> str | None:
+        oi = changes.oi_change_percent
+        price = changes.price_change_percent
+        if oi >= thresholds.oi_rise_percent and price >= thresholds.price_rise_percent:
+            return "pump"
+        if oi >= thresholds.oi_rise_percent:
+            return "oi_pump"
+        if settings.require_oi_for_price_only:
+            return None
+        if price >= settings.price_only_min_percent:
+            return "price_pump"
+        return None
+
+    @staticmethod
+    def _classify_short_signal(
+        changes: MarketChanges,
+        thresholds: ExchangeThresholds,
+        settings: ScannerSettings,
+    ) -> str | None:
+        oi = changes.oi_change_percent
+        price = changes.price_change_percent
+        if oi <= -thresholds.oi_drop_percent and price <= -thresholds.price_drop_percent:
+            return "dump"
+        if oi <= -thresholds.oi_drop_percent:
+            return "oi_dump"
+        if settings.require_oi_for_price_only:
+            return None
+        if price <= -settings.price_only_min_percent:
+            return "price_dump"
+        return None
 
     @staticmethod
     def _oi_usd_value(
@@ -417,31 +627,12 @@ class SignalEngine:
 
     @staticmethod
     def _determine_side(price_change_percent: float, signal_type: str) -> str:
-        if price_change_percent < 0 or signal_type in {"dump", "oi_dump", "price_dump"}:
+        short_types = {
+            "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump",
+        }
+        if price_change_percent < 0 or signal_type in short_types:
             return "short"
         return "long"
-
-    @staticmethod
-    def _determine_signal_type(
-        oi_change_percent: float,
-        price_change_percent: float,
-        thresholds: ExchangeThresholds,
-        settings: ScannerSettings,
-    ) -> str | None:
-        if oi_change_percent >= thresholds.oi_rise_percent and price_change_percent >= thresholds.price_rise_percent:
-            return "pump"
-        if oi_change_percent <= -thresholds.oi_drop_percent and price_change_percent <= -thresholds.price_drop_percent:
-            return "dump"
-        if oi_change_percent >= thresholds.oi_rise_percent:
-            return "oi_pump"
-        if oi_change_percent <= -thresholds.oi_drop_percent:
-            return "oi_dump"
-        price_only_min = settings.price_only_min_percent
-        if price_change_percent >= price_only_min:
-            return "price_pump"
-        if price_change_percent <= -price_only_min:
-            return "price_dump"
-        return None
 
     @staticmethod
     def _calculate_score(
@@ -449,8 +640,26 @@ class SignalEngine:
         price_change_percent: float,
         volume_change_percent: float,
         signal_type: str,
+        flash_tier: float | None = None,
     ) -> int:
-        # 1 = ранний вход, 10 = поздно. Чем сильнее уже прошло движение, тем выше score.
+        if signal_type in {"mega_pump", "mega_dump"}:
+            tier = flash_tier or abs(price_change_percent)
+            if tier >= 40:
+                return 1
+            if tier >= 20:
+                return 1
+            if tier >= 10:
+                return 2
+            return 3
+
+        if signal_type in {"pulse_pump", "pulse_dump", "short_squeeze"}:
+            magnitude = abs(oi_change_percent) * 0.55 + abs(price_change_percent) * 0.45
+            if magnitude < 2:
+                return 1
+            if magnitude < 4:
+                return 2
+            return 3
+
         magnitude = abs(oi_change_percent) * 0.45 + abs(price_change_percent) * 0.4 + abs(volume_change_percent) * 0.15
         if signal_type in {"pump", "dump"}:
             magnitude *= 1.15

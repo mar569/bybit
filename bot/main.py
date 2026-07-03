@@ -69,7 +69,7 @@ async def main() -> None:
     eval_task: asyncio.Task | None = None
     try:
         await telegram.start()
-        eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=2.0))
+        eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         scanner_task = asyncio.create_task(run_scan())
 
         if sys.platform == "win32":
