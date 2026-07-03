@@ -1,0 +1,23 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - ./:/app:rw
+    command: python -m bot.main
