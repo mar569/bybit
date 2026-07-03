@@ -27,6 +27,8 @@ from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .probability_engine import format_probability_from_signal
 from .market_structure import format_market_structure_block
+from .bybit_market_data import format_bybit_real_data_block
+from .chart_renderer import get_signal_chart_png
 from .test_signals import build_test_signals
 
 logger = logging.getLogger(__name__)
@@ -195,6 +197,96 @@ class TelegramBot:
                     return False
         return False
 
+    async def _send_chart(
+        self,
+        chat_id: int,
+        png_bytes: bytes,
+        caption: str,
+        *,
+        is_priority: bool,
+    ) -> bool:
+        if self.application is None:
+            return False
+        async with self._send_lock:
+            try:
+                await self.application.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=png_bytes,
+                    caption=caption[:1024],
+                    parse_mode=ParseMode.HTML,
+                    disable_notification=not is_priority,
+                )
+                self._last_send_time[chat_id] = time.time()
+                return True
+            except RetryAfter as exc:
+                logger.warning("Telegram chart flood chat %s, wait %ss", chat_id, exc.retry_after)
+                await asyncio.sleep(float(exc.retry_after) + 1.0)
+                return False
+            except Exception:
+                logger.exception("Failed to send chart to chat %s", chat_id)
+                return False
+
+    async def _maybe_send_signal_chart(
+        self,
+        signal: Signal,
+        chat_id: int,
+        *,
+        is_priority: bool,
+    ) -> None:
+        settings = self.settings_manager.settings
+        if not settings.signal_chart_enabled:
+            return
+
+        ms = signal.details.get("market_structure")
+        warning = ""
+        if isinstance(ms, dict):
+            warning = str(ms.get("structure_warning", ""))
+
+        try:
+            png, source_label = await get_signal_chart_png(
+                signal.exchange,
+                signal.symbol,
+                chart_source=settings.signal_chart_source,
+                chart_hours=settings.signal_chart_hours,
+                chart_interval_minutes=settings.signal_chart_interval_minutes,
+                side=signal.side,
+                structure_warning=warning,
+                probability_percent=float(signal.details.get("probability_percent", 0) or 0),
+                coinglass_url=signal.link,
+            )
+        except Exception:
+            logger.exception("Chart capture failed for %s", signal.symbol)
+            return
+
+        if not png:
+            return
+
+        side_emoji = "🟢" if signal.side == "long" else "🔴"
+        prob = float(signal.details.get("probability_percent", 0) or 0)
+        source_names = {
+            "tradingview": "TradingView",
+            "coinglass": "CoinGlass",
+            "generated": "свечи Bybit API",
+        }
+        source_text = source_names.get(source_label, source_label)
+        interval = settings.signal_chart_interval_minutes
+        caption = (
+            f"{side_emoji} <b>{signal.symbol}</b> "
+            f"{'LONG' if signal.side == 'long' else 'SHORT'} · "
+            f"{interval}м · 🎯 {prob:.0f}%\n"
+            f"<i>График: {source_text}</i>"
+        )
+        await self._send_chart(chat_id, png, caption, is_priority=is_priority)
+
+    def _schedule_signal_chart(self, signal: Signal, chat_id: int, *, is_priority: bool) -> None:
+        async def _runner() -> None:
+            try:
+                await self._maybe_send_signal_chart(signal, chat_id, is_priority=is_priority)
+            except Exception:
+                logger.exception("Background chart task failed for %s", signal.symbol)
+
+        asyncio.create_task(_runner())
+
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
@@ -256,6 +348,11 @@ class TelegramBot:
                 return
 
         sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
+
+        if not sent_any:
+            return
+
+        self._schedule_signal_chart(signal, notify_chat_id, is_priority=is_priority)
 
         if sent_any and self.outcome_tracker is not None and self.settings_manager.settings.outcome_tracking_enabled:
             try:
@@ -876,6 +973,7 @@ class TelegramBot:
             f"📈 OI: <b>{oi_pct:.2f}%</b> (<b>{oi_usd}</b>)\n\n"
             f"<i>Ранний вход в вертикаль, как на графике</i>\n\n"
             f"{self._market_structure_section(signal)}"
+            f"{self._bybit_real_data_section(signal)}"
             f"{format_probability_from_signal(signal)}"
         )
 
@@ -923,12 +1021,20 @@ class TelegramBot:
             f"⏱ Ранность: <b>{signal.signal_score}</b>/10 "
             f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>\n\n"
             f"{self._market_structure_section(signal)}"
+            f"{self._bybit_real_data_section(signal)}"
             f"{format_probability_from_signal(signal)}"
         )
 
     @staticmethod
     def _market_structure_section(signal: Signal) -> str:
         block = format_market_structure_block(signal.details.get("market_structure"))
+        return f"{block}\n" if block else ""
+
+    @staticmethod
+    def _bybit_real_data_section(signal: Signal) -> str:
+        if "bybit" not in signal.exchange.lower():
+            return ""
+        block = format_bybit_real_data_block(signal.details)
         return f"{block}\n" if block else ""
 
     def _is_admin(self, update: Update) -> bool:

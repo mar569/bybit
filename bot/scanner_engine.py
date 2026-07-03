@@ -10,6 +10,8 @@ from typing import Awaitable, Callable
 
 from .models import Signal, SnapshotPoint
 from .bybit_klines import BybitKlineCache
+from .bybit_market_data import BybitAccountRatioCache
+from .bybit_liquidations import BybitLiquidationTracker
 from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_time
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
@@ -55,9 +57,16 @@ def format_oi_usd(value: float | None) -> str:
 
 
 class SignalEngine:
-    def __init__(self, settings: SettingsManager, on_signal: Callable[[Signal], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        settings: SettingsManager,
+        on_signal: Callable[[Signal], Awaitable[None]],
+        *,
+        liquidation_tracker: BybitLiquidationTracker | None = None,
+    ) -> None:
         self.settings = settings
         self.on_signal = on_signal
+        self._liquidation_tracker = liquidation_tracker
         self.history: dict[str, deque[SnapshotPoint]] = {}
         self.last_signal_time: dict[str, float] = {}
         self.daily_signal_counts: dict[str, int] = {}
@@ -69,7 +78,22 @@ class SignalEngine:
         self._btc_history: deque[SnapshotPoint] = deque(maxlen=HISTORY_MAX_POINTS)
         self._five_min_bars: dict[str, deque[FiveMinOiBar]] = {}
         self._kline_cache = BybitKlineCache()
+        self._account_ratio_cache = BybitAccountRatioCache()
         self.lock = asyncio.Lock()
+
+    def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
+        self._liquidation_tracker = tracker
+
+    def get_bybit_top_symbols(self) -> list[str]:
+        self._refresh_top_symbols_if_needed()
+        top = self._top_symbols.get("Bybit")
+        if top:
+            return sorted(top)
+        return [
+            key.split(":", 1)[1]
+            for key in self._volumes
+            if key.startswith("Bybit:") and self._volumes[key] > 0
+        ][: self.settings.settings.top_n_symbols or 150]
 
     def _reset_daily_counts_if_needed(self) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -379,16 +403,38 @@ class SignalEngine:
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             market_structure_dict = None
-            if "bybit" in exchange.lower() and settings.market_structure_enabled:
-                klines = await self._kline_cache.get_klines(symbol, limit=OI_BAR_MAX_COUNT)
-                oi_bars = list(self._five_min_bars.get(key, []))
-                ms_ctx = analyze_market_structure(
-                    klines,
-                    oi_bars,
-                    is_long=(side == "long"),
-                    hours=settings.market_structure_hours,
-                )
-                market_structure_dict = ms_ctx.to_dict()
+            account_ratio_dict = None
+            liquidations_dict = None
+            if "bybit" in exchange.lower():
+                if settings.market_structure_enabled:
+                    klines = await self._kline_cache.get_klines(symbol, limit=OI_BAR_MAX_COUNT)
+                    oi_bars = list(self._five_min_bars.get(key, []))
+                    ms_ctx = analyze_market_structure(
+                        klines,
+                        oi_bars,
+                        is_long=(side == "long"),
+                        hours=settings.market_structure_hours,
+                    )
+                    market_structure_dict = ms_ctx.to_dict()
+
+                ratio = await self._account_ratio_cache.get_ratio(symbol)
+                if ratio is not None:
+                    account_ratio_dict = {
+                        "buy_ratio": round(ratio.buy_ratio, 4),
+                        "sell_ratio": round(ratio.sell_ratio, 4),
+                        "long_short_ratio": ratio.long_short_ratio,
+                        "period": ratio.period,
+                        "long_pct": round(ratio.buy_ratio * 100, 1),
+                        "short_pct": round(ratio.sell_ratio * 100, 1),
+                    }
+
+                if self._liquidation_tracker is not None:
+                    liq_stats = self._liquidation_tracker.get_stats(symbol, window_minutes=15)
+                    liquidations_dict = liq_stats.to_dict()
+
+            liq_estimate = None
+            if liquidations_dict:
+                liq_estimate = float(liquidations_dict.get("total_usd", 0) or 0)
 
             signal = Signal(
                 exchange=exchange,
@@ -411,7 +457,7 @@ class SignalEngine:
                 rsi=indicators.get("rsi"),
                 ema_short=indicators.get("ema_short"),
                 ema_long=indicators.get("ema_long"),
-                liquidation_estimate=indicators.get("liquidation_estimate"),
+                liquidation_estimate=liq_estimate if liq_estimate else indicators.get("liquidation_estimate"),
                 volume_24h=current.volume_24h,
                 volume_speed=indicators.get("volume_speed"),
                 signal_score=min(max(score, 1), 10),
@@ -430,6 +476,8 @@ class SignalEngine:
                     "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
                     **(candidate.breakout_meta or {}),
                     **({"market_structure": market_structure_dict} if market_structure_dict else {}),
+                    **({"account_ratio": account_ratio_dict} if account_ratio_dict else {}),
+                    **({"liquidations": liquidations_dict} if liquidations_dict else {}),
                 },
             )
 
@@ -440,6 +488,8 @@ class SignalEngine:
                 btc_change_percent=self.get_btc_change_percent(5),
                 vol_spike=vol_spike,
                 market_structure=market_structure_dict,
+                account_ratio=account_ratio_dict,
+                liquidations=liquidations_dict,
             )
             signal.details["probability_percent"] = assessment.percent
             signal.details["probability_verdict"] = assessment.verdict

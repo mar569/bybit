@@ -14,20 +14,22 @@ PROBABILITY_BYPASS_TYPES = frozenset({
 
 # Веса факторов (сумма = 1.0)
 FACTOR_WEIGHTS: dict[str, float] = {
-    "oi_price_sync": 0.17,
-    "threshold_excess": 0.13,
+    "oi_price_sync": 0.16,
+    "threshold_excess": 0.12,
     "oi_usd_flow": 0.10,
     "momentum": 0.09,
     "volume": 0.06,
     "trend": 0.06,
     "rsi": 0.05,
     "funding": 0.04,
-    "liquidity": 0.03,
+    "liquidity": 0.02,
     "pattern": 0.07,
-    "timing": 0.05,
-    "btc": 0.07,
+    "timing": 0.04,
+    "btc": 0.06,
     "market_phase": 0.06,
-    "htf_oi_context": 0.05,
+    "htf_oi_context": 0.04,
+    "long_short": 0.05,
+    "liquidations": 0.04,
 }
 
 
@@ -91,20 +93,28 @@ def _rsi_strength(rsi: float | None, is_long: bool) -> float:
     if rsi is None:
         return 0.45
     if is_long:
-        if rsi < 25:
-            return 0.25
-        if rsi <= 55:
-            return _clamp(0.4 + (rsi - 25) / 30 * 0.55, 0.0, 1.0)
-        if rsi <= 72:
-            return _clamp(1.0 - (rsi - 55) / 17 * 0.35, 0.0, 1.0)
-        return _clamp(0.65 - (rsi - 72) / 28 * 0.55, 0.0, 1.0)
-    if rsi > 75:
-        return 0.25
-    if rsi >= 45:
-        return _clamp(0.4 + (75 - rsi) / 30 * 0.55, 0.0, 1.0)
-    if rsi >= 28:
-        return _clamp(1.0 - (45 - rsi) / 17 * 0.35, 0.0, 1.0)
-    return _clamp(0.65 - (28 - rsi) / 28 * 0.55, 0.0, 1.0)
+        if rsi < 28:
+            return 0.28
+        if rsi < 42:
+            return _clamp(0.38 + (rsi - 28) / 14 * 0.22, 0.0, 1.0)
+        if rsi <= 50:
+            return 0.48
+        if rsi <= 64:
+            return _clamp(0.52 + (rsi - 50) / 14 * 0.38, 0.0, 1.0)
+        if rsi <= 75:
+            return _clamp(0.88 - (rsi - 64) / 11 * 0.40, 0.0, 1.0)
+        return 0.32
+    if rsi > 72:
+        return 0.28
+    if rsi > 58:
+        return _clamp(0.38 + (72 - rsi) / 14 * 0.22, 0.0, 1.0)
+    if rsi >= 50:
+        return 0.48
+    if rsi >= 36:
+        return _clamp(0.52 + (50 - rsi) / 14 * 0.38, 0.0, 1.0)
+    if rsi >= 25:
+        return _clamp(0.88 - (36 - rsi) / 11 * 0.40, 0.0, 1.0)
+    return 0.32
 
 
 def _pattern_strength(signal: Signal) -> float:
@@ -132,6 +142,132 @@ def _pattern_strength(signal: Signal) -> float:
     return base
 
 
+def _long_short_strength(
+    ls_ratio: float | None,
+    buy_ratio: float | None,
+    sell_ratio: float | None,
+    is_long: bool,
+) -> tuple[float, str]:
+    if ls_ratio is None:
+        return 0.45, "нет данных Bybit L/S"
+    long_pct = (buy_ratio or 0) * 100
+    short_pct = (sell_ratio or 0) * 100
+    detail = f"L/S {ls_ratio:.2f} (лонг {long_pct:.0f}% / шорт {short_pct:.0f}% аккаунтов)"
+    if is_long:
+        if ls_ratio < 0.85:
+            return 0.90, detail + " — перекос в шорты"
+        if ls_ratio < 1.0:
+            return 0.74, detail + " — чуть больше шортов"
+        if ls_ratio <= 1.15:
+            return 0.56, detail + " — баланс"
+        if ls_ratio <= 1.35:
+            return 0.36, detail + " — перекос в лонги"
+        return 0.20, detail + " — толпа в лонге"
+    if ls_ratio > 1.15:
+        return 0.90, detail + " — перекос в лонги (контр-тренд short)"
+    if ls_ratio > 1.0:
+        return 0.74, detail + " — чуть больше лонгов"
+    if ls_ratio >= 0.85:
+        return 0.56, detail + " — баланс"
+    if ls_ratio >= 0.65:
+        return 0.36, detail + " — перекос в шорты"
+    return 0.20, detail + " — толпа в шорте"
+
+
+def _liquidation_strength(
+    long_liq_usd: float,
+    short_liq_usd: float,
+    is_long: bool,
+    window_minutes: int = 15,
+) -> tuple[float, str]:
+    total = long_liq_usd + short_liq_usd
+    if total < 1_000:
+        return 0.45, f"ликвидаций <1k$ за {window_minutes}м"
+    long_share = long_liq_usd / total
+    short_share = short_liq_usd / total
+    detail = (
+        f"за {window_minutes}м: лонги {long_liq_usd:,.0f}$ | шорты {short_liq_usd:,.0f}$"
+        .replace(",", " ")
+    )
+    if is_long:
+        if short_share >= 0.65:
+            return 0.92, detail + " — шорты ликвидируют"
+        if short_share >= 0.52:
+            return 0.72, detail
+        if long_share >= 0.65:
+            return 0.22, detail + " — лонги смывают"
+        return 0.50, detail
+    if long_share >= 0.65:
+        return 0.92, detail + " — лонги ликвидируют"
+    if long_share >= 0.52:
+        return 0.72, detail
+    if short_share >= 0.65:
+        return 0.22, detail + " — шорты смывают"
+    return 0.50, detail
+
+
+def _compute_structure_penalty(
+    market_structure: dict[str, object] | None,
+    *,
+    is_long: bool,
+    signal_type: str,
+    signal_score: int,
+) -> tuple[float, str]:
+    """Штраф к вероятности, если краткий импульс против старшей структуры (как LAB)."""
+    if not isinstance(market_structure, dict):
+        return 0.0, ""
+
+    penalty = 0.0
+    notes: list[str] = []
+
+    post_crash = bool(market_structure.get("post_crash"))
+    lower_highs = bool(market_structure.get("lower_highs"))
+    dead_cat = bool(market_structure.get("dead_cat_bounce"))
+    try:
+        drawdown = float(market_structure.get("drawdown_from_high_pct", 0) or 0)
+        range_pos = float(market_structure.get("range_position", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        drawdown = 0.0
+        range_pos = 0.5
+
+    pulse_types = {"pulse_pump", "pulse_dump", "oi_pump", "oi_dump", "price_pump", "price_dump"}
+
+    if is_long:
+        if post_crash:
+            penalty += 7.0 if drawdown < 18 else 10.0
+            notes.append(f"−{drawdown:.0f}% от хая")
+        if lower_highs:
+            penalty += 7.0
+            notes.append("lower highs")
+        if dead_cat:
+            penalty += 11.0
+            notes.append("отскок после дампа")
+        if range_pos > 0.68 and drawdown >= 8.0:
+            penalty += 5.0
+            notes.append("у сопротивления")
+        if signal_type in pulse_types and (post_crash or lower_highs or dead_cat):
+            penalty += 6.0
+            notes.append("пульс vs структура")
+        if signal_score >= 3 and (post_crash or dead_cat):
+            penalty += 3.0
+    else:
+        if post_crash and dead_cat and not lower_highs:
+            penalty += 5.0
+            notes.append("отскок — short рано")
+        if not post_crash and drawdown < 5 and lower_highs is False:
+            chg_3h = market_structure.get("price_changes", {})
+            try:
+                c3 = float(chg_3h.get("3", chg_3h.get("2", 0)) or 0)
+            except (TypeError, ValueError):
+                c3 = 0.0
+            if c3 > 2.0:
+                penalty += 6.0
+                notes.append("short против локального роста")
+
+    penalty = min(penalty, 32.0)
+    return penalty, " | ".join(notes)
+
+
 def assess_signal_probability(
     signal: Signal,
     settings: ScannerSettings,
@@ -140,6 +276,8 @@ def assess_signal_probability(
     btc_change_percent: float | None = None,
     vol_spike: bool = False,
     market_structure: dict[str, object] | None = None,
+    account_ratio: dict[str, object] | None = None,
+    liquidations: dict[str, object] | None = None,
 ) -> ProbabilityAssessment:
     is_long = signal.side == "long"
     oi = signal.oi_change_percent
@@ -231,6 +369,36 @@ def assess_signal_probability(
         phase_label = ""
         oi_label = ""
 
+    ar = account_ratio or signal.details.get("account_ratio")
+    ls_ratio = None
+    buy_ratio = None
+    sell_ratio = None
+    if isinstance(ar, dict):
+        try:
+            ls_ratio = float(ar["long_short_ratio"]) if ar.get("long_short_ratio") is not None else None
+            buy_ratio = float(ar["buy_ratio"]) if ar.get("buy_ratio") is not None else None
+            sell_ratio = float(ar["sell_ratio"]) if ar.get("sell_ratio") is not None else None
+        except (KeyError, TypeError, ValueError):
+            pass
+    long_short_strength, long_short_detail = _long_short_strength(
+        ls_ratio, buy_ratio, sell_ratio, is_long,
+    )
+
+    liq = liquidations or signal.details.get("liquidations")
+    long_liq = 0.0
+    short_liq = 0.0
+    liq_window = 15
+    if isinstance(liq, dict):
+        try:
+            long_liq = float(liq.get("long_liq_usd", 0) or 0)
+            short_liq = float(liq.get("short_liq_usd", 0) or 0)
+            liq_window = int(liq.get("window_minutes", 15))
+        except (TypeError, ValueError):
+            pass
+    liquidation_strength, liquidation_detail = _liquidation_strength(
+        long_liq, short_liq, is_long, liq_window,
+    )
+
     strengths: dict[str, float] = {
         "oi_price_sync": sync_strength,
         "threshold_excess": threshold_strength,
@@ -246,6 +414,8 @@ def assess_signal_probability(
         "btc": btc_strength,
         "market_phase": phase_strength,
         "htf_oi_context": oi_ctx_strength,
+        "long_short": long_short_strength,
+        "liquidations": liquidation_strength,
     }
 
     weighted = sum(FACTOR_WEIGHTS[k] * strengths[k] for k in FACTOR_WEIGHTS)
@@ -257,6 +427,15 @@ def assess_signal_probability(
 
     if not oi_aligned and abs(oi) >= oi_thr * 1.2 and abs(price) < price_thr * 0.35:
         percent *= 0.55
+
+    structure_penalty, structure_penalty_detail = _compute_structure_penalty(
+        ms if isinstance(ms, dict) else None,
+        is_long=is_long,
+        signal_type=signal.signal_type,
+        signal_score=signal.signal_score,
+    )
+    if structure_penalty > 0:
+        percent -= structure_penalty
 
     percent = _clamp(percent, 11.0, 89.0)
 
@@ -380,6 +559,37 @@ def assess_signal_probability(
             oi_label or str(ms.get("oi_narrative", "")),
         ))
 
+    if isinstance(ar, dict) and ls_ratio is not None:
+        factors.append(ProbabilityFactor(
+            "long_short",
+            "Long/Short ratio (Bybit)",
+            long_short_strength,
+            FACTOR_WEIGHTS["long_short"],
+            long_short_strength * FACTOR_WEIGHTS["long_short"] * 72,
+            long_short_detail,
+        ))
+
+    if isinstance(liq, dict):
+        factors.append(ProbabilityFactor(
+            "liquidations",
+            "Ликвидации (Bybit WS)",
+            liquidation_strength,
+            FACTOR_WEIGHTS["liquidations"],
+            liquidation_strength * FACTOR_WEIGHTS["liquidations"] * 72,
+            liquidation_detail,
+        ))
+
+    if structure_penalty > 0:
+        factors.append(ProbabilityFactor(
+            "structure_penalty",
+            "Структура графика",
+            0.0,
+            0.0,
+            -structure_penalty,
+            structure_penalty_detail or "импульс против старшего ТФ",
+        ))
+        percent = _clamp(percent, 11, 89)
+
     if not oi_aligned and abs(oi) >= oi_thr:
         factors.append(ProbabilityFactor(
             "divergence",
@@ -408,8 +618,8 @@ def format_probability_block(assessment: ProbabilityAssessment) -> str:
         "",
         "<b>Факторы (вклад в итог):</b>",
     ]
-    for factor in assessment.top_factors(6):
-        if factor.key == "divergence":
+    for factor in assessment.top_factors(8):
+        if factor.key in ("divergence", "structure_penalty"):
             lines.append(f"❌ {factor.label}: <i>{factor.detail}</i> ({factor.contribution:.0f}%)")
             continue
         if factor.strength >= 0.65:

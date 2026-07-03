@@ -12,6 +12,8 @@ from .scanner_engine import SignalEngine
 from .telegram_bot import TelegramBot
 from .exchanges.binance import BinanceScanner
 from .exchanges.bybit import BybitScanner
+from .bybit_liquidations import BybitLiquidationTracker
+from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
 
 logging.basicConfig(
@@ -47,6 +49,11 @@ async def main() -> None:
         scan_interval=scan_interval,
         enabled=bybit_enabled,
     )
+    liquidation_tracker = BybitLiquidationTracker(
+        scanner.get_bybit_top_symbols,
+        enabled=bybit_enabled,
+    )
+    scanner.attach_liquidation_tracker(liquidation_tracker)
 
     async def run_scan() -> None:
         await asyncio.gather(
@@ -69,12 +76,14 @@ async def main() -> None:
     scanner_task: asyncio.Task | None = None
     eval_task: asyncio.Task | None = None
     outcome_task: asyncio.Task | None = None
+    liq_task: asyncio.Task | None = None
     try:
         await telegram.start()
         if telegram.redis is not None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
+        liq_task = asyncio.create_task(liquidation_tracker.run())
         scanner_task = asyncio.create_task(run_scan())
 
         if sys.platform == "win32":
@@ -89,6 +98,8 @@ async def main() -> None:
         logger.info("Shutting down")
         binance.stop()
         bybit.stop()
+        liquidation_tracker.stop()
+        await chart_capture_service.close()
         await telegram.stop()
         if scanner_task is not None:
             scanner_task.cancel()
@@ -96,8 +107,10 @@ async def main() -> None:
             eval_task.cancel()
         if outcome_task is not None:
             outcome_task.cancel()
+        if liq_task is not None:
+            liq_task.cancel()
         await asyncio.gather(
-            *(t for t in (scanner_task, eval_task, outcome_task) if t is not None),
+            *(t for t in (scanner_task, eval_task, outcome_task, liq_task) if t is not None),
             return_exceptions=True,
         )
 

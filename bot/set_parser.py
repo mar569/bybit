@@ -62,6 +62,8 @@ GLOBAL_ALIASES: dict[str, str] = {
     "topn": "top_n_symbols",
     "cooldown": "signal_cooldown_seconds",
     "mega_cooldown": "mega_cooldown_seconds",
+    "chart": "signal_chart_source",
+    "chart_src": "signal_chart_source",
     "prob": "min_probability_percent",
     "prob_filter": "probability_filter_enabled",
     "score": "min_signal_score",

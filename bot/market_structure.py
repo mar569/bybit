@@ -32,6 +32,12 @@ class MarketStructureContext:
     hours_analyzed: int = 5
     bar_count: int = 0
     oi_bar_count: int = 0
+    drawdown_from_high_pct: float = 0.0
+    range_position: float = 0.5
+    lower_highs: bool = False
+    post_crash: bool = False
+    dead_cat_bounce: bool = False
+    structure_warning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +53,12 @@ class MarketStructureContext:
             "hours_analyzed": self.hours_analyzed,
             "bar_count": self.bar_count,
             "oi_bar_count": self.oi_bar_count,
+            "drawdown_from_high_pct": round(self.drawdown_from_high_pct, 2),
+            "range_position": round(self.range_position, 3),
+            "lower_highs": self.lower_highs,
+            "post_crash": self.post_crash,
+            "dead_cat_bounce": self.dead_cat_bounce,
+            "structure_warning": self.structure_warning,
         }
 
 
@@ -57,6 +69,7 @@ PHASE_LABELS: dict[str, str] = {
     "correction_down": "Коррекция вниз",
     "correction_up": "Коррекция вверх",
     "breakout_setup": "Сжатие → пробой",
+    "post_crash_weak": "После обвала / слабость",
     "neutral": "Без явной фазы",
 }
 
@@ -115,13 +128,66 @@ def _oi_change_bars(oi_bars: list[FiveMinOiBar], n_bars: int) -> float | None:
     return (new_oi - old_oi) / old_oi * 100.0
 
 
+def _analyze_chart_structure(
+    klines: list[KlineBar],
+    price_changes: dict[int, float],
+    hours: int,
+) -> dict[str, object]:
+    peak = max(bar.high for bar in klines)
+    trough = min(bar.low for bar in klines)
+    current = klines[-1].close
+    drawdown = (peak - current) / peak * 100.0 if peak > 0 else 0.0
+    span = peak - trough
+    range_pos = (current - trough) / span if span > 0 else 0.5
+
+    lower_highs = False
+    n = len(klines)
+    third = max(n // 3, 1)
+    if n >= 18:
+        h1 = max(bar.high for bar in klines[:third])
+        h2 = max(bar.high for bar in klines[third: 2 * third])
+        h3 = max(bar.high for bar in klines[2 * third:])
+        lower_highs = h1 > h2 > h3 and (h1 - h3) / h1 > 0.015
+
+    post_crash = drawdown >= 12.0
+    chg_1h = price_changes.get(1, 0.0)
+    chg_3h = price_changes.get(3, price_changes.get(2, 0.0))
+    dead_cat = chg_1h > 1.5 and chg_3h <= 0.5 and drawdown >= 10.0
+
+    warnings: list[str] = []
+    if post_crash:
+        warnings.append(f"−{drawdown:.0f}% от хая {hours}ч")
+    if lower_highs:
+        warnings.append("понижающиеся вершины")
+    if dead_cat:
+        warnings.append("отскок после дампа")
+    if range_pos > 0.72 and drawdown >= 8.0:
+        warnings.append(f"у верха диапазона ({range_pos:.0%})")
+
+    return {
+        "drawdown_from_high_pct": drawdown,
+        "range_position": range_pos,
+        "lower_highs": lower_highs,
+        "post_crash": post_crash,
+        "dead_cat_bounce": dead_cat,
+        "structure_warning": " | ".join(warnings),
+    }
+
+
 def _detect_phase(chg_1h: float | None, chg_2h: float | None, chg_5h: float | None,
-                  range_1h: float | None, range_2h: float | None) -> tuple[str, str]:
+                  range_1h: float | None, range_2h: float | None,
+                  *, chart: dict[str, object] | None = None) -> tuple[str, str]:
     c1 = chg_1h or 0.0
     c2 = chg_2h or 0.0
     c5 = chg_5h or 0.0
     r1 = range_1h if range_1h is not None else 99.0
     r2 = range_2h if range_2h is not None else 99.0
+
+    if chart and chart.get("post_crash") and chart.get("lower_highs"):
+        detail = str(chart.get("structure_warning") or "слабая структура после обвала")
+        return "post_crash_weak", detail
+    if chart and chart.get("dead_cat_bounce"):
+        return "post_crash_weak", "краткий отскок в падающей структуре"
 
     if r2 < 2.5 and abs(c5) > 2.0:
         return "consolidation", "узкий диапазон 2ч при заметном движении за 5ч"
@@ -172,6 +238,7 @@ def _phase_strength(phase: str, is_long: bool) -> tuple[float, str]:
             "impulse_up": (0.42, "уже в пампе — риск опоздания"),
             "impulse_down": (0.18, "даун-импульс против long"),
             "correction_up": (0.32, "отскок в падающем контексте"),
+            "post_crash_weak": (0.20, "после обвала — long рискован"),
             "neutral": (0.50, "нейтральный фон"),
         }
     else:
@@ -182,6 +249,7 @@ def _phase_strength(phase: str, is_long: bool) -> tuple[float, str]:
             "impulse_down": (0.42, "уже в дампе — риск опоздания"),
             "impulse_up": (0.18, "ап-импульс против short"),
             "correction_down": (0.32, "откат в растущем контексте"),
+            "post_crash_weak": (0.82, "слабость после обвала — хорош для short"),
             "neutral": (0.50, "нейтральный фон"),
         }
     return table.get(phase, (0.50, ""))
@@ -258,8 +326,11 @@ def analyze_market_structure(
     chg_5h = price_changes.get(hours) or price_changes.get(max(price_changes))
     range_1h = _range_percent(klines, 12)
     range_2h = _range_percent(klines, 24)
+    chart = _analyze_chart_structure(klines, price_changes, hours)
 
-    phase, phase_detail = _detect_phase(chg_1h, chg_2h, chg_5h, range_1h, range_2h)
+    phase, phase_detail = _detect_phase(
+        chg_1h, chg_2h, chg_5h, range_1h, range_2h, chart=chart,
+    )
     phase_str, phase_hint = _phase_strength(phase, is_long)
 
     oi_2h = oi_changes.get(2)
@@ -280,6 +351,12 @@ def analyze_market_structure(
         hours_analyzed=hours,
         bar_count=len(klines),
         oi_bar_count=len(oi_bars),
+        drawdown_from_high_pct=float(chart["drawdown_from_high_pct"]),
+        range_position=float(chart["range_position"]),
+        lower_highs=bool(chart["lower_highs"]),
+        post_crash=bool(chart["post_crash"]),
+        dead_cat_bounce=bool(chart["dead_cat_bounce"]),
+        structure_warning=str(chart.get("structure_warning", "")),
     )
 
 
@@ -292,6 +369,9 @@ def format_market_structure_block(data: dict[str, Any] | None) -> str:
     lines.append(f"Фаза: <b>{data.get('phase_label', '—')}</b>")
     if data.get("phase_detail"):
         lines.append(f"<i>{data['phase_detail']}</i>")
+    warning = data.get("structure_warning")
+    if warning:
+        lines.append(f"⚠️ <i>{warning}</i>")
 
     price_parts = []
     for h in (1, 2, 3, 5):

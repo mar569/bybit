@@ -146,6 +146,12 @@ class ScannerSettings:
     market_structure_enabled: bool = True
     market_structure_hours: int = 5
 
+    # График к сигналу: tradingview = реальный TV (как Bybit), coinglass, generated
+    signal_chart_enabled: bool = True
+    signal_chart_source: str = "tradingview"
+    signal_chart_hours: int = 5
+    signal_chart_interval_minutes: int = 5
+
     # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
     binance_long_period_minutes: int | None = None
@@ -309,6 +315,10 @@ class ScannerSettings:
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
+            signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
+            signal_chart_source=str(base.get("signal_chart_source", "tradingview")),
+            signal_chart_hours=int(base.get("signal_chart_hours", 5)),
+            signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),
