@@ -9,8 +9,9 @@ from dataclasses import asdict
 from typing import Any
 
 import redis.asyncio as redis
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from .config import Config
@@ -80,6 +81,10 @@ class TelegramBot:
         if self.application is None:
             return
         message = self._format_signal_message(signal)
+        recipient_ids = {self.config.telegram_admin_id}
+        if self.config.telegram_alert_chat_id is not None:
+            recipient_ids.add(self.config.telegram_alert_chat_id)
+
         try:
             # Redis-based dedupe: skip send if last sent within cooldown
             should_send = True
@@ -97,12 +102,13 @@ class TelegramBot:
                     should_send = True
 
             if should_send:
-                await self.application.bot.send_message(
-                    chat_id=self.config.telegram_admin_id,
-                    text=message,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+                for chat_id in recipient_ids:
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
                 if self.redis is not None:
                     try:
                         await self.redis.set(key, str(time.time()), ex=self.settings_manager.settings.signal_cooldown_seconds + 5)
@@ -205,6 +211,20 @@ class TelegramBot:
             reply_markup=self._settings_keyboard(),
         )
 
+    async def _safe_edit_message_text(
+        self,
+        query: CallbackQuery,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
+        try:
+            await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except BadRequest as exc:
+            if "Message is not modified" in str(exc):
+                return
+            raise
+
     async def on_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if query is None:
@@ -214,84 +234,89 @@ class TelegramBot:
         if payload.startswith("set_period:"):
             value = int(payload.split(":", 1)[1])
             self.settings_manager.update(oi_period_minutes=value)
-            await query.edit_message_text(f"Период анализа установлен: {value} мин")
+            await self._safe_edit_message_text(query, f"Период анализа установлен: {value} мин")
         elif payload.startswith("set_volume_spike:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(volume_spike_multiplier=value)
-            await query.edit_message_text(f"Volume spike multiplier установлен: {value}x")
+            await self._safe_edit_message_text(query, f"Volume spike multiplier установлен: {value}x")
         elif payload.startswith("set_price_pump:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(price_pump_threshold_pct=value)
-            await query.edit_message_text(f"Price pump threshold установлен: {value}%")
+            await self._safe_edit_message_text(query, f"Price pump threshold установлен: {value}%")
         elif payload.startswith("set_min_score:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(min_signal_score=value)
-            await query.edit_message_text(f"Минимальная сила сигнала установлена: {value}")
+            await self._safe_edit_message_text(query, f"Минимальная сила сигнала установлена: {value}")
         elif payload.startswith("set_top_n:"):
             value = int(payload.split(":", 1)[1])
             self.settings_manager.update(top_n_symbols=value)
-            await query.edit_message_text(f"Top N symbols установлен: {value}")
+            await self._safe_edit_message_text(query, f"Top N symbols установлен: {value}")
         elif payload.startswith("set_oi_rise:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(oi_rise_percent=value)
-            await query.edit_message_text(f"Порог роста OI установлен: {value}%")
+            await self._safe_edit_message_text(query, f"Порог роста OI установлен: {value}%")
         elif payload.startswith("set_oi_drop:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(oi_drop_percent=value)
-            await query.edit_message_text(f"Порог падения OI установлен: {value}%")
+            await self._safe_edit_message_text(query, f"Порог падения OI установлен: {value}%")
         elif payload.startswith("set_price_rise:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(price_rise_percent=value)
-            await query.edit_message_text(f"Порог роста цены установлен: {value}%")
+            await self._safe_edit_message_text(query, f"Порог роста цены установлен: {value}%")
         elif payload.startswith("set_price_drop:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(price_drop_percent=value)
-            await query.edit_message_text(f"Порог падения цены установлен: {value}%")
+            await self._safe_edit_message_text(query, f"Порог падения цены установлен: {value}%")
         elif payload.startswith("set_min_oi:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(min_open_interest=value)
-            await query.edit_message_text(f"Минимальный Open Interest установлен: {int(value):,}".replace(",", " "))
+            await self._safe_edit_message_text(query, f"Минимальный Open Interest установлен: {int(value):,}".replace(",", " "))
         elif payload.startswith("set_min_volume:"):
             value = float(payload.split(":", 1)[1])
             self.settings_manager.update(min_volume=value)
-            await query.edit_message_text(f"Минимальный объём установлен: {int(value):,}".replace(",", " "))
+            await self._safe_edit_message_text(query, f"Минимальный объём установлен: {int(value):,}".replace(",", " "))
         elif payload == "toggle_binance":
             current = self.settings_manager.settings.enabled_binance
             self.settings_manager.update(enabled_binance=not current)
-            await query.edit_message_text(f"Binance включён: {not current}")
+            await self._safe_edit_message_text(query, f"Binance включён: {not current}")
         elif payload == "toggle_bybit":
             current = self.settings_manager.settings.enabled_bybit
             self.settings_manager.update(enabled_bybit=not current)
-            await query.edit_message_text(f"Bybit включён: {not current}")
+            await self._safe_edit_message_text(query, f"Bybit включён: {not current}")
         elif payload == "menu_scanner":
-            await query.edit_message_text(
+            await self._safe_edit_message_text(
+                query,
                 "Сканер активен. Используйте /status для просмотра текущих настроек или /settings для изменения порогов.",
                 reply_markup=self._main_menu(),
             )
         elif payload == "menu_settings":
-            await query.edit_message_text(
+            await self._safe_edit_message_text(
+                query,
                 "Выберите настройку:",
                 reply_markup=self._settings_keyboard(),
             )
         elif payload == "menu_notifications":
-            await query.edit_message_text(
+            await self._safe_edit_message_text(
+                query,
                 "Уведомления пока доступны через сигналы. Настройки каналов не поддерживаются.",
                 reply_markup=self._main_menu(),
             )
         elif payload == "menu_help":
-            await query.edit_message_text(
+            await self._safe_edit_message_text(
+                query,
                 "Доступные команды:\n/start /status /settings /help\n" \
                 "Выберите настройки через кнопку \"⚙ Настройки\".",
                 reply_markup=self._main_menu(),
             )
         elif payload == "show_settings":
-            await query.edit_message_text(
+            await self._safe_edit_message_text(
+                query,
                 self._build_status_text(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._main_menu(),
             )
         else:
-            await query.edit_message_text("Неизвестное действие.")
+            await self._safe_edit_message_text(query, "Неизвестное действие.")
 
     def _settings_keyboard(self) -> InlineKeyboardMarkup:
         s = self.settings_manager.settings

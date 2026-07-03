@@ -17,6 +17,8 @@ class Config(BaseSettings):
     bybit_api_key: str | None = Field(None, env="BYBIT_API_KEY")
     bybit_api_secret: str | None = Field(None, env="BYBIT_API_SECRET")
 
+    telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
+
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")
     default_oi_rise_percent: float = Field(5.0, env="DEFAULT_OI_PERCENT")
