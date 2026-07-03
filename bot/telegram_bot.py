@@ -23,7 +23,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from .config import Config
 from .models import Signal
-from .scanner_engine import format_oi_usd
+from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .settings import SettingsManager
 from .test_signals import build_test_signals
@@ -40,6 +40,7 @@ class TelegramBot:
     def __init__(self, config: Config, settings_manager: SettingsManager) -> None:
         self.config = config
         self.settings_manager = settings_manager
+        self.scanner: SignalEngine | None = None
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
@@ -53,6 +54,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("history", self.on_history))
         self.application.add_handler(CommandHandler("set", self.on_set))
         self.application.add_handler(CommandHandler("test", self.on_test))
+        self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
         self.application.add_handler(CommandHandler("resume", self.on_resume))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
@@ -222,6 +224,7 @@ class TelegramBot:
             "/settings — кнопки порогов\n"
             "/set — точная настройка (/set help)\n"
             "/test — тестовые LONG и SHORT\n"
+            "/scan — диагностика сканера\n"
             "/pause — остановить сигналы\n"
             "/resume — возобновить сигналы\n"
             "/history [N] — последние сигналы\n\n"
@@ -316,6 +319,46 @@ class TelegramBot:
             parse_mode=ParseMode.HTML,
             reply_markup=self._settings_keyboard(),
         )
+
+    async def on_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        if self.scanner is None:
+            await update.message.reply_text("Сканер ещё не инициализирован.")
+            return
+
+        d = self.scanner.get_diagnostics()
+        s = self.settings_manager.settings
+        signals_state = "✅ ВКЛ" if d["signals_enabled"] else "⏸ ВЫКЛ"
+        warmup = (
+            f"Готово к сигналам: <b>{d['pairs_ready']}</b> пар "
+            f"(нужна история {s.oi_period_minutes} мин)"
+        )
+        if d["pairs_ready"] == 0:
+            warmup += (
+                "\n⚠️ Подождите накопления истории или уменьшите период: "
+                "<code>/set period 5</code>"
+            )
+
+        text = (
+            "<b>📡 Диагностика сканера</b>\n\n"
+            f"Сигналы: {signals_state}\n"
+            f"Пар в памяти: <b>{d['pairs_tracked']}</b>\n"
+            f"С ценой и OI: <b>{d['pairs_with_oi']}</b>\n"
+            f"{warmup}\n"
+            f"Макс. точек истории: <b>{d['max_history_points']}</b>\n\n"
+            f"<b>Пороги:</b>\n"
+            f"OI ≥ {d['oi_rise_percent']}% | Цена ≥ {d['price_rise_percent']}%\n"
+            f"Мин. OI: {d['min_open_interest']:,.0f} $ | Score ≥ {d['min_signal_score']}\n"
+            f"Топ монет: {d['top_n_symbols'] or 'все'}\n\n"
+            "<i>Если сигналов нет — попробуйте:</i>\n"
+            "<code>/set period 5</code>\n"
+            "<code>/set oi 1</code>\n"
+            "<code>/set price 0.5</code>\n"
+            "<code>/resume</code> (если на паузе)"
+        ).replace(",", " ")
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self._reply_keyboard())
 
     async def on_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):

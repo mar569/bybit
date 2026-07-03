@@ -25,6 +25,7 @@ async def main() -> None:
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
     scanner = SignalEngine(settings, telegram.dispatch_signal)
+    telegram.scanner = scanner
 
     def scan_interval() -> float:
         return float(settings.settings.scan_interval_seconds)
@@ -65,8 +66,10 @@ async def main() -> None:
         logger.info("Windows detected: use Ctrl+C to stop the bot")
 
     scanner_task: asyncio.Task | None = None
+    eval_task: asyncio.Task | None = None
     try:
         await telegram.start()
+        eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=2.0))
         scanner_task = asyncio.create_task(run_scan())
 
         if sys.platform == "win32":
@@ -84,7 +87,12 @@ async def main() -> None:
         await telegram.stop()
         if scanner_task is not None:
             scanner_task.cancel()
-            await asyncio.gather(scanner_task, return_exceptions=True)
+        if eval_task is not None:
+            eval_task.cancel()
+        await asyncio.gather(
+            *(t for t in (scanner_task, eval_task) if t is not None),
+            return_exceptions=True,
+        )
 
 
 if __name__ == "__main__":

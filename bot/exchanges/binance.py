@@ -157,7 +157,8 @@ class BinanceScanner(ExchangeScanner):
             "quote_volume_24h": payload.get("q"),
         })
         self.snapshots[symbol] = snapshot
-        await self._dispatch_update(snapshot)
+        if snapshot.price and snapshot.open_interest:
+            await self._dispatch_update(snapshot)
 
     async def _handle_open_interest_message(self, raw_message: str) -> None:
         data = json.loads(raw_message)
@@ -175,7 +176,8 @@ class BinanceScanner(ExchangeScanner):
             snapshot.additional["open_interest_value"] = snapshot.open_interest * snapshot.price
 
         self.snapshots[symbol] = snapshot
-        await self._dispatch_update(snapshot)
+        if snapshot.price and snapshot.open_interest:
+            await self._dispatch_update(snapshot)
 
     async def _dispatch_update(self, snapshot: MarketSnapshot) -> None:
         await self.on_update(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from .models import Signal, SnapshotPoint
 from .settings import ExchangeThresholds, SettingsManager
 
 HISTORY_MAX_POINTS = 3600
+
+logger = logging.getLogger(__name__)
 
 
 def format_oi_usd(value: float | None) -> str:
@@ -34,6 +37,7 @@ class SignalEngine:
         self._volumes: dict[str, float] = {}
         self._top_symbols: dict[str, set[str]] = {}
         self._last_top_refresh = 0.0
+        self._dirty_keys: set[str] = set()
         self.lock = asyncio.Lock()
 
     def _reset_daily_counts_if_needed(self) -> None:
@@ -98,6 +102,8 @@ class SignalEngine:
             return
         if price is None and open_interest is None:
             return
+        if price is None or open_interest is None or price <= 0 or open_interest <= 0:
+            return
 
         now = timestamp or time.time()
         key = f"{exchange}:{symbol}"
@@ -121,7 +127,55 @@ class SignalEngine:
             history = self.history.setdefault(key, deque(maxlen=HISTORY_MAX_POINTS))
             history.append(point)
 
-        await self._evaluate_signals(key, exchange, symbol)
+        self._dirty_keys.add(key)
+
+    async def run_evaluation_loop(self, interval: float = 2.0) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            keys = list(self._dirty_keys)
+            self._dirty_keys.clear()
+            for key in keys:
+                parts = key.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                await self._evaluate_signals(key, parts[0], parts[1])
+
+    def get_diagnostics(self) -> dict[str, object]:
+        settings = self.settings.settings
+        pairs_tracked = len(self.history)
+        pairs_ready = 0
+        pairs_with_oi = 0
+        max_history = 0
+
+        for key, history in self.history.items():
+            if not history:
+                continue
+            max_history = max(max_history, len(history))
+            current = history[-1]
+            if current.open_interest and current.open_interest > 0:
+                pairs_with_oi += 1
+            exchange = key.split(":", 1)[0]
+            thresholds = settings.for_exchange(exchange)
+            lookback_seconds = thresholds.oi_period_minutes * 60
+            cutoff = current.timestamp - lookback_seconds
+            if len(history) >= 2 and history[0].timestamp <= cutoff:
+                if current.price and current.open_interest:
+                    pairs_ready += 1
+
+        return {
+            "signals_enabled": settings.signals_enabled,
+            "oi_period_minutes": settings.oi_period_minutes,
+            "oi_rise_percent": settings.oi_rise_percent,
+            "price_rise_percent": settings.price_rise_percent,
+            "min_open_interest": settings.min_open_interest,
+            "min_signal_score": settings.min_signal_score,
+            "top_n_symbols": settings.top_n_symbols,
+            "pairs_tracked": pairs_tracked,
+            "pairs_with_oi": pairs_with_oi,
+            "pairs_ready": pairs_ready,
+            "max_history_points": max_history,
+            "dirty_queue": len(self._dirty_keys),
+        }
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
         if not self.settings.settings.signals_enabled:
@@ -172,7 +226,8 @@ class SignalEngine:
             if signal_type is None:
                 return
 
-            if current.open_interest < settings.min_open_interest:
+            oi_usd_now = self._oi_usd_value(current.open_interest, current.price, current.additional)
+            if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
                 return
 
             if settings.min_volume > 0 and (current.volume_24h or 0.0) < settings.min_volume:
@@ -253,6 +308,16 @@ class SignalEngine:
             self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
             self.last_signal_time[key] = now
             side = self._determine_side(price_change_percent, signal_type)
+
+            logger.info(
+                "Signal %s %s %s | OI %.2f%% | price %.2f%% | score %d",
+                exchange,
+                symbol,
+                signal_type,
+                oi_change_percent,
+                price_change_percent,
+                score,
+            )
 
             signal = Signal(
                 exchange=exchange,

@@ -23,11 +23,11 @@ class ExchangeThresholds:
 @dataclass
 class ScannerSettings:
     oi_period_minutes: int = 15
-    oi_rise_percent: float = 5.0
-    oi_drop_percent: float = 5.0
-    price_rise_percent: float = 1.0
-    price_drop_percent: float = 1.0
-    min_open_interest: float = 100_000.0
+    oi_rise_percent: float = 3.0
+    oi_drop_percent: float = 3.0
+    price_rise_percent: float = 0.5
+    price_drop_percent: float = 0.5
+    min_open_interest: float = 50_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
