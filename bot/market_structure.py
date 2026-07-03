@@ -360,6 +360,30 @@ def analyze_market_structure(
     )
 
 
+def format_market_structure_compact(data: dict[str, Any] | None) -> str:
+    if not data:
+        return ""
+    parts: list[str] = []
+    warning = str(data.get("structure_warning", "") or "")
+    phase = str(data.get("phase_label", "") or "")
+    if warning:
+        parts.append(warning[:60])
+    elif phase and phase != "Без явной фазы":
+        parts.append(phase)
+
+    chg_bits: list[str] = []
+    for h in (1, 3, 5):
+        val = data.get("price_changes", {}).get(str(h))
+        if val is not None:
+            chg_bits.append(f"{h}ч {float(val):+.1f}%")
+    if chg_bits:
+        parts.append(" ".join(chg_bits))
+
+    if not parts:
+        return ""
+    return "📐 " + " · ".join(parts)
+
+
 def format_market_structure_block(data: dict[str, Any] | None) -> str:
     if not data:
         return ""

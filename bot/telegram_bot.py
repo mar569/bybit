@@ -25,10 +25,10 @@ from .config import Config
 from .models import Signal
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
-from .probability_engine import format_probability_from_signal
-from .market_structure import format_market_structure_block
-from .bybit_market_data import format_bybit_real_data_block
+from .market_structure import format_market_structure_block, format_market_structure_compact
+from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
 from .chart_renderer import get_signal_chart_png
+from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,7 @@ class TelegramBot:
         caption: str,
         *,
         is_priority: bool,
+        keyboard: InlineKeyboardMarkup | None = None,
     ) -> bool:
         if self.application is None:
             return False
@@ -215,6 +216,7 @@ class TelegramBot:
                     caption=caption[:1024],
                     parse_mode=ParseMode.HTML,
                     disable_notification=not is_priority,
+                    reply_markup=keyboard,
                 )
                 self._last_send_time[chat_id] = time.time()
                 return True
@@ -225,67 +227,6 @@ class TelegramBot:
             except Exception:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
-
-    async def _maybe_send_signal_chart(
-        self,
-        signal: Signal,
-        chat_id: int,
-        *,
-        is_priority: bool,
-    ) -> None:
-        settings = self.settings_manager.settings
-        if not settings.signal_chart_enabled:
-            return
-
-        ms = signal.details.get("market_structure")
-        warning = ""
-        if isinstance(ms, dict):
-            warning = str(ms.get("structure_warning", ""))
-
-        try:
-            png, source_label = await get_signal_chart_png(
-                signal.exchange,
-                signal.symbol,
-                chart_source=settings.signal_chart_source,
-                chart_hours=settings.signal_chart_hours,
-                chart_interval_minutes=settings.signal_chart_interval_minutes,
-                side=signal.side,
-                structure_warning=warning,
-                probability_percent=float(signal.details.get("probability_percent", 0) or 0),
-                coinglass_url=signal.link,
-            )
-        except Exception:
-            logger.exception("Chart capture failed for %s", signal.symbol)
-            return
-
-        if not png:
-            return
-
-        side_emoji = "🟢" if signal.side == "long" else "🔴"
-        prob = float(signal.details.get("probability_percent", 0) or 0)
-        source_names = {
-            "tradingview": "TradingView",
-            "coinglass": "CoinGlass",
-            "generated": "свечи Bybit API",
-        }
-        source_text = source_names.get(source_label, source_label)
-        interval = settings.signal_chart_interval_minutes
-        caption = (
-            f"{side_emoji} <b>{signal.symbol}</b> "
-            f"{'LONG' if signal.side == 'long' else 'SHORT'} · "
-            f"{interval}м · 🎯 {prob:.0f}%\n"
-            f"<i>График: {source_text}</i>"
-        )
-        await self._send_chart(chat_id, png, caption, is_priority=is_priority)
-
-    def _schedule_signal_chart(self, signal: Signal, chat_id: int, *, is_priority: bool) -> None:
-        async def _runner() -> None:
-            try:
-                await self._maybe_send_signal_chart(signal, chat_id, is_priority=is_priority)
-            except Exception:
-                logger.exception("Background chart task failed for %s", signal.symbol)
-
-        asyncio.create_task(_runner())
 
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
@@ -303,9 +244,15 @@ class TelegramBot:
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
         if is_vertical:
-            message = self._format_vertical_breakout_message(signal)
+            message = self._format_vertical_breakout_message(
+                signal, compact=self.settings_manager.settings.signal_message_compact,
+            )
         else:
-            message = self._format_signal_message(signal, is_priority=is_priority)
+            message = self._format_signal_message(
+                signal,
+                is_priority=is_priority,
+                compact=self.settings_manager.settings.signal_message_compact,
+            )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
         ])
@@ -347,12 +294,37 @@ class TelegramBot:
                 )
                 return
 
-        sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
+        sent_any = False
+        if settings.signal_chart_enabled:
+            ms = signal.details.get("market_structure")
+            warning = ""
+            if isinstance(ms, dict):
+                warning = str(ms.get("structure_warning", ""))
+            try:
+                png, _source = await get_signal_chart_png(
+                    signal.exchange,
+                    signal.symbol,
+                    chart_source=settings.signal_chart_source,
+                    chart_hours=settings.signal_chart_hours,
+                    chart_interval_minutes=settings.signal_chart_interval_minutes,
+                    side=signal.side,
+                    structure_warning=warning,
+                    probability_percent=float(signal.details.get("probability_percent", 0) or 0),
+                    coinglass_url=signal.link,
+                )
+            except Exception:
+                logger.exception("Chart capture failed for %s", signal.symbol)
+                png = None
+            if png:
+                sent_any = await self._send_chart(
+                    notify_chat_id, png, message, is_priority=is_priority, keyboard=keyboard,
+                )
+
+        if not sent_any:
+            sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
 
         if not sent_any:
             return
-
-        self._schedule_signal_chart(signal, notify_chat_id, is_priority=is_priority)
 
         if sent_any and self.outcome_tracker is not None and self.settings_manager.settings.outcome_tracking_enabled:
             try:
@@ -939,7 +911,23 @@ class TelegramBot:
             label = f"{label} {tier_text}"
         return f"<b>{label}</b>\n" if label else ""
 
-    def _format_vertical_breakout_message(self, signal: Signal) -> str:
+    def _format_vertical_breakout_message(self, signal: Signal, *, compact: bool = False) -> str:
+        if compact:
+            exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
+            exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
+            is_long = signal.side == "long"
+            side_emoji = "🟢" if is_long else "🔴"
+            spike_pct = signal.details.get("spike_percent", signal.price_change_percent)
+            spike_text = f"+{float(spike_pct):.2f}%" if isinstance(spike_pct, (int, float)) else str(spike_pct)
+            oi_usd = format_oi_usd(signal.oi_change_usd)
+            prob = format_probability_from_signal(signal, compact=True)
+            title = "🚨 ВЕРТ. ПАМП" if is_long else "🚨 ВЕРТ. СЛИВ"
+            return (
+                f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
+                f"{side_emoji} <b>{signal.symbol}</b> · взлёт {spike_text} · OI {abs(signal.oi_change_percent):.2f}% ({oi_usd})\n"
+                f"{prob}\n"
+            )
+
         exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
         exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
         is_long = signal.side == "long"
@@ -977,7 +965,10 @@ class TelegramBot:
             f"{format_probability_from_signal(signal)}"
         )
 
-    def _format_signal_message(self, signal: Signal, *, is_priority: bool = False) -> str:
+    def _format_signal_message(self, signal: Signal, *, is_priority: bool = False, compact: bool = False) -> str:
+        if compact:
+            return self._format_signal_message_compact(signal, is_priority=is_priority)
+
         exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
         exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
         period_label = f"{signal.oi_period_minutes}м"
@@ -1024,6 +1015,39 @@ class TelegramBot:
             f"{self._bybit_real_data_section(signal)}"
             f"{format_probability_from_signal(signal)}"
         )
+
+    def _format_signal_message_compact(self, signal: Signal, *, is_priority: bool = False) -> str:
+        exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
+        exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
+        is_long = signal.side == "long"
+        side_emoji = "🟢" if is_long else "🔴"
+        side_label = "LONG" if is_long else "SHORT"
+        price_pct = signal.price_change_percent or 0.0
+        price_text = f"+{price_pct:.2f}%" if price_pct > 0 else f"{price_pct:.2f}%"
+        oi_usd = format_oi_usd(signal.oi_change_usd)
+
+        lines: list[str] = []
+        if is_priority:
+            lines.append("🔥 <b>РАННИЙ СИГНАЛ</b>")
+        type_header = self._signal_type_header(signal).strip()
+        if type_header:
+            lines.append(type_header)
+        lines.append(
+            f"{exchange_emoji} <b>{exchange_name} {signal.oi_period_minutes}м</b> · "
+            f"{side_emoji} <b>{side_label}</b> · <b>{signal.symbol}</b>"
+        )
+        lines.append(
+            f"OI <b>{abs(signal.oi_change_percent):.2f}%</b> ({oi_usd}) · "
+            f"цена <b>{price_text}</b> · ⏱ <b>{signal.signal_score}</b>/10"
+        )
+        ms = format_market_structure_compact(signal.details.get("market_structure"))
+        if ms:
+            lines.append(ms)
+        bybit = format_bybit_real_data_compact(signal.details)
+        if bybit:
+            lines.append(bybit)
+        lines.append(format_probability_from_signal(signal, compact=True))
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _market_structure_section(signal: Signal) -> str:

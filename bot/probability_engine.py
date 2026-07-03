@@ -635,7 +635,63 @@ def format_probability_block(assessment: ProbabilityAssessment) -> str:
     return "\n".join(lines)
 
 
-def format_probability_from_signal(signal: Signal) -> str:
+def format_probability_compact(signal: Signal, *, factor_limit: int = 4) -> str:
+    factors_raw = signal.details.get("probability_factors") or []
+    factors = [
+        ProbabilityFactor(
+            key=item.get("key", ""),
+            label=item.get("label", ""),
+            strength=float(item.get("strength", 0)),
+            weight=float(item.get("weight", 0)),
+            contribution=float(item.get("contribution", item.get("impact", 0))),
+            detail=str(item.get("detail", "")),
+        )
+        for item in factors_raw
+    ]
+    percent = float(signal.details.get("probability_percent", 0))
+    verdict = str(signal.details.get("probability_verdict", ""))
+    bar_filled = int(_clamp(percent / 10, 1, 10))
+    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+
+    short_names = {
+        "oi_price_sync": "OI+цена",
+        "threshold_excess": "пороги",
+        "oi_usd_flow": "OI $",
+        "momentum": "импульс",
+        "long_short": "L/S",
+        "timing": "ранность",
+        "rsi": "RSI",
+        "pattern": "паттерн",
+        "market_phase": "фаза",
+        "structure_penalty": "структура",
+        "liquidations": "ликв.",
+    }
+    ranked = sorted(factors, key=lambda f: abs(f.contribution), reverse=True)
+    top_lines: list[str] = []
+    for factor in ranked:
+        if factor.key in ("divergence",):
+            continue
+        if len(top_lines) >= factor_limit:
+            break
+        if factor.key == "structure_penalty" and factor.contribution >= 0:
+            continue
+        name = short_names.get(factor.key, factor.label.split("(")[0].strip()[:12])
+        if factor.contribution < 0:
+            top_lines.append(f"{name} {factor.contribution:.0f}%")
+        else:
+            top_lines.append(f"{name} +{factor.contribution:.0f}%")
+
+    lines = [
+        f"🎯 <b>{percent:.0f}%</b> {verdict} <code>{bar}</code>",
+    ]
+    if top_lines:
+        lines.append("Топ: " + " · ".join(top_lines))
+    return "\n".join(lines)
+
+
+def format_probability_from_signal(signal: Signal, *, compact: bool = False) -> str:
+    if compact:
+        return format_probability_compact(signal)
     factors_raw = signal.details.get("probability_factors") or []
     factors = [
         ProbabilityFactor(

@@ -64,6 +64,7 @@ GLOBAL_ALIASES: dict[str, str] = {
     "mega_cooldown": "mega_cooldown_seconds",
     "chart": "signal_chart_source",
     "chart_src": "signal_chart_source",
+    "compact": "signal_message_compact",
     "prob": "min_probability_percent",
     "prob_filter": "probability_filter_enabled",
     "score": "min_signal_score",
@@ -184,6 +185,16 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл", "start", "resume"}
         elif field == "probability_filter_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
+        elif field == "signal_message_compact":
+            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
+        elif field == "signal_chart_source":
+            value = raw_value.lower()
+            if value not in {"tradingview", "coinglass", "generated"}:
+                return SetResult(
+                    False,
+                    "График: <code>tradingview</code> | <code>coinglass</code> | <code>generated</code>",
+                    {},
+                )
         elif field in INT_FIELDS or field.endswith("_period_minutes"):
             value = int(float(raw_value))
             if field in {"oi_period_minutes", "long_period_minutes", "short_period_minutes", "pulse_period_minutes"}:

@@ -124,3 +124,28 @@ def format_bybit_real_data_block(details: dict[str, object] | None) -> str:
     if not lines:
         return ""
     return "\n".join(lines)
+
+
+def format_bybit_real_data_compact(details: dict[str, object] | None) -> str:
+    if not details:
+        return ""
+    parts: list[str] = []
+    ar = details.get("account_ratio")
+    if isinstance(ar, dict) and ar.get("long_short_ratio") is not None:
+        ratio = float(ar["long_short_ratio"])
+        short_pct = ar.get("short_pct", "?")
+        long_pct = ar.get("long_pct", "?")
+        bias = "шортов больше" if ratio < 0.95 else ("лонгов больше" if ratio > 1.05 else "баланс")
+        parts.append(f"L/S <b>{ratio:.2f}</b> ({long_pct}/{short_pct}%) {bias}")
+
+    liq = details.get("liquidations")
+    if isinstance(liq, dict):
+        events = int(liq.get("event_count", 0) or 0)
+        if events > 0:
+            long_usd = float(liq.get("long_liq_usd", 0) or 0)
+            short_usd = float(liq.get("short_liq_usd", 0) or 0)
+            parts.append(f"💥 ликв. L {long_usd:,.0f}$ S {short_usd:,.0f}$".replace(",", " "))
+
+    if not parts:
+        return ""
+    return "📊 " + " · ".join(parts)
