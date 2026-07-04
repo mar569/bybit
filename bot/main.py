@@ -37,16 +37,12 @@ async def _scanner_heartbeat_loop(scanner: SignalEngine) -> None:
     while True:
         d = scanner.get_diagnostics()
         logger.info(
-            "Scanner heartbeat: pairs=%d (Bybit %d, Binance %d) ready=%d hist=%d "
-            "signals=%s prob=%s both_oi_price=%s",
+            "Scanner heartbeat: pairs=%d ready=%d oi_ok=%d history_pts=%d signals=%s",
             d["pairs_tracked"],
-            d.get("pairs_bybit", 0),
-            d.get("pairs_binance", 0),
             d["pairs_ready"],
+            d["pairs_with_oi"],
             d["max_history_points"],
             "ON" if d["signals_enabled"] else "OFF",
-            "ON" if d.get("probability_filter_enabled") else "OFF",
-            "AND" if d.get("require_both_oi_and_price") else "OR",
         )
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
@@ -140,10 +136,10 @@ async def main() -> None:
             if not bybit.symbols:
                 await bybit.load_symbols()
         except Exception:
-            logger.exception("Symbol preload failed — сканер догрузит при старте")
+            logger.exception("Symbol preload failed")
         s = settings.settings
         logger.info(
-            "Startup: signals=%s liq=%s | Bybit %d sym | Binance %d sym",
+            "Startup: signals=%s liq=%s | Bybit %d | Binance %d",
             "ON" if s.signals_enabled else "OFF",
             "ON" if s.liquidation_alerts_enabled else "OFF",
             len(bybit.symbols),

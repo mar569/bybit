@@ -22,7 +22,6 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Config
-from .settings import SettingsManager
 from .models import Signal
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
@@ -36,66 +35,13 @@ from .liquidation_alerts import (
     coinglass_url,
     format_liquidation_alert,
 )
+from .settings import SettingsManager
 
 logger = logging.getLogger(__name__)
 
 EXCHANGE_LABEL = {
     "binance": ("🟡", "Binance"),
     "bybit": ("⚫", "ByBit"),
-}
-
-SCANNER_PRESETS: dict[str, dict[str, object]] = {
-    "soft": {
-        "oi_period_minutes": 5,
-        "long_period_minutes": 5,
-        "short_period_minutes": 5,
-        "oi_rise_percent": 1.0,
-        "oi_drop_percent": 1.0,
-        "price_rise_percent": 0.8,
-        "price_drop_percent": 0.8,
-        "min_oi_change_usd": 5_000.0,
-        "max_oi_change_usd": None,
-        "min_open_interest": 50_000.0,
-        "top_n_symbols": None,
-        "probability_filter_enabled": False,
-        "require_both_oi_and_price": False,
-        "require_oi_for_price_only": False,
-    },
-    "balanced": {
-        "oi_period_minutes": 5,
-        "long_period_minutes": 5,
-        "short_period_minutes": 5,
-        "oi_rise_percent": 1.0,
-        "oi_drop_percent": 1.0,
-        "price_rise_percent": 0.7,
-        "price_drop_percent": 0.7,
-        "min_oi_change_usd": 5_000.0,
-        "max_oi_change_usd": None,
-        "min_open_interest": 100_000.0,
-        "top_n_symbols": None,
-        "probability_filter_enabled": False,
-        "require_both_oi_and_price": False,
-        "require_oi_for_price_only": False,
-    },
-    "working": {
-        "oi_period_minutes": 10,
-        "long_period_minutes": 10,
-        "short_period_minutes": 10,
-        "oi_rise_percent": 3.0,
-        "oi_drop_percent": 3.0,
-        "price_rise_percent": 0.8,
-        "price_drop_percent": 0.8,
-        "min_oi_change_usd": 25_000.0,
-        "max_oi_change_usd": None,
-        "min_open_interest": 75_000.0,
-        "top_n_symbols": 150,
-        "signal_cooldown_seconds": 90,
-        "probability_filter_enabled": True,
-        "require_both_oi_and_price": True,
-        "require_oi_for_price_only": True,
-        "max_signal_score": None,
-        "max_signals_per_symbol_per_day": 0,
-    },
 }
 
 
@@ -296,15 +242,14 @@ class TelegramBot:
         if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
             return
 
-        settings = self.settings_manager.settings
-        priority_max = settings.priority_score_max
+        priority_max = self.settings_manager.settings.priority_score_max
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_priority = (
             is_vertical
             or is_reversal
-            or prob >= 80
+            or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
@@ -346,12 +291,10 @@ class TelegramBot:
         if not should_send:
             return
 
-        if settings.probability_filter_enabled and not skip_dedupe:
-            bypass = (
-                (is_vertical or is_reversal)
-                and not settings.probability_strict
-            )
-            if not bypass and prob < settings.min_probability_percent:
+        if (
+            settings := self.settings_manager.settings
+        ).probability_filter_enabled and not skip_dedupe and not is_vertical and not is_reversal:
+            if prob < settings.min_probability_percent:
                 logger.info(
                     "Telegram skip %s %s: probability %.0f%% < %.0f%%",
                     signal.exchange,
@@ -360,27 +303,7 @@ class TelegramBot:
                     settings.min_probability_percent,
                 )
                 return
-            if not bypass and settings.min_probability_factors_passed > 0:
-                factors = signal.details.get("probability_factors") or []
-                passed = sum(
-                    1 for f in factors
-                    if isinstance(f, dict) and f.get("passed")
-                )
-                if (
-                    prob >= settings.min_probability_percent
-                    and passed < settings.min_probability_factors_passed
-                ):
-                    logger.info(
-                        "Telegram skip %s %s: only %d/%d strong factors",
-                        signal.exchange,
-                        signal.symbol,
-                        passed,
-                        settings.min_probability_factors_passed,
-                    )
-                    return
 
-        sent_any = False
-        # Сначала текст — график может зависнуть, ликвидации не должны ждать
         sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
 
         if settings.signal_chart_enabled and sent_any:
@@ -589,50 +512,15 @@ class TelegramBot:
         d = self.scanner.get_diagnostics()
         s = self.settings_manager.settings
         signals_state = "✅ ВКЛ" if d["signals_enabled"] else "⏸ ВЫКЛ"
-        min_period = min(
-            int(d["long_period_minutes"]),
-            int(d["short_period_minutes"]),
-            s.pulse_period_minutes,
-        )
         warmup = (
             f"Готово к сигналам: <b>{d['pairs_ready']}</b> пар "
-            f"(нужна история ≥ <b>{min_period}</b> мин)"
+            f"(нужна история от {s.pulse_period_minutes} мин для пульса)"
         )
         if d["pairs_ready"] == 0:
             warmup += (
-                "\n⚠️ Бот только запустился или история ещё копится. "
-                f"Подождите <b>{min_period}</b> мин или нажмите <b>🔓 Мягкий</b>."
+                "\n⚠️ Подождите накопления истории или уменьшите период: "
+                "<code>/set period 5</code>"
             )
-
-        flow_line = self._format_oi_flow_range(
-            float(d["min_oi_change_usd"]),
-            d.get("max_oi_change_usd"),
-        )
-        max_flow = d.get("max_oi_change_usd")
-        flow_warn = ""
-        if max_flow is not None and float(max_flow) > 0:
-            flow_warn = (
-                f"\n⚠️ Верхний предел притока <b>{float(max_flow):,.0f} $</b> — "
-                "крупные движения отсекаются. Выберите <b>10k–∞</b> или <b>20k–∞</b>."
-            ).replace(",", " ")
-
-        prob_state = (
-            f"ON ({s.min_probability_percent:.0f}%, ≥{s.min_probability_factors_passed} ф.)"
-            if s.probability_filter_enabled
-            else "OFF"
-        )
-        prob_warn = ""
-        if s.probability_filter_enabled:
-            prob_warn = (
-                "\n⚠️ <b>Фильтр вероятности ON</b> — отсекает слабые сигналы. "
-                "Для проверки: <b>✅ Рабочий</b> или выключите фильтр."
-            )
-        live = self.scanner.get_live_threshold_stats()
-        both_mode = (
-            "OI <b>и</b> цена <b>вместе</b> (строго)"
-            if s.require_both_oi_and_price
-            else "OI <b>или</b> цена — достаточно одного"
-        )
 
         text = (
             "<b>📡 Диагностика сканера</b>\n\n"
@@ -641,22 +529,17 @@ class TelegramBot:
             f"С ценой и OI: <b>{d['pairs_with_oi']}</b>\n"
             f"{warmup}\n"
             f"Макс. точек истории: <b>{d['max_history_points']}</b>\n\n"
-            f"<b>Сейчас на рынке (LONG {d['long_period_minutes']}м):</b>\n"
-            f"✅ OI+цена: <b>{live['both_long']}</b> | только OI: <b>{live['oi_only_long']}</b> | "
-            f"только цена: <b>{live['price_only_long']}</b>\n"
-            f"⏳ нет точки 5м назад: <b>{live['lookback_fail']}</b> | "
-            f"приток мало: <b>{live['flow_blocked']}</b>\n"
-            f"<i>Режим: {both_mode}</i>\n\n"
             f"<b>Пороги:</b>\n"
             f"LONG {d['long_period_minutes']}м | SHORT {d['short_period_minutes']}м | "
             f"Пульс {d['pulse_period_minutes']}м\n"
-            f"OI ≥ {d['oi_rise_percent']}% | цена ≥ {d['price_rise_percent']}%\n"
-            f"Мин. OI: {d['min_open_interest']:,.0f} $ | Приток: <b>{flow_line}</b>\n"
-            f"Фильтр вероятности: <b>{prob_state}</b>\n"
-            f"Топ монет: {d['top_n_symbols'] or 'все'}\n"
-            f"{flow_warn}{prob_warn}\n\n"
-            "<i>Если везде 0 — рынок флэт или нужен деплой v9 + перезапуск</i>\n"
-            "<code>/test</code> — проверка Telegram"
+            f"OI ≥ {d['oi_rise_percent']}% | Цена ≥ {d['price_rise_percent']}%\n"
+            f"Мин. OI: {d['min_open_interest']:,.0f} $ | Score ≥ {d['min_signal_score']}\n"
+            f"Топ монет: {d['top_n_symbols'] or 'все'}\n\n"
+            "<i>Если сигналов нет — попробуйте:</i>\n"
+            "<code>/set period 5</code>\n"
+            "<code>/set oi 1</code>\n"
+            "<code>/set price 0.5</code>\n"
+            "<code>/resume</code> (если на паузе)"
         ).replace(",", " ")
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self._reply_keyboard())
 
@@ -740,9 +623,8 @@ class TelegramBot:
             "<b>📋 Доступные команды</b>\n\n"
             "/start — главное меню\n"
             "/status — текущие настройки\n"
-            "/settings — inline-настройки порогов (в т.ч. 🎯 вероятность)\n"
-            "/set prob 60 — точная настройка вероятности\n"
-            "/set help — все команды /set\n"
+            "/settings — inline-настройки порогов\n"
+            "/set help — точная настройка через команды\n"
             "/test — тестовые сигналы LONG + SHORT\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить уведомления\n"
@@ -786,27 +668,6 @@ class TelegramBot:
             f"OI↓<b>{thresholds.oi_drop_percent}</b>%"
         )
 
-    @staticmethod
-    def _format_oi_flow_range(min_usd: float, max_usd: float | None) -> str:
-        min_label = f"{min_usd:,.0f}".replace(",", " ")
-        if max_usd is None or max_usd <= 0:
-            return f"{min_label} – ∞ $"
-        return f"{min_label} – {max_usd:,.0f} $".replace(",", " ")
-
-    @staticmethod
-    def _oi_flow_range_matches(
-        min_usd: float,
-        max_usd: float | None,
-        *,
-        current_min: float,
-        current_max: float | None,
-    ) -> bool:
-        if current_min != min_usd:
-            return False
-        if max_usd is None:
-            return current_max is None or (current_max is not None and current_max <= 0)
-        return current_max == max_usd
-
     def _build_settings_panel_text(self) -> str:
         s = self.settings_manager.settings
         top_label = "все" if not s.top_n_symbols else str(s.top_n_symbols)
@@ -829,7 +690,7 @@ class TelegramBot:
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
-            "<i>Кнопки: OI <b>или</b> цена (v9); приток — диапазон min–max $</i>\n\n"
+            "<i>Кнопки задают минимум OI <b>и</b> цены вместе</i>\n\n"
             f"📅 LONG: <b>{s.long_period_minutes} мин</b> | SHORT: <b>{s.short_period_minutes} мин</b>\n"
             f"⚡ Пульс: <b>{s.pulse_period_minutes} мин</b> "
             f"(OI≥<b>{pulse_oi}</b>% / цена≥<b>{pulse_price}</b>%)\n"
@@ -837,10 +698,9 @@ class TelegramBot:
             f"(от <b>{mega_label}</b>)\n"
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
-            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{self._format_oi_flow_range(s.min_oi_change_usd, s.max_oi_change_usd)}</b>\n"
-            f"🏆 Топ монет: <b>{top_label}</b> | Ранность <b>{s.min_signal_score}–{s.max_signal_score or '∞'}</b>/10\n"
-            f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b> | "
-            f"≤<b>{s.max_signals_per_symbol_per_day}</b>/день на монету\n"
+            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
+            f"🏆 Топ монет: <b>{top_label}</b> | Ранность≥<b>{s.min_signal_score}</b>/10\n"
+            f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
             f"{self._exchange_effective_line('Binance', 'Binance')}\n"
             f"{self._exchange_effective_line('Bybit', 'Bybit')}\n"
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
@@ -850,9 +710,7 @@ class TelegramBot:
             f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
             f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
-            f"(мин. <b>{s.min_probability_percent:.0f}%</b>"
-            f"{', строгий' if s.probability_strict else ''}"
-            f", ≥<b>{s.min_probability_factors_passed}</b> факторов)\n\n"
+            f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
@@ -897,8 +755,6 @@ class TelegramBot:
             "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
             "set_priority:": ("priority_score_max", int, "Приоритет score"),
             "set_top:": ("top_n_symbols", int, "Топ монет"),
-            "set_prob:": ("min_probability_percent", float, "Мин. вероятность"),
-            "set_prob_factors:": ("min_probability_factors_passed", int, "Факторов вероятности"),
         }
 
         for prefix, (field, caster, label) in handlers.items():
@@ -923,43 +779,11 @@ class TelegramBot:
                         changed_label = f"Период LONG/SHORT → {value}м"
                     else:
                         self.settings_manager.update(**{field: value})
-                        if field == "min_probability_percent":
-                            changed_label = f"Мин. вероятность → {value:.0f}%"
-                        elif field == "min_probability_factors_passed":
-                            changed_label = f"Факторов вероятности → ≥{value}"
-                        elif field == "min_open_interest":
-                            changed_label = f"Мин. OI → {value:,.0f} $".replace(",", " ")
-                        else:
-                            changed_label = f"{label} → {value}"
+                        changed_label = f"{label} → {value}"
                 break
 
         if changed_label:
             await query.answer(f"✅ {changed_label}", show_alert=False)
-            await self._safe_edit_message_text(
-                query,
-                self._build_settings_panel_text(),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._settings_keyboard(),
-            )
-            return
-
-        if payload.startswith("set_oi_range:"):
-            raw = payload.split(":", 1)[1]
-            min_part, _, max_part = raw.partition("-")
-            try:
-                min_val = float(min_part)
-                max_val = float(max_part) if max_part and max_part != "0" else None
-            except ValueError:
-                await query.answer("Некорректный диапазон", show_alert=True)
-                return
-            self.settings_manager.update(
-                min_oi_change_usd=min_val,
-                max_oi_change_usd=max_val,
-            )
-            await query.answer(
-                f"✅ Приток OI → {self._format_oi_flow_range(min_val, max_val)}",
-                show_alert=False,
-            )
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -999,46 +823,8 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
-        elif payload == "toggle_prob_filter":
-            current = self.settings_manager.settings.probability_filter_enabled
-            self.settings_manager.update(probability_filter_enabled=not current)
-            state = "вкл" if not current else "выкл"
-            await query.answer(f"✅ Фильтр вероятности {state}", show_alert=False)
-            await self._safe_edit_message_text(
-                query,
-                self._build_settings_panel_text(),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._settings_keyboard(),
-            )
-        elif payload == "toggle_prob_strict":
-            current = self.settings_manager.settings.probability_strict
-            self.settings_manager.update(probability_strict=not current)
-            state = "вкл" if not current else "выкл"
-            await query.answer(f"✅ Строгий режим {state}", show_alert=False)
-            await self._safe_edit_message_text(
-                query,
-                self._build_settings_panel_text(),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._settings_keyboard(),
-            )
         elif payload == "refresh_settings":
             self.settings_manager.reload()
-            await self._safe_edit_message_text(
-                query,
-                self._build_settings_panel_text(),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._settings_keyboard(),
-            )
-        elif payload.startswith("preset:"):
-            preset_key = payload.split(":", 1)[1]
-            preset = SCANNER_PRESETS.get(preset_key)
-            if preset is None:
-                await query.answer("Неизвестный пресет", show_alert=True)
-                return
-            self.settings_manager.update(**preset)
-            labels = {"soft": "🔓 Мягкий", "balanced": "⚖️ Баланс", "working": "✅ Рабочий"}
-            label = labels.get(preset_key, preset_key)
-            await query.answer(f"✅ Пресет {label} применён", show_alert=False)
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -1081,58 +867,43 @@ class TelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
-                InlineKeyboardButton("✅ Рабочий", callback_data="preset:working"),
-                InlineKeyboardButton("🔓 Мягкий", callback_data="preset:soft"),
-                InlineKeyboardButton("⚖️ Баланс", callback_data="preset:balanced"),
-            ],
-            [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
                 InlineKeyboardButton(self._mark("5м", s.oi_period_minutes == 5), callback_data="set_period:5"),
-                InlineKeyboardButton(self._mark("10м", s.oi_period_minutes == 10), callback_data="set_period:10"),
                 InlineKeyboardButton(self._mark("15м", s.oi_period_minutes == 15), callback_data="set_period:15"),
                 InlineKeyboardButton(self._mark("30м", s.oi_period_minutes == 30), callback_data="set_period:30"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI+0.5%", s.oi_rise_percent == 0.5), callback_data="set_oi_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.oi_rise_percent == 1.0), callback_data="set_oi_rise:1.0"),
-                InlineKeyboardButton(self._mark("+1.5%", s.oi_rise_percent == 1.5), callback_data="set_oi_rise:1.5"),
-                InlineKeyboardButton(self._mark("+2%", s.oi_rise_percent == 2.0), callback_data="set_oi_rise:2.0"),
                 InlineKeyboardButton(self._mark("+3%", s.oi_rise_percent == 3.0), callback_data="set_oi_rise:3.0"),
                 InlineKeyboardButton(self._mark("+5%", s.oi_rise_percent == 5.0), callback_data="set_oi_rise:5.0"),
+                InlineKeyboardButton(self._mark("+10%", s.oi_rise_percent == 10.0), callback_data="set_oi_rise:10.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI-0.5%", s.oi_drop_percent == 0.5), callback_data="set_oi_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.oi_drop_percent == 1.0), callback_data="set_oi_drop:1.0"),
-                InlineKeyboardButton(self._mark("-1.5%", s.oi_drop_percent == 1.5), callback_data="set_oi_drop:1.5"),
-                InlineKeyboardButton(self._mark("-2%", s.oi_drop_percent == 2.0), callback_data="set_oi_drop:2.0"),
                 InlineKeyboardButton(self._mark("-3%", s.oi_drop_percent == 3.0), callback_data="set_oi_drop:3.0"),
                 InlineKeyboardButton(self._mark("-5%", s.oi_drop_percent == 5.0), callback_data="set_oi_drop:5.0"),
+                InlineKeyboardButton(self._mark("-10%", s.oi_drop_percent == 10.0), callback_data="set_oi_drop:10.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("🟢+0.5%", s.price_rise_percent == 0.5), callback_data="set_price_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.price_rise_percent == 1.0), callback_data="set_price_rise:1.0"),
-                InlineKeyboardButton(self._mark("+1.2%", s.price_rise_percent == 1.2), callback_data="set_price_rise:1.2"),
                 InlineKeyboardButton(self._mark("+2%", s.price_rise_percent == 2.0), callback_data="set_price_rise:2.0"),
                 InlineKeyboardButton(self._mark("+3%", s.price_rise_percent == 3.0), callback_data="set_price_rise:3.0"),
+                InlineKeyboardButton(self._mark("+5%", s.price_rise_percent == 5.0), callback_data="set_price_rise:5.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("🔴-0.5%", s.price_drop_percent == 0.5), callback_data="set_price_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.price_drop_percent == 1.0), callback_data="set_price_drop:1.0"),
-                InlineKeyboardButton(self._mark("-1.2%", s.price_drop_percent == 1.2), callback_data="set_price_drop:1.2"),
                 InlineKeyboardButton(self._mark("-2%", s.price_drop_percent == 2.0), callback_data="set_price_drop:2.0"),
                 InlineKeyboardButton(self._mark("-3%", s.price_drop_percent == 3.0), callback_data="set_price_drop:3.0"),
+                InlineKeyboardButton(self._mark("-5%", s.price_drop_percent == 5.0), callback_data="set_price_drop:5.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI 50k", s.min_open_interest == 50000), callback_data="set_min_oi:50000"),
                 InlineKeyboardButton(self._mark("100k", s.min_open_interest == 100000), callback_data="set_min_oi:100000"),
-                InlineKeyboardButton(self._mark("150k", s.min_open_interest == 150000), callback_data="set_min_oi:150000"),
                 InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
-            ],
-            [
-                InlineKeyboardButton(self._mark("Приток 10k", s.min_oi_change_usd == 10000 and (s.max_oi_change_usd is None or s.max_oi_change_usd <= 0)), callback_data="set_oi_range:10000-"),
-                InlineKeyboardButton(self._mark("15k–50k", self._oi_flow_range_matches(15000, 50000, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:15000-50000"),
-                InlineKeyboardButton(self._mark("20k–∞", self._oi_flow_range_matches(20000, None, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:20000-"),
-                InlineKeyboardButton(self._mark("20k–75k", self._oi_flow_range_matches(20000, 75000, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:20000-75000"),
             ],
             [
                 InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),
@@ -1153,34 +924,6 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("🔥≤1", s.priority_score_max == 1), callback_data="set_priority:1"),
                 InlineKeyboardButton(self._mark("≤2", s.priority_score_max == 2), callback_data="set_priority:2"),
                 InlineKeyboardButton(self._mark("≤3", s.priority_score_max == 3), callback_data="set_priority:3"),
-            ],
-            [
-                InlineKeyboardButton(self._mark("🎯50%", s.min_probability_percent == 50), callback_data="set_prob:50"),
-                InlineKeyboardButton(self._mark("60%", s.min_probability_percent == 60), callback_data="set_prob:60"),
-                InlineKeyboardButton(self._mark("70%", s.min_probability_percent == 70), callback_data="set_prob:70"),
-                InlineKeyboardButton(self._mark("80%", s.min_probability_percent == 80), callback_data="set_prob:80"),
-            ],
-            [
-                InlineKeyboardButton(self._mark("Ф≥1", s.min_probability_factors_passed == 1), callback_data="set_prob_factors:1"),
-                InlineKeyboardButton(self._mark("≥2", s.min_probability_factors_passed == 2), callback_data="set_prob_factors:2"),
-                InlineKeyboardButton(self._mark("≥3", s.min_probability_factors_passed == 3), callback_data="set_prob_factors:3"),
-                InlineKeyboardButton(self._mark("≥4", s.min_probability_factors_passed == 4), callback_data="set_prob_factors:4"),
-            ],
-            [
-                InlineKeyboardButton(
-                    self._mark(
-                        f"Фильтр {'ON' if s.probability_filter_enabled else 'OFF'}",
-                        s.probability_filter_enabled,
-                    ),
-                    callback_data="toggle_prob_filter",
-                ),
-                InlineKeyboardButton(
-                    self._mark(
-                        f"Строгий {'ON' if s.probability_strict else 'OFF'}",
-                        s.probability_strict,
-                    ),
-                    callback_data="toggle_prob_strict",
-                ),
             ],
             [
                 InlineKeyboardButton(self._mark(f"Binance {'ON' if s.enabled_binance else 'OFF'}", s.enabled_binance), callback_data="toggle_binance"),

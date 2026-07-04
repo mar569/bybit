@@ -1,5 +1,5 @@
 {
-  "settings_version": 12,
+  "settings_version": 13,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -13,7 +13,6 @@
   "price_rise_percent": 0.8,
   "price_drop_percent": 0.8,
 
-  "pulse_enabled": true,
   "pulse_period_minutes": 5,
   "pulse_oi_rise_percent": 0.8,
   "pulse_oi_drop_percent": 0.8,
@@ -29,22 +28,26 @@
 
   "min_open_interest": 75000,
   "min_oi_change_usd": 25000,
-  "max_oi_change_usd": null,
   "require_oi_for_price_only": true,
   "require_both_oi_and_price": true,
+  "short_squeeze_min_price": 4.0,
+  "short_squeeze_max_oi_change": -0.8,
 
   "signal_cooldown_seconds": 90,
   "mega_cooldown_seconds": 30,
   "priority_score_max": 3,
   "min_signal_score": 1.0,
 
-  "min_probability_percent": 70,
-  "probability_filter_enabled": true,
-  "probability_strict": false,
-  "min_probability_factors_passed": 1,
+  "binance_oi_rise_percent": null,
+  "binance_price_rise_percent": null,
+  "bybit_oi_rise_percent": null,
+  "bybit_price_rise_percent": null,
 
   "telegram_max_per_minute": 10,
   "telegram_min_interval_seconds": 2.0,
+  "min_probability_percent": 70,
+  "probability_filter_enabled": true,
+  "outcome_tracking_enabled": true,
   "scan_interval_seconds": 1,
 
   "liquidation_alerts_enabled": true,

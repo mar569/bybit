@@ -111,8 +111,7 @@ class BybitLiquidationTracker:
             if not self._enabled():
                 await asyncio.sleep(2)
                 continue
-            symbols = self._get_symbols()
-            if not symbols:
+            if not self._get_symbols():
                 logger.info("Bybit liquidation: waiting for symbol list...")
                 await asyncio.sleep(3)
                 continue

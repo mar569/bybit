@@ -18,17 +18,12 @@ SET_HELP = (
     "/set pulse_oi 1 — OI% для пульса\n"
     "/set pulse_price 0.5 — цена% для пульса\n"
     "/set min_oi 100000 — мин. OI в USD\n"
-    "/set min_oi_change 20000 — мин. приток OI в USD\n"
-    "/set max_oi_change 50000 — макс. приток OI (0 = без верха)\n"
-    "/set oi_flow 15000 50000 — диапазон притока OI (min max; max=0 без верха)\n"
+    "/set min_oi_change 15000 — мин. приток OI в USD\n"
     "/set min_volume 0\n"
     "/set top 50 — топ монет по объёму (0 = все)\n"
-    "/set cooldown 300 — пауза между повторами по одной монете (идеал: 300с)\n"
-    "/set mega_cooldown 300 — пауза между мега-сигналами\n"
-    "/set prob 50 — мин. вероятность для уведомления (дефолт 50%)\n"
-    "/set prob_strict on — тот же порог для ВСЕХ типов (вкл. breakout)\n"
-    "/set max_score 4 — не слать поздние (score>4)\n"
-    "/set daily_cap 2 — макс. сигналов на монету в день\n"
+    "/set cooldown 60\n"
+    "/set mega_cooldown 45 — пауза между мега-сигналами\n"
+    "/set prob 70 — мин. вероятность для уведомления\n"
     "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
@@ -69,17 +64,11 @@ GLOBAL_ALIASES: dict[str, str] = {
     "pulse_price_drop": "pulse_price_drop_percent",
     "min_oi": "min_open_interest",
     "min_oi_change": "min_oi_change_usd",
-    "max_oi_change": "max_oi_change_usd",
-    "oi_flow": "oi_flow_range",
     "min_volume": "min_volume",
     "top": "top_n_symbols",
     "topn": "top_n_symbols",
     "cooldown": "signal_cooldown_seconds",
     "mega_cooldown": "mega_cooldown_seconds",
-    "max_score": "max_signal_score",
-    "daily_cap": "max_signals_per_symbol_per_day",
-    "prob_strict": "probability_strict",
-    "prob_factors": "min_probability_factors_passed",
     "chart": "signal_chart_source",
     "chart_src": "signal_chart_source",
     "compact": "signal_message_compact",
@@ -116,12 +105,9 @@ INT_FIELDS = {
     "pulse_period_minutes",
     "signal_cooldown_seconds",
     "mega_cooldown_seconds",
-    "max_signal_score",
-    "max_signals_per_symbol_per_day",
-    "min_probability_factors_passed",
+    "liquidation_cooldown_seconds",
     "top_n_symbols",
     "priority_score_max",
-    "liquidation_cooldown_seconds",
     "binance_oi_period_minutes",
     "binance_long_period_minutes",
     "binance_short_period_minutes",
@@ -195,33 +181,6 @@ def parse_set_command(args: list[str]) -> SetResult:
         return SetResult(False, "Формат: /set <параметр> <значение>", {})
 
     key_alias = args[0].lower()
-    if not exchange and key_alias == "oi_flow":
-        if len(args) < 3:
-            return SetResult(
-                False,
-                "Формат: /set oi_flow <min> <max> (max=0 — без верхнего лимита)",
-                {},
-            )
-        try:
-            min_val = float(args[1])
-            max_raw = float(args[2])
-        except ValueError:
-            return SetResult(False, "Некорректные числа для диапазона притока OI.", {})
-        if min_val < 0:
-            return SetResult(False, "Минимум не может быть отрицательным.", {})
-        max_val: float | None = max_raw if max_raw > 0 else None
-        if max_val is not None and max_val < min_val:
-            return SetResult(False, "Макс. должен быть ≥ мин. или 0 (без лимита).", {})
-        if max_val is None:
-            display = f"{min_val:,.0f} – ∞".replace(",", " ")
-        else:
-            display = f"{min_val:,.0f} – {max_val:,.0f}".replace(",", " ")
-        return SetResult(
-            True,
-            f"✅ Приток OI → <b>{display} $</b>",
-            {"min_oi_change_usd": min_val, "max_oi_change_usd": max_val},
-        )
-
     raw_value = args[1]
 
     try:
@@ -234,8 +193,6 @@ def parse_set_command(args: list[str]) -> SetResult:
             field = GLOBAL_ALIASES.get(key_alias)
             if not field:
                 return SetResult(False, f"Неизвестный параметр: {key_alias}. /set help", {})
-            if field == "oi_flow_range":
-                return SetResult(False, "Используйте: /set oi_flow <min> <max>", {})
 
         if field == "top_n_symbols":
             value: Any = int(float(raw_value))
@@ -251,12 +208,6 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_filter_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
-        elif field == "probability_strict":
-            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
-        elif field == "max_signal_score":
-            value = int(float(raw_value))
-            if value <= 0:
-                value = None
         elif field == "signal_message_compact":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
@@ -267,10 +218,6 @@ def parse_set_command(args: list[str]) -> SetResult:
                     "График: <code>tradingview</code> | <code>coinglass</code> | <code>generated</code>",
                     {},
                 )
-        elif field == "max_oi_change_usd":
-            value = float(raw_value)
-            if value <= 0:
-                value = None
         elif field in INT_FIELDS or field.endswith("_period_minutes"):
             value = int(float(raw_value))
             if field in {"oi_period_minutes", "long_period_minutes", "short_period_minutes", "pulse_period_minutes"}:
