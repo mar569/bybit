@@ -358,6 +358,11 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
+            self._reset_daily_counts_if_needed()
+            daily_cap = settings.max_signals_per_symbol_per_day
+            if daily_cap > 0 and self.daily_signal_counts.get(key, 0) >= daily_cap:
+                return
+
             if is_breakout or is_reversal:
                 score = 1 if is_breakout else (
                     1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
@@ -372,6 +377,10 @@ class SignalEngine:
                 )
 
             if not is_breakout and not is_reversal and settings.min_signal_score and score < settings.min_signal_score:
+                return
+
+            max_score = settings.max_signal_score
+            if max_score is not None and max_score > 0 and score > max_score:
                 return
 
             lookback_seconds = changes.lookback_seconds
@@ -407,9 +416,6 @@ class SignalEngine:
             except Exception:
                 vol_spike = False
 
-            self._reset_daily_counts_if_needed()
-            self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
-            self.last_signal_time[cooldown_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             market_structure_dict = None
@@ -508,7 +514,10 @@ class SignalEngine:
             ]
 
             if settings.probability_filter_enabled:
-                bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
+                bypass = (
+                    signal.signal_type in PROBABILITY_BYPASS_TYPES
+                    and not settings.probability_strict
+                )
                 if not bypass and assessment.percent < settings.min_probability_percent:
                     logger.info(
                         "Signal filtered %s %s: probability %.0f%% < %.0f%%",
@@ -518,6 +527,26 @@ class SignalEngine:
                         settings.min_probability_percent,
                     )
                     return
+                min_factors = settings.min_probability_factors_passed
+                if (
+                    not bypass
+                    and min_factors > 0
+                    and assessment.percent >= settings.min_probability_percent
+                ):
+                    passed = sum(1 for f in assessment.factors if f.passed)
+                    if passed < min_factors:
+                        logger.info(
+                            "Signal filtered %s %s: only %d/%d strong factors",
+                            exchange,
+                            symbol,
+                            passed,
+                            min_factors,
+                        )
+                        return
+
+            self._reset_daily_counts_if_needed()
+            self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
+            self.last_signal_time[cooldown_key] = now
 
             logger.info(
                 "Signal %s %s %s | OI %.2f%% | price %.2f%% | prob %.0f%% | %dm",
@@ -824,49 +853,50 @@ class SignalEngine:
                             ))
                             break
 
-        pulse_earlier = self._point_at_cutoff(
-            history, current.timestamp - settings.pulse_period_minutes * 60
-        )
-        if pulse_earlier is not None:
-            pulse = self._compute_changes(
-                current, pulse_earlier, settings.pulse_period_minutes * 60
+        if settings.pulse_enabled:
+            pulse_earlier = self._point_at_cutoff(
+                history, current.timestamp - settings.pulse_period_minutes * 60
             )
-            if (
-                pulse.oi_change_percent >= pulse_oi_up
-                and pulse.price_change_percent >= pulse_price_up
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="pulse_pump",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
-            if (
-                pulse.oi_change_percent <= -pulse_oi_down
-                and pulse.price_change_percent <= -pulse_price_down
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="pulse_dump",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
-            if (
-                pulse.price_change_percent >= squeeze_min
-                and pulse.oi_change_percent <= settings.short_squeeze_max_oi_change
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="short_squeeze",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
+            if pulse_earlier is not None:
+                pulse = self._compute_changes(
+                    current, pulse_earlier, settings.pulse_period_minutes * 60
+                )
+                if (
+                    pulse.oi_change_percent >= pulse_oi_up
+                    and pulse.price_change_percent >= pulse_price_up
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="pulse_pump",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
+                if (
+                    pulse.oi_change_percent <= -pulse_oi_down
+                    and pulse.price_change_percent <= -pulse_price_down
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="pulse_dump",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
+                if (
+                    pulse.price_change_percent >= squeeze_min
+                    and pulse.oi_change_percent <= settings.short_squeeze_max_oi_change
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="short_squeeze",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
 
         long_earlier = self._point_at_cutoff(
             history, current.timestamp - thresholds.long_period_minutes * 60

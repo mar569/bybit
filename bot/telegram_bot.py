@@ -234,14 +234,15 @@ class TelegramBot:
         if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
             return
 
-        priority_max = self.settings_manager.settings.priority_score_max
+        settings = self.settings_manager.settings
+        priority_max = settings.priority_score_max
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_priority = (
             is_vertical
             or is_reversal
-            or prob >= 75
+            or prob >= 80
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
@@ -283,10 +284,12 @@ class TelegramBot:
         if not should_send:
             return
 
-        if (
-            settings := self.settings_manager.settings
-        ).probability_filter_enabled and not skip_dedupe and not is_vertical and not is_reversal:
-            if prob < settings.min_probability_percent:
+        if settings.probability_filter_enabled and not skip_dedupe:
+            bypass = (
+                (is_vertical or is_reversal)
+                and not settings.probability_strict
+            )
+            if not bypass and prob < settings.min_probability_percent:
                 logger.info(
                     "Telegram skip %s %s: probability %.0f%% < %.0f%%",
                     signal.exchange,
@@ -295,6 +298,24 @@ class TelegramBot:
                     settings.min_probability_percent,
                 )
                 return
+            if not bypass and settings.min_probability_factors_passed > 0:
+                factors = signal.details.get("probability_factors") or []
+                passed = sum(
+                    1 for f in factors
+                    if isinstance(f, dict) and f.get("passed")
+                )
+                if (
+                    prob >= settings.min_probability_percent
+                    and passed < settings.min_probability_factors_passed
+                ):
+                    logger.info(
+                        "Telegram skip %s %s: only %d/%d strong factors",
+                        signal.exchange,
+                        signal.symbol,
+                        passed,
+                        settings.min_probability_factors_passed,
+                    )
+                    return
 
         sent_any = False
         if settings.signal_chart_enabled:
@@ -661,8 +682,9 @@ class TelegramBot:
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
             f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
-            f"🏆 Топ монет: <b>{top_label}</b> | Ранность≥<b>{s.min_signal_score}</b>/10\n"
-            f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
+            f"🏆 Топ монет: <b>{top_label}</b> | Ранность <b>{s.min_signal_score}–{s.max_signal_score or '∞'}</b>/10\n"
+            f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b> | "
+            f"≤<b>{s.max_signals_per_symbol_per_day}</b>/день на монету\n"
             f"{self._exchange_effective_line('Binance', 'Binance')}\n"
             f"{self._exchange_effective_line('Bybit', 'Bybit')}\n"
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
@@ -672,7 +694,9 @@ class TelegramBot:
             f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
             f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
-            f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n\n"
+            f"(мин. <b>{s.min_probability_percent:.0f}%</b>"
+            f"{', строгий' if s.probability_strict else ''}"
+            f", ≥<b>{s.min_probability_factors_passed}</b> факторов)\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")

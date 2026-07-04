@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -17,6 +17,7 @@ PRESERVE_ON_MIGRATE = frozenset({
     "enabled_binance",
     "enabled_bybit",
     "top_n_symbols",
+    "telegram_max_per_minute",
 })
 
 # При изменении глобального порога сбрасываем биржевые override — иначе кнопки в боте «не работают».
@@ -75,82 +76,87 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной LONG-профиль (OI + цена, качественный приток)
+    # Основной LONG-профиль — пресет «идеал»: OI+цена согласованы, крупный приток
     oi_period_minutes: int = 10
     long_period_minutes: int = 10
     short_period_minutes: int = 10
-    oi_rise_percent: float = 3.0
-    oi_drop_percent: float = 3.0
-    price_rise_percent: float = 0.8
-    price_drop_percent: float = 0.8
+    oi_rise_percent: float = 4.0
+    oi_drop_percent: float = 4.0
+    price_rise_percent: float = 1.2
+    price_drop_percent: float = 1.2
 
-    # Ранний пульс — ловим старт движения на альтах
+    # Ранний пульс — только при сильном совпадении с глобальными порогами
+    pulse_enabled: bool = True
     pulse_period_minutes: int = 5
-    pulse_oi_rise_percent: float = 0.8
-    pulse_oi_drop_percent: float = 0.8
-    pulse_price_rise_percent: float = 0.4
-    pulse_price_drop_percent: float = 0.4
+    pulse_oi_rise_percent: float = 2.5
+    pulse_oi_drop_percent: float = 2.5
+    pulse_price_rise_percent: float = 0.9
+    pulse_price_drop_percent: float = 0.9
 
-    # Мега-пампы: 5–100% за 5–10 минут
+    # Мега-пампы: только крупные движения (≥8%)
     flash_enabled: bool = True
     flash_window_minutes: tuple[int, ...] = (5, 10)
-    flash_price_tiers: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0)
-    flash_min_oi_rise_percent: float = 1.0
-    flash_min_oi_drop_percent: float = 1.0
-    flash_bypass_oi_tier_pct: float = 15.0
+    flash_price_tiers: tuple[float, ...] = (8.0, 12.0, 18.0, 25.0, 35.0, 50.0, 100.0)
+    flash_min_oi_rise_percent: float = 2.5
+    flash_min_oi_drop_percent: float = 2.5
+    flash_bypass_oi_tier_pct: float = 20.0
 
-    # Качество сигнала: деньги в OI, не просто цена
-    min_oi_change_usd: float = 25_000.0
-    short_squeeze_min_price: float = 4.0
-    short_squeeze_max_oi_change: float = -0.8
+    # Качество сигнала: реальный приток капитала в OI
+    min_oi_change_usd: float = 75_000.0
+    short_squeeze_min_price: float = 5.0
+    short_squeeze_max_oi_change: float = -1.2
     require_oi_for_price_only: bool = True
     require_both_oi_and_price: bool = True
     respect_global_floors: bool = True
-    mega_cooldown_seconds: int = 30
+    mega_cooldown_seconds: int = 300
 
     # Вертикальный памп: флет → взлёт (вне порогов OI/цены из кнопок)
     breakout_enabled: bool = True
     breakout_bypass_top_n: bool = True
     breakout_consolidation_minutes: int = 25
     breakout_spike_minutes: int = 3
-    breakout_max_flat_percent: float = 2.0
-    breakout_min_spike_percent: float = 1.8
-    breakout_min_dump_percent: float = 1.8
-    breakout_velocity_multiplier: float = 3.5
-    breakout_min_liquidity_oi_usd: float = 30_000.0
-    breakout_cooldown_seconds: int = 120
+    breakout_max_flat_percent: float = 1.8
+    breakout_min_spike_percent: float = 2.5
+    breakout_min_dump_percent: float = 2.5
+    breakout_velocity_multiplier: float = 4.0
+    breakout_min_liquidity_oi_usd: float = 80_000.0
+    breakout_cooldown_seconds: int = 300
 
     # Резкий разворот: памп → слив (или дамп → отскок) без 25м флета
     reversal_enabled: bool = True
     reversal_bypass_top_n: bool = True
     reversal_window_minutes: int = 10
     reversal_spike_minutes: int = 3
-    reversal_peak_max_age_minutes: int = 6
-    reversal_min_prior_move_pct: float = 2.0
-    reversal_min_reversal_pct: float = 1.5
-    reversal_min_liquidity_oi_usd: float = 25_000.0
-    reversal_cooldown_seconds: int = 90
+    reversal_peak_max_age_minutes: int = 5
+    reversal_min_prior_move_pct: float = 3.0
+    reversal_min_reversal_pct: float = 2.0
+    reversal_min_liquidity_oi_usd: float = 60_000.0
+    reversal_cooldown_seconds: int = 300
 
-    min_open_interest: float = 75_000.0
+    min_open_interest: float = 150_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 90
-    volume_spike_multiplier: float = 4.0
-    price_pump_threshold_pct: float = 8.0
+    signal_cooldown_seconds: int = 300
+    volume_spike_multiplier: float = 5.0
+    price_pump_threshold_pct: float = 10.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
     min_signal_score: float = 1.0
-    top_n_symbols: int | None = 150
-    priority_score_max: int = 3
+    max_signal_score: int | None = 4
+    max_signals_per_symbol_per_day: int = 2
+    top_n_symbols: int | None = 250
+    priority_score_max: int = 2
     signals_enabled: bool = True
-    price_only_min_percent: float = 3.0
-    telegram_max_per_minute: int = 10
-    telegram_min_interval_seconds: float = 2.0
+    price_only_min_percent: float = 4.0
+    telegram_max_per_minute: int = 5
+    telegram_min_interval_seconds: float = 3.0
 
-    min_probability_percent: float = 70.0
+    min_probability_percent: float = 80.0
     probability_filter_enabled: bool = True
+    probability_strict: bool = True
+    min_probability_factors_passed: int = 5
     outcome_tracking_enabled: bool = True
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
@@ -277,6 +283,7 @@ class ScannerSettings:
             price_rise_percent=float(base["price_rise_percent"]),
             price_drop_percent=float(base["price_drop_percent"]),
             pulse_period_minutes=int(base["pulse_period_minutes"]),
+            pulse_enabled=bool(base.get("pulse_enabled", True)),
             pulse_oi_rise_percent=float(base["pulse_oi_rise_percent"]),
             pulse_oi_drop_percent=float(base["pulse_oi_drop_percent"]),
             pulse_price_rise_percent=float(base["pulse_price_rise_percent"]),
@@ -327,14 +334,26 @@ class ScannerSettings:
             price_pump_window_minutes=int(base.get("price_pump_window_minutes", 5)),
             cvd_divergence_threshold=float(base.get("cvd_divergence_threshold", -0.1)),
             min_signal_score=float(base.get("min_signal_score", 1.0)),
+            max_signal_score=(
+                int(base["max_signal_score"])
+                if base.get("max_signal_score") is not None
+                else None
+            ),
+            max_signals_per_symbol_per_day=int(
+                base.get("max_signals_per_symbol_per_day", 2)
+            ),
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(base.get("priority_score_max", 3)),
             signals_enabled=bool(base.get("signals_enabled", True)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
-            min_probability_percent=float(base.get("min_probability_percent", 70.0)),
+            min_probability_percent=float(base.get("min_probability_percent", 80.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
+            probability_strict=bool(base.get("probability_strict", True)),
+            min_probability_factors_passed=int(
+                base.get("min_probability_factors_passed", 5)
+            ),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),

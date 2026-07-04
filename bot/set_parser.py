@@ -21,9 +21,12 @@ SET_HELP = (
     "/set min_oi_change 15000 — мин. приток OI в USD\n"
     "/set min_volume 0\n"
     "/set top 50 — топ монет по объёму (0 = все)\n"
-    "/set cooldown 60\n"
-    "/set mega_cooldown 45 — пауза между мега-сигналами\n"
-    "/set prob 70 — мин. вероятность для уведомления\n"
+    "/set cooldown 300 — пауза между повторами по одной монете (идеал: 300с)\n"
+    "/set mega_cooldown 300 — пауза между мега-сигналами\n"
+    "/set prob 80 — мин. вероятность для уведомления\n"
+    "/set prob_strict on — 80%+ для ВСЕХ типов сигналов\n"
+    "/set max_score 4 — не слать поздние (score>4)\n"
+    "/set daily_cap 2 — макс. сигналов на монету в день\n"
     "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
@@ -62,6 +65,10 @@ GLOBAL_ALIASES: dict[str, str] = {
     "topn": "top_n_symbols",
     "cooldown": "signal_cooldown_seconds",
     "mega_cooldown": "mega_cooldown_seconds",
+    "max_score": "max_signal_score",
+    "daily_cap": "max_signals_per_symbol_per_day",
+    "prob_strict": "probability_strict",
+    "prob_factors": "min_probability_factors_passed",
     "chart": "signal_chart_source",
     "chart_src": "signal_chart_source",
     "compact": "signal_message_compact",
@@ -91,6 +98,9 @@ INT_FIELDS = {
     "pulse_period_minutes",
     "signal_cooldown_seconds",
     "mega_cooldown_seconds",
+    "max_signal_score",
+    "max_signals_per_symbol_per_day",
+    "min_probability_factors_passed",
     "top_n_symbols",
     "priority_score_max",
     "binance_oi_period_minutes",
@@ -185,6 +195,12 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл", "start", "resume"}
         elif field == "probability_filter_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
+        elif field == "probability_strict":
+            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
+        elif field == "max_signal_score":
+            value = int(float(raw_value))
+            if value <= 0:
+                value = None
         elif field == "signal_message_compact":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
