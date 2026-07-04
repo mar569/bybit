@@ -30,6 +30,11 @@ from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_d
 from .chart_renderer import get_signal_chart_png
 from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
+from .liquidation_alerts import (
+    LiquidationAlertEvent,
+    coinglass_url,
+    format_liquidation_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +100,9 @@ class TelegramBot:
                     f"📈 LONG <b>{s.long_period_minutes}м</b> OI≥{s.oi_rise_percent}% | "
                     f"📉 SHORT <b>{s.short_period_minutes}м</b> OI≥{s.oi_drop_percent}%\n"
                     f"🚀 Мега: +{','.join(str(int(t)) for t in s.flash_price_tiers)}% за "
-                    f"{','.join(str(m) for m in s.flash_window_minutes)}м"
+                    f"{','.join(str(m) for m in s.flash_window_minutes)}м\n"
+                    f"💥 Ликвидации: {'вкл' if s.liquidation_alerts_enabled else 'выкл'} "
+                    f"(≥${int(s.liquidation_min_usd):,} · Binance+Bybit)".replace(",", " ")
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
@@ -377,6 +384,30 @@ class TelegramBot:
                 await self.redis.ltrim("signals", -500, -1)
             except Exception:
                 logger.exception("Failed to persist signal to Redis")
+
+    async def dispatch_liquidation_alert(
+        self,
+        event: LiquidationAlertEvent,
+        event_count: int,
+        total_usd: float,
+    ) -> None:
+        if self.application is None:
+            return
+        settings = self.settings_manager.settings
+        if not settings.liquidation_alerts_enabled:
+            return
+
+        message = format_liquidation_alert(
+            event,
+            event_count,
+            total_usd,
+            show_reversal_hint=settings.liquidation_show_reversal_hint,
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(event.symbol, event.exchange))],
+        ])
+        notify_chat_id = self.config.notification_chat_id
+        await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):

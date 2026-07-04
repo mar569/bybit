@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 4
+SETTINGS_VERSION = 5
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -171,6 +171,14 @@ class ScannerSettings:
 
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
+
+    # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
+    liquidation_alerts_enabled: bool = True
+    liquidation_min_usd: float = 40_000.0
+    liquidation_burst_window_seconds: float = 2.0
+    liquidation_cooldown_seconds: int = 60
+    liquidation_all_symbols: bool = True
+    liquidation_show_reversal_hint: bool = True
 
     # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
@@ -362,6 +370,16 @@ class ScannerSettings:
             signal_chart_hours=int(base.get("signal_chart_hours", 5)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
+            liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
+            liquidation_min_usd=float(base.get("liquidation_min_usd", 40_000.0)),
+            liquidation_burst_window_seconds=float(
+                base.get("liquidation_burst_window_seconds", 2.0)
+            ),
+            liquidation_cooldown_seconds=int(base.get("liquidation_cooldown_seconds", 60)),
+            liquidation_all_symbols=bool(base.get("liquidation_all_symbols", True)),
+            liquidation_show_reversal_hint=bool(
+                base.get("liquidation_show_reversal_hint", True)
+            ),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),

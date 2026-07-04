@@ -6,9 +6,11 @@ import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Callable
+from typing import Awaitable, Callable
 
 from websockets import connect
+
+from .liquidation_alerts import LiquidationAlertEvent, normalize_bybit_side
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +70,11 @@ class BybitLiquidationTracker:
         get_symbols: Callable[[], list[str]],
         *,
         enabled: Callable[[], bool] | None = None,
+        on_event: Callable[[LiquidationAlertEvent], Awaitable[None]] | None = None,
     ) -> None:
         self._get_symbols = get_symbols
         self._enabled = enabled or (lambda: True)
+        self._on_event = on_event
         self._running = False
         self._events: dict[str, deque[LiquidationEvent]] = defaultdict(
             lambda: deque(maxlen=MAX_EVENTS_PER_SYMBOL)
@@ -159,6 +163,7 @@ class BybitLiquidationTracker:
         rows = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
         now = time.time()
 
+        new_events: list[LiquidationAlertEvent] = []
         async with self._lock:
             for row in rows:
                 if not isinstance(row, dict):
@@ -173,17 +178,32 @@ class BybitLiquidationTracker:
                     continue
                 if size <= 0 or price <= 0:
                     continue
-                side = str(row.get("S", ""))
+                side_raw = str(row.get("S", ""))
                 ts_ms = row.get("T")
                 ts = float(ts_ms) / 1000.0 if ts_ms else now
+                usd_value = size * price
                 self._events[symbol].append(LiquidationEvent(
                     timestamp=ts,
                     symbol=symbol,
-                    side=side,
+                    side=side_raw,
                     size=size,
                     price=price,
-                    usd_value=size * price,
+                    usd_value=usd_value,
                 ))
+                normalized = normalize_bybit_side(side_raw)
+                if normalized is not None and self._on_event is not None:
+                    new_events.append(LiquidationAlertEvent(
+                        exchange="Bybit",
+                        timestamp=ts,
+                        symbol=symbol,
+                        side=normalized,
+                        usd_value=usd_value,
+                        price=price,
+                    ))
+
+        if self._on_event is not None:
+            for alert_event in new_events:
+                await self._on_event(alert_event)
 
     def stop(self) -> None:
         self._running = False

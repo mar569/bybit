@@ -56,5 +56,12 @@
 
   "telegram_max_per_minute": 5,
   "telegram_min_interval_seconds": 3.0,
-  "scan_interval_seconds": 1
+  "scan_interval_seconds": 1,
+
+  "liquidation_alerts_enabled": true,
+  "liquidation_min_usd": 40000,
+  "liquidation_burst_window_seconds": 2.0,
+  "liquidation_cooldown_seconds": 60,
+  "liquidation_all_symbols": true,
+  "liquidation_show_reversal_hint": true
 }

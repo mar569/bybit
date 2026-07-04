@@ -31,6 +31,13 @@ SET_HELP = (
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
     "/set signals on — возобновить уведомления\n\n"
+    "Ликвидации (REKT-алерты):\n"
+    "/set liq on — включить алерты по ликвидациям\n"
+    "/set liq off — выключить\n"
+    "/set liq_min 40000 — мин. сумма всплеска в USD\n"
+    "/set liq_window 2 — окно агрегации (сек)\n"
+    "/set liq_cooldown 60 — пауза между алертами по монете\n"
+    "/set liq_all on — все монеты Bybit (не только топ)\n\n"
     "По биржам (переопределяют глобальные):\n"
     "/set binance oi 3\n"
     "/set binance period 10\n"
@@ -77,6 +84,13 @@ GLOBAL_ALIASES: dict[str, str] = {
     "score": "min_signal_score",
     "priority": "priority_score_max",
     "signals": "signals_enabled",
+    "liq": "liquidation_alerts_enabled",
+    "liq_alerts": "liquidation_alerts_enabled",
+    "liq_min": "liquidation_min_usd",
+    "liq_window": "liquidation_burst_window_seconds",
+    "liq_cooldown": "liquidation_cooldown_seconds",
+    "liq_all": "liquidation_all_symbols",
+    "liq_hint": "liquidation_show_reversal_hint",
 }
 
 EXCHANGE_ALIASES: dict[str, str] = {
@@ -103,6 +117,7 @@ INT_FIELDS = {
     "min_probability_factors_passed",
     "top_n_symbols",
     "priority_score_max",
+    "liquidation_cooldown_seconds",
     "binance_oi_period_minutes",
     "binance_long_period_minutes",
     "binance_short_period_minutes",
@@ -133,6 +148,8 @@ FLOAT_FIELDS = {
     "bybit_price_rise_percent",
     "bybit_price_drop_percent",
     "min_probability_percent",
+    "liquidation_min_usd",
+    "liquidation_burst_window_seconds",
 }
 
 
@@ -193,6 +210,12 @@ def parse_set_command(args: list[str]) -> SetResult:
                 value = None
         elif field == "signals_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл", "start", "resume"}
+        elif field in {
+            "liquidation_alerts_enabled",
+            "liquidation_all_symbols",
+            "liquidation_show_reversal_hint",
+        }:
+            value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_filter_enabled":
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_strict":

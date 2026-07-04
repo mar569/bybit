@@ -13,6 +13,8 @@ from .telegram_bot import TelegramBot
 from .exchanges.binance import BinanceScanner
 from .exchanges.bybit import BybitScanner
 from .bybit_liquidations import BybitLiquidationTracker
+from .binance_liquidations import BinanceLiquidationTracker
+from .liquidation_alerts import LiquidationAlertService
 from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
 
@@ -49,9 +51,34 @@ async def main() -> None:
         scan_interval=scan_interval,
         enabled=bybit_enabled,
     )
+
+    liquidation_alerts = LiquidationAlertService(
+        lambda: settings.settings,
+        telegram.dispatch_liquidation_alert,
+    )
+
+    def liquidation_symbols() -> list[str]:
+        if settings.settings.liquidation_all_symbols and bybit.symbols:
+            return bybit.symbols
+        return scanner.get_bybit_top_symbols()
+
+    def liquidation_bybit_enabled() -> bool:
+        return bybit_enabled() and settings.settings.liquidation_alerts_enabled
+
+    def liquidation_binance_enabled() -> bool:
+        return binance_enabled() and settings.settings.liquidation_alerts_enabled
+
+    async def on_liquidation_event(event) -> None:
+        await liquidation_alerts.on_liquidation(event)
+
     liquidation_tracker = BybitLiquidationTracker(
-        scanner.get_bybit_top_symbols,
-        enabled=bybit_enabled,
+        liquidation_symbols,
+        enabled=liquidation_bybit_enabled,
+        on_event=on_liquidation_event,
+    )
+    binance_liquidation_tracker = BinanceLiquidationTracker(
+        enabled=liquidation_binance_enabled,
+        on_event=on_liquidation_event,
     )
     scanner.attach_liquidation_tracker(liquidation_tracker)
 
@@ -77,6 +104,7 @@ async def main() -> None:
     eval_task: asyncio.Task | None = None
     outcome_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
+    binance_liq_task: asyncio.Task | None = None
     try:
         await telegram.start()
         if telegram.redis is not None:
@@ -84,6 +112,7 @@ async def main() -> None:
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         liq_task = asyncio.create_task(liquidation_tracker.run())
+        binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())
         scanner_task = asyncio.create_task(run_scan())
 
         if sys.platform == "win32":
@@ -99,6 +128,7 @@ async def main() -> None:
         binance.stop()
         bybit.stop()
         liquidation_tracker.stop()
+        binance_liquidation_tracker.stop()
         await chart_capture_service.close()
         await telegram.stop()
         if scanner_task is not None:
@@ -109,8 +139,14 @@ async def main() -> None:
             outcome_task.cancel()
         if liq_task is not None:
             liq_task.cancel()
+        if binance_liq_task is not None:
+            binance_liq_task.cancel()
         await asyncio.gather(
-            *(t for t in (scanner_task, eval_task, outcome_task, liq_task) if t is not None),
+            *(
+                t
+                for t in (scanner_task, eval_task, outcome_task, liq_task, binance_liq_task)
+                if t is not None
+            ),
             return_exceptions=True,
         )
 
