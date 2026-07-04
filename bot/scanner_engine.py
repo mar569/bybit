@@ -292,6 +292,8 @@ class SignalEngine:
             "oi_rise_percent": settings.oi_rise_percent,
             "price_rise_percent": settings.price_rise_percent,
             "min_open_interest": settings.min_open_interest,
+            "min_oi_change_usd": settings.min_oi_change_usd,
+            "max_oi_change_usd": settings.max_oi_change_usd,
             "min_signal_score": settings.min_signal_score,
             "top_n_symbols": settings.top_n_symbols,
             "pairs_tracked": pairs_tracked,
@@ -340,6 +342,13 @@ class SignalEngine:
                 oi_flow_abs = abs(changes.oi_change_usd)
                 if oi_flow_abs < settings.min_oi_change_usd:
                     if candidate.signal_type not in {"price_pump", "price_dump"}:
+                        logger.info(
+                            "Signal filtered %s %s: OI flow %.0f$ < min %.0f$",
+                            exchange,
+                            symbol,
+                            oi_flow_abs,
+                            settings.min_oi_change_usd,
+                        )
                         return
                 max_flow = settings.max_oi_change_usd
                 if (
@@ -348,6 +357,13 @@ class SignalEngine:
                     and oi_flow_abs > max_flow
                     and candidate.signal_type not in {"price_pump", "price_dump"}
                 ):
+                    logger.info(
+                        "Signal filtered %s %s: OI flow %.0f$ > max %.0f$",
+                        exchange,
+                        symbol,
+                        oi_flow_abs,
+                        max_flow,
+                    )
                     return
 
             now = time.time()

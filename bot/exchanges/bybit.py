@@ -21,6 +21,8 @@ BYBIT_WS_LINEAR = "wss://stream.bybit.com/v5/public/linear"
 # Bybit allows many topics per connection; batch size for subscribe messages.
 WS_SUBSCRIBE_BATCH = 50
 SYMBOL_REFRESH_SECONDS = 3600
+REST_TIMEOUT_SECONDS = 45
+REST_DISPATCH_CONCURRENCY = 30
 
 
 class BybitScanner(ExchangeScanner):
@@ -76,7 +78,12 @@ class BybitScanner(ExchangeScanner):
         try:
             await self.load_symbols()
         except Exception as exc:
-            logger.warning("Bybit symbol refresh failed: %s", exc)
+            logger.warning(
+                "Bybit symbol refresh failed: %s: %s",
+                type(exc).__name__,
+                exc or "no details",
+                exc_info=exc if not str(exc) else None,
+            )
 
     async def _rest_poll_loop(self) -> None:
         while self._running:
@@ -88,25 +95,38 @@ class BybitScanner(ExchangeScanner):
                 await self._maybe_refresh_symbols()
                 await self._fetch_all_tickers()
             except Exception as exc:
-                logger.warning("Bybit REST poll failed: %s", exc)
+                logger.warning(
+                    "Bybit REST poll failed: %s: %s",
+                    type(exc).__name__,
+                    exc or "no details",
+                    exc_info=exc if not str(exc) else None,
+                )
 
             await asyncio.sleep(self._get_scan_interval())
 
     async def _fetch_all_tickers(self) -> None:
         params = {"category": "linear"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(BYBIT_TICKERS, params=params, timeout=30) as response:
+        timeout = aiohttp.ClientTimeout(total=REST_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(BYBIT_TICKERS, params=params) as response:
                 data = await response.json()
 
         if data.get("retCode") != 0:
             raise RuntimeError(f"Bybit tickers failed: {data.get('retMsg')}")
 
         known = set(self.symbols)
-        for item in data.get("result", {}).get("list", []):
-            symbol = item.get("symbol")
-            if not symbol or symbol not in known:
-                continue
-            await self._apply_ticker_payload(item, source="rest")
+        items = [
+            item
+            for item in data.get("result", {}).get("list", [])
+            if item.get("symbol") in known
+        ]
+        semaphore = asyncio.Semaphore(REST_DISPATCH_CONCURRENCY)
+
+        async def apply(item: dict[str, Any]) -> None:
+            async with semaphore:
+                await self._apply_ticker_payload(item, source="rest")
+
+        await asyncio.gather(*(apply(item) for item in items))
 
     async def _websocket_loop(self) -> None:
         while self._running:
@@ -117,8 +137,9 @@ class BybitScanner(ExchangeScanner):
             try:
                 async with connect(
                     BYBIT_WS_LINEAR,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=25,
+                    ping_timeout=30,
+                    close_timeout=10,
                     max_size=2**24,
                 ) as websocket:
                     logger.info("Bybit v5 websocket connected")
@@ -128,7 +149,11 @@ class BybitScanner(ExchangeScanner):
                             break
                         await self._handle_ws_message(message)
             except Exception as exc:
-                logger.warning("Bybit websocket disconnected: %s", exc)
+                logger.warning(
+                    "Bybit websocket disconnected: %s: %s",
+                    type(exc).__name__,
+                    exc or "no details",
+                )
                 await asyncio.sleep(5)
 
     async def _subscribe_all(self, websocket: Any) -> None:

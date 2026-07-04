@@ -43,14 +43,38 @@ EXCHANGE_LABEL = {
     "bybit": ("⚫", "ByBit"),
 }
 
-# (подпись кнопки, min USD, max USD или None = без верха)
-OI_FLOW_RANGES: tuple[tuple[str, float, float | None], ...] = (
-    ("10k–∞", 10_000, None),
-    ("15k–50k", 15_000, 50_000),
-    ("20k–∞", 20_000, None),
-    ("20k–75k", 20_000, 75_000),
-    ("25k–100k", 25_000, 100_000),
-)
+SCANNER_PRESETS: dict[str, dict[str, object]] = {
+    "soft": {
+        "oi_period_minutes": 5,
+        "long_period_minutes": 5,
+        "short_period_minutes": 5,
+        "oi_rise_percent": 1.0,
+        "oi_drop_percent": 1.0,
+        "price_rise_percent": 0.8,
+        "price_drop_percent": 0.8,
+        "min_oi_change_usd": 5_000.0,
+        "max_oi_change_usd": None,
+        "min_open_interest": 50_000.0,
+        "top_n_symbols": None,
+        "probability_filter_enabled": False,
+    },
+    "balanced": {
+        "oi_period_minutes": 5,
+        "long_period_minutes": 5,
+        "short_period_minutes": 5,
+        "oi_rise_percent": 1.5,
+        "oi_drop_percent": 1.5,
+        "price_rise_percent": 1.0,
+        "price_drop_percent": 1.0,
+        "min_oi_change_usd": 10_000.0,
+        "max_oi_change_usd": None,
+        "min_open_interest": 100_000.0,
+        "top_n_symbols": None,
+        "probability_filter_enabled": True,
+        "min_probability_percent": 50.0,
+        "min_probability_factors_passed": 1,
+    },
+}
 
 
 class TelegramBot:
@@ -535,15 +559,38 @@ class TelegramBot:
         d = self.scanner.get_diagnostics()
         s = self.settings_manager.settings
         signals_state = "✅ ВКЛ" if d["signals_enabled"] else "⏸ ВЫКЛ"
+        min_period = min(
+            int(d["long_period_minutes"]),
+            int(d["short_period_minutes"]),
+            s.pulse_period_minutes,
+        )
         warmup = (
             f"Готово к сигналам: <b>{d['pairs_ready']}</b> пар "
-            f"(нужна история от {s.pulse_period_minutes} мин для пульса)"
+            f"(нужна история ≥ <b>{min_period}</b> мин)"
         )
         if d["pairs_ready"] == 0:
             warmup += (
-                "\n⚠️ Подождите накопления истории или уменьшите период: "
-                "<code>/set period 5</code>"
+                "\n⚠️ Бот только запустился или история ещё копится. "
+                f"Подождите <b>{min_period}</b> мин или нажмите <b>🔓 Мягкий</b>."
             )
+
+        flow_line = self._format_oi_flow_range(
+            float(d["min_oi_change_usd"]),
+            d.get("max_oi_change_usd"),
+        )
+        max_flow = d.get("max_oi_change_usd")
+        flow_warn = ""
+        if max_flow is not None and float(max_flow) > 0:
+            flow_warn = (
+                f"\n⚠️ Верхний предел притока <b>{float(max_flow):,.0f} $</b> — "
+                "крупные движения отсекаются. Выберите <b>10k–∞</b> или <b>20k–∞</b>."
+            ).replace(",", " ")
+
+        prob_state = (
+            f"ON ({s.min_probability_percent:.0f}%, ≥{s.min_probability_factors_passed} ф.)"
+            if s.probability_filter_enabled
+            else "OFF"
+        )
 
         text = (
             "<b>📡 Диагностика сканера</b>\n\n"
@@ -555,14 +602,17 @@ class TelegramBot:
             f"<b>Пороги:</b>\n"
             f"LONG {d['long_period_minutes']}м | SHORT {d['short_period_minutes']}м | "
             f"Пульс {d['pulse_period_minutes']}м\n"
-            f"OI ≥ {d['oi_rise_percent']}% | Цена ≥ {d['price_rise_percent']}%\n"
-            f"Мин. OI: {d['min_open_interest']:,.0f} $ | Score ≥ {d['min_signal_score']}\n"
-            f"Топ монет: {d['top_n_symbols'] or 'все'}\n\n"
-            "<i>Если сигналов нет — попробуйте:</i>\n"
-            "<code>/set period 5</code>\n"
-            "<code>/set oi 1</code>\n"
-            "<code>/set price 0.5</code>\n"
-            "<code>/resume</code> (если на паузе)"
+            f"OI ≥ {d['oi_rise_percent']}% <b>и</b> цена ≥ {d['price_rise_percent']}% <b>вместе</b>\n"
+            f"Мин. OI: {d['min_open_interest']:,.0f} $ | Приток: <b>{flow_line}</b>\n"
+            f"Фильтр вероятности: <b>{prob_state}</b>\n"
+            f"Топ монет: {d['top_n_symbols'] or 'все'}\n"
+            f"{flow_warn}\n\n"
+            "<i>Рынок живой — при тишине чаще всего мешают:</i>\n"
+            "• диапазон притока с верхним пределом (15k–50k)\n"
+            "• OI+цена вместе при жёстких %\n"
+            "• история &lt; периода после перезапуска\n\n"
+            "<code>/test</code> — проверка Telegram\n"
+            "Кнопка <b>🔓 Мягкий</b> в настройках — больше сигналов"
         ).replace(",", " ")
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self._reply_keyboard())
 
@@ -935,6 +985,21 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
+        elif payload.startswith("preset:"):
+            preset_key = payload.split(":", 1)[1]
+            preset = SCANNER_PRESETS.get(preset_key)
+            if preset is None:
+                await query.answer("Неизвестный пресет", show_alert=True)
+                return
+            self.settings_manager.update(**preset)
+            label = "🔓 Мягкий" if preset_key == "soft" else "⚖️ Баланс"
+            await query.answer(f"✅ Пресет {label} применён", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
         else:
             await self._safe_edit_message_text(query, "Неизвестное действие.")
 
@@ -971,6 +1036,10 @@ class TelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
+                InlineKeyboardButton("🔓 Мягкий", callback_data="preset:soft"),
+                InlineKeyboardButton("⚖️ Баланс", callback_data="preset:balanced"),
+            ],
+            [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
                 InlineKeyboardButton(self._mark("5м", s.oi_period_minutes == 5), callback_data="set_period:5"),
                 InlineKeyboardButton(self._mark("10м", s.oi_period_minutes == 10), callback_data="set_period:10"),
@@ -980,6 +1049,7 @@ class TelegramBot:
             [
                 InlineKeyboardButton(self._mark("OI+0.5%", s.oi_rise_percent == 0.5), callback_data="set_oi_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.oi_rise_percent == 1.0), callback_data="set_oi_rise:1.0"),
+                InlineKeyboardButton(self._mark("+1.5%", s.oi_rise_percent == 1.5), callback_data="set_oi_rise:1.5"),
                 InlineKeyboardButton(self._mark("+2%", s.oi_rise_percent == 2.0), callback_data="set_oi_rise:2.0"),
                 InlineKeyboardButton(self._mark("+3%", s.oi_rise_percent == 3.0), callback_data="set_oi_rise:3.0"),
                 InlineKeyboardButton(self._mark("+5%", s.oi_rise_percent == 5.0), callback_data="set_oi_rise:5.0"),
@@ -987,6 +1057,7 @@ class TelegramBot:
             [
                 InlineKeyboardButton(self._mark("OI-0.5%", s.oi_drop_percent == 0.5), callback_data="set_oi_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.oi_drop_percent == 1.0), callback_data="set_oi_drop:1.0"),
+                InlineKeyboardButton(self._mark("-1.5%", s.oi_drop_percent == 1.5), callback_data="set_oi_drop:1.5"),
                 InlineKeyboardButton(self._mark("-2%", s.oi_drop_percent == 2.0), callback_data="set_oi_drop:2.0"),
                 InlineKeyboardButton(self._mark("-3%", s.oi_drop_percent == 3.0), callback_data="set_oi_drop:3.0"),
                 InlineKeyboardButton(self._mark("-5%", s.oi_drop_percent == 5.0), callback_data="set_oi_drop:5.0"),
@@ -1012,23 +1083,10 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
             ],
             [
-                InlineKeyboardButton(
-                    self._mark(
-                        label,
-                        self._oi_flow_range_matches(
-                            min_usd,
-                            max_usd,
-                            current_min=s.min_oi_change_usd,
-                            current_max=s.max_oi_change_usd,
-                        ),
-                    ),
-                    callback_data=(
-                        f"set_oi_range:{int(min_usd)}-"
-                        if max_usd is None
-                        else f"set_oi_range:{int(min_usd)}-{int(max_usd)}"
-                    ),
-                )
-                for label, min_usd, max_usd in OI_FLOW_RANGES
+                InlineKeyboardButton(self._mark("Приток 10k", s.min_oi_change_usd == 10000 and (s.max_oi_change_usd is None or s.max_oi_change_usd <= 0)), callback_data="set_oi_range:10000-"),
+                InlineKeyboardButton(self._mark("15k–50k", self._oi_flow_range_matches(15000, 50000, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:15000-50000"),
+                InlineKeyboardButton(self._mark("20k–∞", self._oi_flow_range_matches(20000, None, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:20000-"),
+                InlineKeyboardButton(self._mark("20k–75k", self._oi_flow_range_matches(20000, 75000, current_min=s.min_oi_change_usd, current_max=s.max_oi_change_usd)), callback_data="set_oi_range:20000-75000"),
             ],
             [
                 InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),

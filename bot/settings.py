@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 7
+SETTINGS_VERSION = 8
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -76,14 +76,14 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной профиль — сбалансированный: OI+цена вместе, умеренный приток
-    oi_period_minutes: int = 10
-    long_period_minutes: int = 10
-    short_period_minutes: int = 10
-    oi_rise_percent: float = 2.0
-    oi_drop_percent: float = 2.0
-    price_rise_percent: float = 1.2
-    price_drop_percent: float = 1.2
+    # Основной профиль — умеренный: ловит альты, не требует идеального совпадения
+    oi_period_minutes: int = 5
+    long_period_minutes: int = 5
+    short_period_minutes: int = 5
+    oi_rise_percent: float = 1.5
+    oi_drop_percent: float = 1.5
+    price_rise_percent: float = 1.0
+    price_drop_percent: float = 1.0
 
     # Ранний пульс — только при сильном совпадении с глобальными порогами
     pulse_enabled: bool = True
@@ -102,7 +102,7 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 20.0
 
     # Качество сигнала: реальный приток капитала в OI (диапазон min–max USD)
-    min_oi_change_usd: float = 20_000.0
+    min_oi_change_usd: float = 10_000.0
     max_oi_change_usd: float | None = None
     short_squeeze_min_price: float = 5.0
     short_squeeze_max_oi_change: float = -1.2
@@ -147,7 +147,7 @@ class ScannerSettings:
     min_signal_score: float = 1.0
     max_signal_score: int | None = 4
     max_signals_per_symbol_per_day: int = 2
-    top_n_symbols: int | None = 250
+    top_n_symbols: int | None = None
     priority_score_max: int = 2
     signals_enabled: bool = True
     price_only_min_percent: float = 4.0
