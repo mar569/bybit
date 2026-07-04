@@ -258,6 +258,8 @@ class SignalEngine:
     def get_diagnostics(self) -> dict[str, object]:
         settings = self.settings.settings
         pairs_tracked = len(self.history)
+        pairs_bybit = sum(1 for k in self.history if k.startswith("Bybit:"))
+        pairs_binance = sum(1 for k in self.history if k.startswith("Binance:"))
         pairs_ready = 0
         pairs_with_oi = 0
         max_history = 0
@@ -285,6 +287,10 @@ class SignalEngine:
 
         return {
             "signals_enabled": settings.signals_enabled,
+            "enabled_binance": settings.enabled_binance,
+            "enabled_bybit": settings.enabled_bybit,
+            "require_both_oi_and_price": settings.require_both_oi_and_price,
+            "probability_filter_enabled": settings.probability_filter_enabled,
             "oi_period_minutes": settings.oi_period_minutes,
             "long_period_minutes": settings.long_period_minutes,
             "short_period_minutes": settings.short_period_minutes,
@@ -297,6 +303,8 @@ class SignalEngine:
             "min_signal_score": settings.min_signal_score,
             "top_n_symbols": settings.top_n_symbols,
             "pairs_tracked": pairs_tracked,
+            "pairs_bybit": pairs_bybit,
+            "pairs_binance": pairs_binance,
             "pairs_with_oi": pairs_with_oi,
             "pairs_ready": pairs_ready,
             "max_history_points": max_history,
@@ -343,18 +351,23 @@ class SignalEngine:
                 changes.oi_change_usd is None
                 or abs(changes.oi_change_usd) >= settings.min_oi_change_usd
             )
-
-            if not flow_ok:
-                if oi_ok or price_ok:
-                    flow_blocked += 1
-                continue
+            or_mode = not settings.require_both_oi_and_price
 
             if oi_ok and price_ok:
-                both_long += 1
+                if flow_ok:
+                    both_long += 1
+                else:
+                    flow_blocked += 1
             elif oi_ok:
-                oi_only_long += 1
+                if or_mode or flow_ok:
+                    oi_only_long += 1
+                else:
+                    flow_blocked += 1
             elif price_ok:
-                price_only_long += 1
+                if or_mode or flow_ok:
+                    price_only_long += 1
+                else:
+                    flow_blocked += 1
 
         return {
             "both_long": both_long,
@@ -402,8 +415,15 @@ class SignalEngine:
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
             if not is_mega and not is_breakout and not is_reversal and changes.oi_change_usd is not None:
                 oi_flow_abs = abs(changes.oi_change_usd)
+                flow_exempt = candidate.signal_type in {"price_pump", "price_dump"}
+                if (
+                    not flow_exempt
+                    and not settings.require_both_oi_and_price
+                    and candidate.signal_type in {"oi_pump", "oi_dump"}
+                ):
+                    flow_exempt = True
                 if oi_flow_abs < settings.min_oi_change_usd:
-                    if candidate.signal_type not in {"price_pump", "price_dump"}:
+                    if not flow_exempt:
                         logger.info(
                             "Signal filtered %s %s: OI flow %.0f$ < min %.0f$",
                             exchange,
@@ -1107,6 +1127,8 @@ class SignalEngine:
             return "pump"
         if not settings.require_both_oi_and_price and oi >= thresholds.oi_rise_percent:
             return "oi_pump"
+        if not settings.require_both_oi_and_price and price >= thresholds.price_rise_percent:
+            return "price_pump"
         if settings.require_oi_for_price_only:
             return None
         if price >= settings.price_only_min_percent:
@@ -1125,6 +1147,8 @@ class SignalEngine:
             return "dump"
         if not settings.require_both_oi_and_price and oi <= -thresholds.oi_drop_percent:
             return "oi_dump"
+        if not settings.require_both_oi_and_price and price <= -thresholds.price_drop_percent:
+            return "price_dump"
         if settings.require_oi_for_price_only:
             return None
         if price <= -settings.price_only_min_percent:

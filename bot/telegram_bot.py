@@ -58,6 +58,7 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "top_n_symbols": None,
         "probability_filter_enabled": False,
         "require_both_oi_and_price": False,
+        "require_oi_for_price_only": False,
     },
     "balanced": {
         "oi_period_minutes": 5,
@@ -73,6 +74,7 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "top_n_symbols": None,
         "probability_filter_enabled": False,
         "require_both_oi_and_price": False,
+        "require_oi_for_price_only": False,
     },
     "working": {
         "oi_period_minutes": 5,
@@ -88,6 +90,7 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "top_n_symbols": None,
         "probability_filter_enabled": False,
         "require_both_oi_and_price": False,
+        "require_oi_for_price_only": False,
         "pulse_oi_rise_percent": 0.8,
         "pulse_oi_drop_percent": 0.8,
         "pulse_price_rise_percent": 0.5,
@@ -610,6 +613,12 @@ class TelegramBot:
             if s.probability_filter_enabled
             else "OFF"
         )
+        prob_warn = ""
+        if s.probability_filter_enabled:
+            prob_warn = (
+                "\n⚠️ <b>Фильтр вероятности ON</b> — отсекает слабые сигналы. "
+                "Для проверки: <b>✅ Рабочий</b> или выключите фильтр."
+            )
         live = self.scanner.get_live_threshold_stats()
         both_mode = (
             "OI <b>и</b> цена <b>вместе</b> (строго)"
@@ -637,7 +646,7 @@ class TelegramBot:
             f"Мин. OI: {d['min_open_interest']:,.0f} $ | Приток: <b>{flow_line}</b>\n"
             f"Фильтр вероятности: <b>{prob_state}</b>\n"
             f"Топ монет: {d['top_n_symbols'] or 'все'}\n"
-            f"{flow_warn}\n\n"
+            f"{flow_warn}{prob_warn}\n\n"
             "<i>Если везде 0 — рынок флэт или нужен деплой v9 + перезапуск</i>\n"
             "<code>/test</code> — проверка Telegram"
         ).replace(",", " ")
