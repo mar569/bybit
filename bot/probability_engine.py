@@ -78,9 +78,9 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 def _verdict(percent: float) -> str:
-    if percent >= 75:
+    if percent >= 80:
         return "ВЫСОКАЯ"
-    if percent >= 58:
+    if percent >= 62:
         return "СРЕДНЯЯ"
     return "НИЗКАЯ"
 
@@ -282,6 +282,7 @@ def assess_signal_probability(
     market_structure: dict[str, object] | None = None,
     account_ratio: dict[str, object] | None = None,
     liquidations: dict[str, object] | None = None,
+    probability_strict: bool | None = None,
 ) -> ProbabilityAssessment:
     is_long = signal.side == "long"
     oi = signal.oi_change_percent
@@ -302,16 +303,16 @@ def assess_signal_probability(
 
     threshold_strength = math.sqrt(max(oi_strength, 0.0) * max(price_strength, 0.0))
 
-    usd_target = settings.min_oi_change_usd * 2.5
+    usd_target = settings.min_oi_change_usd * 3.5
     usd_strength = _clamp(oi_usd / usd_target, 0.0, 1.0) if usd_target > 0 else 0.5
-    if oi_usd < settings.min_oi_change_usd * 0.5:
-        usd_strength *= 0.4
+    if oi_usd < settings.min_oi_change_usd * 0.65:
+        usd_strength *= 0.35
 
     speed = float(signal.details.get("price_speed_pct_per_min", 0.0))
     speed_target = max(price_thr / period, 0.05)
-    momentum_strength = _clamp(abs(speed) / (speed_target * 2), 0.0, 1.0)
+    momentum_strength = _clamp(abs(speed) / (speed_target * 2.2), 0.0, 1.0)
 
-    volume_strength = 0.92 if vol_spike else 0.28
+    volume_strength = 0.94 if vol_spike else 0.22
 
     price_now = signal.current_price
     ema_s, ema_l = signal.ema_short, signal.ema_long
@@ -423,14 +424,14 @@ def assess_signal_probability(
     }
 
     weighted = sum(FACTOR_WEIGHTS[k] * strengths[k] for k in FACTOR_WEIGHTS)
-    percent = 18.0 + weighted * 72.0
+    percent = 20.0 + weighted * 68.0
 
     if not oi_aligned:
-        align_penalty = 0.35 + 0.25 * max(oi_strength, price_strength)
+        align_penalty = 0.32 + 0.22 * max(oi_strength, price_strength)
         percent *= align_penalty
 
     if not oi_aligned and abs(oi) >= oi_thr * 1.2 and abs(price) < price_thr * 0.35:
-        percent *= 0.55
+        percent *= 0.50
 
     structure_penalty, structure_penalty_detail = _compute_structure_penalty(
         ms if isinstance(ms, dict) else None,
@@ -441,9 +442,12 @@ def assess_signal_probability(
     if structure_penalty > 0:
         percent -= structure_penalty
 
-    percent = _clamp(percent, 11.0, 89.0)
+    percent = _clamp(percent, 11.0, 88.0)
 
-    if signal.signal_type in PROBABILITY_BYPASS_TYPES:
+    strict = (
+        settings.probability_strict if probability_strict is None else probability_strict
+    )
+    if signal.signal_type in PROBABILITY_BYPASS_TYPES and not strict:
         percent = max(percent, 68.0 + pattern_strength * 12.0)
 
     factors: list[ProbabilityFactor] = [

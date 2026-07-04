@@ -258,6 +258,8 @@ class SignalEngine:
     def get_diagnostics(self) -> dict[str, object]:
         settings = self.settings.settings
         pairs_tracked = len(self.history)
+        pairs_bybit = sum(1 for k in self.history if k.startswith("Bybit:"))
+        pairs_binance = sum(1 for k in self.history if k.startswith("Binance:"))
         pairs_ready = 0
         pairs_with_oi = 0
         max_history = 0
@@ -285,6 +287,10 @@ class SignalEngine:
 
         return {
             "signals_enabled": settings.signals_enabled,
+            "enabled_binance": settings.enabled_binance,
+            "enabled_bybit": settings.enabled_bybit,
+            "require_both_oi_and_price": settings.require_both_oi_and_price,
+            "probability_filter_enabled": settings.probability_filter_enabled,
             "oi_period_minutes": settings.oi_period_minutes,
             "long_period_minutes": settings.long_period_minutes,
             "short_period_minutes": settings.short_period_minutes,
@@ -292,13 +298,84 @@ class SignalEngine:
             "oi_rise_percent": settings.oi_rise_percent,
             "price_rise_percent": settings.price_rise_percent,
             "min_open_interest": settings.min_open_interest,
+            "min_oi_change_usd": settings.min_oi_change_usd,
+            "max_oi_change_usd": settings.max_oi_change_usd,
             "min_signal_score": settings.min_signal_score,
             "top_n_symbols": settings.top_n_symbols,
             "pairs_tracked": pairs_tracked,
+            "pairs_bybit": pairs_bybit,
+            "pairs_binance": pairs_binance,
             "pairs_with_oi": pairs_with_oi,
             "pairs_ready": pairs_ready,
             "max_history_points": max_history,
             "dirty_queue": len(self._dirty_keys),
+        }
+
+    def get_live_threshold_stats(self) -> dict[str, int]:
+        """Сколько пар прямо сейчас бьют пороги (LONG), без фильтра вероятности."""
+        settings = self.settings.settings
+        both_long = 0
+        oi_only_long = 0
+        price_only_long = 0
+        lookback_fail = 0
+        flow_blocked = 0
+        liquidity_blocked = 0
+
+        for key, history in self.history.items():
+            if len(history) < 2:
+                continue
+            current = history[-1]
+            if not current.price or not current.open_interest:
+                continue
+
+            oi_usd_now = self._oi_usd_value(
+                current.open_interest, current.price, current.additional
+            )
+            if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
+                liquidity_blocked += 1
+                continue
+
+            exchange = key.split(":", 1)[0]
+            thresholds = settings.for_exchange(exchange)
+            earlier = self._lookback_point(history, thresholds.long_period_minutes)
+            if earlier is None:
+                lookback_fail += 1
+                continue
+
+            changes = self._compute_changes(
+                current, earlier, thresholds.long_period_minutes * 60
+            )
+            oi_ok = changes.oi_change_percent >= thresholds.oi_rise_percent
+            price_ok = changes.price_change_percent >= thresholds.price_rise_percent
+            flow_ok = (
+                changes.oi_change_usd is None
+                or abs(changes.oi_change_usd) >= settings.min_oi_change_usd
+            )
+            or_mode = not settings.require_both_oi_and_price
+
+            if oi_ok and price_ok:
+                if flow_ok:
+                    both_long += 1
+                else:
+                    flow_blocked += 1
+            elif oi_ok:
+                if or_mode or flow_ok:
+                    oi_only_long += 1
+                else:
+                    flow_blocked += 1
+            elif price_ok:
+                if or_mode or flow_ok:
+                    price_only_long += 1
+                else:
+                    flow_blocked += 1
+
+        return {
+            "both_long": both_long,
+            "oi_only_long": oi_only_long,
+            "price_only_long": price_only_long,
+            "lookback_fail": lookback_fail,
+            "flow_blocked": flow_blocked,
+            "liquidity_blocked": liquidity_blocked,
         }
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
@@ -337,9 +414,46 @@ class SignalEngine:
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
             if not is_mega and not is_breakout and not is_reversal and changes.oi_change_usd is not None:
-                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
-                    if candidate.signal_type not in {"price_pump", "price_dump"}:
+                oi_flow_abs = abs(changes.oi_change_usd)
+                flow_exempt = candidate.signal_type in {"price_pump", "price_dump"}
+                if (
+                    not flow_exempt
+                    and not settings.require_both_oi_and_price
+                    and candidate.signal_type in {"oi_pump", "oi_dump"}
+                ):
+                    flow_exempt = True
+                if oi_flow_abs < settings.min_oi_change_usd:
+                    if not flow_exempt:
+                        logger.info(
+                            "Signal filtered %s %s: OI flow %.0f$ < min %.0f$",
+                            exchange,
+                            symbol,
+                            oi_flow_abs,
+                            settings.min_oi_change_usd,
+                        )
                         return
+                max_flow = settings.max_oi_change_usd
+                flow_type_exempt = candidate.signal_type in {"price_pump", "price_dump"}
+                if (
+                    not flow_type_exempt
+                    and not settings.require_both_oi_and_price
+                    and candidate.signal_type in {"oi_pump", "oi_dump"}
+                ):
+                    flow_type_exempt = True
+                if (
+                    max_flow is not None
+                    and max_flow > 0
+                    and oi_flow_abs > max_flow
+                    and not flow_type_exempt
+                ):
+                    logger.info(
+                        "Signal filtered %s %s: OI flow %.0f$ > max %.0f$",
+                        exchange,
+                        symbol,
+                        oi_flow_abs,
+                        max_flow,
+                    )
+                    return
 
             now = time.time()
             if is_breakout:
@@ -358,6 +472,11 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
+            self._reset_daily_counts_if_needed()
+            daily_cap = settings.max_signals_per_symbol_per_day
+            if daily_cap > 0 and self.daily_signal_counts.get(key, 0) >= daily_cap:
+                return
+
             if is_breakout or is_reversal:
                 score = 1 if is_breakout else (
                     1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
@@ -372,6 +491,10 @@ class SignalEngine:
                 )
 
             if not is_breakout and not is_reversal and settings.min_signal_score and score < settings.min_signal_score:
+                return
+
+            max_score = settings.max_signal_score
+            if max_score is not None and max_score > 0 and score > max_score:
                 return
 
             lookback_seconds = changes.lookback_seconds
@@ -407,9 +530,6 @@ class SignalEngine:
             except Exception:
                 vol_spike = False
 
-            self._reset_daily_counts_if_needed()
-            self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
-            self.last_signal_time[cooldown_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             market_structure_dict = None
@@ -508,7 +628,10 @@ class SignalEngine:
             ]
 
             if settings.probability_filter_enabled:
-                bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
+                bypass = (
+                    signal.signal_type in PROBABILITY_BYPASS_TYPES
+                    and not settings.probability_strict
+                )
                 if not bypass and assessment.percent < settings.min_probability_percent:
                     logger.info(
                         "Signal filtered %s %s: probability %.0f%% < %.0f%%",
@@ -518,6 +641,26 @@ class SignalEngine:
                         settings.min_probability_percent,
                     )
                     return
+                min_factors = settings.min_probability_factors_passed
+                if (
+                    not bypass
+                    and min_factors > 0
+                    and assessment.percent >= settings.min_probability_percent
+                ):
+                    passed = sum(1 for f in assessment.factors if f.passed)
+                    if passed < min_factors:
+                        logger.info(
+                            "Signal filtered %s %s: only %d/%d strong factors",
+                            exchange,
+                            symbol,
+                            passed,
+                            min_factors,
+                        )
+                        return
+
+            self._reset_daily_counts_if_needed()
+            self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
+            self.last_signal_time[cooldown_key] = now
 
             logger.info(
                 "Signal %s %s %s | OI %.2f%% | price %.2f%% | prob %.0f%% | %dm",
@@ -793,7 +936,7 @@ class SignalEngine:
 
         if settings.flash_enabled and flash_tiers:
             for window in settings.flash_window_minutes:
-                earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+                earlier = self._lookback_point(history, window)
                 if earlier is None:
                     continue
                 changes = self._compute_changes(current, earlier, window * 60)
@@ -824,53 +967,50 @@ class SignalEngine:
                             ))
                             break
 
-        pulse_earlier = self._point_at_cutoff(
-            history, current.timestamp - settings.pulse_period_minutes * 60
-        )
-        if pulse_earlier is not None:
-            pulse = self._compute_changes(
-                current, pulse_earlier, settings.pulse_period_minutes * 60
-            )
-            if (
-                pulse.oi_change_percent >= pulse_oi_up
-                and pulse.price_change_percent >= pulse_price_up
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="pulse_pump",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
-            if (
-                pulse.oi_change_percent <= -pulse_oi_down
-                and pulse.price_change_percent <= -pulse_price_down
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="pulse_dump",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
-            if (
-                pulse.price_change_percent >= squeeze_min
-                and pulse.oi_change_percent <= settings.short_squeeze_max_oi_change
-            ):
-                candidates.append(SignalCandidate(
-                    signal_type="short_squeeze",
-                    period_minutes=settings.pulse_period_minutes,
-                    oi_change_percent=pulse.oi_change_percent,
-                    price_change_percent=pulse.price_change_percent,
-                    earlier=pulse_earlier,
-                    urgency=2,
-                ))
+        if settings.pulse_enabled:
+            pulse_earlier = self._lookback_point(history, settings.pulse_period_minutes)
+            if pulse_earlier is not None:
+                pulse = self._compute_changes(
+                    current, pulse_earlier, settings.pulse_period_minutes * 60
+                )
+                if (
+                    pulse.oi_change_percent >= pulse_oi_up
+                    and pulse.price_change_percent >= pulse_price_up
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="pulse_pump",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
+                if (
+                    pulse.oi_change_percent <= -pulse_oi_down
+                    and pulse.price_change_percent <= -pulse_price_down
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="pulse_dump",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
+                if (
+                    pulse.price_change_percent >= squeeze_min
+                    and pulse.oi_change_percent <= settings.short_squeeze_max_oi_change
+                ):
+                    candidates.append(SignalCandidate(
+                        signal_type="short_squeeze",
+                        period_minutes=settings.pulse_period_minutes,
+                        oi_change_percent=pulse.oi_change_percent,
+                        price_change_percent=pulse.price_change_percent,
+                        earlier=pulse_earlier,
+                        urgency=2,
+                    ))
 
-        long_earlier = self._point_at_cutoff(
-            history, current.timestamp - thresholds.long_period_minutes * 60
-        )
+        long_earlier = self._lookback_point(history, thresholds.long_period_minutes)
         if long_earlier is not None:
             long_chg = self._compute_changes(
                 current, long_earlier, thresholds.long_period_minutes * 60
@@ -886,9 +1026,7 @@ class SignalEngine:
                     urgency=3,
                 ))
 
-        short_earlier = self._point_at_cutoff(
-            history, current.timestamp - thresholds.short_period_minutes * 60
-        )
+        short_earlier = self._lookback_point(history, thresholds.short_period_minutes)
         if short_earlier is not None:
             short_chg = self._compute_changes(
                 current, short_earlier, thresholds.short_period_minutes * 60
@@ -916,14 +1054,30 @@ class SignalEngine:
         )
         return candidates[0]
 
+    def _lookback_point(
+        self,
+        history: deque[SnapshotPoint],
+        period_minutes: int,
+    ) -> SnapshotPoint | None:
+        lookback_seconds = period_minutes * 60
+        cutoff = history[-1].timestamp - lookback_seconds
+        return self._point_at_cutoff(history, cutoff)
+
     @staticmethod
     def _point_at_cutoff(
         history: deque[SnapshotPoint],
         cutoff: float,
+        *,
+        max_lag_seconds: float | None = None,
     ) -> SnapshotPoint | None:
         if history[0].timestamp > cutoff:
             return None
-        return next((point for point in reversed(history) if point.timestamp <= cutoff), None)
+        earlier = next((point for point in reversed(history) if point.timestamp <= cutoff), None)
+        if earlier is None:
+            return None
+        if max_lag_seconds is not None and (cutoff - earlier.timestamp) > max_lag_seconds:
+            return None
+        return earlier
 
     def _compute_changes(
         self,
@@ -980,6 +1134,8 @@ class SignalEngine:
             return "pump"
         if not settings.require_both_oi_and_price and oi >= thresholds.oi_rise_percent:
             return "oi_pump"
+        if not settings.require_both_oi_and_price and price >= thresholds.price_rise_percent:
+            return "price_pump"
         if settings.require_oi_for_price_only:
             return None
         if price >= settings.price_only_min_percent:
@@ -998,6 +1154,8 @@ class SignalEngine:
             return "dump"
         if not settings.require_both_oi_and_price and oi <= -thresholds.oi_drop_percent:
             return "oi_dump"
+        if not settings.require_both_oi_and_price and price <= -thresholds.price_drop_percent:
+            return "price_dump"
         if settings.require_oi_for_price_only:
             return None
         if price <= -settings.price_only_min_percent:
