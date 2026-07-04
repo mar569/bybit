@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 6
+SETTINGS_VERSION = 7
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -76,12 +76,12 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной LONG-профиль — пресет «идеал»: OI+цена согласованы, крупный приток
+    # Основной профиль — сбалансированный: OI+цена вместе, умеренный приток
     oi_period_minutes: int = 10
     long_period_minutes: int = 10
     short_period_minutes: int = 10
-    oi_rise_percent: float = 4.0
-    oi_drop_percent: float = 4.0
+    oi_rise_percent: float = 2.0
+    oi_drop_percent: float = 2.0
     price_rise_percent: float = 1.2
     price_drop_percent: float = 1.2
 
@@ -97,12 +97,12 @@ class ScannerSettings:
     flash_enabled: bool = True
     flash_window_minutes: tuple[int, ...] = (5, 10)
     flash_price_tiers: tuple[float, ...] = (8.0, 12.0, 18.0, 25.0, 35.0, 50.0, 100.0)
-    flash_min_oi_rise_percent: float = 2.5
-    flash_min_oi_drop_percent: float = 2.5
+    flash_min_oi_rise_percent: float = 2.0
+    flash_min_oi_drop_percent: float = 2.0
     flash_bypass_oi_tier_pct: float = 20.0
 
     # Качество сигнала: реальный приток капитала в OI
-    min_oi_change_usd: float = 75_000.0
+    min_oi_change_usd: float = 20_000.0
     short_squeeze_min_price: float = 5.0
     short_squeeze_max_oi_change: float = -1.2
     require_oi_for_price_only: bool = True
@@ -133,7 +133,7 @@ class ScannerSettings:
     reversal_min_liquidity_oi_usd: float = 60_000.0
     reversal_cooldown_seconds: int = 300
 
-    min_open_interest: float = 150_000.0
+    min_open_interest: float = 100_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
@@ -153,10 +153,10 @@ class ScannerSettings:
     telegram_max_per_minute: int = 5
     telegram_min_interval_seconds: float = 3.0
 
-    min_probability_percent: float = 60.0
+    min_probability_percent: float = 50.0
     probability_filter_enabled: bool = True
     probability_strict: bool = False
-    min_probability_factors_passed: int = 3
+    min_probability_factors_passed: int = 1
     outcome_tracking_enabled: bool = True
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)

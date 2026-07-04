@@ -1,5 +1,5 @@
 {
-  "settings_version": 4,
+  "settings_version": 7,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -8,8 +8,8 @@
   "oi_period_minutes": 10,
   "long_period_minutes": 10,
   "short_period_minutes": 10,
-  "oi_rise_percent": 4.0,
-  "oi_drop_percent": 4.0,
+  "oi_rise_percent": 2.0,
+  "oi_drop_percent": 2.0,
   "price_rise_percent": 1.2,
   "price_drop_percent": 1.2,
 
@@ -23,12 +23,12 @@
   "flash_enabled": true,
   "flash_window_minutes": [5, 10],
   "flash_price_tiers": [8, 12, 18, 25, 35, 50, 100],
-  "flash_min_oi_rise_percent": 2.5,
-  "flash_min_oi_drop_percent": 2.5,
+  "flash_min_oi_rise_percent": 2.0,
+  "flash_min_oi_drop_percent": 2.0,
   "flash_bypass_oi_tier_pct": 20.0,
 
-  "min_open_interest": 150000,
-  "min_oi_change_usd": 75000,
+  "min_open_interest": 100000,
+  "min_oi_change_usd": 20000,
   "require_oi_for_price_only": true,
   "require_both_oi_and_price": true,
   "short_squeeze_min_price": 5.0,
@@ -43,10 +43,10 @@
   "min_signal_score": 1.0,
   "max_signal_score": 4,
 
-  "min_probability_percent": 60,
+  "min_probability_percent": 50,
   "probability_filter_enabled": true,
   "probability_strict": false,
-  "min_probability_factors_passed": 3,
+  "min_probability_factors_passed": 1,
 
   "market_structure_enabled": true,
   "market_structure_hours": 5,

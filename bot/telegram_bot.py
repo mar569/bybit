@@ -768,6 +768,7 @@ class TelegramBot:
             "set_price_rise:": ("price_rise_percent", float, "Рост цены"),
             "set_price_drop:": ("price_drop_percent", float, "Падение цены"),
             "set_min_oi:": ("min_open_interest", float, "Мин. OI"),
+            "set_min_oi_change:": ("min_oi_change_usd", float, "Приток OI"),
             "set_min_volume:": ("min_volume", float, "Мин. объём"),
             "set_min_score:": ("min_signal_score", float, "Мин. сигнал"),
             "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
@@ -803,6 +804,10 @@ class TelegramBot:
                             changed_label = f"Мин. вероятность → {value:.0f}%"
                         elif field == "min_probability_factors_passed":
                             changed_label = f"Факторов вероятности → ≥{value}"
+                        elif field == "min_oi_change_usd":
+                            changed_label = f"Приток OI → {value:,.0f} $".replace(",", " ")
+                        elif field == "min_open_interest":
+                            changed_label = f"Мин. OI → {value:,.0f} $".replace(",", " ")
                         else:
                             changed_label = f"{label} → {value}"
                 break
@@ -916,41 +921,50 @@ class TelegramBot:
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
                 InlineKeyboardButton(self._mark("5м", s.oi_period_minutes == 5), callback_data="set_period:5"),
+                InlineKeyboardButton(self._mark("10м", s.oi_period_minutes == 10), callback_data="set_period:10"),
                 InlineKeyboardButton(self._mark("15м", s.oi_period_minutes == 15), callback_data="set_period:15"),
                 InlineKeyboardButton(self._mark("30м", s.oi_period_minutes == 30), callback_data="set_period:30"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI+0.5%", s.oi_rise_percent == 0.5), callback_data="set_oi_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.oi_rise_percent == 1.0), callback_data="set_oi_rise:1.0"),
+                InlineKeyboardButton(self._mark("+2%", s.oi_rise_percent == 2.0), callback_data="set_oi_rise:2.0"),
                 InlineKeyboardButton(self._mark("+3%", s.oi_rise_percent == 3.0), callback_data="set_oi_rise:3.0"),
                 InlineKeyboardButton(self._mark("+5%", s.oi_rise_percent == 5.0), callback_data="set_oi_rise:5.0"),
-                InlineKeyboardButton(self._mark("+10%", s.oi_rise_percent == 10.0), callback_data="set_oi_rise:10.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI-0.5%", s.oi_drop_percent == 0.5), callback_data="set_oi_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.oi_drop_percent == 1.0), callback_data="set_oi_drop:1.0"),
+                InlineKeyboardButton(self._mark("-2%", s.oi_drop_percent == 2.0), callback_data="set_oi_drop:2.0"),
                 InlineKeyboardButton(self._mark("-3%", s.oi_drop_percent == 3.0), callback_data="set_oi_drop:3.0"),
                 InlineKeyboardButton(self._mark("-5%", s.oi_drop_percent == 5.0), callback_data="set_oi_drop:5.0"),
-                InlineKeyboardButton(self._mark("-10%", s.oi_drop_percent == 10.0), callback_data="set_oi_drop:10.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("🟢+0.5%", s.price_rise_percent == 0.5), callback_data="set_price_rise:0.5"),
                 InlineKeyboardButton(self._mark("+1%", s.price_rise_percent == 1.0), callback_data="set_price_rise:1.0"),
+                InlineKeyboardButton(self._mark("+1.2%", s.price_rise_percent == 1.2), callback_data="set_price_rise:1.2"),
                 InlineKeyboardButton(self._mark("+2%", s.price_rise_percent == 2.0), callback_data="set_price_rise:2.0"),
                 InlineKeyboardButton(self._mark("+3%", s.price_rise_percent == 3.0), callback_data="set_price_rise:3.0"),
-                InlineKeyboardButton(self._mark("+5%", s.price_rise_percent == 5.0), callback_data="set_price_rise:5.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("🔴-0.5%", s.price_drop_percent == 0.5), callback_data="set_price_drop:0.5"),
                 InlineKeyboardButton(self._mark("-1%", s.price_drop_percent == 1.0), callback_data="set_price_drop:1.0"),
+                InlineKeyboardButton(self._mark("-1.2%", s.price_drop_percent == 1.2), callback_data="set_price_drop:1.2"),
                 InlineKeyboardButton(self._mark("-2%", s.price_drop_percent == 2.0), callback_data="set_price_drop:2.0"),
                 InlineKeyboardButton(self._mark("-3%", s.price_drop_percent == 3.0), callback_data="set_price_drop:3.0"),
-                InlineKeyboardButton(self._mark("-5%", s.price_drop_percent == 5.0), callback_data="set_price_drop:5.0"),
             ],
             [
                 InlineKeyboardButton(self._mark("OI 50k", s.min_open_interest == 50000), callback_data="set_min_oi:50000"),
                 InlineKeyboardButton(self._mark("100k", s.min_open_interest == 100000), callback_data="set_min_oi:100000"),
+                InlineKeyboardButton(self._mark("150k", s.min_open_interest == 150000), callback_data="set_min_oi:150000"),
                 InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("Приток 15k", s.min_oi_change_usd == 15000), callback_data="set_min_oi_change:15000"),
+                InlineKeyboardButton(self._mark("20k", s.min_oi_change_usd == 20000), callback_data="set_min_oi_change:20000"),
+                InlineKeyboardButton(self._mark("25k", s.min_oi_change_usd == 25000), callback_data="set_min_oi_change:25000"),
+                InlineKeyboardButton(self._mark("50k", s.min_oi_change_usd == 50000), callback_data="set_min_oi_change:50000"),
+                InlineKeyboardButton(self._mark("75k", s.min_oi_change_usd == 75000), callback_data="set_min_oi_change:75000"),
             ],
             [
                 InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),
@@ -979,10 +993,10 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("80%", s.min_probability_percent == 80), callback_data="set_prob:80"),
             ],
             [
-                InlineKeyboardButton(self._mark("Ф≥2", s.min_probability_factors_passed == 2), callback_data="set_prob_factors:2"),
+                InlineKeyboardButton(self._mark("Ф≥1", s.min_probability_factors_passed == 1), callback_data="set_prob_factors:1"),
+                InlineKeyboardButton(self._mark("≥2", s.min_probability_factors_passed == 2), callback_data="set_prob_factors:2"),
                 InlineKeyboardButton(self._mark("≥3", s.min_probability_factors_passed == 3), callback_data="set_prob_factors:3"),
                 InlineKeyboardButton(self._mark("≥4", s.min_probability_factors_passed == 4), callback_data="set_prob_factors:4"),
-                InlineKeyboardButton(self._mark("≥5", s.min_probability_factors_passed == 5), callback_data="set_prob_factors:5"),
             ],
             [
                 InlineKeyboardButton(
