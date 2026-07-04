@@ -84,6 +84,11 @@ class SignalEngine:
     def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
         self._liquidation_tracker = tracker
 
+    @staticmethod
+    def _symbol_cooldown_key(symbol: str) -> str:
+        """Один cooldown на тикер — не дублировать Binance+Bybit и mega/pulse/pump."""
+        return f"sym:{symbol.upper()}"
+
     def get_bybit_top_symbols(self) -> list[str]:
         self._refresh_top_symbols_if_needed()
         top = self._top_symbols.get("Bybit")
@@ -342,6 +347,12 @@ class SignalEngine:
                         return
 
             now = time.time()
+            symbol_cd_key = self._symbol_cooldown_key(symbol)
+            symbol_cd = settings.signal_cooldown_seconds
+            last_symbol = self.last_signal_time.get(symbol_cd_key, 0.0)
+            if now - last_symbol < symbol_cd:
+                return
+
             if is_breakout:
                 cooldown_key = f"{key}:breakout"
                 cooldown = settings.breakout_cooldown_seconds
@@ -410,6 +421,7 @@ class SignalEngine:
             self._reset_daily_counts_if_needed()
             self.daily_signal_counts[key] = self.daily_signal_counts.get(key, 0) + 1
             self.last_signal_time[cooldown_key] = now
+            self.last_signal_time[symbol_cd_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             market_structure_dict = None

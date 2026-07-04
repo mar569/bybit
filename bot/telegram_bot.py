@@ -54,6 +54,7 @@ class TelegramBot:
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
         self._send_lock = asyncio.Lock()
+        self._last_symbol_signal_time: dict[str, float] = {}
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
@@ -268,27 +269,32 @@ class TelegramBot:
         ])
         notify_chat_id = self.config.notification_chat_id
 
-        key = (
-            f"last_breakout:{signal.exchange}:{signal.symbol}"
+        cooldown = (
+            self.settings_manager.settings.breakout_cooldown_seconds
             if is_vertical
-            else f"last_signal:{signal.exchange}:{signal.symbol}"
+            else self.settings_manager.settings.signal_cooldown_seconds
         )
+        symbol_key = f"last_signal:sym:{signal.symbol.upper()}"
         should_send = True
-        if not skip_dedupe and self.redis is not None:
-            try:
-                last = await self.redis.get(key)
-                if last is not None:
-                    cooldown = (
-                        self.settings_manager.settings.breakout_cooldown_seconds
-                        if is_vertical
-                        else self.settings_manager.settings.signal_cooldown_seconds
-                    )
-                    if time.time() - float(last) < cooldown:
+        if not skip_dedupe:
+            now = time.time()
+            last_local = self._last_symbol_signal_time.get(signal.symbol.upper(), 0.0)
+            if now - last_local < cooldown:
+                should_send = False
+            elif self.redis is not None:
+                try:
+                    last = await self.redis.get(symbol_key)
+                    if last is not None and now - float(last) < cooldown:
                         should_send = False
-            except Exception:
-                should_send = True
+                except Exception:
+                    should_send = True
 
         if not should_send:
+            logger.debug(
+                "Skip duplicate %s (cooldown %.0fs)",
+                signal.symbol,
+                cooldown,
+            )
             return
 
         if (
@@ -304,32 +310,41 @@ class TelegramBot:
                 )
                 return
 
-        sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
-
-        if settings.signal_chart_enabled and sent_any:
+        sent_any = False
+        if settings.signal_chart_enabled:
             ms = signal.details.get("market_structure")
             warning = ""
             if isinstance(ms, dict):
                 warning = str(ms.get("structure_warning", ""))
+            png = None
             try:
-                png, _source = await get_signal_chart_png(
-                    signal.exchange,
-                    signal.symbol,
-                    chart_source=settings.signal_chart_source,
-                    chart_hours=settings.signal_chart_hours,
-                    chart_interval_minutes=settings.signal_chart_interval_minutes,
-                    side=signal.side,
-                    structure_warning=warning,
-                    probability_percent=float(signal.details.get("probability_percent", 0) or 0),
-                    coinglass_url=signal.link,
+                png, _source = await asyncio.wait_for(
+                    get_signal_chart_png(
+                        signal.exchange,
+                        signal.symbol,
+                        chart_source=settings.signal_chart_source,
+                        chart_hours=settings.signal_chart_hours,
+                        chart_interval_minutes=settings.signal_chart_interval_minutes,
+                        side=signal.side,
+                        structure_warning=warning,
+                        probability_percent=float(
+                            signal.details.get("probability_percent", 0) or 0
+                        ),
+                        coinglass_url=signal.link,
+                    ),
+                    timeout=25.0,
                 )
+            except asyncio.TimeoutError:
+                logger.warning("Chart capture timeout for %s", signal.symbol)
             except Exception:
                 logger.exception("Chart capture failed for %s", signal.symbol)
-                png = None
             if png:
-                await self._send_chart(
+                sent_any = await self._send_chart(
                     notify_chat_id, png, message, is_priority=is_priority, keyboard=keyboard,
                 )
+
+        if not sent_any:
+            sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
 
         if not sent_any:
             return
@@ -340,20 +355,18 @@ class TelegramBot:
             except Exception:
                 logger.exception("Outcome schedule failed")
 
-        if sent_any and not skip_dedupe and self.redis is not None:
-            try:
-                ex = (
-                    self.settings_manager.settings.breakout_cooldown_seconds + 5
-                    if is_vertical
-                    else self.settings_manager.settings.signal_cooldown_seconds + 5
-                )
-                await self.redis.set(
-                    key,
-                    str(time.time()),
-                    ex=ex,
-                )
-            except Exception:
-                logger.exception("Failed to update last_signal in Redis")
+        if sent_any and not skip_dedupe:
+            now = time.time()
+            self._last_symbol_signal_time[signal.symbol.upper()] = now
+            if self.redis is not None:
+                try:
+                    await self.redis.set(
+                        symbol_key,
+                        str(now),
+                        ex=int(cooldown) + 5,
+                    )
+                except Exception:
+                    logger.exception("Failed to update last_signal in Redis")
 
         if self.redis is not None:
             try:
