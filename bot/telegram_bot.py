@@ -63,16 +63,35 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "oi_period_minutes": 5,
         "long_period_minutes": 5,
         "short_period_minutes": 5,
-        "oi_rise_percent": 1.2,
-        "oi_drop_percent": 1.2,
-        "price_rise_percent": 0.8,
-        "price_drop_percent": 0.8,
-        "min_oi_change_usd": 10_000.0,
+        "oi_rise_percent": 1.0,
+        "oi_drop_percent": 1.0,
+        "price_rise_percent": 0.7,
+        "price_drop_percent": 0.7,
+        "min_oi_change_usd": 5_000.0,
         "max_oi_change_usd": None,
         "min_open_interest": 100_000.0,
         "top_n_symbols": None,
         "probability_filter_enabled": False,
         "require_both_oi_and_price": False,
+    },
+    "working": {
+        "oi_period_minutes": 5,
+        "long_period_minutes": 5,
+        "short_period_minutes": 5,
+        "oi_rise_percent": 1.0,
+        "oi_drop_percent": 1.0,
+        "price_rise_percent": 0.7,
+        "price_drop_percent": 0.7,
+        "min_oi_change_usd": 5_000.0,
+        "max_oi_change_usd": None,
+        "min_open_interest": 100_000.0,
+        "top_n_symbols": None,
+        "probability_filter_enabled": False,
+        "require_both_oi_and_price": False,
+        "pulse_oi_rise_percent": 0.8,
+        "pulse_oi_drop_percent": 0.8,
+        "pulse_price_rise_percent": 0.5,
+        "pulse_price_drop_percent": 0.5,
     },
 }
 
@@ -593,9 +612,9 @@ class TelegramBot:
         )
         live = self.scanner.get_live_threshold_stats()
         both_mode = (
-            "OI <b>и</b> цена <b>вместе</b>"
+            "OI <b>и</b> цена <b>вместе</b> (строго)"
             if s.require_both_oi_and_price
-            else "OI <b>или</b> цена (достаточно одного)"
+            else "OI <b>или</b> цена — достаточно одного"
         )
 
         text = (
@@ -606,8 +625,10 @@ class TelegramBot:
             f"{warmup}\n"
             f"Макс. точек истории: <b>{d['max_history_points']}</b>\n\n"
             f"<b>Сейчас на рынке (LONG {d['long_period_minutes']}м):</b>\n"
-            f"✅ OI+цена вместе: <b>{live['both_long']}</b> пар\n"
-            f"📈 только OI: <b>{live['oi_only_long']}</b> | только цена: <b>{live['price_only_long']}</b>\n"
+            f"✅ OI+цена: <b>{live['both_long']}</b> | только OI: <b>{live['oi_only_long']}</b> | "
+            f"только цена: <b>{live['price_only_long']}</b>\n"
+            f"⏳ нет точки 5м назад: <b>{live['lookback_fail']}</b> | "
+            f"приток мало: <b>{live['flow_blocked']}</b>\n"
             f"<i>Режим: {both_mode}</i>\n\n"
             f"<b>Пороги:</b>\n"
             f"LONG {d['long_period_minutes']}м | SHORT {d['short_period_minutes']}м | "
@@ -617,7 +638,7 @@ class TelegramBot:
             f"Фильтр вероятности: <b>{prob_state}</b>\n"
             f"Топ монет: {d['top_n_symbols'] or 'все'}\n"
             f"{flow_warn}\n\n"
-            "<i>Если «OI+цена вместе: 0» — рынок спокойный или жмите <b>🔓 Мягкий</b></i>\n"
+            "<i>Если везде 0 — рынок флэт или нужен деплой v9 + перезапуск</i>\n"
             "<code>/test</code> — проверка Telegram"
         ).replace(",", " ")
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self._reply_keyboard())
@@ -791,7 +812,7 @@ class TelegramBot:
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
-            "<i>Кнопки задают минимум OI <b>и</b> цены вместе; приток — диапазон min–max $</i>\n\n"
+            "<i>Кнопки: OI <b>или</b> цена (v9); приток — диапазон min–max $</i>\n\n"
             f"📅 LONG: <b>{s.long_period_minutes} мин</b> | SHORT: <b>{s.short_period_minutes} мин</b>\n"
             f"⚡ Пульс: <b>{s.pulse_period_minutes} мин</b> "
             f"(OI≥<b>{pulse_oi}</b>% / цена≥<b>{pulse_price}</b>%)\n"
@@ -998,7 +1019,8 @@ class TelegramBot:
                 await query.answer("Неизвестный пресет", show_alert=True)
                 return
             self.settings_manager.update(**preset)
-            label = "🔓 Мягкий" if preset_key == "soft" else "⚖️ Баланс"
+            labels = {"soft": "🔓 Мягкий", "balanced": "⚖️ Баланс", "working": "✅ Рабочий"}
+            label = labels.get(preset_key, preset_key)
             await query.answer(f"✅ Пресет {label} применён", show_alert=False)
             await self._safe_edit_message_text(
                 query,
@@ -1042,6 +1064,7 @@ class TelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
+                InlineKeyboardButton("✅ Рабочий", callback_data="preset:working"),
                 InlineKeyboardButton("🔓 Мягкий", callback_data="preset:soft"),
                 InlineKeyboardButton("⚖️ Баланс", callback_data="preset:balanced"),
             ],

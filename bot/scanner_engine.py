@@ -309,6 +309,9 @@ class SignalEngine:
         both_long = 0
         oi_only_long = 0
         price_only_long = 0
+        lookback_fail = 0
+        flow_blocked = 0
+        liquidity_blocked = 0
 
         for key, history in self.history.items():
             if len(history) < 2:
@@ -321,23 +324,31 @@ class SignalEngine:
                 current.open_interest, current.price, current.additional
             )
             if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
+                liquidity_blocked += 1
                 continue
 
             exchange = key.split(":", 1)[0]
             thresholds = settings.for_exchange(exchange)
             earlier = self._lookback_point(history, thresholds.long_period_minutes)
             if earlier is None:
+                lookback_fail += 1
                 continue
 
             changes = self._compute_changes(
                 current, earlier, thresholds.long_period_minutes * 60
             )
-            if changes.oi_change_usd is not None:
-                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
-                    continue
-
             oi_ok = changes.oi_change_percent >= thresholds.oi_rise_percent
             price_ok = changes.price_change_percent >= thresholds.price_rise_percent
+            flow_ok = (
+                changes.oi_change_usd is None
+                or abs(changes.oi_change_usd) >= settings.min_oi_change_usd
+            )
+
+            if not flow_ok:
+                if oi_ok or price_ok:
+                    flow_blocked += 1
+                continue
+
             if oi_ok and price_ok:
                 both_long += 1
             elif oi_ok:
@@ -349,6 +360,9 @@ class SignalEngine:
             "both_long": both_long,
             "oi_only_long": oi_only_long,
             "price_only_long": price_only_long,
+            "lookback_fail": lookback_fail,
+            "flow_blocked": flow_blocked,
+            "liquidity_blocked": liquidity_blocked,
         }
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
@@ -1020,8 +1034,7 @@ class SignalEngine:
     ) -> SnapshotPoint | None:
         lookback_seconds = period_minutes * 60
         cutoff = history[-1].timestamp - lookback_seconds
-        max_lag = min(lookback_seconds * 0.5, 120.0)
-        return self._point_at_cutoff(history, cutoff, max_lag_seconds=max_lag)
+        return self._point_at_cutoff(history, cutoff)
 
     @staticmethod
     def _point_at_cutoff(

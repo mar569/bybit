@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 8
+SETTINGS_VERSION = 9
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -76,22 +76,22 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной профиль — умеренный: ловит альты, не требует идеального совпадения
+    # Рабочий профиль: OI или цена (не оба сразу), без фильтра вероятности
     oi_period_minutes: int = 5
     long_period_minutes: int = 5
     short_period_minutes: int = 5
-    oi_rise_percent: float = 1.5
-    oi_drop_percent: float = 1.5
-    price_rise_percent: float = 1.0
-    price_drop_percent: float = 1.0
+    oi_rise_percent: float = 1.0
+    oi_drop_percent: float = 1.0
+    price_rise_percent: float = 0.7
+    price_drop_percent: float = 0.7
 
-    # Ранний пульс — только при сильном совпадении с глобальными порогами
+    # Ранний пульс — мягче глобальных порогов
     pulse_enabled: bool = True
     pulse_period_minutes: int = 5
-    pulse_oi_rise_percent: float = 2.5
-    pulse_oi_drop_percent: float = 2.5
-    pulse_price_rise_percent: float = 0.9
-    pulse_price_drop_percent: float = 0.9
+    pulse_oi_rise_percent: float = 0.8
+    pulse_oi_drop_percent: float = 0.8
+    pulse_price_rise_percent: float = 0.5
+    pulse_price_drop_percent: float = 0.5
 
     # Мега-пампы: только крупные движения (≥8%)
     flash_enabled: bool = True
@@ -102,12 +102,12 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 20.0
 
     # Качество сигнала: реальный приток капитала в OI (диапазон min–max USD)
-    min_oi_change_usd: float = 10_000.0
+    min_oi_change_usd: float = 5_000.0
     max_oi_change_usd: float | None = None
     short_squeeze_min_price: float = 5.0
     short_squeeze_max_oi_change: float = -1.2
     require_oi_for_price_only: bool = True
-    require_both_oi_and_price: bool = True
+    require_both_oi_and_price: bool = False
     respect_global_floors: bool = True
     mega_cooldown_seconds: int = 300
 
@@ -154,8 +154,8 @@ class ScannerSettings:
     telegram_max_per_minute: int = 5
     telegram_min_interval_seconds: float = 3.0
 
-    min_probability_percent: float = 50.0
-    probability_filter_enabled: bool = True
+    min_probability_percent: float = 45.0
+    probability_filter_enabled: bool = False
     probability_strict: bool = False
     min_probability_factors_passed: int = 1
     outcome_tracking_enabled: bool = True
