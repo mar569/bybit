@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 13
+SETTINGS_VERSION = 14
 
 # Сохраняем при миграции на рабочий пресет (7843362 «быстрые алерты»).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -27,6 +27,14 @@ LIQUIDATION_PRESERVE_KEYS = frozenset({
     "liquidation_cooldown_seconds",
     "liquidation_all_symbols",
     "liquidation_show_reversal_hint",
+})
+
+ANALYSIS_PRESERVE_KEYS = frozenset({
+    "analysis_enabled",
+    "analysis_min_liq_usd",
+    "analysis_delay_seconds",
+    "analysis_min_confidence",
+    "analysis_cooldown_seconds",
 })
 
 # При изменении глобального порога сбрасываем биржевые override — иначе кнопки в боте «не работают».
@@ -183,6 +191,16 @@ class ScannerSettings:
     liquidation_cooldown_seconds: int = 60
     liquidation_all_symbols: bool = True
     liquidation_show_reversal_hint: bool = True
+
+    # Аналитический чат (post-liquidation разбор) → TELEGRAM_ANALYSIS_CHAT_ID
+    analysis_enabled: bool = True
+    analysis_min_liq_usd: float = 80_000.0
+    analysis_delay_seconds: int = 90
+    analysis_min_confidence: float = 60.0
+    analysis_cooldown_seconds: int = 1800
+    analysis_outcome_tracking_enabled: bool = True
+    analysis_chart_enabled: bool = True
+    analysis_chart_interval_minutes: int = 5
 
     # Per-exchange override (None = использовать глобальные пороги из бота)
     binance_oi_period_minutes: int | None = None
@@ -373,6 +391,18 @@ class ScannerSettings:
             liquidation_show_reversal_hint=bool(
                 base.get("liquidation_show_reversal_hint", True)
             ),
+            analysis_enabled=bool(base.get("analysis_enabled", True)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 80_000.0)),
+            analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 60.0)),
+            analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 1800)),
+            analysis_outcome_tracking_enabled=bool(
+                base.get("analysis_outcome_tracking_enabled", True)
+            ),
+            analysis_chart_enabled=bool(base.get("analysis_chart_enabled", True)),
+            analysis_chart_interval_minutes=int(
+                base.get("analysis_chart_interval_minutes", 5)
+            ),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),
             binance_long_period_minutes=opt_int("binance_long_period_minutes"),
             binance_short_period_minutes=opt_int("binance_short_period_minutes"),
@@ -426,6 +456,9 @@ class SettingsManager:
             for key in LIQUIDATION_PRESERVE_KEYS:
                 if key in data:
                     merged[key] = data[key]
+            for key in ANALYSIS_PRESERVE_KEYS:
+                if key in data:
+                    merged[key] = data[key]
             # v3: кнопки бота управляют глобальными порогами — убираем биржевые override
             if version < 3:
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
@@ -438,7 +471,7 @@ class SettingsManager:
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
             preserved = sorted(
-                (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS) & data.keys()
+                (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
                 "Settings migrated v%d → v%d (stable preset 7843362, preserved: %s)",

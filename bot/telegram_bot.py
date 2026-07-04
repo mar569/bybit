@@ -35,6 +35,9 @@ from .liquidation_alerts import (
     coinglass_url,
     format_liquidation_alert,
 )
+from .liquidation_analysis import LiquidationAnalysisResult, format_liquidation_analysis
+from .analysis_outcome_tracker import AnalysisOutcomeSummary
+from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ class TelegramBot:
         self.settings_manager = settings_manager
         self.scanner: SignalEngine | None = None
         self.outcome_tracker: Any | None = None
+        self.analysis_outcome_tracker: Any | None = None
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
         self._send_lock = asyncio.Lock()
@@ -105,6 +109,8 @@ class TelegramBot:
                     f"{','.join(str(m) for m in s.flash_window_minutes)}м\n"
                     f"💥 Ликвидации: {'вкл' if s.liquidation_alerts_enabled else 'выкл'} "
                     f"(≥${int(s.liquidation_min_usd):,} · Binance+Bybit)".replace(",", " ")
+                    + f"\n🧠 Анализ: {'вкл' if s.analysis_enabled and self.config.analysis_chat_configured else 'выкл'} "
+                    f"(≥${int(s.analysis_min_liq_usd):,} · conf≥{s.analysis_min_confidence:.0f}%)".replace(",", " ")
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
@@ -126,6 +132,29 @@ class TelegramBot:
                 )
             except Exception as exc:
                 logger.warning("Could not verify TELEGRAM_ALERT_CHAT_ID=%s: %s", alert_chat_id, exc)
+
+        analysis_chat_id = self.config.telegram_analysis_chat_id
+        if analysis_chat_id is not None:
+            try:
+                chat = await self.application.bot.get_chat(analysis_chat_id)
+                logger.info(
+                    "Analysis chat OK: %s (%s)",
+                    chat.title or chat.username or chat.id,
+                    analysis_chat_id,
+                )
+            except BadRequest as exc:
+                logger.warning(
+                    "TELEGRAM_ANALYSIS_CHAT_ID=%s недоступен: %s. "
+                    "Добавьте бота в чат или очистите переменную.",
+                    analysis_chat_id,
+                    exc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not verify TELEGRAM_ANALYSIS_CHAT_ID=%s: %s",
+                    analysis_chat_id,
+                    exc,
+                )
 
         logger.info("Telegram bot started")
 
@@ -408,6 +437,64 @@ class TelegramBot:
                 event_count,
             )
 
+    async def get_analysis_adaptive_weights(self) -> dict[str, float] | None:
+        if self.analysis_outcome_tracker is None:
+            return None
+        return await self.analysis_outcome_tracker.get_adaptive_weights()
+
+    async def dispatch_liquidation_analysis(self, result: LiquidationAnalysisResult) -> None:
+        if self.application is None:
+            return
+        settings = self.settings_manager.settings
+        chat_id = self.config.telegram_analysis_chat_id
+        if chat_id is None or not settings.analysis_enabled:
+            return
+
+        message = format_liquidation_analysis(result)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(result.symbol, result.exchange)),
+            ],
+        ])
+        sent = False
+        if settings.analysis_chart_enabled:
+            png = None
+            try:
+                png = await asyncio.wait_for(
+                    chart_capture_service.capture_tradingview(
+                        result.exchange,
+                        result.symbol,
+                        interval_minutes=settings.analysis_chart_interval_minutes,
+                    ),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Analysis chart timeout for %s", result.symbol)
+            except Exception:
+                logger.exception("Analysis chart capture failed for %s", result.symbol)
+            if png:
+                sent = await self._send_chart(
+                    chat_id, png, message, is_priority=False, keyboard=keyboard,
+                )
+        if not sent:
+            sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=False)
+        if sent:
+            logger.info(
+                "Analysis alert %s %s conf=%.0f%% %s",
+                result.exchange,
+                result.symbol,
+                result.confidence,
+                result.direction,
+            )
+            if (
+                self.analysis_outcome_tracker is not None
+                and settings.analysis_outcome_tracking_enabled
+            ):
+                try:
+                    await self.analysis_outcome_tracker.schedule(result)
+                except Exception:
+                    logger.exception("Analysis outcome schedule failed")
+
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -462,7 +549,7 @@ class TelegramBot:
             await update.message.reply_text("Нет доступа.")
             return
         await update.message.reply_text(
-            self._build_settings_panel_text(),
+            await self._build_settings_panel_text_async(),
             parse_mode=ParseMode.HTML,
             reply_markup=self._settings_keyboard(),
         )
@@ -613,13 +700,13 @@ class TelegramBot:
             )
         elif text in {"⚙ Настройки", "🔧 Настройки", "Настройки"}:
             await update.message.reply_text(
-                self._build_settings_panel_text(),
+                await self._build_settings_panel_text_async(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
         elif text in {"📈 Статус", "Статус"}:
             await update.message.reply_text(
-                self._build_settings_panel_text(),
+                await self._build_settings_panel_text_async(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
             )
@@ -723,10 +810,54 @@ class TelegramBot:
             f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
             f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
-            f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n\n"
+            f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n"
+            f"🧠 Анализ ликвидаций: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
+            f"(≥<b>{s.analysis_min_liq_usd:,.0f}</b>$ · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
+            f"delay <b>{s.analysis_delay_seconds}с</b>)\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
+
+    @staticmethod
+    def _format_analysis_outcome_stats(summary: AnalysisOutcomeSummary) -> str:
+        if summary.total_completed == 0 and summary.pending == 0:
+            return "\n📊 <b>Исходы анализов (7д):</b> ещё нет данных"
+        lines = [f"\n📊 <b>Исходы анализов ({summary.days}д):</b>"]
+        if summary.total_completed > 0:
+            rate_60 = summary.success_rate_60m
+            rate_60_text = f"{rate_60}%" if rate_60 is not None else "—"
+            lines.append(
+                f"✅ 60м: <b>{rate_60_text}</b> "
+                f"({summary.success_60m}/{summary.total_completed})"
+            )
+            if summary.success_rate_30m is not None:
+                rate_15 = (
+                    round(summary.success_15m / summary.total_completed * 100, 1)
+                    if summary.total_completed
+                    else None
+                )
+                rate_15_text = f"{rate_15}%" if rate_15 is not None else "—"
+                lines.append(
+                    f"30м: {summary.success_rate_30m}% · "
+                    f"15м: {rate_15_text} "
+                    f"({summary.success_15m}/{summary.total_completed})"
+                )
+        if summary.pending > 0:
+            lines.append(f"⏳ в проверке: <b>{summary.pending}</b>")
+        return "\n".join(lines)
+
+    async def _build_settings_panel_text_async(self) -> str:
+        text = self._build_settings_panel_text()
+        if (
+            self.analysis_outcome_tracker is not None
+            and self.settings_manager.settings.analysis_outcome_tracking_enabled
+        ):
+            try:
+                summary = await self.analysis_outcome_tracker.get_summary(days=7)
+                text += self._format_analysis_outcome_stats(summary)
+            except Exception:
+                logger.exception("Failed to load analysis outcome stats")
+        return text
 
     def _mark(self, label: str, is_active: bool) -> str:
         return f"✅ {label}" if is_active else label

@@ -115,7 +115,7 @@ class LiquidationAlertService:
 
         alert = LiquidationAlertEvent(
             exchange=burst.exchange,
-            timestamp=time.time(),
+            timestamp=burst.first_ts or time.time(),
             symbol=burst.symbol,
             side=burst.side,
             usd_value=burst.total_usd,

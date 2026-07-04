@@ -15,8 +15,10 @@ from .exchanges.bybit import BybitScanner
 from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
 from .liquidation_alerts import LiquidationAlertService
+from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
+from .analysis_outcome_tracker import AnalysisOutcomeTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,9 +76,21 @@ async def main() -> None:
         enabled=bybit_enabled,
     )
 
+    analysis_engine = LiquidationAnalysisEngine(
+        lambda: settings.settings,
+        scanner,
+        None,
+        telegram.dispatch_liquidation_analysis,
+        weights_getter=lambda: telegram.get_analysis_adaptive_weights(),
+    )
+
+    async def on_liquidation_alert(event, event_count: int, total_usd: float) -> None:
+        await telegram.dispatch_liquidation_alert(event, event_count, total_usd)
+        await analysis_engine.schedule(event, event_count, total_usd)
+
     liquidation_alerts = LiquidationAlertService(
         lambda: settings.settings,
-        telegram.dispatch_liquidation_alert,
+        on_liquidation_alert,
     )
 
     def liquidation_symbols() -> list[str]:
@@ -103,6 +117,8 @@ async def main() -> None:
         on_event=on_liquidation_event,
     )
     scanner.attach_liquidation_tracker(liquidation_tracker)
+    analysis_engine.attach_liquidation_tracker(liquidation_tracker)
+    analysis_engine.attach_binance_liquidation_tracker(binance_liquidation_tracker)
 
     async def run_scan() -> None:
         await asyncio.gather(
@@ -126,6 +142,7 @@ async def main() -> None:
     eval_task: asyncio.Task | None = None
     heartbeat_task: asyncio.Task | None = None
     outcome_task: asyncio.Task | None = None
+    analysis_outcome_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
     try:
@@ -139,15 +156,18 @@ async def main() -> None:
             logger.exception("Symbol preload failed")
         s = settings.settings
         logger.info(
-            "Startup: signals=%s liq=%s | Bybit %d | Binance %d",
+            "Startup: signals=%s liq=%s analysis=%s | Bybit %d | Binance %d",
             "ON" if s.signals_enabled else "OFF",
             "ON" if s.liquidation_alerts_enabled else "OFF",
+            "ON" if s.analysis_enabled and config.analysis_chat_configured else "OFF",
             len(bybit.symbols),
             len(binance.symbols),
         )
         if telegram.redis is not None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
+            telegram.analysis_outcome_tracker = AnalysisOutcomeTracker(telegram.redis, scanner)
+            analysis_outcome_task = asyncio.create_task(telegram.analysis_outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         liq_task = asyncio.create_task(liquidation_tracker.run())
@@ -178,6 +198,8 @@ async def main() -> None:
             heartbeat_task.cancel()
         if outcome_task is not None:
             outcome_task.cancel()
+        if analysis_outcome_task is not None:
+            analysis_outcome_task.cancel()
         if liq_task is not None:
             liq_task.cancel()
         if binance_liq_task is not None:
@@ -190,6 +212,7 @@ async def main() -> None:
                     eval_task,
                     heartbeat_task,
                     outcome_task,
+                    analysis_outcome_task,
                     liq_task,
                     binance_liq_task,
                 )

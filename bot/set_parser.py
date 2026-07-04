@@ -35,6 +35,13 @@ SET_HELP = (
     "/set liq_window 2 — окно агрегации (сек)\n"
     "/set liq_cooldown 60 — пауза между алертами по монете\n"
     "/set liq_all on — все монеты Bybit (не только топ)\n\n"
+    "Аналитический чат (разбор после ликвидаций):\n"
+    "/set analysis on — включить умный разбор\n"
+    "/set analysis off — выключить\n"
+    "/set analysis_min 80000 — мин. кластер для анализа (USD)\n"
+    "/set analysis_delay 90 — пауза перед разбором (сек)\n"
+    "/set analysis_conf 60 — мин. уверенность %\n"
+    "/set analysis_cd 1800 — cooldown по монете (сек)\n\n"
     "По биржам (переопределяют глобальные):\n"
     "/set binance oi 3\n"
     "/set binance period 10\n"
@@ -84,6 +91,11 @@ GLOBAL_ALIASES: dict[str, str] = {
     "liq_cooldown": "liquidation_cooldown_seconds",
     "liq_all": "liquidation_all_symbols",
     "liq_hint": "liquidation_show_reversal_hint",
+    "analysis": "analysis_enabled",
+    "analysis_min": "analysis_min_liq_usd",
+    "analysis_delay": "analysis_delay_seconds",
+    "analysis_conf": "analysis_min_confidence",
+    "analysis_cd": "analysis_cooldown_seconds",
 }
 
 EXCHANGE_ALIASES: dict[str, str] = {
@@ -106,6 +118,8 @@ INT_FIELDS = {
     "signal_cooldown_seconds",
     "mega_cooldown_seconds",
     "liquidation_cooldown_seconds",
+    "analysis_delay_seconds",
+    "analysis_cooldown_seconds",
     "top_n_symbols",
     "priority_score_max",
     "binance_oi_period_minutes",
@@ -140,6 +154,8 @@ FLOAT_FIELDS = {
     "min_probability_percent",
     "liquidation_min_usd",
     "liquidation_burst_window_seconds",
+    "analysis_min_liq_usd",
+    "analysis_min_confidence",
 }
 
 
@@ -204,6 +220,7 @@ def parse_set_command(args: list[str]) -> SetResult:
             "liquidation_alerts_enabled",
             "liquidation_all_symbols",
             "liquidation_show_reversal_hint",
+            "analysis_enabled",
         }:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_filter_enabled":

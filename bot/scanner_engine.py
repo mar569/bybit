@@ -232,6 +232,69 @@ class SignalEngine:
             return None
         return history[-1]
 
+    def get_five_min_oi_bars(self, exchange: str, symbol: str) -> list[FiveMinOiBar]:
+        return list(self._five_min_bars.get(f"{exchange}:{symbol}", []))
+
+    def get_metrics_since(self, exchange: str, symbol: str, since_ts: float) -> dict[str, float | None]:
+        key = f"{exchange}:{symbol}"
+        history = self.history.get(key)
+        if not history:
+            return {"current_price": None, "price_change_pct": None, "oi_change_pct": None, "funding_rate": None}
+
+        current = history[-1]
+        current_price = current.price
+        funding_rate = self._extract_funding(current.additional)
+
+        baseline = None
+        for point in reversed(history):
+            if point.timestamp <= since_ts and point.price:
+                baseline = point
+                break
+        if baseline is None:
+            baseline = history[0]
+
+        price_change_pct = None
+        if current_price and baseline.price:
+            price_change_pct = self._percent_change(baseline.price, current_price)
+
+        oi_change_pct = None
+        if current.open_interest and baseline.open_interest and baseline.open_interest > 0:
+            oi_change_pct = self._percent_change(baseline.open_interest, current.open_interest)
+
+        return {
+            "current_price": current_price,
+            "price_change_pct": price_change_pct,
+            "oi_change_pct": oi_change_pct,
+            "funding_rate": funding_rate,
+        }
+
+    def get_price_extremes_since(
+        self,
+        exchange: str,
+        symbol: str,
+        since_ts: float,
+    ) -> dict[str, float | None]:
+        history = self.history.get(f"{exchange}:{symbol}")
+        if not history:
+            return {"low": None, "high": None}
+        prices = [
+            p.price for p in history
+            if p.timestamp >= since_ts and p.price is not None
+        ]
+        if not prices:
+            return {"low": None, "high": None}
+        return {"low": min(prices), "high": max(prices)}
+
+    @staticmethod
+    def _extract_funding(additional: dict[str, object]) -> float | None:
+        raw = additional.get("funding_rate")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
     def get_btc_change_percent(self, minutes: int = 5) -> float | None:
         if len(self._btc_history) < 2:
             return None
