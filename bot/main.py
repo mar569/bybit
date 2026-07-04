@@ -28,6 +28,24 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+HEARTBEAT_INTERVAL_SECONDS = 300
+
+
+async def _scanner_heartbeat_loop(scanner: SignalEngine) -> None:
+    """Периодический лог — подтверждает, что биржи шлют данные (без спама httpx)."""
+    await asyncio.sleep(60)
+    while True:
+        d = scanner.get_diagnostics()
+        logger.info(
+            "Scanner heartbeat: pairs=%d ready=%d oi_ok=%d history_pts=%d signals=%s",
+            d["pairs_tracked"],
+            d["pairs_ready"],
+            d["pairs_with_oi"],
+            d["max_history_points"],
+            "ON" if d["signals_enabled"] else "OFF",
+        )
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
 
 async def main() -> None:
     config = Config.load()
@@ -106,6 +124,7 @@ async def main() -> None:
 
     scanner_task: asyncio.Task | None = None
     eval_task: asyncio.Task | None = None
+    heartbeat_task: asyncio.Task | None = None
     outcome_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
@@ -115,6 +134,7 @@ async def main() -> None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
+        heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         liq_task = asyncio.create_task(liquidation_tracker.run())
         binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())
         scanner_task = asyncio.create_task(run_scan())
@@ -139,6 +159,8 @@ async def main() -> None:
             scanner_task.cancel()
         if eval_task is not None:
             eval_task.cancel()
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
         if outcome_task is not None:
             outcome_task.cancel()
         if liq_task is not None:
@@ -148,7 +170,14 @@ async def main() -> None:
         await asyncio.gather(
             *(
                 t
-                for t in (scanner_task, eval_task, outcome_task, liq_task, binance_liq_task)
+                for t in (
+                    scanner_task,
+                    eval_task,
+                    heartbeat_task,
+                    outcome_task,
+                    liq_task,
+                    binance_liq_task,
+                )
                 if t is not None
             ),
             return_exceptions=True,
