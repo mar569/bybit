@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 
 # Сохраняем при миграции на новый пресет (остальное — идеальные значения).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -153,10 +153,10 @@ class ScannerSettings:
     telegram_max_per_minute: int = 5
     telegram_min_interval_seconds: float = 3.0
 
-    min_probability_percent: float = 80.0
+    min_probability_percent: float = 60.0
     probability_filter_enabled: bool = True
-    probability_strict: bool = True
-    min_probability_factors_passed: int = 5
+    probability_strict: bool = False
+    min_probability_factors_passed: int = 3
     outcome_tracking_enabled: bool = True
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
@@ -356,11 +356,11 @@ class ScannerSettings:
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
-            min_probability_percent=float(base.get("min_probability_percent", 80.0)),
+            min_probability_percent=float(base.get("min_probability_percent", 60.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
-            probability_strict=bool(base.get("probability_strict", True)),
+            probability_strict=bool(base.get("probability_strict", False)),
             min_probability_factors_passed=int(
-                base.get("min_probability_factors_passed", 5)
+                base.get("min_probability_factors_passed", 3)
             ),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),

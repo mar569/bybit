@@ -637,8 +637,9 @@ class TelegramBot:
             "<b>📋 Доступные команды</b>\n\n"
             "/start — главное меню\n"
             "/status — текущие настройки\n"
-            "/settings — inline-настройки порогов\n"
-            "/set help — точная настройка через команды\n"
+            "/settings — inline-настройки порогов (в т.ч. 🎯 вероятность)\n"
+            "/set prob 60 — точная настройка вероятности\n"
+            "/set help — все команды /set\n"
             "/test — тестовые сигналы LONG + SHORT\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить уведомления\n"
@@ -772,6 +773,8 @@ class TelegramBot:
             "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
             "set_priority:": ("priority_score_max", int, "Приоритет score"),
             "set_top:": ("top_n_symbols", int, "Топ монет"),
+            "set_prob:": ("min_probability_percent", float, "Мин. вероятность"),
+            "set_prob_factors:": ("min_probability_factors_passed", int, "Факторов вероятности"),
         }
 
         for prefix, (field, caster, label) in handlers.items():
@@ -796,7 +799,12 @@ class TelegramBot:
                         changed_label = f"Период LONG/SHORT → {value}м"
                     else:
                         self.settings_manager.update(**{field: value})
-                        changed_label = f"{label} → {value}"
+                        if field == "min_probability_percent":
+                            changed_label = f"Мин. вероятность → {value:.0f}%"
+                        elif field == "min_probability_factors_passed":
+                            changed_label = f"Факторов вероятности → ≥{value}"
+                        else:
+                            changed_label = f"{label} → {value}"
                 break
 
         if changed_label:
@@ -834,6 +842,28 @@ class TelegramBot:
             self.settings_manager.update(signals_enabled=not current)
             state = "включены" if not current else "остановлены"
             await query.answer(f"✅ Сигналы {state}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+        elif payload == "toggle_prob_filter":
+            current = self.settings_manager.settings.probability_filter_enabled
+            self.settings_manager.update(probability_filter_enabled=not current)
+            state = "вкл" if not current else "выкл"
+            await query.answer(f"✅ Фильтр вероятности {state}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+        elif payload == "toggle_prob_strict":
+            current = self.settings_manager.settings.probability_strict
+            self.settings_manager.update(probability_strict=not current)
+            state = "вкл" if not current else "выкл"
+            await query.answer(f"✅ Строгий режим {state}", show_alert=False)
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -941,6 +971,34 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("🔥≤1", s.priority_score_max == 1), callback_data="set_priority:1"),
                 InlineKeyboardButton(self._mark("≤2", s.priority_score_max == 2), callback_data="set_priority:2"),
                 InlineKeyboardButton(self._mark("≤3", s.priority_score_max == 3), callback_data="set_priority:3"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("🎯50%", s.min_probability_percent == 50), callback_data="set_prob:50"),
+                InlineKeyboardButton(self._mark("60%", s.min_probability_percent == 60), callback_data="set_prob:60"),
+                InlineKeyboardButton(self._mark("70%", s.min_probability_percent == 70), callback_data="set_prob:70"),
+                InlineKeyboardButton(self._mark("80%", s.min_probability_percent == 80), callback_data="set_prob:80"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("Ф≥2", s.min_probability_factors_passed == 2), callback_data="set_prob_factors:2"),
+                InlineKeyboardButton(self._mark("≥3", s.min_probability_factors_passed == 3), callback_data="set_prob_factors:3"),
+                InlineKeyboardButton(self._mark("≥4", s.min_probability_factors_passed == 4), callback_data="set_prob_factors:4"),
+                InlineKeyboardButton(self._mark("≥5", s.min_probability_factors_passed == 5), callback_data="set_prob_factors:5"),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark(
+                        f"Фильтр {'ON' if s.probability_filter_enabled else 'OFF'}",
+                        s.probability_filter_enabled,
+                    ),
+                    callback_data="toggle_prob_filter",
+                ),
+                InlineKeyboardButton(
+                    self._mark(
+                        f"Строгий {'ON' if s.probability_strict else 'OFF'}",
+                        s.probability_strict,
+                    ),
+                    callback_data="toggle_prob_strict",
+                ),
             ],
             [
                 InlineKeyboardButton(self._mark(f"Binance {'ON' if s.enabled_binance else 'OFF'}", s.enabled_binance), callback_data="toggle_binance"),

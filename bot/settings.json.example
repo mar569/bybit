@@ -43,10 +43,10 @@
   "min_signal_score": 1.0,
   "max_signal_score": 4,
 
-  "min_probability_percent": 80,
+  "min_probability_percent": 60,
   "probability_filter_enabled": true,
-  "probability_strict": true,
-  "min_probability_factors_passed": 5,
+  "probability_strict": false,
+  "min_probability_factors_passed": 3,
 
   "market_structure_enabled": true,
   "market_structure_hours": 5,
