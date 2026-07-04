@@ -29,6 +29,7 @@
 
   "min_open_interest": 100000,
   "min_oi_change_usd": 20000,
+  "max_oi_change_usd": null,
   "require_oi_for_price_only": true,
   "require_both_oi_and_price": true,
   "short_squeeze_min_price": 5.0,

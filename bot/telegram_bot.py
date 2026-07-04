@@ -43,6 +43,15 @@ EXCHANGE_LABEL = {
     "bybit": ("⚫", "ByBit"),
 }
 
+# (подпись кнопки, min USD, max USD или None = без верха)
+OI_FLOW_RANGES: tuple[tuple[str, float, float | None], ...] = (
+    ("10k–∞", 10_000, None),
+    ("15k–50k", 15_000, 50_000),
+    ("20k–∞", 20_000, None),
+    ("20k–75k", 20_000, 75_000),
+    ("25k–100k", 25_000, 100_000),
+)
+
 
 class TelegramBot:
     def __init__(self, config: Config, settings_manager: SettingsManager) -> None:
@@ -683,6 +692,27 @@ class TelegramBot:
             f"OI↓<b>{thresholds.oi_drop_percent}</b>%"
         )
 
+    @staticmethod
+    def _format_oi_flow_range(min_usd: float, max_usd: float | None) -> str:
+        min_label = f"{min_usd:,.0f}".replace(",", " ")
+        if max_usd is None or max_usd <= 0:
+            return f"{min_label} – ∞ $"
+        return f"{min_label} – {max_usd:,.0f} $".replace(",", " ")
+
+    @staticmethod
+    def _oi_flow_range_matches(
+        min_usd: float,
+        max_usd: float | None,
+        *,
+        current_min: float,
+        current_max: float | None,
+    ) -> bool:
+        if current_min != min_usd:
+            return False
+        if max_usd is None:
+            return current_max is None or (current_max is not None and current_max <= 0)
+        return current_max == max_usd
+
     def _build_settings_panel_text(self) -> str:
         s = self.settings_manager.settings
         top_label = "все" if not s.top_n_symbols else str(s.top_n_symbols)
@@ -705,7 +735,7 @@ class TelegramBot:
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
-            "<i>Кнопки задают минимум OI <b>и</b> цены вместе</i>\n\n"
+            "<i>Кнопки задают минимум OI <b>и</b> цены вместе; приток — диапазон min–max $</i>\n\n"
             f"📅 LONG: <b>{s.long_period_minutes} мин</b> | SHORT: <b>{s.short_period_minutes} мин</b>\n"
             f"⚡ Пульс: <b>{s.pulse_period_minutes} мин</b> "
             f"(OI≥<b>{pulse_oi}</b>% / цена≥<b>{pulse_price}</b>%)\n"
@@ -713,7 +743,7 @@ class TelegramBot:
             f"(от <b>{mega_label}</b>)\n"
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
-            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
+            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{self._format_oi_flow_range(s.min_oi_change_usd, s.max_oi_change_usd)}</b>\n"
             f"🏆 Топ монет: <b>{top_label}</b> | Ранность <b>{s.min_signal_score}–{s.max_signal_score or '∞'}</b>/10\n"
             f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b> | "
             f"≤<b>{s.max_signals_per_symbol_per_day}</b>/день на монету\n"
@@ -768,7 +798,6 @@ class TelegramBot:
             "set_price_rise:": ("price_rise_percent", float, "Рост цены"),
             "set_price_drop:": ("price_drop_percent", float, "Падение цены"),
             "set_min_oi:": ("min_open_interest", float, "Мин. OI"),
-            "set_min_oi_change:": ("min_oi_change_usd", float, "Приток OI"),
             "set_min_volume:": ("min_volume", float, "Мин. объём"),
             "set_min_score:": ("min_signal_score", float, "Мин. сигнал"),
             "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
@@ -804,8 +833,6 @@ class TelegramBot:
                             changed_label = f"Мин. вероятность → {value:.0f}%"
                         elif field == "min_probability_factors_passed":
                             changed_label = f"Факторов вероятности → ≥{value}"
-                        elif field == "min_oi_change_usd":
-                            changed_label = f"Приток OI → {value:,.0f} $".replace(",", " ")
                         elif field == "min_open_interest":
                             changed_label = f"Мин. OI → {value:,.0f} $".replace(",", " ")
                         else:
@@ -814,6 +841,31 @@ class TelegramBot:
 
         if changed_label:
             await query.answer(f"✅ {changed_label}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+            return
+
+        if payload.startswith("set_oi_range:"):
+            raw = payload.split(":", 1)[1]
+            min_part, _, max_part = raw.partition("-")
+            try:
+                min_val = float(min_part)
+                max_val = float(max_part) if max_part and max_part != "0" else None
+            except ValueError:
+                await query.answer("Некорректный диапазон", show_alert=True)
+                return
+            self.settings_manager.update(
+                min_oi_change_usd=min_val,
+                max_oi_change_usd=max_val,
+            )
+            await query.answer(
+                f"✅ Приток OI → {self._format_oi_flow_range(min_val, max_val)}",
+                show_alert=False,
+            )
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -960,11 +1012,23 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
             ],
             [
-                InlineKeyboardButton(self._mark("Приток 15k", s.min_oi_change_usd == 15000), callback_data="set_min_oi_change:15000"),
-                InlineKeyboardButton(self._mark("20k", s.min_oi_change_usd == 20000), callback_data="set_min_oi_change:20000"),
-                InlineKeyboardButton(self._mark("25k", s.min_oi_change_usd == 25000), callback_data="set_min_oi_change:25000"),
-                InlineKeyboardButton(self._mark("50k", s.min_oi_change_usd == 50000), callback_data="set_min_oi_change:50000"),
-                InlineKeyboardButton(self._mark("75k", s.min_oi_change_usd == 75000), callback_data="set_min_oi_change:75000"),
+                InlineKeyboardButton(
+                    self._mark(
+                        label,
+                        self._oi_flow_range_matches(
+                            min_usd,
+                            max_usd,
+                            current_min=s.min_oi_change_usd,
+                            current_max=s.max_oi_change_usd,
+                        ),
+                    ),
+                    callback_data=(
+                        f"set_oi_range:{int(min_usd)}-"
+                        if max_usd is None
+                        else f"set_oi_range:{int(min_usd)}-{int(max_usd)}"
+                    ),
+                )
+                for label, min_usd, max_usd in OI_FLOW_RANGES
             ],
             [
                 InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),

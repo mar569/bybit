@@ -337,9 +337,18 @@ class SignalEngine:
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
             if not is_mega and not is_breakout and not is_reversal and changes.oi_change_usd is not None:
-                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
+                oi_flow_abs = abs(changes.oi_change_usd)
+                if oi_flow_abs < settings.min_oi_change_usd:
                     if candidate.signal_type not in {"price_pump", "price_dump"}:
                         return
+                max_flow = settings.max_oi_change_usd
+                if (
+                    max_flow is not None
+                    and max_flow > 0
+                    and oi_flow_abs > max_flow
+                    and candidate.signal_type not in {"price_pump", "price_dump"}
+                ):
+                    return
 
             now = time.time()
             if is_breakout:

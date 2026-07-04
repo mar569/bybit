@@ -101,8 +101,9 @@ class ScannerSettings:
     flash_min_oi_drop_percent: float = 2.0
     flash_bypass_oi_tier_pct: float = 20.0
 
-    # Качество сигнала: реальный приток капитала в OI
+    # Качество сигнала: реальный приток капитала в OI (диапазон min–max USD)
     min_oi_change_usd: float = 20_000.0
+    max_oi_change_usd: float | None = None
     short_squeeze_min_price: float = 5.0
     short_squeeze_max_oi_change: float = -1.2
     require_oi_for_price_only: bool = True
@@ -259,6 +260,16 @@ class ScannerSettings:
     def default(cls) -> "ScannerSettings":
         return cls()
 
+    @staticmethod
+    def _parse_optional_usd_cap(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScannerSettings":
         defaults = cls.default().to_dict()
@@ -308,6 +319,7 @@ class ScannerSettings:
             flash_min_oi_drop_percent=float(base["flash_min_oi_drop_percent"]),
             flash_bypass_oi_tier_pct=float(base["flash_bypass_oi_tier_pct"]),
             min_oi_change_usd=float(base["min_oi_change_usd"]),
+            max_oi_change_usd=cls._parse_optional_usd_cap(base.get("max_oi_change_usd")),
             short_squeeze_min_price=float(base["short_squeeze_min_price"]),
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
