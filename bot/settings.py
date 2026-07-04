@@ -9,15 +9,24 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 9
+SETTINGS_VERSION = 10
 
-# Сохраняем при миграции на новый пресет (остальное — идеальные значения).
+# Сохраняем при миграции на рабочий пресет (7843362 «быстрые алерты»).
 PRESERVE_ON_MIGRATE = frozenset({
     "signals_enabled",
     "enabled_binance",
     "enabled_bybit",
     "top_n_symbols",
     "telegram_max_per_minute",
+})
+
+LIQUIDATION_PRESERVE_KEYS = frozenset({
+    "liquidation_alerts_enabled",
+    "liquidation_min_usd",
+    "liquidation_burst_window_seconds",
+    "liquidation_cooldown_seconds",
+    "liquidation_all_symbols",
+    "liquidation_show_reversal_hint",
 })
 
 # При изменении глобального порога сбрасываем биржевые override — иначе кнопки в боте «не работают».
@@ -76,88 +85,82 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Рабочий профиль: OI или цена (не оба сразу), без фильтра вероятности
-    oi_period_minutes: int = 5
-    long_period_minutes: int = 5
-    short_period_minutes: int = 5
-    oi_rise_percent: float = 1.0
-    oi_drop_percent: float = 1.0
-    price_rise_percent: float = 0.7
-    price_drop_percent: float = 0.7
+    # Основной LONG-профиль (OI + цена, качественный приток)
+    oi_period_minutes: int = 10
+    long_period_minutes: int = 10
+    short_period_minutes: int = 10
+    oi_rise_percent: float = 3.0
+    oi_drop_percent: float = 3.0
+    price_rise_percent: float = 0.8
+    price_drop_percent: float = 0.8
 
-    # Ранний пульс — мягче глобальных порогов
-    pulse_enabled: bool = True
+    # Ранний пульс — ловим старт движения на альтах
     pulse_period_minutes: int = 5
     pulse_oi_rise_percent: float = 0.8
     pulse_oi_drop_percent: float = 0.8
-    pulse_price_rise_percent: float = 0.5
-    pulse_price_drop_percent: float = 0.5
+    pulse_price_rise_percent: float = 0.4
+    pulse_price_drop_percent: float = 0.4
 
-    # Мега-пампы: только крупные движения (≥8%)
+    # Мега-пампы: 5–100% за 5–10 минут
     flash_enabled: bool = True
     flash_window_minutes: tuple[int, ...] = (5, 10)
-    flash_price_tiers: tuple[float, ...] = (8.0, 12.0, 18.0, 25.0, 35.0, 50.0, 100.0)
-    flash_min_oi_rise_percent: float = 2.0
-    flash_min_oi_drop_percent: float = 2.0
-    flash_bypass_oi_tier_pct: float = 20.0
+    flash_price_tiers: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0)
+    flash_min_oi_rise_percent: float = 1.0
+    flash_min_oi_drop_percent: float = 1.0
+    flash_bypass_oi_tier_pct: float = 15.0
 
-    # Качество сигнала: реальный приток капитала в OI (диапазон min–max USD)
-    min_oi_change_usd: float = 5_000.0
-    max_oi_change_usd: float | None = None
-    short_squeeze_min_price: float = 5.0
-    short_squeeze_max_oi_change: float = -1.2
+    # Качество сигнала: деньги в OI, не просто цена
+    min_oi_change_usd: float = 25_000.0
+    short_squeeze_min_price: float = 4.0
+    short_squeeze_max_oi_change: float = -0.8
     require_oi_for_price_only: bool = True
-    require_both_oi_and_price: bool = False
+    require_both_oi_and_price: bool = True
     respect_global_floors: bool = True
-    mega_cooldown_seconds: int = 300
+    mega_cooldown_seconds: int = 30
 
     # Вертикальный памп: флет → взлёт (вне порогов OI/цены из кнопок)
     breakout_enabled: bool = True
     breakout_bypass_top_n: bool = True
     breakout_consolidation_minutes: int = 25
     breakout_spike_minutes: int = 3
-    breakout_max_flat_percent: float = 1.8
-    breakout_min_spike_percent: float = 2.5
-    breakout_min_dump_percent: float = 2.5
-    breakout_velocity_multiplier: float = 4.0
-    breakout_min_liquidity_oi_usd: float = 80_000.0
-    breakout_cooldown_seconds: int = 300
+    breakout_max_flat_percent: float = 2.0
+    breakout_min_spike_percent: float = 1.8
+    breakout_min_dump_percent: float = 1.8
+    breakout_velocity_multiplier: float = 3.5
+    breakout_min_liquidity_oi_usd: float = 30_000.0
+    breakout_cooldown_seconds: int = 120
 
     # Резкий разворот: памп → слив (или дамп → отскок) без 25м флета
     reversal_enabled: bool = True
     reversal_bypass_top_n: bool = True
     reversal_window_minutes: int = 10
     reversal_spike_minutes: int = 3
-    reversal_peak_max_age_minutes: int = 5
-    reversal_min_prior_move_pct: float = 3.0
-    reversal_min_reversal_pct: float = 2.0
-    reversal_min_liquidity_oi_usd: float = 60_000.0
-    reversal_cooldown_seconds: int = 300
+    reversal_peak_max_age_minutes: int = 6
+    reversal_min_prior_move_pct: float = 2.0
+    reversal_min_reversal_pct: float = 1.5
+    reversal_min_liquidity_oi_usd: float = 25_000.0
+    reversal_cooldown_seconds: int = 90
 
-    min_open_interest: float = 100_000.0
+    min_open_interest: float = 75_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 300
-    volume_spike_multiplier: float = 5.0
-    price_pump_threshold_pct: float = 10.0
+    signal_cooldown_seconds: int = 90
+    volume_spike_multiplier: float = 4.0
+    price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
     min_signal_score: float = 1.0
-    max_signal_score: int | None = 4
-    max_signals_per_symbol_per_day: int = 2
-    top_n_symbols: int | None = None
-    priority_score_max: int = 2
+    top_n_symbols: int | None = 150
+    priority_score_max: int = 3
     signals_enabled: bool = True
-    price_only_min_percent: float = 4.0
-    telegram_max_per_minute: int = 5
-    telegram_min_interval_seconds: float = 3.0
+    price_only_min_percent: float = 3.0
+    telegram_max_per_minute: int = 10
+    telegram_min_interval_seconds: float = 2.0
 
-    min_probability_percent: float = 45.0
-    probability_filter_enabled: bool = False
-    probability_strict: bool = False
-    min_probability_factors_passed: int = 1
+    min_probability_percent: float = 70.0
+    probability_filter_enabled: bool = True
     outcome_tracking_enabled: bool = True
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
@@ -260,16 +263,6 @@ class ScannerSettings:
     def default(cls) -> "ScannerSettings":
         return cls()
 
-    @staticmethod
-    def _parse_optional_usd_cap(value: object) -> float | None:
-        if value is None:
-            return None
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
-
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScannerSettings":
         defaults = cls.default().to_dict()
@@ -302,7 +295,6 @@ class ScannerSettings:
             price_rise_percent=float(base["price_rise_percent"]),
             price_drop_percent=float(base["price_drop_percent"]),
             pulse_period_minutes=int(base["pulse_period_minutes"]),
-            pulse_enabled=bool(base.get("pulse_enabled", True)),
             pulse_oi_rise_percent=float(base["pulse_oi_rise_percent"]),
             pulse_oi_drop_percent=float(base["pulse_oi_drop_percent"]),
             pulse_price_rise_percent=float(base["pulse_price_rise_percent"]),
@@ -319,7 +311,6 @@ class ScannerSettings:
             flash_min_oi_drop_percent=float(base["flash_min_oi_drop_percent"]),
             flash_bypass_oi_tier_pct=float(base["flash_bypass_oi_tier_pct"]),
             min_oi_change_usd=float(base["min_oi_change_usd"]),
-            max_oi_change_usd=cls._parse_optional_usd_cap(base.get("max_oi_change_usd")),
             short_squeeze_min_price=float(base["short_squeeze_min_price"]),
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
@@ -354,26 +345,14 @@ class ScannerSettings:
             price_pump_window_minutes=int(base.get("price_pump_window_minutes", 5)),
             cvd_divergence_threshold=float(base.get("cvd_divergence_threshold", -0.1)),
             min_signal_score=float(base.get("min_signal_score", 1.0)),
-            max_signal_score=(
-                int(base["max_signal_score"])
-                if base.get("max_signal_score") is not None
-                else None
-            ),
-            max_signals_per_symbol_per_day=int(
-                base.get("max_signals_per_symbol_per_day", 2)
-            ),
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(base.get("priority_score_max", 3)),
             signals_enabled=bool(base.get("signals_enabled", True)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
-            min_probability_percent=float(base.get("min_probability_percent", 60.0)),
+            min_probability_percent=float(base.get("min_probability_percent", 70.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
-            probability_strict=bool(base.get("probability_strict", False)),
-            min_probability_factors_passed=int(
-                base.get("min_probability_factors_passed", 3)
-            ),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
@@ -382,6 +361,8 @@ class ScannerSettings:
             signal_chart_hours=int(base.get("signal_chart_hours", 5)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
+            scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
+            signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
             liquidation_min_usd=float(base.get("liquidation_min_usd", 40_000.0)),
             liquidation_burst_window_seconds=float(
@@ -392,8 +373,6 @@ class ScannerSettings:
             liquidation_show_reversal_hint=bool(
                 base.get("liquidation_show_reversal_hint", True)
             ),
-            scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
-            signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
             binance_oi_period_minutes=opt_int("binance_oi_period_minutes"),
             binance_long_period_minutes=opt_int("binance_long_period_minutes"),
             binance_short_period_minutes=opt_int("binance_short_period_minutes"),
@@ -444,18 +423,28 @@ class SettingsManager:
             for key in PRESERVE_ON_MIGRATE:
                 if key in data:
                     merged[key] = data[key]
+            for key in LIQUIDATION_PRESERVE_KEYS:
+                if key in data:
+                    merged[key] = data[key]
             # v3: кнопки бота управляют глобальными порогами — убираем биржевые override
             if version < 3:
+                for override_key in EXCHANGE_OVERRIDE_KEYS:
+                    merged[override_key] = None
+            # v10: сброс на пресет «быстрые алерты» (7843362), ликвидации не трогаем
+            if version >= 3:
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
                     merged[override_key] = None
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
+            preserved = sorted(
+                (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS) & data.keys()
+            )
             logger.info(
-                "Settings migrated v%d → v%d (ideal preset applied, preserved: %s)",
+                "Settings migrated v%d → v%d (preset 7843362, preserved: %s)",
                 version,
                 SETTINGS_VERSION,
-                ", ".join(sorted(PRESERVE_ON_MIGRATE & data.keys())),
+                ", ".join(preserved),
             )
             return settings
 
