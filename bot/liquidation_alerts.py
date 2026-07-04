@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
-from .scanner_engine import SignalEngine
-
 logger = logging.getLogger(__name__)
 
 # Нормализованная сторона: ликвидированы лонги или шорты
@@ -151,7 +149,13 @@ def normalize_binance_side(side: str) -> str | None:
 
 
 def coinglass_url(symbol: str, exchange: str) -> str:
-    return SignalEngine._coinglass_url(symbol, exchange)
+    normalized = symbol.upper().replace("/", "")
+    exchange_key = exchange.lower()
+    if "bybit" in exchange_key:
+        return f"https://www.coinglass.com/tv/Bybit_{normalized}"
+    if "binance" in exchange_key:
+        return f"https://www.coinglass.com/tv/Binance_{normalized}"
+    return f"https://www.coinglass.com/Futures/{normalized}"
 
 
 def exchange_trade_url(symbol: str, exchange: str) -> str:
