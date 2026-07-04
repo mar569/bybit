@@ -57,22 +57,22 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "min_open_interest": 50_000.0,
         "top_n_symbols": None,
         "probability_filter_enabled": False,
+        "require_both_oi_and_price": False,
     },
     "balanced": {
         "oi_period_minutes": 5,
         "long_period_minutes": 5,
         "short_period_minutes": 5,
-        "oi_rise_percent": 1.5,
-        "oi_drop_percent": 1.5,
-        "price_rise_percent": 1.0,
-        "price_drop_percent": 1.0,
+        "oi_rise_percent": 1.2,
+        "oi_drop_percent": 1.2,
+        "price_rise_percent": 0.8,
+        "price_drop_percent": 0.8,
         "min_oi_change_usd": 10_000.0,
         "max_oi_change_usd": None,
         "min_open_interest": 100_000.0,
         "top_n_symbols": None,
-        "probability_filter_enabled": True,
-        "min_probability_percent": 50.0,
-        "min_probability_factors_passed": 1,
+        "probability_filter_enabled": False,
+        "require_both_oi_and_price": False,
     },
 }
 
@@ -591,6 +591,12 @@ class TelegramBot:
             if s.probability_filter_enabled
             else "OFF"
         )
+        live = self.scanner.get_live_threshold_stats()
+        both_mode = (
+            "OI <b>и</b> цена <b>вместе</b>"
+            if s.require_both_oi_and_price
+            else "OI <b>или</b> цена (достаточно одного)"
+        )
 
         text = (
             "<b>📡 Диагностика сканера</b>\n\n"
@@ -599,20 +605,20 @@ class TelegramBot:
             f"С ценой и OI: <b>{d['pairs_with_oi']}</b>\n"
             f"{warmup}\n"
             f"Макс. точек истории: <b>{d['max_history_points']}</b>\n\n"
+            f"<b>Сейчас на рынке (LONG {d['long_period_minutes']}м):</b>\n"
+            f"✅ OI+цена вместе: <b>{live['both_long']}</b> пар\n"
+            f"📈 только OI: <b>{live['oi_only_long']}</b> | только цена: <b>{live['price_only_long']}</b>\n"
+            f"<i>Режим: {both_mode}</i>\n\n"
             f"<b>Пороги:</b>\n"
             f"LONG {d['long_period_minutes']}м | SHORT {d['short_period_minutes']}м | "
             f"Пульс {d['pulse_period_minutes']}м\n"
-            f"OI ≥ {d['oi_rise_percent']}% <b>и</b> цена ≥ {d['price_rise_percent']}% <b>вместе</b>\n"
+            f"OI ≥ {d['oi_rise_percent']}% | цена ≥ {d['price_rise_percent']}%\n"
             f"Мин. OI: {d['min_open_interest']:,.0f} $ | Приток: <b>{flow_line}</b>\n"
             f"Фильтр вероятности: <b>{prob_state}</b>\n"
             f"Топ монет: {d['top_n_symbols'] or 'все'}\n"
             f"{flow_warn}\n\n"
-            "<i>Рынок живой — при тишине чаще всего мешают:</i>\n"
-            "• диапазон притока с верхним пределом (15k–50k)\n"
-            "• OI+цена вместе при жёстких %\n"
-            "• история &lt; периода после перезапуска\n\n"
-            "<code>/test</code> — проверка Telegram\n"
-            "Кнопка <b>🔓 Мягкий</b> в настройках — больше сигналов"
+            "<i>Если «OI+цена вместе: 0» — рынок спокойный или жмите <b>🔓 Мягкий</b></i>\n"
+            "<code>/test</code> — проверка Telegram"
         ).replace(",", " ")
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self._reply_keyboard())
 

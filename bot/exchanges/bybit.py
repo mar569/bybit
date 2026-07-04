@@ -44,7 +44,6 @@ class BybitScanner(ExchangeScanner):
             self._get_scan_interval = lambda: float(scan_interval)
         self._enabled = enabled or (lambda: True)
         self._last_symbol_refresh = 0.0
-        self._last_dispatch_sig: dict[str, tuple[float, float]] = {}
         self._session: aiohttp.ClientSession | None = None
 
     async def load_symbols(self) -> list[str]:
@@ -203,11 +202,6 @@ class BybitScanner(ExchangeScanner):
 
         if not snapshot.price or not snapshot.open_interest:
             return None
-
-        sig = (round(snapshot.price, 8), round(snapshot.open_interest, 6))
-        if self._last_dispatch_sig.get(symbol) == sig:
-            return None
-        self._last_dispatch_sig[symbol] = sig
         return snapshot
 
     async def _dispatch_update(self, snapshot: MarketSnapshot) -> None:

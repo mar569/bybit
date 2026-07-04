@@ -303,6 +303,54 @@ class SignalEngine:
             "dirty_queue": len(self._dirty_keys),
         }
 
+    def get_live_threshold_stats(self) -> dict[str, int]:
+        """Сколько пар прямо сейчас бьют пороги (LONG), без фильтра вероятности."""
+        settings = self.settings.settings
+        both_long = 0
+        oi_only_long = 0
+        price_only_long = 0
+
+        for key, history in self.history.items():
+            if len(history) < 2:
+                continue
+            current = history[-1]
+            if not current.price or not current.open_interest:
+                continue
+
+            oi_usd_now = self._oi_usd_value(
+                current.open_interest, current.price, current.additional
+            )
+            if oi_usd_now is None or oi_usd_now < settings.min_open_interest:
+                continue
+
+            exchange = key.split(":", 1)[0]
+            thresholds = settings.for_exchange(exchange)
+            earlier = self._lookback_point(history, thresholds.long_period_minutes)
+            if earlier is None:
+                continue
+
+            changes = self._compute_changes(
+                current, earlier, thresholds.long_period_minutes * 60
+            )
+            if changes.oi_change_usd is not None:
+                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
+                    continue
+
+            oi_ok = changes.oi_change_percent >= thresholds.oi_rise_percent
+            price_ok = changes.price_change_percent >= thresholds.price_rise_percent
+            if oi_ok and price_ok:
+                both_long += 1
+            elif oi_ok:
+                oi_only_long += 1
+            elif price_ok:
+                price_only_long += 1
+
+        return {
+            "both_long": both_long,
+            "oi_only_long": oi_only_long,
+            "price_only_long": price_only_long,
+        }
+
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
         if not self.settings.settings.signals_enabled:
             return
@@ -847,7 +895,7 @@ class SignalEngine:
 
         if settings.flash_enabled and flash_tiers:
             for window in settings.flash_window_minutes:
-                earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+                earlier = self._lookback_point(history, window)
                 if earlier is None:
                     continue
                 changes = self._compute_changes(current, earlier, window * 60)
@@ -879,9 +927,7 @@ class SignalEngine:
                             break
 
         if settings.pulse_enabled:
-            pulse_earlier = self._point_at_cutoff(
-                history, current.timestamp - settings.pulse_period_minutes * 60
-            )
+            pulse_earlier = self._lookback_point(history, settings.pulse_period_minutes)
             if pulse_earlier is not None:
                 pulse = self._compute_changes(
                     current, pulse_earlier, settings.pulse_period_minutes * 60
@@ -923,9 +969,7 @@ class SignalEngine:
                         urgency=2,
                     ))
 
-        long_earlier = self._point_at_cutoff(
-            history, current.timestamp - thresholds.long_period_minutes * 60
-        )
+        long_earlier = self._lookback_point(history, thresholds.long_period_minutes)
         if long_earlier is not None:
             long_chg = self._compute_changes(
                 current, long_earlier, thresholds.long_period_minutes * 60
@@ -941,9 +985,7 @@ class SignalEngine:
                     urgency=3,
                 ))
 
-        short_earlier = self._point_at_cutoff(
-            history, current.timestamp - thresholds.short_period_minutes * 60
-        )
+        short_earlier = self._lookback_point(history, thresholds.short_period_minutes)
         if short_earlier is not None:
             short_chg = self._compute_changes(
                 current, short_earlier, thresholds.short_period_minutes * 60
@@ -971,14 +1013,31 @@ class SignalEngine:
         )
         return candidates[0]
 
+    def _lookback_point(
+        self,
+        history: deque[SnapshotPoint],
+        period_minutes: int,
+    ) -> SnapshotPoint | None:
+        lookback_seconds = period_minutes * 60
+        cutoff = history[-1].timestamp - lookback_seconds
+        max_lag = min(lookback_seconds * 0.5, 120.0)
+        return self._point_at_cutoff(history, cutoff, max_lag_seconds=max_lag)
+
     @staticmethod
     def _point_at_cutoff(
         history: deque[SnapshotPoint],
         cutoff: float,
+        *,
+        max_lag_seconds: float | None = None,
     ) -> SnapshotPoint | None:
         if history[0].timestamp > cutoff:
             return None
-        return next((point for point in reversed(history) if point.timestamp <= cutoff), None)
+        earlier = next((point for point in reversed(history) if point.timestamp <= cutoff), None)
+        if earlier is None:
+            return None
+        if max_lag_seconds is not None and (cutoff - earlier.timestamp) > max_lag_seconds:
+            return None
+        return earlier
 
     def _compute_changes(
         self,
