@@ -22,6 +22,7 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Config
+from .settings import SettingsManager
 from .models import Signal
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
@@ -77,24 +78,23 @@ SCANNER_PRESETS: dict[str, dict[str, object]] = {
         "require_oi_for_price_only": False,
     },
     "working": {
-        "oi_period_minutes": 5,
-        "long_period_minutes": 5,
-        "short_period_minutes": 5,
-        "oi_rise_percent": 1.0,
-        "oi_drop_percent": 1.0,
-        "price_rise_percent": 0.7,
-        "price_drop_percent": 0.7,
-        "min_oi_change_usd": 5_000.0,
+        "oi_period_minutes": 10,
+        "long_period_minutes": 10,
+        "short_period_minutes": 10,
+        "oi_rise_percent": 3.0,
+        "oi_drop_percent": 3.0,
+        "price_rise_percent": 0.8,
+        "price_drop_percent": 0.8,
+        "min_oi_change_usd": 25_000.0,
         "max_oi_change_usd": None,
-        "min_open_interest": 100_000.0,
-        "top_n_symbols": None,
-        "probability_filter_enabled": False,
-        "require_both_oi_and_price": False,
-        "require_oi_for_price_only": False,
-        "pulse_oi_rise_percent": 0.8,
-        "pulse_oi_drop_percent": 0.8,
-        "pulse_price_rise_percent": 0.5,
-        "pulse_price_drop_percent": 0.5,
+        "min_open_interest": 75_000.0,
+        "top_n_symbols": 150,
+        "signal_cooldown_seconds": 90,
+        "probability_filter_enabled": True,
+        "require_both_oi_and_price": True,
+        "require_oi_for_price_only": True,
+        "max_signal_score": None,
+        "max_signals_per_symbol_per_day": 0,
     },
 }
 
@@ -380,7 +380,10 @@ class TelegramBot:
                     return
 
         sent_any = False
-        if settings.signal_chart_enabled:
+        # Сначала текст — график может зависнуть, ликвидации не должны ждать
+        sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
+
+        if settings.signal_chart_enabled and sent_any:
             ms = signal.details.get("market_structure")
             warning = ""
             if isinstance(ms, dict):
@@ -401,12 +404,9 @@ class TelegramBot:
                 logger.exception("Chart capture failed for %s", signal.symbol)
                 png = None
             if png:
-                sent_any = await self._send_chart(
+                await self._send_chart(
                     notify_chat_id, png, message, is_priority=is_priority, keyboard=keyboard,
                 )
-
-        if not sent_any:
-            sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
 
         if not sent_any:
             return
@@ -462,7 +462,15 @@ class TelegramBot:
             [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(event.symbol, event.exchange))],
         ])
         notify_chat_id = self.config.notification_chat_id
-        await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
+        sent = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
+        if sent:
+            logger.info(
+                "Liquidation alert %s %s $%.0f (%d events)",
+                event.exchange,
+                event.symbol,
+                total_usd,
+                event_count,
+            )
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):

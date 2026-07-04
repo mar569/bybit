@@ -134,6 +134,21 @@ async def main() -> None:
     binance_liq_task: asyncio.Task | None = None
     try:
         await telegram.start()
+        try:
+            if not binance.symbols:
+                await binance.load_symbols()
+            if not bybit.symbols:
+                await bybit.load_symbols()
+        except Exception:
+            logger.exception("Symbol preload failed — сканер догрузит при старте")
+        s = settings.settings
+        logger.info(
+            "Startup: signals=%s liq=%s | Bybit %d sym | Binance %d sym",
+            "ON" if s.signals_enabled else "OFF",
+            "ON" if s.liquidation_alerts_enabled else "OFF",
+            len(bybit.symbols),
+            len(binance.symbols),
+        )
         if telegram.redis is not None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())

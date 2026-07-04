@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Awaitable, Callable
 
 import aiohttp
+from websockets import connect
 
 from .base import ExchangeScanner, MarketSnapshot
 
@@ -14,20 +16,14 @@ logger = logging.getLogger(__name__)
 BYBIT_REST_BASE = "https://api.bybit.com"
 BYBIT_INSTRUMENTS = f"{BYBIT_REST_BASE}/v5/market/instruments-info"
 BYBIT_TICKERS = f"{BYBIT_REST_BASE}/v5/market/tickers"
+BYBIT_WS_LINEAR = "wss://stream.bybit.com/v5/public/linear"
 
+# Bybit allows many topics per connection; batch size for subscribe messages.
+WS_SUBSCRIBE_BATCH = 50
 SYMBOL_REFRESH_SECONDS = 3600
-REST_TIMEOUT_SECONDS = 90
-REST_MIN_INTERVAL_SECONDS = 2.0
-REST_MAX_RETRIES = 3
-REST_DISPATCH_CONCURRENCY = 12
 
 
 class BybitScanner(ExchangeScanner):
-    """
-    Bybit linear USDT: один REST-запрос на все тикеры.
-    WebSocket tickers.* на все символы перегружает event loop → ping timeout и REST TimeoutError.
-    """
-
     def __init__(
         self,
         on_update: Callable[..., Awaitable[None]],
@@ -44,14 +40,12 @@ class BybitScanner(ExchangeScanner):
             self._get_scan_interval = lambda: float(scan_interval)
         self._enabled = enabled or (lambda: True)
         self._last_symbol_refresh = 0.0
-        self._session: aiohttp.ClientSession | None = None
 
     async def load_symbols(self) -> list[str]:
         params = {"category": "linear"}
-        timeout = aiohttp.ClientTimeout(total=60)
-        session = self._session or aiohttp.ClientSession(timeout=timeout)
-        async with session.get(BYBIT_INSTRUMENTS, params=params) as response:
-            data = await response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(BYBIT_INSTRUMENTS, params=params, timeout=30) as response:
+                data = await response.json()
 
         if data.get("retCode") != 0:
             raise RuntimeError(f"Bybit instruments-info failed: {data.get('retMsg')}")
@@ -68,17 +62,13 @@ class BybitScanner(ExchangeScanner):
 
     async def run(self) -> None:
         self._running = True
-        timeout = aiohttp.ClientTimeout(total=REST_TIMEOUT_SECONDS, connect=20)
-        connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300)
-        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        try:
-            if not self.symbols:
-                await self.load_symbols()
-            await self._rest_poll_loop()
-        finally:
-            if self._session is not None:
-                await self._session.close()
-                self._session = None
+        if not self.symbols:
+            await self.load_symbols()
+
+        await asyncio.gather(
+            self._rest_poll_loop(),
+            self._websocket_loop(),
+        )
 
     async def _maybe_refresh_symbols(self) -> None:
         if time.time() - self._last_symbol_refresh < SYMBOL_REFRESH_SECONDS:
@@ -86,11 +76,7 @@ class BybitScanner(ExchangeScanner):
         try:
             await self.load_symbols()
         except Exception as exc:
-            logger.warning(
-                "Bybit symbol refresh failed: %s: %s",
-                type(exc).__name__,
-                exc or "no details",
-            )
+            logger.warning("Bybit symbol refresh failed: %s", exc)
 
     async def _rest_poll_loop(self) -> None:
         while self._running:
@@ -101,79 +87,74 @@ class BybitScanner(ExchangeScanner):
             try:
                 await self._maybe_refresh_symbols()
                 await self._fetch_all_tickers()
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Bybit REST poll timed out (>%ss) — повтор на следующем цикле",
-                    REST_TIMEOUT_SECONDS,
-                )
-            except aiohttp.ClientError as exc:
-                logger.warning("Bybit REST network error: %s: %s", type(exc).__name__, exc)
             except Exception as exc:
-                logger.warning(
-                    "Bybit REST poll failed: %s: %s",
-                    type(exc).__name__,
-                    exc or "no details",
-                )
+                logger.warning("Bybit REST poll failed: %s", exc)
 
-            interval = max(self._get_scan_interval(), REST_MIN_INTERVAL_SECONDS)
-            await asyncio.sleep(interval)
-
-    async def _fetch_ticker_json(self) -> dict[str, Any]:
-        if self._session is None:
-            raise RuntimeError("Bybit HTTP session is not initialized")
-
-        last_exc: Exception | None = None
-        for attempt in range(1, REST_MAX_RETRIES + 1):
-            try:
-                async with self._session.get(
-                    BYBIT_TICKERS,
-                    params={"category": "linear"},
-                ) as response:
-                    data = await response.json()
-                if data.get("retCode") != 0:
-                    raise RuntimeError(f"Bybit tickers failed: {data.get('retMsg')}")
-                return data
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                last_exc = exc
-                if attempt < REST_MAX_RETRIES:
-                    await asyncio.sleep(attempt * 2)
-        assert last_exc is not None
-        raise last_exc
+            await asyncio.sleep(self._get_scan_interval())
 
     async def _fetch_all_tickers(self) -> None:
-        data = await self._fetch_ticker_json()
+        params = {"category": "linear"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(BYBIT_TICKERS, params=params, timeout=30) as response:
+                data = await response.json()
+
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit tickers failed: {data.get('retMsg')}")
+
         known = set(self.symbols)
-        items = [
-            item
-            for item in data.get("result", {}).get("list", [])
-            if item.get("symbol") in known
-        ]
+        for item in data.get("result", {}).get("list", []):
+            symbol = item.get("symbol")
+            if not symbol or symbol not in known:
+                continue
+            await self._apply_ticker_payload(item, source="rest")
 
-        to_dispatch: list[MarketSnapshot] = []
-        for item in items:
-            snapshot = self._merge_ticker_payload(item, source="rest")
-            if snapshot is not None:
-                to_dispatch.append(snapshot)
+    async def _websocket_loop(self) -> None:
+        while self._running:
+            if not self._enabled() or not self.symbols:
+                await asyncio.sleep(2)
+                continue
 
-        if not to_dispatch:
+            try:
+                async with connect(
+                    BYBIT_WS_LINEAR,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    max_size=2**24,
+                ) as websocket:
+                    logger.info("Bybit v5 websocket connected")
+                    await self._subscribe_all(websocket)
+                    async for message in websocket:
+                        if not self._running or not self._enabled():
+                            break
+                        await self._handle_ws_message(message)
+            except Exception as exc:
+                logger.warning("Bybit websocket disconnected: %s", exc)
+                await asyncio.sleep(5)
+
+    async def _subscribe_all(self, websocket: Any) -> None:
+        topics = [f"tickers.{symbol}" for symbol in self.symbols]
+        for index in range(0, len(topics), WS_SUBSCRIBE_BATCH):
+            batch = topics[index : index + WS_SUBSCRIBE_BATCH]
+            await websocket.send(json.dumps({"op": "subscribe", "args": batch}))
+            await asyncio.sleep(0.05)
+
+    async def _handle_ws_message(self, raw_message: str) -> None:
+        data = json.loads(raw_message)
+        topic = data.get("topic", "")
+        if not topic.startswith("tickers."):
             return
 
-        semaphore = asyncio.Semaphore(REST_DISPATCH_CONCURRENCY)
+        payload = data.get("data")
+        if isinstance(payload, list):
+            for item in payload:
+                await self._apply_ticker_payload(item, source="ws")
+        elif isinstance(payload, dict):
+            await self._apply_ticker_payload(payload, source="ws")
 
-        async def dispatch(snapshot: MarketSnapshot) -> None:
-            async with semaphore:
-                await self._dispatch_update(snapshot)
-
-        await asyncio.gather(*(dispatch(snapshot) for snapshot in to_dispatch))
-
-    def _merge_ticker_payload(
-        self,
-        payload: dict[str, Any],
-        source: str,
-    ) -> MarketSnapshot | None:
+    async def _apply_ticker_payload(self, payload: dict[str, Any], source: str) -> None:
         symbol = payload.get("symbol")
         if not symbol or symbol not in self.symbols:
-            return None
+            return
 
         snapshot = self.snapshots.get(symbol) or MarketSnapshot(exchange="Bybit", symbol=symbol)
 
@@ -199,10 +180,8 @@ class BybitScanner(ExchangeScanner):
             "source": source,
         })
         self.snapshots[symbol] = snapshot
-
-        if not snapshot.price or not snapshot.open_interest:
-            return None
-        return snapshot
+        if snapshot.price and snapshot.open_interest:
+            await self._dispatch_update(snapshot)
 
     async def _dispatch_update(self, snapshot: MarketSnapshot) -> None:
         await self.on_update(
