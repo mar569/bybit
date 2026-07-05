@@ -149,7 +149,7 @@ def _analyze_chart_structure(
         h3 = max(bar.high for bar in klines[2 * third:])
         lower_highs = h1 > h2 > h3 and (h1 - h3) / h1 > 0.015
 
-    post_crash = drawdown >= 12.0
+    post_crash = drawdown >= 10.0
     chg_1h = price_changes.get(1, 0.0)
     chg_3h = price_changes.get(3, price_changes.get(2, 0.0))
     dead_cat = chg_1h > 1.5 and chg_3h <= 0.5 and drawdown >= 10.0

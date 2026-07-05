@@ -53,7 +53,11 @@ async def main() -> None:
     config = Config.load()
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
-    scanner = SignalEngine(settings, telegram.dispatch_signal)
+    scanner = SignalEngine(
+        settings,
+        telegram.dispatch_signal,
+        on_anomaly=telegram.dispatch_anomaly,
+    )
     telegram.scanner = scanner
 
     def scan_interval() -> float:
@@ -95,6 +99,7 @@ async def main() -> None:
     liquidation_alerts = LiquidationAlertService(
         lambda: settings.settings,
         on_liquidation_alert,
+        oi_usd_getter=scanner.get_symbol_oi_usd,
     )
 
     def liquidation_symbols() -> list[str]:
@@ -167,10 +172,11 @@ async def main() -> None:
             logger.exception("Symbol preload failed")
         s = settings.settings
         logger.info(
-            "Startup: signals=%s liq=%s analysis=%s | Bybit %d | Binance %d",
+            "Startup: signals=%s liq=%s analysis=%s anomaly=%s | Bybit %d | Binance %d",
             "ON" if s.signals_enabled else "OFF",
             "ON" if s.liquidation_alerts_enabled else "OFF",
             "ON" if s.analysis_enabled and config.analysis_chat_configured else "OFF",
+            "ON" if s.anomaly_enabled and config.anomaly_chat_configured else "OFF",
             len(bybit.symbols),
             len(binance.symbols),
         )

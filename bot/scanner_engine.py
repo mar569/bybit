@@ -16,6 +16,7 @@ from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_t
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 from .symbol_tiers import TierThresholds, tier_thresholds
+from .anomaly_alerts import detect_anomaly_for_symbol
 
 HISTORY_MAX_POINTS = 3600
 OI_BAR_INTERVAL_SECONDS = 300
@@ -63,11 +64,13 @@ class SignalEngine:
         settings: SettingsManager,
         on_signal: Callable[[Signal], Awaitable[None]],
         *,
+        on_anomaly: Callable[[object], Awaitable[None]] | None = None,
         liquidation_tracker: BybitLiquidationTracker | None = None,
         binance_liquidation_tracker: object | None = None,
     ) -> None:
         self.settings = settings
         self.on_signal = on_signal
+        self.on_anomaly = on_anomaly
         self._liquidation_tracker = liquidation_tracker
         self._binance_liquidation_tracker = binance_liquidation_tracker
         self.history: dict[str, deque[SnapshotPoint]] = {}
@@ -82,6 +85,7 @@ class SignalEngine:
         self._five_min_bars: dict[str, deque[FiveMinOiBar]] = {}
         self._kline_cache = BybitKlineCache()
         self._account_ratio_cache = BybitAccountRatioCache()
+        self._anomaly_last_time: dict[str, float] = {}
         self.lock = asyncio.Lock()
 
     def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
@@ -164,6 +168,19 @@ class SignalEngine:
         if not top:
             return True
         return symbol in top
+
+    def get_symbol_oi_usd(self, symbol: str) -> float | None:
+        symbol = symbol.upper()
+        for exchange in ("Bybit", "Binance"):
+            snap = self.get_snapshot_for(exchange, symbol)
+            if snap is None:
+                continue
+            value = self._oi_usd_value(
+                snap.open_interest, snap.price, snap.additional,
+            )
+            if value is not None and value > 0:
+                return value
+        return None
 
     async def update_snapshot(
         self,
@@ -381,8 +398,23 @@ class SignalEngine:
         }
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
-        if not self.settings.settings.signals_enabled:
+        async with self.lock:
+            history = self.history.get(key)
+            if not history or len(history) < 2:
+                return
+            current = history[-1]
+            settings = self.settings.settings
+            if current.open_interest is None or current.price is None:
+                return
+            thresholds = settings.for_exchange(exchange)
+            in_top = self._is_in_top_n(exchange, symbol)
+            tier = tier_thresholds(symbol, settings, thresholds, in_top_n=in_top)
+
+        await self._maybe_dispatch_anomaly(exchange, symbol, history, current, settings, tier)
+
+        if not settings.signals_enabled:
             return
+
         async with self.lock:
             history = self.history.get(key)
             if not history or len(history) < 2:
@@ -410,6 +442,25 @@ class SignalEngine:
             if candidate is None:
                 return
 
+            if (
+                candidate.signal_type == "reversal_pump"
+                and settings.reversal_block_long_after_dump
+            ):
+                dump_pct = self._max_drop_in_window(
+                    history,
+                    current,
+                    settings.reversal_block_dump_window_minutes,
+                )
+                if dump_pct <= -settings.reversal_block_min_dump_pct:
+                    logger.info(
+                        "Blocked reversal_pump %s %s: dump %.1f%% in %dm window",
+                        exchange,
+                        symbol,
+                        dump_pct,
+                        settings.reversal_block_dump_window_minutes,
+                    )
+                    return
+
             earlier = candidate.earlier
             changes = self._compute_changes(current, earlier, candidate.period_minutes * 60)
 
@@ -417,11 +468,14 @@ class SignalEngine:
             is_breakout = candidate.signal_type in {"vertical_pump", "vertical_dump"}
             is_reversal = candidate.signal_type in {"reversal_pump", "reversal_dump"}
             is_liq_cascade = candidate.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
+            is_impulse = candidate.signal_type in {"impulse_pump", "impulse_dump"}
             min_liquidity = tier.min_open_interest_usd
             if is_breakout:
                 min_liquidity = max(min_liquidity, settings.breakout_min_liquidity_oi_usd)
             elif is_reversal:
                 min_liquidity = max(min_liquidity, settings.reversal_min_liquidity_oi_usd)
+            elif is_impulse:
+                min_liquidity = max(min_liquidity, settings.impulse_min_liquidity_oi_usd)
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 return
 
@@ -434,6 +488,7 @@ class SignalEngine:
                 and not is_breakout
                 and not is_reversal
                 and not is_liq_cascade
+                and not is_impulse
                 and changes.oi_change_usd is not None
             ):
                 if abs(changes.oi_change_usd) < tier.min_oi_change_usd:
@@ -456,6 +511,9 @@ class SignalEngine:
             elif is_liq_cascade:
                 cooldown_key = f"{key}:liq_cascade"
                 cooldown = settings.liq_cascade_cooldown_seconds
+            elif is_impulse:
+                cooldown_key = f"{key}:impulse"
+                cooldown = settings.impulse_cooldown_seconds
             elif is_mega:
                 cooldown_key = f"{key}:mega"
                 cooldown = settings.mega_cooldown_seconds
@@ -466,10 +524,14 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
-            if is_breakout or is_reversal or is_liq_cascade:
-                score = 1 if (is_breakout or is_liq_cascade) else (
-                    1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
-                )
+            if is_breakout or is_reversal or is_liq_cascade or is_impulse:
+                if is_impulse:
+                    tier_hit = float((candidate.breakout_meta or {}).get("impulse_tier_pct", 0))
+                    score = 1 if tier_hit >= 10 else 2
+                else:
+                    score = 1 if (is_breakout or is_liq_cascade) else (
+                        1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
+                    )
             else:
                 score = self._calculate_score(
                     changes.oi_change_percent,
@@ -488,6 +550,7 @@ class SignalEngine:
                 not is_breakout
                 and not is_reversal
                 and not is_liq_cascade
+                and not is_impulse
                 and min_score
                 and score < min_score
             ):
@@ -893,6 +956,106 @@ class SignalEngine:
 
         return None
 
+    def _detect_sustained_impulse(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> SignalCandidate | None:
+        """Кумулятивный импульс за 15–30 мин — ловит затяжные pump/dump без флета."""
+        if not settings.impulse_enabled or current.price is None:
+            return None
+
+        tiers = tier.impulse_price_tiers
+        if not tiers:
+            return None
+
+        best: SignalCandidate | None = None
+        for window in settings.impulse_window_minutes:
+            earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+            if earlier is None or earlier.price is None or earlier.price <= 0:
+                continue
+            price_pct = self._percent_change(earlier.price, current.price)
+            oi_pct = self._oi_percent_change(earlier, current)
+
+            for tier_pct in sorted(tiers, reverse=True):
+                if price_pct >= tier_pct:
+                    meta = {
+                        "impulse_tier_pct": round(tier_pct, 2),
+                        "impulse_window_min": float(window),
+                        "impulse_move_pct": round(price_pct, 2),
+                    }
+                    best = SignalCandidate(
+                        signal_type="impulse_pump",
+                        period_minutes=window,
+                        oi_change_percent=oi_pct,
+                        price_change_percent=round(price_pct, 2),
+                        earlier=earlier,
+                        urgency=0,
+                        breakout_meta=meta,
+                    )
+                    break
+                if price_pct <= -tier_pct:
+                    meta = {
+                        "impulse_tier_pct": round(tier_pct, 2),
+                        "impulse_window_min": float(window),
+                        "impulse_move_pct": round(price_pct, 2),
+                    }
+                    best = SignalCandidate(
+                        signal_type="impulse_dump",
+                        period_minutes=window,
+                        oi_change_percent=oi_pct,
+                        price_change_percent=round(price_pct, 2),
+                        earlier=earlier,
+                        urgency=0,
+                        breakout_meta=meta,
+                    )
+                    break
+        return best
+
+    @staticmethod
+    def _max_drop_in_window(
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        window_minutes: int,
+    ) -> float:
+        """Максимальное падение от локального хая в окне до текущей цены."""
+        if current.price is None:
+            return 0.0
+        cutoff = current.timestamp - window_minutes * 60
+        window_points = [
+            p for p in history
+            if p.timestamp >= cutoff and p.price is not None and p.price > 0
+        ]
+        if not window_points:
+            return 0.0
+        peak_price = max(p.price for p in window_points)
+        if peak_price <= 0:
+            return 0.0
+        return (current.price - peak_price) / peak_price * 100.0
+
+    async def _maybe_dispatch_anomaly(
+        self,
+        exchange: str,
+        symbol: str,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> None:
+        if not settings.anomaly_enabled or self.on_anomaly is None:
+            return
+        event = detect_anomaly_for_symbol(exchange, symbol, history, current, settings, tier)
+        if event is None:
+            return
+        now = time.time()
+        cd_key = f"{symbol.upper()}:{event.anomaly_type}"
+        if now - self._anomaly_last_time.get(cd_key, 0.0) < settings.anomaly_cooldown_seconds:
+            return
+        self._anomaly_last_time[cd_key] = now
+        await self.on_anomaly(event)
+
     def _detect_liq_cascade(
         self,
         exchange: str,
@@ -969,6 +1132,10 @@ class SignalEngine:
         )
         if liq_cascade is not None:
             return liq_cascade
+
+        impulse = self._detect_sustained_impulse(history, current, settings, tier)
+        if impulse is not None:
+            return impulse
 
         breakout = self._detect_vertical_breakout(history, current, settings, tier)
         if breakout is not None:
@@ -1257,7 +1424,7 @@ class SignalEngine:
             return "short" if price_change_percent < 0 else "long"
         short_types = {
             "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump", "vertical_dump",
-            "reversal_dump", "liq_cascade_dump",
+            "reversal_dump", "liq_cascade_dump", "impulse_dump",
         }
         if signal_type in short_types:
             return "short"
@@ -1283,6 +1450,14 @@ class SignalEngine:
 
         if signal_type in {"reversal_pump", "reversal_dump"}:
             return 1
+
+        if signal_type in {"impulse_pump", "impulse_dump"}:
+            tier = flash_tier or abs(price_change_percent)
+            if tier >= 10:
+                return 1
+            if tier >= 6:
+                return 2
+            return 3
 
         if signal_type in {"pulse_pump", "pulse_dump", "short_squeeze"}:
             magnitude = abs(oi_change_percent) * 0.55 + abs(price_change_percent) * 0.45

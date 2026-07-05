@@ -19,6 +19,7 @@ class Config(BaseSettings):
 
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")
+    telegram_anomaly_chat_id: int | None = Field(None, env="TELEGRAM_ANOMALY_CHAT_ID")
 
     @validator("telegram_alert_chat_id", pre=True)
     def empty_alert_chat_id(cls, value: object) -> object:
@@ -28,6 +29,12 @@ class Config(BaseSettings):
 
     @validator("telegram_analysis_chat_id", pre=True)
     def empty_analysis_chat_id(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @validator("telegram_anomaly_chat_id", pre=True)
+    def empty_anomaly_chat_id(cls, value: object) -> object:
         if value is None or value == "":
             return None
         return value
@@ -42,6 +49,18 @@ class Config(BaseSettings):
     @property
     def analysis_chat_configured(self) -> bool:
         return self.telegram_analysis_chat_id is not None
+
+    @property
+    def anomaly_chat_id(self) -> int | None:
+        if self.telegram_anomaly_chat_id is not None:
+            return self.telegram_anomaly_chat_id
+        if self.telegram_analysis_chat_id is not None:
+            return self.telegram_analysis_chat_id
+        return None
+
+    @property
+    def anomaly_chat_configured(self) -> bool:
+        return self.anomaly_chat_id is not None
 
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 17
+SETTINGS_VERSION = 18
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -158,6 +158,19 @@ class ScannerSettings:
     reversal_min_reversal_pct: float = 0.85
     reversal_min_liquidity_oi_usd: float = 400_000.0
     reversal_cooldown_seconds: int = 120
+    reversal_block_long_after_dump: bool = True
+    reversal_block_dump_window_minutes: int = 30
+    reversal_block_min_dump_pct: float = 5.0
+
+    # Импульс: кумулятивное движение за 15–30 мин (ловит затяжные pump/dump как DBR)
+    impulse_enabled: bool = True
+    impulse_bypass_top_n: bool = True
+    impulse_window_minutes: tuple[int, ...] = (15, 30)
+    impulse_price_tiers: tuple[float, ...] = (5.0, 8.0, 12.0)
+    impulse_min_liquidity_oi_usd: float = 250_000.0
+    impulse_cooldown_seconds: int = 120
+    major_impulse_price_multiplier: float = 0.6
+    alt_impulse_price_multiplier: float = 1.2
 
     # Tier: мейджоры / топ / альты — разные пороги из одной базы
     tier_enabled: bool = True
@@ -228,17 +241,34 @@ class ScannerSettings:
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
 
-    # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
+      # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
     liquidation_alerts_enabled: bool = True
-    liquidation_min_usd: float = 80_000.0
+    liquidation_min_usd: float = 50_000.0
     liquidation_burst_window_seconds: float = 2.0
+    liquidation_sliding_window_seconds: float = 300.0
+    liquidation_tier_enabled: bool = True
+    liquidation_alt_max_oi_usd: float = 500_000.0
+    liquidation_alt_min_usd: float = 20_000.0
+    liquidation_mid_max_oi_usd: float = 2_000_000.0
+    liquidation_mid_min_usd: float = 35_000.0
     liquidation_cooldown_seconds: int = 60
     liquidation_all_symbols: bool = True
     liquidation_show_reversal_hint: bool = True
 
+    # Аномалии (volume/OI/funding/pump-dump) → TELEGRAM_ANOMALY_CHAT_ID или analysis
+    anomaly_enabled: bool = True
+    anomaly_min_oi_change_pct: float = 3.0
+    anomaly_min_price_change_pct: float = 4.0
+    anomaly_funding_abs_min: float = 0.0015
+    anomaly_pump_dump_window_minutes: int = 60
+    anomaly_pump_min_pct: float = 5.0
+    anomaly_dump_min_pct: float = 5.0
+    anomaly_volume_spike_multiplier: float = 5.0
+    anomaly_cooldown_seconds: int = 300
+
     # Аналитический чат (post-liquidation разбор) → TELEGRAM_ANALYSIS_CHAT_ID
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 80_000.0
+    analysis_min_liq_usd: float = 40_000.0
     analysis_delay_seconds: int = 90
     analysis_min_confidence: float = 58.0
     analysis_cooldown_seconds: int = 1800
@@ -409,6 +439,29 @@ class ScannerSettings:
             reversal_min_reversal_pct=float(base.get("reversal_min_reversal_pct", 0.85)),
             reversal_min_liquidity_oi_usd=float(base.get("reversal_min_liquidity_oi_usd", 400_000.0)),
             reversal_cooldown_seconds=int(base.get("reversal_cooldown_seconds", 120)),
+            reversal_block_long_after_dump=bool(base.get("reversal_block_long_after_dump", True)),
+            reversal_block_dump_window_minutes=int(
+                base.get("reversal_block_dump_window_minutes", 30)
+            ),
+            reversal_block_min_dump_pct=float(base.get("reversal_block_min_dump_pct", 5.0)),
+            impulse_enabled=bool(base.get("impulse_enabled", True)),
+            impulse_bypass_top_n=bool(base.get("impulse_bypass_top_n", True)),
+            impulse_window_minutes=cls._parse_int_tuple(
+                base.get("impulse_window_minutes"), (15, 30)
+            ),
+            impulse_price_tiers=cls._parse_float_tuple(
+                base.get("impulse_price_tiers"), (5.0, 8.0, 12.0)
+            ),
+            impulse_min_liquidity_oi_usd=float(
+                base.get("impulse_min_liquidity_oi_usd", 250_000.0)
+            ),
+            impulse_cooldown_seconds=int(base.get("impulse_cooldown_seconds", 120)),
+            major_impulse_price_multiplier=float(
+                base.get("major_impulse_price_multiplier", 0.6)
+            ),
+            alt_impulse_price_multiplier=float(
+                base.get("alt_impulse_price_multiplier", 1.2)
+            ),
             tier_enabled=bool(base.get("tier_enabled", True)),
             major_symbols=cls._parse_str_tuple(
                 base.get("major_symbols"),
@@ -476,17 +529,38 @@ class ScannerSettings:
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
-            liquidation_min_usd=float(base.get("liquidation_min_usd", 80_000.0)),
+            liquidation_min_usd=float(base.get("liquidation_min_usd", 50_000.0)),
             liquidation_burst_window_seconds=float(
                 base.get("liquidation_burst_window_seconds", 2.0)
             ),
+            liquidation_sliding_window_seconds=float(
+                base.get("liquidation_sliding_window_seconds", 300.0)
+            ),
+            liquidation_tier_enabled=bool(base.get("liquidation_tier_enabled", True)),
+            liquidation_alt_max_oi_usd=float(base.get("liquidation_alt_max_oi_usd", 500_000.0)),
+            liquidation_alt_min_usd=float(base.get("liquidation_alt_min_usd", 20_000.0)),
+            liquidation_mid_max_oi_usd=float(base.get("liquidation_mid_max_oi_usd", 2_000_000.0)),
+            liquidation_mid_min_usd=float(base.get("liquidation_mid_min_usd", 35_000.0)),
             liquidation_cooldown_seconds=int(base.get("liquidation_cooldown_seconds", 60)),
             liquidation_all_symbols=bool(base.get("liquidation_all_symbols", True)),
             liquidation_show_reversal_hint=bool(
                 base.get("liquidation_show_reversal_hint", True)
             ),
+            anomaly_enabled=bool(base.get("anomaly_enabled", True)),
+            anomaly_min_oi_change_pct=float(base.get("anomaly_min_oi_change_pct", 3.0)),
+            anomaly_min_price_change_pct=float(base.get("anomaly_min_price_change_pct", 4.0)),
+            anomaly_funding_abs_min=float(base.get("anomaly_funding_abs_min", 0.0015)),
+            anomaly_pump_dump_window_minutes=int(
+                base.get("anomaly_pump_dump_window_minutes", 60)
+            ),
+            anomaly_pump_min_pct=float(base.get("anomaly_pump_min_pct", 5.0)),
+            anomaly_dump_min_pct=float(base.get("anomaly_dump_min_pct", 5.0)),
+            anomaly_volume_spike_multiplier=float(
+                base.get("anomaly_volume_spike_multiplier", 5.0)
+            ),
+            anomaly_cooldown_seconds=int(base.get("anomaly_cooldown_seconds", 300)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
-            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 80_000.0)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 40_000.0)),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
             analysis_min_confidence=float(base.get("analysis_min_confidence", 58.0)),
             analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 1800)),
@@ -575,6 +649,16 @@ class SettingsManager:
                     58.0,
                 )
                 merged["analysis_delay_seconds"] = int(merged.get("analysis_delay_seconds", 90))
+            # v18: impulse + tier liq + ниже пороги для альтов
+            if version < 18:
+                if float(merged.get("liquidation_min_usd", 80_000.0)) >= 80_000.0:
+                    merged["liquidation_min_usd"] = 50_000.0
+                if float(merged.get("analysis_min_liq_usd", 80_000.0)) >= 80_000.0:
+                    merged["analysis_min_liq_usd"] = 40_000.0
+                merged.setdefault("liquidation_alt_min_usd", 20_000.0)
+                merged.setdefault("liquidation_mid_min_usd", 35_000.0)
+                merged.setdefault("liquidation_sliding_window_seconds", 300.0)
+                merged.setdefault("anomaly_enabled", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -582,7 +666,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (professional v16: all symbols, tier anti-spam, preserved: %s)",
+                "Settings migrated v%d → v%d (v18: impulse, tier liq, anomalies; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

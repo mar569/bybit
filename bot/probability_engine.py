@@ -14,6 +14,8 @@ PROBABILITY_BYPASS_TYPES = frozenset({
     "reversal_dump",
     "liq_cascade_pump",
     "liq_cascade_dump",
+    "impulse_pump",
+    "impulse_dump",
 })
 
 # Веса факторов (сумма = 1.0)
@@ -129,6 +131,8 @@ def _pattern_strength(signal: Signal) -> float:
         "liq_cascade_dump": 0.92,
         "reversal_pump": 0.90,
         "reversal_dump": 0.90,
+        "impulse_pump": 0.93,
+        "impulse_dump": 0.93,
         "mega_pump": 0.88,
         "mega_dump": 0.88,
         "pump": 0.82,
@@ -244,6 +248,9 @@ def _compute_structure_penalty(
         if post_crash:
             penalty += 7.0 if drawdown < 18 else 10.0
             notes.append(f"−{drawdown:.0f}% от хая")
+        elif drawdown >= 8.0:
+            penalty += 8.0
+            notes.append(f"−{drawdown:.0f}% от хая")
         if lower_highs:
             penalty += 7.0
             notes.append("lower highs")
@@ -253,9 +260,10 @@ def _compute_structure_penalty(
         if range_pos > 0.68 and drawdown >= 8.0:
             penalty += 5.0
             notes.append("у сопротивления")
-        if signal_type in pulse_types and (post_crash or lower_highs or dead_cat):
-            penalty += 6.0
-            notes.append("пульс vs структура")
+        risky_long = pulse_types | {"reversal_pump"}
+        if signal_type in risky_long and (post_crash or lower_highs or dead_cat or drawdown >= 8.0):
+            penalty += 8.0
+            notes.append("long после слива")
         if signal_score >= 3 and (post_crash or dead_cat):
             penalty += 3.0
     else:

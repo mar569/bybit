@@ -41,6 +41,7 @@ from .liquidation_analysis import (
     format_liquidation_analysis,
 )
 from .analysis_outcome_tracker import AnalysisOutcomeSummary
+from .anomaly_alerts import AnomalyEvent, format_anomaly_alert
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
@@ -286,17 +287,19 @@ class TelegramBot:
         priority_max = self.settings_manager.settings.priority_score_max
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
+        is_impulse = signal.signal_type in {"impulse_pump", "impulse_dump"}
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_liq_cascade = signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
         is_priority = (
             is_vertical
+            or is_impulse
             or is_reversal
             or is_liq_cascade
             or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
-        if is_vertical:
+        if is_vertical or is_impulse:
             message = self._format_vertical_breakout_message(
                 signal, compact=self.settings_manager.settings.signal_message_compact,
             )
@@ -314,6 +317,8 @@ class TelegramBot:
         cooldown = (
             self.settings_manager.settings.breakout_cooldown_seconds
             if is_vertical
+            else self.settings_manager.settings.impulse_cooldown_seconds
+            if is_impulse
             else self.settings_manager.settings.signal_cooldown_seconds
         )
         symbol_key = f"last_signal:sym:{signal.symbol.upper()}"
@@ -448,6 +453,29 @@ class TelegramBot:
                 event.symbol,
                 total_usd,
                 event_count,
+            )
+
+    async def dispatch_anomaly(self, event: AnomalyEvent) -> None:
+        if self.application is None:
+            return
+        settings = self.settings_manager.settings
+        if not settings.anomaly_enabled:
+            return
+        chat_id = self.config.anomaly_chat_id
+        if chat_id is None:
+            return
+
+        message = format_anomaly_alert(event)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(event.symbol, event.exchange))],
+        ])
+        sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
+        if sent:
+            logger.info(
+                "Anomaly %s %s %s",
+                event.exchange,
+                event.symbol,
+                event.anomaly_type,
             )
 
     async def get_analysis_adaptive_weights(self) -> dict[str, float] | None:
@@ -900,7 +928,16 @@ class TelegramBot:
             f"(≥<b>{s.major_liq_cascade_min_usd:,.0f}</b>$ мейджоры / "
             f"<b>{s.liq_cascade_min_usd:,.0f}</b>$ · цена≥<b>{s.major_liq_cascade_min_price_percent}%</b>)\n"
             f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
-            f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
+            f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м"
+            f"{'' if not s.reversal_block_long_after_dump else f' · блок LONG после −{s.reversal_block_min_dump_pct:g}%'})\n"
+            f"📉 Импульс: <b>{'ON' if s.impulse_enabled else 'OFF'}</b> "
+            f"({','.join(str(m) for m in s.impulse_window_minutes)}м · "
+            f"{'/'.join(f'{int(t)}%' if t == int(t) else str(t) for t in s.impulse_price_tiers)})\n"
+            f"💧 Ликвидации: <b>{'ON' if s.liquidation_alerts_enabled else 'OFF'}</b> "
+            f"(alt <b>${s.liquidation_alt_min_usd:,.0f}</b> / mid <b>${s.liquidation_mid_min_usd:,.0f}</b> / "
+            f"крупн. <b>${s.liquidation_min_usd:,.0f}</b> · окно <b>{int(s.liquidation_sliding_window_seconds)}с</b>)\n"
+            f"⚠️ Аномалии: <b>{'ON' if s.anomaly_enabled and self.config.anomaly_chat_configured else 'OFF'}</b> "
+            f"(pump→dump / volume / OI / funding)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
             f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n"
             f"🧠 Анализ ликвидаций: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
@@ -1177,6 +1214,8 @@ class TelegramBot:
             "liq_cascade_dump": "💧 LIQ-CASCADE SHORT",
             "reversal_pump": "↩️ РАЗВОРОТ ВВЕРХ",
             "reversal_dump": "↩️ РАЗВОРОТ ВНИЗ",
+            "impulse_pump": "📈 ИМПУЛЬС ВВЕРХ",
+            "impulse_dump": "📉 ИМПУЛЬС ВНИЗ",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -1213,6 +1252,9 @@ class TelegramBot:
             oi_usd = format_oi_usd(signal.oi_change_usd)
             prob = format_probability_from_signal(signal, compact=True)
             title = "🚨 ВЕРТ. ПАМП" if is_long else "🚨 ВЕРТ. СЛИВ"
+            if signal.signal_type in {"impulse_pump", "impulse_dump"}:
+                win = signal.details.get("impulse_window_min", signal.oi_period_minutes)
+                title = f"📈 ИМПУЛЬС {win}м" if is_long else f"📉 ИМПУЛЬС {win}м"
             return (
                 f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
                 f"{side_emoji} {self._symbol_link_and_copy(signal)}\n"
@@ -1241,6 +1283,9 @@ class TelegramBot:
         oi_usd = format_oi_usd(signal.oi_change_usd)
 
         title = "🚨 <b>ВЕРТИКАЛЬНЫЙ ПАМП</b>" if is_long else "🚨 <b>ВЕРТИКАЛЬНЫЙ СЛИВ</b>"
+        if signal.signal_type in {"impulse_pump", "impulse_dump"}:
+            win = signal.details.get("impulse_window_min", signal.oi_period_minutes)
+            title = f"📈 <b>ИМПУЛЬС ВВЕРХ ({win}м)</b>" if is_long else f"📉 <b>ИМПУЛЬС ВНИЗ ({win}м)</b>"
         return (
             f"{title}\n"
             f"⚡ <b>Выход из проторговки</b> (вне порогов)\n"
@@ -1335,7 +1380,13 @@ class TelegramBot:
         )
         prior = signal.details.get("reversal_prior_move_pct")
         leg = signal.details.get("reversal_leg_pct")
-        if prior is not None and leg is not None:
+        impulse_move = signal.details.get("impulse_move_pct")
+        if impulse_move is not None:
+            lines.append(
+                f"📉 движение <b>{float(impulse_move):+.1f}%</b> за "
+                f"<b>{signal.oi_period_minutes}</b>м"
+            )
+        elif prior is not None and leg is not None:
             lines.append(
                 f"↩️ было <b>{float(prior):+.1f}%</b> → сейчас <b>{float(leg):+.1f}%</b> "
                 f"за {signal.oi_period_minutes}м"

@@ -42,6 +42,7 @@ class TierThresholds:
     liq_cascade_min_usd: float
     liq_cascade_min_price_percent: float
     min_signal_score: float
+    impulse_price_tiers: tuple[float, ...]
 
 
 def _major_symbols(settings: ScannerSettings) -> frozenset[str]:
@@ -57,6 +58,11 @@ def classify_symbol(symbol: str, settings: ScannerSettings, *, in_top_n: bool) -
     if in_top_n:
         return SymbolTier.STANDARD
     return SymbolTier.ALT
+
+
+def _impulse_tiers(settings: ScannerSettings, multiplier: float) -> tuple[float, ...]:
+    base = getattr(settings, "impulse_price_tiers", (5.0, 8.0, 12.0))
+    return tuple(round(t * multiplier, 2) for t in base if t * multiplier > 0.5)
 
 
 def tier_thresholds(
@@ -97,6 +103,9 @@ def tier_thresholds(
                 getattr(settings, "major_liq_cascade_min_price_percent", 0.35)
             ),
             min_signal_score=float(getattr(settings, "major_min_signal_score", 1.0)),
+            impulse_price_tiers=_impulse_tiers(
+                settings, float(getattr(settings, "major_impulse_price_multiplier", 0.6))
+            ),
         )
 
     if tier == SymbolTier.ALT:
@@ -120,6 +129,9 @@ def tier_thresholds(
                 getattr(settings, "liq_cascade_min_price_percent", 0.55)
             ),
             min_signal_score=float(getattr(settings, "alt_min_signal_score", 3.0)),
+            impulse_price_tiers=_impulse_tiers(
+                settings, float(getattr(settings, "alt_impulse_price_multiplier", 1.2))
+            ),
         )
 
     return TierThresholds(
@@ -140,6 +152,7 @@ def tier_thresholds(
             getattr(settings, "liq_cascade_min_price_percent", 0.45)
         ),
         min_signal_score=float(getattr(settings, "standard_min_signal_score", 2.0)),
+        impulse_price_tiers=_impulse_tiers(settings, 1.0),
     )
 
 
