@@ -52,12 +52,14 @@ class Config(BaseSettings):
 
     @property
     def anomaly_chat_id(self) -> int | None:
-        """Только отдельный чат — не смешивать с analysis."""
-        return self.telegram_anomaly_chat_id
+        """Куда слать аномалии: отдельный чат или тот же, что analysis."""
+        if self.telegram_anomaly_chat_id is not None:
+            return self.telegram_anomaly_chat_id
+        return self.telegram_analysis_chat_id
 
     @property
     def anomaly_chat_configured(self) -> bool:
-        return self.telegram_anomaly_chat_id is not None
+        return self.anomaly_chat_id is not None
 
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")
