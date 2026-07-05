@@ -15,6 +15,7 @@ from .bybit_liquidations import BybitLiquidationTracker
 from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_time
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
+from .symbol_tiers import TierThresholds, tier_thresholds
 
 HISTORY_MAX_POINTS = 3600
 OI_BAR_INTERVAL_SECONDS = 300
@@ -63,10 +64,12 @@ class SignalEngine:
         on_signal: Callable[[Signal], Awaitable[None]],
         *,
         liquidation_tracker: BybitLiquidationTracker | None = None,
+        binance_liquidation_tracker: object | None = None,
     ) -> None:
         self.settings = settings
         self.on_signal = on_signal
         self._liquidation_tracker = liquidation_tracker
+        self._binance_liquidation_tracker = binance_liquidation_tracker
         self.history: dict[str, deque[SnapshotPoint]] = {}
         self.last_signal_time: dict[str, float] = {}
         self.daily_signal_counts: dict[str, int] = {}
@@ -83,6 +86,22 @@ class SignalEngine:
 
     def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
         self._liquidation_tracker = tracker
+
+    def attach_binance_liquidation_tracker(self, tracker: object) -> None:
+        self._binance_liquidation_tracker = tracker
+
+    def _get_liquidation_stats(
+        self,
+        exchange: str,
+        symbol: str,
+        window_minutes: int,
+    ):
+        key = exchange.lower()
+        if "bybit" in key and self._liquidation_tracker is not None:
+            return self._liquidation_tracker.get_stats(symbol, window_minutes=window_minutes)
+        if "binance" in key and self._binance_liquidation_tracker is not None:
+            return self._binance_liquidation_tracker.get_stats(symbol, window_minutes=window_minutes)
+        return None
 
     @staticmethod
     def _symbol_cooldown_key(symbol: str) -> str:
@@ -170,14 +189,6 @@ class SignalEngine:
         if volume_24h is not None:
             self._volumes[key] = volume_24h
         self._refresh_top_symbols_if_needed()
-        settings = self.settings.settings
-        in_top = self._is_in_top_n(exchange, symbol)
-        if not in_top and not (
-            settings.breakout_enabled and settings.breakout_bypass_top_n
-        ) and not (
-            settings.reversal_enabled and settings.reversal_bypass_top_n
-        ):
-            return
 
         point = SnapshotPoint(
             timestamp=now,
@@ -382,7 +393,20 @@ class SignalEngine:
             if current.open_interest is None or current.price is None:
                 return
 
-            candidate = self._pick_best_candidate(history, current, settings, thresholds)
+            in_top = self._is_in_top_n(exchange, symbol)
+            tier = tier_thresholds(symbol, settings, thresholds, in_top_n=in_top)
+            effective_thresholds = ExchangeThresholds(
+                long_period_minutes=thresholds.long_period_minutes,
+                short_period_minutes=thresholds.short_period_minutes,
+                oi_rise_percent=tier.oi_rise_percent,
+                oi_drop_percent=tier.oi_drop_percent,
+                price_rise_percent=tier.price_rise_percent,
+                price_drop_percent=tier.price_drop_percent,
+            )
+
+            candidate = self._pick_best_candidate(
+                history, current, settings, effective_thresholds, exchange, symbol, tier
+            )
             if candidate is None:
                 return
 
@@ -392,11 +416,12 @@ class SignalEngine:
             oi_usd_now = self._oi_usd_value(current.open_interest, current.price, current.additional)
             is_breakout = candidate.signal_type in {"vertical_pump", "vertical_dump"}
             is_reversal = candidate.signal_type in {"reversal_pump", "reversal_dump"}
-            min_liquidity = settings.min_open_interest
+            is_liq_cascade = candidate.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
+            min_liquidity = tier.min_open_interest_usd
             if is_breakout:
-                min_liquidity = settings.breakout_min_liquidity_oi_usd
+                min_liquidity = max(min_liquidity, settings.breakout_min_liquidity_oi_usd)
             elif is_reversal:
-                min_liquidity = settings.reversal_min_liquidity_oi_usd
+                min_liquidity = max(min_liquidity, settings.reversal_min_liquidity_oi_usd)
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 return
 
@@ -404,8 +429,14 @@ class SignalEngine:
                 return
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
-            if not is_mega and not is_breakout and not is_reversal and changes.oi_change_usd is not None:
-                if abs(changes.oi_change_usd) < settings.min_oi_change_usd:
+            if (
+                not is_mega
+                and not is_breakout
+                and not is_reversal
+                and not is_liq_cascade
+                and changes.oi_change_usd is not None
+            ):
+                if abs(changes.oi_change_usd) < tier.min_oi_change_usd:
                     if candidate.signal_type not in {"price_pump", "price_dump"}:
                         return
 
@@ -422,6 +453,9 @@ class SignalEngine:
             elif is_reversal:
                 cooldown_key = f"{key}:reversal"
                 cooldown = settings.reversal_cooldown_seconds
+            elif is_liq_cascade:
+                cooldown_key = f"{key}:liq_cascade"
+                cooldown = settings.liq_cascade_cooldown_seconds
             elif is_mega:
                 cooldown_key = f"{key}:mega"
                 cooldown = settings.mega_cooldown_seconds
@@ -432,8 +466,8 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
-            if is_breakout or is_reversal:
-                score = 1 if is_breakout else (
+            if is_breakout or is_reversal or is_liq_cascade:
+                score = 1 if (is_breakout or is_liq_cascade) else (
                     1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
                 )
             else:
@@ -445,7 +479,18 @@ class SignalEngine:
                     flash_tier=candidate.flash_tier,
                 )
 
-            if not is_breakout and not is_reversal and settings.min_signal_score and score < settings.min_signal_score:
+            min_score = (
+                tier.min_signal_score
+                if settings.tier_enabled
+                else settings.min_signal_score
+            )
+            if (
+                not is_breakout
+                and not is_reversal
+                and not is_liq_cascade
+                and min_score
+                and score < min_score
+            ):
                 return
 
             lookback_seconds = changes.lookback_seconds
@@ -560,6 +605,7 @@ class SignalEngine:
                     "urgency": candidate.urgency,
                     "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
                     **(candidate.breakout_meta or {}),
+                    **({"symbol_tier": tier.tier.value} if settings.tier_enabled else {}),
                     **({"market_structure": market_structure_dict} if market_structure_dict else {}),
                     **({"account_ratio": account_ratio_dict} if account_ratio_dict else {}),
                     **({"liquidations": liquidations_dict} if liquidations_dict else {}),
@@ -584,13 +630,15 @@ class SignalEngine:
 
             if settings.probability_filter_enabled:
                 bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
-                if not bypass and assessment.percent < settings.min_probability_percent:
+                min_prob = tier.min_probability_percent if settings.tier_enabled else settings.min_probability_percent
+                if not bypass and assessment.percent < min_prob:
                     logger.info(
-                        "Signal filtered %s %s: probability %.0f%% < %.0f%%",
+                        "Signal filtered %s %s: probability %.0f%% < %.0f%% (tier %s)",
                         exchange,
                         symbol,
                         assessment.percent,
-                        settings.min_probability_percent,
+                        min_prob,
+                        tier.tier.value,
                     )
                     return
 
@@ -647,6 +695,7 @@ class SignalEngine:
         history: deque[SnapshotPoint],
         current: SnapshotPoint,
         settings: ScannerSettings,
+        tier: TierThresholds,
     ) -> SignalCandidate | None:
         if not settings.breakout_enabled or current.price is None:
             return None
@@ -713,7 +762,7 @@ class SignalEngine:
             "consolidation_minutes": float(settings.breakout_consolidation_minutes),
         }
 
-        if spike_pct >= settings.breakout_min_spike_percent:
+        if spike_pct >= tier.breakout_min_spike_percent:
             return SignalCandidate(
                 signal_type="vertical_pump",
                 period_minutes=settings.breakout_spike_minutes,
@@ -724,7 +773,7 @@ class SignalEngine:
                 breakout_meta=meta,
             )
 
-        if spike_pct <= -settings.breakout_min_dump_percent:
+        if spike_pct <= -tier.breakout_min_dump_percent:
             meta["spike_percent"] = round(spike_pct, 2)
             return SignalCandidate(
                 signal_type="vertical_dump",
@@ -743,6 +792,7 @@ class SignalEngine:
         history: deque[SnapshotPoint],
         current: SnapshotPoint,
         settings: ScannerSettings,
+        tier: TierThresholds,
     ) -> SignalCandidate | None:
         """Памп → резкий слив (или дамп → отскок) без обязательного 25м флета."""
         if not settings.reversal_enabled or current.price is None:
@@ -769,8 +819,8 @@ class SignalEngine:
             return None
 
         spike_pct = self._percent_change(spike_earlier.price, current.price)
-        min_rev = settings.reversal_min_reversal_pct
-        min_prior = settings.reversal_min_prior_move_pct
+        min_rev = tier.reversal_min_reversal_pct
+        min_prior = tier.reversal_min_prior_move_pct
         max_peak_age = settings.reversal_peak_max_age_minutes * 60.0
         oi_pct = self._oi_percent_change(spike_earlier, current)
 
@@ -843,18 +893,88 @@ class SignalEngine:
 
         return None
 
+    def _detect_liq_cascade(
+        self,
+        exchange: str,
+        symbol: str,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> SignalCandidate | None:
+        if not settings.liq_cascade_enabled:
+            return None
+
+        window = settings.liq_cascade_window_minutes
+        earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+        if earlier is None:
+            return None
+
+        changes = self._compute_changes(current, earlier, window * 60)
+        stats = self._get_liquidation_stats(exchange, symbol, window)
+        if stats is None or stats.total_usd <= 0:
+            return None
+
+        imbalance_min = settings.liq_cascade_imbalance_min
+        meta = {
+            "liq_cascade_long_usd": round(stats.long_liq_usd, 2),
+            "liq_cascade_short_usd": round(stats.short_liq_usd, 2),
+            "liq_cascade_window_min": float(window),
+        }
+
+        if (
+            stats.long_liq_usd >= tier.liq_cascade_min_usd
+            and stats.long_liq_usd / stats.total_usd >= imbalance_min
+            and changes.price_change_percent <= -tier.liq_cascade_min_price_percent
+        ):
+            return SignalCandidate(
+                signal_type="liq_cascade_dump",
+                period_minutes=window,
+                oi_change_percent=changes.oi_change_percent,
+                price_change_percent=changes.price_change_percent,
+                earlier=earlier,
+                urgency=0,
+                breakout_meta=meta,
+            )
+
+        if (
+            stats.short_liq_usd >= tier.liq_cascade_min_usd
+            and stats.short_liq_usd / stats.total_usd >= imbalance_min
+            and changes.price_change_percent >= tier.liq_cascade_min_price_percent
+        ):
+            return SignalCandidate(
+                signal_type="liq_cascade_pump",
+                period_minutes=window,
+                oi_change_percent=changes.oi_change_percent,
+                price_change_percent=changes.price_change_percent,
+                earlier=earlier,
+                urgency=0,
+                breakout_meta=meta,
+            )
+
+        return None
+
     def _pick_best_candidate(
         self,
         history: deque[SnapshotPoint],
         current: SnapshotPoint,
         settings: ScannerSettings,
         thresholds: ExchangeThresholds,
+        exchange: str,
+        symbol: str,
+        tier: TierThresholds,
     ) -> SignalCandidate | None:
-        breakout = self._detect_vertical_breakout(history, current, settings)
+        liq_cascade = self._detect_liq_cascade(
+            exchange, symbol, history, current, settings, tier
+        )
+        if liq_cascade is not None:
+            return liq_cascade
+
+        breakout = self._detect_vertical_breakout(history, current, settings, tier)
         if breakout is not None:
             return breakout
 
-        reversal = self._detect_sharp_reversal(history, current, settings)
+        reversal = self._detect_sharp_reversal(history, current, settings, tier)
         if reversal is not None:
             return reversal
 
@@ -1137,7 +1257,7 @@ class SignalEngine:
             return "short" if price_change_percent < 0 else "long"
         short_types = {
             "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump", "vertical_dump",
-            "reversal_dump",
+            "reversal_dump", "liq_cascade_dump",
         }
         if signal_type in short_types:
             return "short"

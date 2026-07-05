@@ -50,9 +50,17 @@ class LiquidationAlertService:
         self._cooldown_until: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
 
-    def enabled(self) -> bool:
+    def alerts_enabled(self) -> bool:
         settings = self._get_settings()
         return bool(getattr(settings, "liquidation_alerts_enabled", True))
+
+    def analysis_enabled(self) -> bool:
+        settings = self._get_settings()
+        return bool(getattr(settings, "analysis_enabled", True))
+
+    def enabled(self) -> bool:
+        """WS и агрегация нужны, если включены алерты и/или аналитический чат."""
+        return self.alerts_enabled() or self.analysis_enabled()
 
     async def on_liquidation(self, event: LiquidationAlertEvent) -> None:
         if not self.enabled():

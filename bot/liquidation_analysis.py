@@ -295,6 +295,25 @@ class LiquidationAnalysisEngine:
         self._cooldown_until: dict[str, float] = {}
         self._pending_tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._stats: dict[str, int] = {
+            "scheduled": 0,
+            "sent": 0,
+            "skipped_threshold": 0,
+            "skipped_no_price": 0,
+            "skipped_confidence": 0,
+            "errors": 0,
+        }
+
+    def get_diagnostics(self) -> dict[str, int | float]:
+        settings = self._get_settings()
+        pending = sum(1 for t in self._pending_tasks.values() if t is not None and not t.done())
+        return {
+            **self._stats,
+            "pending": pending,
+            "analysis_min_liq_usd": float(getattr(settings, "analysis_min_liq_usd", 80_000.0)),
+            "analysis_min_confidence": float(getattr(settings, "analysis_min_confidence", 60.0)),
+            "analysis_delay_seconds": int(getattr(settings, "analysis_delay_seconds", 90)),
+        }
 
     def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
         self._liquidation_tracker = tracker
@@ -317,11 +336,19 @@ class LiquidationAnalysisEngine:
         settings = self._get_settings()
         min_usd = float(getattr(settings, "analysis_min_liq_usd", 80_000.0))
         if total_usd < min_usd:
+            self._stats["skipped_threshold"] += 1
+            logger.debug(
+                "Analysis skip %s: cluster $%.0f < min $%.0f",
+                event.symbol,
+                total_usd,
+                min_usd,
+            )
             return
 
         symbol = event.symbol.upper()
         now = time.time()
         cooldown = int(getattr(settings, "analysis_cooldown_seconds", 1800))
+        self._stats["scheduled"] += 1
         async with self._lock:
             if now < self._cooldown_until.get(symbol, 0.0):
                 return
@@ -351,16 +378,20 @@ class LiquidationAnalysisEngine:
                 return
             min_conf = float(getattr(settings, "analysis_min_confidence", 60.0))
             if result.confidence < min_conf:
+                self._stats["skipped_confidence"] += 1
                 logger.info(
-                    "Analysis skip %s: confidence %.0f%% < %.0f%%",
+                    "Analysis skip %s: confidence %.0f%% < %.0f%% (cluster $%.0f, price %+.2f%%)",
                     symbol,
                     result.confidence,
                     min_conf,
+                    total_usd,
+                    result.price_change_since_cluster_pct,
                 )
                 return
             async with self._lock:
                 self._cooldown_until[symbol] = time.time() + cooldown
             await self._on_dispatch(result)
+            self._stats["sent"] += 1
             logger.info(
                 "Analysis sent %s %s conf=%.0f%% dir=%s",
                 event.exchange,
@@ -371,6 +402,7 @@ class LiquidationAnalysisEngine:
         except asyncio.CancelledError:
             return
         except Exception:
+            self._stats["errors"] += 1
             logger.exception("Liquidation analysis failed for %s", symbol)
         finally:
             async with self._lock:
@@ -394,24 +426,46 @@ class LiquidationAnalysisEngine:
         current_price = metrics.get("current_price")
         if current_price is None or current_price <= 0:
             snap = self._scanner.get_snapshot_for(exchange, symbol)
-            if snap is None or snap.price is None:
-                logger.debug("Analysis skip %s: no price", symbol)
+            if snap is not None and snap.price:
+                current_price = snap.price
+            else:
+                snap_bybit = self._scanner.get_snapshot_for("Bybit", symbol)
+                if snap_bybit is not None and snap_bybit.price:
+                    current_price = snap_bybit.price
+                    exchange = "Bybit"
+        if current_price is None or current_price <= 0:
+            klines = await self._kline_cache.get_klines(symbol, limit=24)
+            if klines:
+                current_price = klines[-1].close
+                cluster_price = event.price
+                if cluster_price > 0:
+                    price_change_pct = (current_price - cluster_price) / cluster_price * 100.0
+                else:
+                    price_change_pct = 0.0
+                oi_change_pct = None
+                funding_rate = None
+            else:
+                self._stats["skipped_no_price"] += 1
+                logger.warning(
+                    "Analysis skip %s: no price (exchange=%s, cluster $%.0f)",
+                    symbol,
+                    exchange,
+                    total_usd,
+                )
                 return None
-            current_price = snap.price
+        else:
             metrics = self._scanner.get_metrics_since(exchange, symbol, event.timestamp)
-
-        price_change_pct = float(metrics.get("price_change_pct") or 0.0)
-        oi_change_pct = metrics.get("oi_change_pct")
-        if isinstance(oi_change_pct, (int, float)):
-            oi_change_pct = float(oi_change_pct)
-        else:
-            oi_change_pct = None
-
-        funding_rate = metrics.get("funding_rate")
-        if isinstance(funding_rate, (int, float)):
-            funding_rate = float(funding_rate)
-        else:
-            funding_rate = None
+            price_change_pct = float(metrics.get("price_change_pct") or 0.0)
+            oi_change_pct = metrics.get("oi_change_pct")
+            if isinstance(oi_change_pct, (int, float)):
+                oi_change_pct = float(oi_change_pct)
+            else:
+                oi_change_pct = None
+            funding_rate = metrics.get("funding_rate")
+            if isinstance(funding_rate, (int, float)):
+                funding_rate = float(funding_rate)
+            else:
+                funding_rate = None
 
         factor_weights = dict(FACTOR_WEIGHTS)
         if self._weights_getter is not None:
@@ -506,7 +560,7 @@ class LiquidationAnalysisEngine:
             or (not predict_long and post_score < 0.35 and struct_score < 0.35)
         )
         if continuation_risk:
-            confidence = min(confidence, 58.0)
+            confidence *= 0.90
 
         window_min, window_max = _estimate_window(confidence)
         low_high = self._scanner.get_price_extremes_since(exchange, symbol, event.timestamp)

@@ -35,7 +35,11 @@ from .liquidation_alerts import (
     coinglass_url,
     format_liquidation_alert,
 )
-from .liquidation_analysis import LiquidationAnalysisResult, format_liquidation_analysis
+from .liquidation_analysis import (
+    AnalysisFactor,
+    LiquidationAnalysisResult,
+    format_liquidation_analysis,
+)
 from .analysis_outcome_tracker import AnalysisOutcomeSummary
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
@@ -53,6 +57,7 @@ class TelegramBot:
         self.config = config
         self.settings_manager = settings_manager
         self.scanner: SignalEngine | None = None
+        self.analysis_engine: Any | None = None
         self.outcome_tracker: Any | None = None
         self.analysis_outcome_tracker: Any | None = None
         self._last_send_time: dict[int, float] = {}
@@ -72,6 +77,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("history", self.on_history))
         self.application.add_handler(CommandHandler("set", self.on_set))
         self.application.add_handler(CommandHandler("test", self.on_test))
+        self.application.add_handler(CommandHandler("test_analysis", self.on_test_analysis))
         self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
         self.application.add_handler(CommandHandler("resume", self.on_resume))
@@ -155,6 +161,11 @@ class TelegramBot:
                     analysis_chat_id,
                     exc,
                 )
+        elif s.analysis_enabled:
+            logger.warning(
+                "analysis_enabled=ON, но TELEGRAM_ANALYSIS_CHAT_ID не задан — "
+                "разборы ликвидаций не будут отправляться"
+            )
 
         logger.info("Telegram bot started")
 
@@ -276,9 +287,11 @@ class TelegramBot:
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
+        is_liq_cascade = signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
         is_priority = (
             is_vertical
             or is_reversal
+            or is_liq_cascade
             or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
@@ -447,7 +460,10 @@ class TelegramBot:
             return
         settings = self.settings_manager.settings
         chat_id = self.config.telegram_analysis_chat_id
-        if chat_id is None or not settings.analysis_enabled:
+        if chat_id is None:
+            logger.warning("Analysis dispatch skipped: TELEGRAM_ANALYSIS_CHAT_ID not set")
+            return
+        if not settings.analysis_enabled:
             return
 
         message = format_liquidation_analysis(result)
@@ -544,6 +560,52 @@ class TelegramBot:
             reply_markup=self._reply_keyboard(),
         )
 
+    async def on_test_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        if not self.config.analysis_chat_configured:
+            await update.message.reply_text(
+                "❌ <b>TELEGRAM_ANALYSIS_CHAT_ID</b> не задан в <code>.env</code>.\n\n"
+                "1) Создайте отдельный чат/канал\n"
+                "2) Добавьте бота\n"
+                "3) Узнайте id через getUpdates (как для ALERT_CHAT)\n"
+                "4) Пропишите в .env: <code>TELEGRAM_ANALYSIS_CHAT_ID=-100...</code>\n"
+                "5) Перезапустите бота",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        now = time.time()
+        sample = LiquidationAnalysisResult(
+            symbol="ETHUSDT",
+            exchange="Bybit",
+            cluster_side="long_liq",
+            cluster_usd=210_000.0,
+            cluster_events=14,
+            cluster_price=1768.0,
+            cluster_time=now - 90,
+            current_price=1756.0,
+            price_change_since_cluster_pct=-0.68,
+            oi_change_since_cluster_pct=-1.4,
+            direction="long",
+            direction_label="↗️ отскок вверх",
+            confidence=72.0,
+            window_min=10,
+            window_max=30,
+            invalidation_price=1752.0,
+            invalidation_label="пробой $1752 вниз → слив продолжается",
+            factors=[
+                AnalysisFactor("cluster", "Кластер", 0.85, 0.16, "$210,000 за всплеск"),
+                AnalysisFactor("liq_imbalance", "Ликвидации 15м", 0.92, 0.22, "лонги ликвидируют"),
+            ],
+            continuation_risk=False,
+        )
+        await self.dispatch_liquidation_analysis(sample)
+        await update.message.reply_text(
+            "✅ Тестовый разбор отправлен в аналитический чат.",
+            reply_markup=self._reply_keyboard(),
+        )
+
     async def on_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -635,6 +697,31 @@ class TelegramBot:
             f"OI ≥ {d['oi_rise_percent']}% | Цена ≥ {d['price_rise_percent']}%\n"
             f"Мин. OI: {d['min_open_interest']:,.0f} $ | Score ≥ {d['min_signal_score']}\n"
             f"Топ монет: {d['top_n_symbols'] or 'все'}\n\n"
+        )
+        if self.analysis_engine is not None:
+            ad = self.analysis_engine.get_diagnostics()
+            analysis_on = (
+                s.analysis_enabled and self.config.analysis_chat_configured
+            )
+            chat_note = (
+                "чат OK"
+                if self.config.analysis_chat_configured
+                else "⚠️ нет TELEGRAM_ANALYSIS_CHAT_ID"
+            )
+            text += (
+                f"<b>🧠 Анализ ликвидаций:</b> {'ON' if analysis_on else 'OFF'} ({chat_note})\n"
+                f"Запланировано: <b>{ad['scheduled']}</b> | "
+                f"Отправлено: <b>{ad['sent']}</b> | "
+                f"В очереди: <b>{ad['pending']}</b>\n"
+                f"Отсечено: порог <b>{ad['skipped_threshold']}</b> | "
+                f"нет цены <b>{ad['skipped_no_price']}</b> | "
+                f"conf <b>{ad['skipped_confidence']}</b> | "
+                f"ошибки <b>{ad['errors']}</b>\n"
+                f"Порог: ≥${ad['analysis_min_liq_usd']:,.0f} · "
+                f"conf≥{ad['analysis_min_confidence']:.0f}% · "
+                f"delay {ad['analysis_delay_seconds']}с\n\n"
+            ).replace(",", " ")
+        text += (
             "<i>Если сигналов нет — попробуйте:</i>\n"
             "<code>/set period 5</code>\n"
             "<code>/set oi 1</code>\n"
@@ -799,14 +886,19 @@ class TelegramBot:
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
             f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
-            f"🏆 Топ монет: <b>{top_label}</b> | Ранность≥<b>{s.min_signal_score}</b>/10\n"
+            f"🏆 Топ монет: <b>{top_label}</b> | Tier: <b>{'ON' if s.tier_enabled else 'OFF'}</b> "
+            f"(мейджор≤<b>{s.major_min_signal_score:.0f}</b> / стандарт≤<b>{s.standard_min_signal_score:.0f}</b> / альт≤<b>{s.alt_min_signal_score:.0f}</b>)\n"
             f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
             f"{self._exchange_effective_line('Binance', 'Binance')}\n"
             f"{self._exchange_effective_line('Bybit', 'Bybit')}\n"
             f"Binance: <b>{'ON' if s.enabled_binance else 'OFF'}</b> | "
             f"Bybit: <b>{'ON' if s.enabled_bybit else 'OFF'}</b>\n"
             f"🚨 Вертикальный памп: <b>{'ON' if s.breakout_enabled else 'OFF'}</b> "
-            f"(флет ≤{s.breakout_max_flat_percent}% → +{s.breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n"
+            f"(флет ≤{s.breakout_max_flat_percent}% → ±{s.breakout_min_spike_percent}% "
+            f"· мейджоры ±{s.major_breakout_min_spike_percent}% за {s.breakout_spike_minutes}м)\n"
+            f"💧 Liq-cascade: <b>{'ON' if s.liq_cascade_enabled else 'OFF'}</b> "
+            f"(≥<b>{s.major_liq_cascade_min_usd:,.0f}</b>$ мейджоры / "
+            f"<b>{s.liq_cascade_min_usd:,.0f}</b>$ · цена≥<b>{s.major_liq_cascade_min_price_percent}%</b>)\n"
             f"↩️ Резкий разворот: <b>{'ON' if s.reversal_enabled else 'OFF'}</b> "
             f"(±{s.reversal_min_prior_move_pct}% → ∓{s.reversal_min_reversal_pct}% за {s.reversal_spike_minutes}м)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
@@ -1081,6 +1173,8 @@ class TelegramBot:
         labels = {
             "vertical_pump": "🚨 ВЕРТИКАЛЬНЫЙ ПАМП",
             "vertical_dump": "🚨 ВЕРТИКАЛЬНЫЙ СЛИВ",
+            "liq_cascade_pump": "💧 LIQ-CASCADE LONG",
+            "liq_cascade_dump": "💧 LIQ-CASCADE SHORT",
             "reversal_pump": "↩️ РАЗВОРОТ ВВЕРХ",
             "reversal_dump": "↩️ РАЗВОРОТ ВНИЗ",
             "mega_pump": "🚀 МЕГА-ПАМП",

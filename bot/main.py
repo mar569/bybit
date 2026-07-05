@@ -83,10 +83,14 @@ async def main() -> None:
         telegram.dispatch_liquidation_analysis,
         weights_getter=lambda: telegram.get_analysis_adaptive_weights(),
     )
+    telegram.analysis_engine = analysis_engine
 
     async def on_liquidation_alert(event, event_count: int, total_usd: float) -> None:
-        await telegram.dispatch_liquidation_alert(event, event_count, total_usd)
-        await analysis_engine.schedule(event, event_count, total_usd)
+        s = settings.settings
+        if s.liquidation_alerts_enabled:
+            await telegram.dispatch_liquidation_alert(event, event_count, total_usd)
+        if s.analysis_enabled and config.analysis_chat_configured:
+            await analysis_engine.schedule(event, event_count, total_usd)
 
     liquidation_alerts = LiquidationAlertService(
         lambda: settings.settings,
@@ -98,11 +102,17 @@ async def main() -> None:
             return bybit.symbols
         return scanner.get_bybit_top_symbols()
 
+    def _liquidation_ws_enabled() -> bool:
+        s = settings.settings
+        return s.liquidation_alerts_enabled or (
+            s.analysis_enabled and config.analysis_chat_configured
+        )
+
     def liquidation_bybit_enabled() -> bool:
-        return bybit_enabled() and settings.settings.liquidation_alerts_enabled
+        return bybit_enabled() and _liquidation_ws_enabled()
 
     def liquidation_binance_enabled() -> bool:
-        return binance_enabled() and settings.settings.liquidation_alerts_enabled
+        return binance_enabled() and _liquidation_ws_enabled()
 
     async def on_liquidation_event(event) -> None:
         await liquidation_alerts.on_liquidation(event)
@@ -117,6 +127,7 @@ async def main() -> None:
         on_event=on_liquidation_event,
     )
     scanner.attach_liquidation_tracker(liquidation_tracker)
+    scanner.attach_binance_liquidation_tracker(binance_liquidation_tracker)
     analysis_engine.attach_liquidation_tracker(liquidation_tracker)
     analysis_engine.attach_binance_liquidation_tracker(binance_liquidation_tracker)
 

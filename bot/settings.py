@@ -9,15 +9,25 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 14
+SETTINGS_VERSION = 17
 
-# Сохраняем при миграции на рабочий пресет (7843362 «быстрые алерты»).
+# Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
     "signals_enabled",
     "enabled_binance",
     "enabled_bybit",
-    "top_n_symbols",
     "telegram_max_per_minute",
+    "liquidation_alerts_enabled",
+    "liquidation_min_usd",
+    "liquidation_burst_window_seconds",
+    "liquidation_cooldown_seconds",
+    "liquidation_all_symbols",
+    "liquidation_show_reversal_hint",
+    "analysis_enabled",
+    "analysis_min_liq_usd",
+    "analysis_delay_seconds",
+    "analysis_min_confidence",
+    "analysis_cooldown_seconds",
 })
 
 LIQUIDATION_PRESERVE_KEYS = frozenset({
@@ -93,21 +103,21 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной LONG-профиль (OI + цена, качественный приток)
+    # Основной LONG/SHORT-профиль (база для tier: мейджоры ниже, альты выше)
     oi_period_minutes: int = 10
     long_period_minutes: int = 10
     short_period_minutes: int = 10
-    oi_rise_percent: float = 3.0
-    oi_drop_percent: float = 3.0
-    price_rise_percent: float = 0.8
-    price_drop_percent: float = 0.8
+    oi_rise_percent: float = 2.0
+    oi_drop_percent: float = 2.0
+    price_rise_percent: float = 1.0
+    price_drop_percent: float = 1.0
 
-    # Ранний пульс — ловим старт движения на альтах
+    # Ранний пульс — чувствительнее основного (respect_global_floors=False)
     pulse_period_minutes: int = 5
-    pulse_oi_rise_percent: float = 0.8
-    pulse_oi_drop_percent: float = 0.8
-    pulse_price_rise_percent: float = 0.4
-    pulse_price_drop_percent: float = 0.4
+    pulse_oi_rise_percent: float = 1.2
+    pulse_oi_drop_percent: float = 1.2
+    pulse_price_rise_percent: float = 0.55
+    pulse_price_drop_percent: float = 0.55
 
     # Мега-пампы: 5–100% за 5–10 минут
     flash_enabled: bool = True
@@ -118,56 +128,90 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 15.0
 
     # Качество сигнала: деньги в OI, не просто цена
-    min_oi_change_usd: float = 25_000.0
-    short_squeeze_min_price: float = 4.0
+    min_oi_change_usd: float = 100_000.0
+    short_squeeze_min_price: float = 3.5
     short_squeeze_max_oi_change: float = -0.8
     require_oi_for_price_only: bool = True
     require_both_oi_and_price: bool = True
-    respect_global_floors: bool = True
-    mega_cooldown_seconds: int = 30
+    respect_global_floors: bool = False
+    mega_cooldown_seconds: int = 45
 
-    # Вертикальный памп: флет → взлёт (вне порогов OI/цены из кнопок)
+    # Вертикальный памп/слив: флет → импульс (tier снижает % для BTC/ETH)
     breakout_enabled: bool = True
     breakout_bypass_top_n: bool = True
-    breakout_consolidation_minutes: int = 25
+    breakout_consolidation_minutes: int = 20
     breakout_spike_minutes: int = 3
-    breakout_max_flat_percent: float = 2.0
-    breakout_min_spike_percent: float = 1.8
-    breakout_min_dump_percent: float = 1.8
-    breakout_velocity_multiplier: float = 3.5
-    breakout_min_liquidity_oi_usd: float = 30_000.0
-    breakout_cooldown_seconds: int = 120
+    breakout_max_flat_percent: float = 1.5
+    breakout_min_spike_percent: float = 1.0
+    breakout_min_dump_percent: float = 1.0
+    breakout_velocity_multiplier: float = 2.8
+    breakout_min_liquidity_oi_usd: float = 500_000.0
+    breakout_cooldown_seconds: int = 150
 
-    # Резкий разворот: памп → слив (или дамп → отскок) без 25м флета
+    # Резкий разворот: памп → слив (или дамп → отскок)
     reversal_enabled: bool = True
     reversal_bypass_top_n: bool = True
     reversal_window_minutes: int = 10
     reversal_spike_minutes: int = 3
     reversal_peak_max_age_minutes: int = 6
-    reversal_min_prior_move_pct: float = 2.0
-    reversal_min_reversal_pct: float = 1.5
-    reversal_min_liquidity_oi_usd: float = 25_000.0
-    reversal_cooldown_seconds: int = 90
+    reversal_min_prior_move_pct: float = 1.2
+    reversal_min_reversal_pct: float = 0.85
+    reversal_min_liquidity_oi_usd: float = 400_000.0
+    reversal_cooldown_seconds: int = 120
 
-    min_open_interest: float = 75_000.0
+    # Tier: мейджоры / топ / альты — разные пороги из одной базы
+    tier_enabled: bool = True
+    major_symbols: tuple[str, ...] = (
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
+    )
+    major_price_multiplier: float = 0.5
+    major_oi_multiplier: float = 0.55
+    major_min_open_interest: float = 3_000_000.0
+    major_min_oi_change_usd: float = 150_000.0
+    major_min_probability_percent: float = 65.0
+    major_min_signal_score: float = 1.0
+    major_breakout_min_spike_percent: float = 0.55
+    major_breakout_min_dump_percent: float = 0.55
+    major_reversal_min_prior_pct: float = 0.9
+    major_reversal_min_leg_pct: float = 0.65
+    alt_price_multiplier: float = 1.25
+    alt_oi_multiplier: float = 1.15
+    alt_min_open_interest: float = 750_000.0
+    alt_min_oi_change_usd: float = 120_000.0
+    alt_min_probability_percent: float = 76.0
+    alt_min_signal_score: float = 3.0
+    standard_min_signal_score: float = 2.0
+
+    # Liq-cascade: крупные ликвидации + движение цены (ловит ETH −0.7% + $194K liq)
+    liq_cascade_enabled: bool = True
+    liq_cascade_window_minutes: int = 5
+    liq_cascade_min_usd: float = 80_000.0
+    liq_cascade_min_price_percent: float = 0.45
+    liq_cascade_imbalance_min: float = 0.60
+    major_liq_cascade_min_usd: float = 120_000.0
+    major_liq_cascade_min_price_percent: float = 0.35
+    liq_cascade_cooldown_seconds: int = 120
+
+    min_open_interest: float = 500_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 90
+    signal_cooldown_seconds: int = 180
     volume_spike_multiplier: float = 4.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
     min_signal_score: float = 1.0
-    top_n_symbols: int | None = 150
-    priority_score_max: int = 3
+    top_n_symbols: int | None = None
+    priority_score_max: int = 5
     signals_enabled: bool = True
     price_only_min_percent: float = 3.0
     telegram_max_per_minute: int = 10
     telegram_min_interval_seconds: float = 2.0
 
-    min_probability_percent: float = 70.0
+    min_probability_percent: float = 72.0
     probability_filter_enabled: bool = True
     outcome_tracking_enabled: bool = True
 
@@ -186,7 +230,7 @@ class ScannerSettings:
 
     # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
     liquidation_alerts_enabled: bool = True
-    liquidation_min_usd: float = 40_000.0
+    liquidation_min_usd: float = 80_000.0
     liquidation_burst_window_seconds: float = 2.0
     liquidation_cooldown_seconds: int = 60
     liquidation_all_symbols: bool = True
@@ -196,7 +240,7 @@ class ScannerSettings:
     analysis_enabled: bool = True
     analysis_min_liq_usd: float = 80_000.0
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 60.0
+    analysis_min_confidence: float = 58.0
     analysis_cooldown_seconds: int = 1800
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
@@ -254,6 +298,17 @@ class ScannerSettings:
                 getattr(self, f"{prefix}_price_drop_percent") or self.price_drop_percent
             ),
         )
+
+    @staticmethod
+    def _parse_str_tuple(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
+        if value is None:
+            return default
+        if isinstance(value, (list, tuple)):
+            return tuple(str(v).upper() for v in value)
+        if isinstance(value, str):
+            parts = [p.strip().upper() for p in value.split(",") if p.strip()]
+            return tuple(parts) if parts else default
+        return default
 
     @staticmethod
     def _parse_int_tuple(value: object, default: tuple[int, ...]) -> tuple[int, ...]:
@@ -333,27 +388,66 @@ class ScannerSettings:
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
             require_both_oi_and_price=bool(base.get("require_both_oi_and_price", True)),
-            respect_global_floors=bool(base.get("respect_global_floors", True)),
+            respect_global_floors=bool(base.get("respect_global_floors", False)),
             mega_cooldown_seconds=int(base["mega_cooldown_seconds"]),
             breakout_enabled=bool(base.get("breakout_enabled", True)),
             breakout_bypass_top_n=bool(base.get("breakout_bypass_top_n", True)),
-            breakout_consolidation_minutes=int(base.get("breakout_consolidation_minutes", 25)),
+            breakout_consolidation_minutes=int(base.get("breakout_consolidation_minutes", 20)),
             breakout_spike_minutes=int(base.get("breakout_spike_minutes", 3)),
-            breakout_max_flat_percent=float(base.get("breakout_max_flat_percent", 2.0)),
-            breakout_min_spike_percent=float(base.get("breakout_min_spike_percent", 1.8)),
-            breakout_min_dump_percent=float(base.get("breakout_min_dump_percent", 1.8)),
-            breakout_velocity_multiplier=float(base.get("breakout_velocity_multiplier", 3.5)),
-            breakout_min_liquidity_oi_usd=float(base.get("breakout_min_liquidity_oi_usd", 30_000.0)),
-            breakout_cooldown_seconds=int(base.get("breakout_cooldown_seconds", 120)),
+            breakout_max_flat_percent=float(base.get("breakout_max_flat_percent", 1.5)),
+            breakout_min_spike_percent=float(base.get("breakout_min_spike_percent", 1.0)),
+            breakout_min_dump_percent=float(base.get("breakout_min_dump_percent", 1.0)),
+            breakout_velocity_multiplier=float(base.get("breakout_velocity_multiplier", 2.8)),
+            breakout_min_liquidity_oi_usd=float(base.get("breakout_min_liquidity_oi_usd", 500_000.0)),
+            breakout_cooldown_seconds=int(base.get("breakout_cooldown_seconds", 150)),
             reversal_enabled=bool(base.get("reversal_enabled", True)),
             reversal_bypass_top_n=bool(base.get("reversal_bypass_top_n", True)),
             reversal_window_minutes=int(base.get("reversal_window_minutes", 10)),
             reversal_spike_minutes=int(base.get("reversal_spike_minutes", 3)),
             reversal_peak_max_age_minutes=int(base.get("reversal_peak_max_age_minutes", 6)),
-            reversal_min_prior_move_pct=float(base.get("reversal_min_prior_move_pct", 2.0)),
-            reversal_min_reversal_pct=float(base.get("reversal_min_reversal_pct", 1.5)),
-            reversal_min_liquidity_oi_usd=float(base.get("reversal_min_liquidity_oi_usd", 25_000.0)),
-            reversal_cooldown_seconds=int(base.get("reversal_cooldown_seconds", 90)),
+            reversal_min_prior_move_pct=float(base.get("reversal_min_prior_move_pct", 1.2)),
+            reversal_min_reversal_pct=float(base.get("reversal_min_reversal_pct", 0.85)),
+            reversal_min_liquidity_oi_usd=float(base.get("reversal_min_liquidity_oi_usd", 400_000.0)),
+            reversal_cooldown_seconds=int(base.get("reversal_cooldown_seconds", 120)),
+            tier_enabled=bool(base.get("tier_enabled", True)),
+            major_symbols=cls._parse_str_tuple(
+                base.get("major_symbols"),
+                (
+                    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
+                ),
+            ),
+            major_price_multiplier=float(base.get("major_price_multiplier", 0.5)),
+            major_oi_multiplier=float(base.get("major_oi_multiplier", 0.55)),
+            major_min_open_interest=float(base.get("major_min_open_interest", 3_000_000.0)),
+            major_min_oi_change_usd=float(base.get("major_min_oi_change_usd", 150_000.0)),
+            major_min_probability_percent=float(base.get("major_min_probability_percent", 65.0)),
+            major_min_signal_score=float(base.get("major_min_signal_score", 1.0)),
+            major_breakout_min_spike_percent=float(
+                base.get("major_breakout_min_spike_percent", 0.55)
+            ),
+            major_breakout_min_dump_percent=float(
+                base.get("major_breakout_min_dump_percent", 0.55)
+            ),
+            major_reversal_min_prior_pct=float(base.get("major_reversal_min_prior_pct", 0.9)),
+            major_reversal_min_leg_pct=float(base.get("major_reversal_min_leg_pct", 0.65)),
+            alt_price_multiplier=float(base.get("alt_price_multiplier", 1.25)),
+            alt_oi_multiplier=float(base.get("alt_oi_multiplier", 1.15)),
+            alt_min_open_interest=float(base.get("alt_min_open_interest", 750_000.0)),
+            alt_min_oi_change_usd=float(base.get("alt_min_oi_change_usd", 120_000.0)),
+            alt_min_probability_percent=float(base.get("alt_min_probability_percent", 76.0)),
+            alt_min_signal_score=float(base.get("alt_min_signal_score", 3.0)),
+            standard_min_signal_score=float(base.get("standard_min_signal_score", 2.0)),
+            liq_cascade_enabled=bool(base.get("liq_cascade_enabled", True)),
+            liq_cascade_window_minutes=int(base.get("liq_cascade_window_minutes", 5)),
+            liq_cascade_min_usd=float(base.get("liq_cascade_min_usd", 80_000.0)),
+            liq_cascade_min_price_percent=float(base.get("liq_cascade_min_price_percent", 0.45)),
+            liq_cascade_imbalance_min=float(base.get("liq_cascade_imbalance_min", 0.60)),
+            major_liq_cascade_min_usd=float(base.get("major_liq_cascade_min_usd", 120_000.0)),
+            major_liq_cascade_min_price_percent=float(
+                base.get("major_liq_cascade_min_price_percent", 0.35)
+            ),
+            liq_cascade_cooldown_seconds=int(base.get("liq_cascade_cooldown_seconds", 120)),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),
@@ -364,12 +458,12 @@ class ScannerSettings:
             cvd_divergence_threshold=float(base.get("cvd_divergence_threshold", -0.1)),
             min_signal_score=float(base.get("min_signal_score", 1.0)),
             top_n_symbols=(int(top_n) if top_n is not None else None),
-            priority_score_max=int(base.get("priority_score_max", 3)),
+            priority_score_max=int(base.get("priority_score_max", 5)),
             signals_enabled=bool(base.get("signals_enabled", True)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
-            min_probability_percent=float(base.get("min_probability_percent", 70.0)),
+            min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
@@ -380,9 +474,9 @@ class ScannerSettings:
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
-            signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 90)),
+            signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
-            liquidation_min_usd=float(base.get("liquidation_min_usd", 40_000.0)),
+            liquidation_min_usd=float(base.get("liquidation_min_usd", 80_000.0)),
             liquidation_burst_window_seconds=float(
                 base.get("liquidation_burst_window_seconds", 2.0)
             ),
@@ -394,7 +488,7 @@ class ScannerSettings:
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 80_000.0)),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 60.0)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 58.0)),
             analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 1800)),
             analysis_outcome_tracking_enabled=bool(
                 base.get("analysis_outcome_tracking_enabled", True)
@@ -463,10 +557,24 @@ class SettingsManager:
             if version < 3:
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
                     merged[override_key] = None
-            # v10: сброс на пресет «быстрые алерты» (7843362), ликвидации не трогаем
+            # v10+: сброс биржевых override при миграции
             if version >= 3:
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
                     merged[override_key] = None
+            # v16: сканируем все монеты (не top-150), снимаем жёсткие кнопочные пороги
+            merged["top_n_symbols"] = None
+            merged["respect_global_floors"] = False
+            # v17: починка анализа ликвидаций — пороги как у REKT-алертов, conf не режется в ноль
+            if version < 17:
+                merged["analysis_min_liq_usd"] = min(
+                    float(merged.get("analysis_min_liq_usd", 80_000.0)),
+                    float(merged.get("liquidation_min_usd", 80_000.0)),
+                )
+                merged["analysis_min_confidence"] = min(
+                    float(merged.get("analysis_min_confidence", 58.0)),
+                    58.0,
+                )
+                merged["analysis_delay_seconds"] = int(merged.get("analysis_delay_seconds", 90))
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -474,7 +582,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (stable preset 7843362, preserved: %s)",
+                "Settings migrated v%d → v%d (professional v16: all symbols, tier anti-spam, preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

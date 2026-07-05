@@ -12,6 +12,8 @@ PROBABILITY_BYPASS_TYPES = frozenset({
     "vertical_dump",
     "reversal_pump",
     "reversal_dump",
+    "liq_cascade_pump",
+    "liq_cascade_dump",
 })
 
 # Веса факторов (сумма = 1.0)
@@ -123,6 +125,8 @@ def _pattern_strength(signal: Signal) -> float:
     base = {
         "vertical_pump": 0.95,
         "vertical_dump": 0.95,
+        "liq_cascade_pump": 0.92,
+        "liq_cascade_dump": 0.92,
         "reversal_pump": 0.90,
         "reversal_dump": 0.90,
         "mega_pump": 0.88,
