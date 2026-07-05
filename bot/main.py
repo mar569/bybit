@@ -14,6 +14,7 @@ from .exchanges.binance import BinanceScanner
 from .exchanges.bybit import BybitScanner
 from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
+from .anomaly_alerts import AnomalyBatcher
 from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
@@ -53,11 +54,9 @@ async def main() -> None:
     config = Config.load()
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
-    scanner = SignalEngine(
-        settings,
-        telegram.dispatch_signal,
-        on_anomaly=telegram.dispatch_anomaly,
-    )
+    anomaly_batcher = AnomalyBatcher(telegram.dispatch_anomaly)
+    scanner = SignalEngine(settings, telegram.dispatch_signal)
+    scanner.attach_anomaly_batcher(anomaly_batcher)
     telegram.scanner = scanner
 
     def scan_interval() -> float:
@@ -161,6 +160,7 @@ async def main() -> None:
     analysis_outcome_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
+    anomaly_task: asyncio.Task | None = None
     try:
         await telegram.start()
         try:
@@ -186,6 +186,7 @@ async def main() -> None:
             telegram.analysis_outcome_tracker = AnalysisOutcomeTracker(telegram.redis, scanner)
             analysis_outcome_task = asyncio.create_task(telegram.analysis_outcome_tracker.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
+        anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         liq_task = asyncio.create_task(liquidation_tracker.run())
         binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())
@@ -221,6 +222,8 @@ async def main() -> None:
             liq_task.cancel()
         if binance_liq_task is not None:
             binance_liq_task.cancel()
+        if anomaly_task is not None:
+            anomaly_task.cancel()
         await asyncio.gather(
             *(
                 t
@@ -232,6 +235,7 @@ async def main() -> None:
                     analysis_outcome_task,
                     liq_task,
                     binance_liq_task,
+                    anomaly_task,
                 )
                 if t is not None
             ),

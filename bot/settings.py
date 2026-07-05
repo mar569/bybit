@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 18
+SETTINGS_VERSION = 19
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -263,8 +263,17 @@ class ScannerSettings:
     anomaly_pump_dump_window_minutes: int = 60
     anomaly_pump_min_pct: float = 5.0
     anomaly_dump_min_pct: float = 5.0
-    anomaly_volume_spike_multiplier: float = 5.0
+    anomaly_volume_spike_multiplier: float = 8.0
+    anomaly_volume_spike_enabled: bool = False
+    anomaly_volume_spike_min_price_pct: float = 1.5
+    anomaly_types_enabled: tuple[str, ...] = (
+        "pump_dump", "oi_spike", "funding_extreme",
+    )
     anomaly_cooldown_seconds: int = 300
+    anomaly_max_per_minute: int = 3
+    anomaly_batch_interval_seconds: int = 60
+    anomaly_symbol_cooldown_seconds: int = 1800
+    anomaly_min_importance: float = 55.0
 
     # Аналитический чат (post-liquidation разбор) → TELEGRAM_ANALYSIS_CHAT_ID
     analysis_enabled: bool = True
@@ -556,9 +565,27 @@ class ScannerSettings:
             anomaly_pump_min_pct=float(base.get("anomaly_pump_min_pct", 5.0)),
             anomaly_dump_min_pct=float(base.get("anomaly_dump_min_pct", 5.0)),
             anomaly_volume_spike_multiplier=float(
-                base.get("anomaly_volume_spike_multiplier", 5.0)
+                base.get("anomaly_volume_spike_multiplier", 8.0)
+            ),
+            anomaly_volume_spike_enabled=bool(
+                base.get("anomaly_volume_spike_enabled", False)
+            ),
+            anomaly_volume_spike_min_price_pct=float(
+                base.get("anomaly_volume_spike_min_price_pct", 1.5)
+            ),
+            anomaly_types_enabled=cls._parse_str_tuple(
+                base.get("anomaly_types_enabled"),
+                ("pump_dump", "oi_spike", "funding_extreme"),
             ),
             anomaly_cooldown_seconds=int(base.get("anomaly_cooldown_seconds", 300)),
+            anomaly_max_per_minute=int(base.get("anomaly_max_per_minute", 3)),
+            anomaly_batch_interval_seconds=int(
+                base.get("anomaly_batch_interval_seconds", 60)
+            ),
+            anomaly_symbol_cooldown_seconds=int(
+                base.get("anomaly_symbol_cooldown_seconds", 1800)
+            ),
+            anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 40_000.0)),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
@@ -659,6 +686,16 @@ class SettingsManager:
                 merged.setdefault("liquidation_mid_min_usd", 35_000.0)
                 merged.setdefault("liquidation_sliding_window_seconds", 300.0)
                 merged.setdefault("anomaly_enabled", True)
+            # v19: антиспам аномалий — очередь, лимит, без volume_spike по умолчанию
+            if version < 19:
+                merged["anomaly_volume_spike_enabled"] = False
+                merged["anomaly_max_per_minute"] = 3
+                merged["anomaly_batch_interval_seconds"] = 60
+                merged["anomaly_symbol_cooldown_seconds"] = 1800
+                merged["anomaly_min_importance"] = 55.0
+                merged["anomaly_types_enabled"] = [
+                    "pump_dump", "oi_spike", "funding_extreme",
+                ]
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -666,7 +703,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v18: impulse, tier liq, anomalies; preserved: %s)",
+                "Settings migrated v%d → v%d (v19: anomaly queue anti-spam; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

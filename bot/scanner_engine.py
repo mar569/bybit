@@ -16,7 +16,7 @@ from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_t
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 from .symbol_tiers import TierThresholds, tier_thresholds
-from .anomaly_alerts import detect_anomaly_for_symbol
+from .anomaly_alerts import AnomalyBatcher, detect_anomaly_for_symbol
 
 HISTORY_MAX_POINTS = 3600
 OI_BAR_INTERVAL_SECONDS = 300
@@ -64,13 +64,11 @@ class SignalEngine:
         settings: SettingsManager,
         on_signal: Callable[[Signal], Awaitable[None]],
         *,
-        on_anomaly: Callable[[object], Awaitable[None]] | None = None,
         liquidation_tracker: BybitLiquidationTracker | None = None,
         binance_liquidation_tracker: object | None = None,
     ) -> None:
         self.settings = settings
         self.on_signal = on_signal
-        self.on_anomaly = on_anomaly
         self._liquidation_tracker = liquidation_tracker
         self._binance_liquidation_tracker = binance_liquidation_tracker
         self.history: dict[str, deque[SnapshotPoint]] = {}
@@ -85,8 +83,11 @@ class SignalEngine:
         self._five_min_bars: dict[str, deque[FiveMinOiBar]] = {}
         self._kline_cache = BybitKlineCache()
         self._account_ratio_cache = BybitAccountRatioCache()
-        self._anomaly_last_time: dict[str, float] = {}
+        self._anomaly_batcher: AnomalyBatcher | None = None
         self.lock = asyncio.Lock()
+
+    def attach_anomaly_batcher(self, batcher: AnomalyBatcher) -> None:
+        self._anomaly_batcher = batcher
 
     def attach_liquidation_tracker(self, tracker: BybitLiquidationTracker) -> None:
         self._liquidation_tracker = tracker
@@ -1044,17 +1045,23 @@ class SignalEngine:
         settings: ScannerSettings,
         tier: TierThresholds,
     ) -> None:
-        if not settings.anomaly_enabled or self.on_anomaly is None:
+        if not settings.anomaly_enabled or self._anomaly_batcher is None:
             return
         event = detect_anomaly_for_symbol(exchange, symbol, history, current, settings, tier)
         if event is None:
             return
-        now = time.time()
-        cd_key = f"{symbol.upper()}:{event.anomaly_type}"
-        if now - self._anomaly_last_time.get(cd_key, 0.0) < settings.anomaly_cooldown_seconds:
-            return
-        self._anomaly_last_time[cd_key] = now
-        await self.on_anomaly(event)
+        await self._anomaly_batcher.offer(event, settings)
+
+    async def run_anomaly_flush_loop(self, interval: float = 15.0) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            batcher = self._anomaly_batcher
+            if batcher is None:
+                continue
+            try:
+                await batcher.flush(self.settings.settings)
+            except Exception:
+                logger.exception("Anomaly batch flush failed")
 
     def _detect_liq_cascade(
         self,

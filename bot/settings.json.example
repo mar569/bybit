@@ -1,5 +1,5 @@
 {
-  "settings_version": 18,
+  "settings_version": 19,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -106,7 +106,14 @@
   "anomaly_pump_dump_window_minutes": 60,
   "anomaly_pump_min_pct": 5.0,
   "anomaly_dump_min_pct": 5.0,
-  "anomaly_volume_spike_multiplier": 5.0,
+  "anomaly_volume_spike_multiplier": 8.0,
+  "anomaly_volume_spike_enabled": false,
+  "anomaly_volume_spike_min_price_pct": 1.5,
+  "anomaly_types_enabled": ["pump_dump", "oi_spike", "funding_extreme"],
+  "anomaly_max_per_minute": 3,
+  "anomaly_batch_interval_seconds": 60,
+  "anomaly_symbol_cooldown_seconds": 1800,
+  "anomaly_min_importance": 55,
   "anomaly_cooldown_seconds": 300,
 
   "analysis_enabled": true,
