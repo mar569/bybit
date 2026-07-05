@@ -69,6 +69,7 @@ def _analysis_prefilter(
     total_usd: float,
     *,
     source: str = "liq_alert",
+    event_count: int | None = None,
 ) -> str | None:
     """Причина отказа или None если можно планировать разбор."""
     in_top = True
@@ -98,6 +99,12 @@ def _analysis_prefilter(
         oi_usd = scanner.get_symbol_oi_usd(symbol)
         if oi_usd is not None and oi_usd < min_oi:
             return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
+
+    min_events = int(getattr(settings, "analysis_min_cluster_events", 2))
+    min_single = float(getattr(settings, "analysis_single_event_min_usd", 55_000.0))
+    if source == "liq_alert" and event_count is not None:
+        if event_count < min_events and total_usd < min_single:
+            return f"cluster_{event_count}ev_lt_{min_single:.0f}"
     return None
 
 
@@ -307,7 +314,13 @@ class LiquidationAnalysisEngine:
         symbol = event.symbol.upper()
 
         reject = _analysis_prefilter(
-            self._scanner, event.exchange, symbol, settings, total_usd, source=source,
+            self._scanner,
+            event.exchange,
+            symbol,
+            settings,
+            total_usd,
+            source=source,
+            event_count=event_count,
         )
         if reject:
             if reject == "alt_tier":
@@ -373,8 +386,10 @@ class LiquidationAnalysisEngine:
         long_liq = stats.long_liq_usd if stats else 0.0
         short_liq = stats.short_liq_usd if stats else 0.0
         total_liq = long_liq + short_liq
-        oi_flow = abs(float(signal.oi_change_usd or 0.0))
-        cluster_usd = max(total_liq, oi_flow)
+        min_liq = float(getattr(settings, "analysis_signal_min_liq_usd", 30_000.0))
+        if total_liq < min_liq:
+            return
+        cluster_usd = total_liq
 
         if signal.side == "long":
             cluster_side = SIDE_LONG_LIQ if long_liq >= short_liq else SIDE_SHORT_LIQ
@@ -397,7 +412,7 @@ class LiquidationAnalysisEngine:
             event_count,
             cluster_usd,
             source="signal",
-            skip_trend_gate=True,
+            skip_trend_gate=signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"},
         )
 
     async def _run_delayed(
@@ -422,7 +437,12 @@ class LiquidationAnalysisEngine:
             )
             if result is None:
                 return
-            min_conf = float(getattr(settings, "analysis_min_confidence", 62.0))
+            min_conf = float(getattr(settings, "analysis_min_confidence", 55.0))
+            if result.direction in ("long", "short"):
+                min_conf = max(
+                    min_conf,
+                    float(getattr(settings, "analysis_min_confidence_directional", 68.0)),
+                )
             if result.confidence < min_conf:
                 self._stats["skipped_confidence"] += 1
                 logger.info(
@@ -557,6 +577,16 @@ class LiquidationAnalysisEngine:
             buy_ratio=buy_ratio,
         )
 
+        if verdict.direction in ("long", "short"):
+            if ctx.trend_quality == "weak":
+                self._stats["skipped_trend"] += 1
+                logger.info("Analysis skip %s: directional %s on weak trend", symbol, verdict.direction)
+                return None
+            if ctx.oi_narrative == "insufficient_oi":
+                self._stats["skipped_oi"] += 1
+                logger.info("Analysis skip %s: directional %s without OI data", symbol, verdict.direction)
+                return None
+
         predict_long = verdict.direction == "long"
         if verdict.direction == "wait":
             predict_long = cluster_side == SIDE_LONG_LIQ
@@ -640,9 +670,15 @@ class LiquidationAnalysisEngine:
         weight_sum = sum(f.weight for f in factors)
         confidence = sum(f.score * f.weight for f in factors) / weight_sum * 100.0
 
-        continuation_risk = verdict.continuation_up or verdict.continuation_down
         if verdict.direction == "wait":
-            confidence *= 0.92
+            confidence *= 0.95
+        elif ctx.near_high and cluster_side == SIDE_SHORT_LIQ and verdict.direction == "long":
+            confidence *= 0.80
+
+        continuation_risk = (
+            verdict.direction == "wait"
+            or (ctx.near_high and cluster_side == SIDE_SHORT_LIQ)
+        )
 
         window_min, window_max = _estimate_window(confidence)
         low_high = self._scanner.get_price_extremes_since(exchange, symbol, event.timestamp)
@@ -728,9 +764,9 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
     lines.append(f"⚠️ <b>Отмена:</b> {result.invalidation_label}")
 
     if result.direction == "wait":
-        lines.append("⏸ <i>Жди подтверждения — рынок в фазе выжидания после смыва</i>")
+        lines.append("⏸ <i>Нет чёткого edge — не входи по этому разбору</i>")
     elif result.continuation_risk:
-        lines.append("⚡ <i>Импульс может продолжиться — вход только с подтверждением</i>")
+        lines.append("⚠️ <i>Риск ложного сценария — только с подтверждением на графике</i>")
 
     lines.append(
         f'\n<a href="{ex_url}">Торговать</a> · <a href="{cg_url}">CoinGlass</a>'
