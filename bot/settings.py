@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 21
+SETTINGS_VERSION = 22
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -277,18 +277,20 @@ class ScannerSettings:
 
     # Аналитический чат — только крупные ликвидации с толком (не все монеты)
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 30_000.0
-    analysis_major_min_liq_usd: float = 50_000.0
-    analysis_alt_min_liq_usd: float = 35_000.0
+    analysis_min_liq_usd: float = 20_000.0
+    analysis_major_min_liq_usd: float = 35_000.0
+    analysis_alt_min_liq_usd: float = 20_000.0
     analysis_skip_alt_tier: bool = False
-    analysis_min_oi_usd: float = 500_000.0
+    analysis_min_oi_usd: float = 0.0
     analysis_min_price_move_pct: float = 0.0
-    analysis_min_trend_pct: float = 2.0
+    analysis_min_trend_pct: float = 1.5
     analysis_require_trend: bool = True
-    analysis_force_liq_usd: float = 80_000.0
-    analysis_max_per_hour: int = 4
+    analysis_force_liq_usd: float = 50_000.0
+    analysis_max_per_hour: int = 6
+    analysis_signal_trigger_enabled: bool = True
+    analysis_signal_min_liq_usd: float = 10_000.0
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 62.0
+    analysis_min_confidence: float = 58.0
     analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
@@ -596,24 +598,30 @@ class ScannerSettings:
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
-            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 30_000.0)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 20_000.0)),
             analysis_major_min_liq_usd=float(
-                base.get("analysis_major_min_liq_usd", 50_000.0)
+                base.get("analysis_major_min_liq_usd", 35_000.0)
             ),
             analysis_alt_min_liq_usd=float(
-                base.get("analysis_alt_min_liq_usd", 35_000.0)
+                base.get("analysis_alt_min_liq_usd", 20_000.0)
             ),
             analysis_skip_alt_tier=bool(base.get("analysis_skip_alt_tier", False)),
-            analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 500_000.0)),
+            analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 0.0)),
             analysis_min_price_move_pct=float(
                 base.get("analysis_min_price_move_pct", 0.0)
             ),
-            analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 2.0)),
+            analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 1.5)),
             analysis_require_trend=bool(base.get("analysis_require_trend", True)),
-            analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 80_000.0)),
-            analysis_max_per_hour=int(base.get("analysis_max_per_hour", 4)),
+            analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 50_000.0)),
+            analysis_max_per_hour=int(base.get("analysis_max_per_hour", 6)),
+            analysis_signal_trigger_enabled=bool(
+                base.get("analysis_signal_trigger_enabled", True)
+            ),
+            analysis_signal_min_liq_usd=float(
+                base.get("analysis_signal_min_liq_usd", 10_000.0)
+            ),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 62.0)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 58.0)),
             analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 3600)),
             analysis_outcome_tracking_enabled=bool(
                 base.get("analysis_outcome_tracking_enabled", True)
@@ -751,6 +759,18 @@ class SettingsManager:
                 merged.setdefault("analysis_force_liq_usd", 80_000.0)
                 merged.setdefault("analysis_max_per_hour", 4)
                 merged["anomaly_types_enabled"] = ["pump_dump", "oi_spike"]
+            # v22: анализ чаще — триггер от сигналов, пороги как у liq-алертов
+            if version < 22:
+                merged["analysis_min_liq_usd"] = 20_000.0
+                merged["analysis_major_min_liq_usd"] = 35_000.0
+                merged["analysis_alt_min_liq_usd"] = 20_000.0
+                merged["analysis_min_oi_usd"] = 0.0
+                merged["analysis_min_confidence"] = 58.0
+                merged["analysis_min_trend_pct"] = 1.5
+                merged["analysis_force_liq_usd"] = 50_000.0
+                merged["analysis_max_per_hour"] = 6
+                merged.setdefault("analysis_signal_trigger_enabled", True)
+                merged.setdefault("analysis_signal_min_liq_usd", 10_000.0)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -758,7 +778,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v21: trend+liq+OI/CVD analysis; anomalies off; preserved: %s)",
+                "Settings migrated v%d → v%d (v22: analysis from signals+liq; relaxed gates; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

@@ -88,6 +88,16 @@ async def main() -> None:
     )
     telegram.analysis_engine = analysis_engine
 
+    async def on_trading_signal(signal) -> None:
+        await telegram.dispatch_signal(signal)
+        if settings.settings.analysis_enabled and config.analysis_chat_configured:
+            try:
+                await analysis_engine.schedule_from_signal(signal)
+            except Exception:
+                logger.exception("Analysis schedule from signal failed %s", signal.symbol)
+
+    scanner.on_signal = on_trading_signal
+
     async def on_liquidation_alert(event, event_count: int, total_usd: float) -> None:
         s = settings.settings
         if s.liquidation_alerts_enabled:

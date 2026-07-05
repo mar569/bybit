@@ -28,10 +28,20 @@ from .trend_liq_context import (
     resolve_scenario,
     score_trend_liq_factors,
 )
+from .models import Signal
 
 logger = logging.getLogger(__name__)
 
 OI_BAR_MAX_COUNT = 72
+
+ANALYSIS_SIGNAL_TYPES = frozenset({
+    "impulse_pump",
+    "impulse_dump",
+    "reversal_pump",
+    "reversal_dump",
+    "liq_cascade_pump",
+    "liq_cascade_dump",
+})
 
 
 def resolve_analysis_min_liq_usd(
@@ -57,6 +67,8 @@ def _analysis_prefilter(
     symbol: str,
     settings: object,
     total_usd: float,
+    *,
+    source: str = "liq_alert",
 ) -> str | None:
     """Причина отказа или None если можно планировать разбор."""
     in_top = True
@@ -65,16 +77,27 @@ def _analysis_prefilter(
     except Exception:
         in_top = True
 
+    if source == "signal":
+        if bool(getattr(settings, "analysis_skip_alt_tier", False)):
+            tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top)
+            if tier == SymbolTier.ALT:
+                return "alt_tier"
+        min_liq = float(getattr(settings, "analysis_signal_min_liq_usd", 10_000.0))
+        if total_usd < min_liq:
+            return f"liq_${total_usd:.0f}_lt_{min_liq:.0f}"
+        return None
+
     min_liq, skip = resolve_analysis_min_liq_usd(symbol, settings, in_top_n=in_top)
     if min_liq is None:
         return skip or "tier"
     if total_usd < min_liq:
         return f"liq_${total_usd:.0f}_lt_{min_liq:.0f}"
 
-    min_oi = float(getattr(settings, "analysis_min_oi_usd", 500_000.0))
-    oi_usd = scanner.get_symbol_oi_usd(symbol)
-    if oi_usd is not None and oi_usd < min_oi:
-        return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
+    min_oi = float(getattr(settings, "analysis_min_oi_usd", 0.0))
+    if min_oi > 0:
+        oi_usd = scanner.get_symbol_oi_usd(symbol)
+        if oi_usd is not None and oi_usd < min_oi:
+            return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
     return None
 
 
@@ -231,6 +254,8 @@ class LiquidationAnalysisEngine:
             "skipped_no_price": 0,
             "skipped_confidence": 0,
             "skipped_rate_limit": 0,
+            "skipped_cooldown": 0,
+            "from_signal": 0,
             "errors": 0,
         }
 
@@ -272,6 +297,9 @@ class LiquidationAnalysisEngine:
         event: LiquidationAlertEvent,
         event_count: int,
         total_usd: float,
+        *,
+        source: str = "liq_alert",
+        skip_trend_gate: bool = False,
     ) -> None:
         if not self.enabled():
             return
@@ -279,7 +307,7 @@ class LiquidationAnalysisEngine:
         symbol = event.symbol.upper()
 
         reject = _analysis_prefilter(
-            self._scanner, event.exchange, symbol, settings, total_usd,
+            self._scanner, event.exchange, symbol, settings, total_usd, source=source,
         )
         if reject:
             if reject == "alt_tier":
@@ -288,23 +316,89 @@ class LiquidationAnalysisEngine:
                 self._stats["skipped_oi"] += 1
             else:
                 self._stats["skipped_threshold"] += 1
-            logger.debug("Analysis skip %s: %s (cluster $%.0f)", symbol, reject, total_usd)
+            logger.info(
+                "Analysis skip %s [%s]: %s (cluster $%.0f)",
+                symbol,
+                source,
+                reject,
+                total_usd,
+            )
             return
 
         now = time.time()
         cooldown = int(getattr(settings, "analysis_cooldown_seconds", 3600))
-        self._stats["scheduled"] += 1
         async with self._lock:
             if now < self._cooldown_until.get(symbol, 0.0):
+                self._stats["skipped_cooldown"] += 1
                 return
             prev = self._pending_tasks.get(symbol)
             if prev is not None and not prev.done():
                 prev.cancel()
+            self._stats["scheduled"] += 1
+            if source == "signal":
+                self._stats["from_signal"] += 1
             task = asyncio.create_task(
-                self._run_delayed(event, event_count, total_usd, cooldown),
+                self._run_delayed(
+                    event,
+                    event_count,
+                    total_usd,
+                    cooldown,
+                    skip_trend_gate=skip_trend_gate,
+                ),
                 name=f"liq-analysis-{symbol}",
             )
             self._pending_tasks[symbol] = task
+
+    async def schedule_from_signal(self, signal: Signal) -> None:
+        """Разбор по импульсу/развороту + liq из трекера (не ждём REKT-алерт)."""
+        settings = self._get_settings()
+        if not self.enabled():
+            return
+        if not bool(getattr(settings, "analysis_signal_trigger_enabled", True)):
+            return
+        if signal.signal_type not in ANALYSIS_SIGNAL_TYPES:
+            return
+
+        symbol = signal.symbol.upper()
+        exchange = signal.exchange
+        liq_tracker = (
+            self._binance_liquidation_tracker
+            if "binance" in exchange.lower()
+            else self._liquidation_tracker
+        )
+        stats = None
+        if liq_tracker is not None:
+            stats = liq_tracker.get_stats(symbol, window_minutes=15)
+
+        long_liq = stats.long_liq_usd if stats else 0.0
+        short_liq = stats.short_liq_usd if stats else 0.0
+        total_liq = long_liq + short_liq
+        oi_flow = abs(float(signal.oi_change_usd or 0.0))
+        cluster_usd = max(total_liq, oi_flow)
+
+        if signal.side == "long":
+            cluster_side = SIDE_LONG_LIQ if long_liq >= short_liq else SIDE_SHORT_LIQ
+        else:
+            cluster_side = SIDE_SHORT_LIQ if short_liq >= long_liq else SIDE_LONG_LIQ
+        if total_liq <= 0:
+            cluster_side = SIDE_LONG_LIQ if signal.side == "long" else SIDE_SHORT_LIQ
+
+        event_count = stats.event_count if stats and stats.event_count > 0 else 1
+        event = LiquidationAlertEvent(
+            exchange=exchange,
+            timestamp=time.time(),
+            symbol=symbol,
+            side=cluster_side,
+            usd_value=cluster_usd,
+            price=float(signal.current_price or 0.0),
+        )
+        await self.schedule(
+            event,
+            event_count,
+            cluster_usd,
+            source="signal",
+            skip_trend_gate=True,
+        )
 
     async def _run_delayed(
         self,
@@ -312,13 +406,20 @@ class LiquidationAnalysisEngine:
         event_count: int,
         total_usd: float,
         cooldown: int,
+        *,
+        skip_trend_gate: bool = False,
     ) -> None:
         settings = self._get_settings()
         delay = int(getattr(settings, "analysis_delay_seconds", 90))
         symbol = event.symbol.upper()
         try:
             await asyncio.sleep(delay)
-            result = await self._build_analysis(event, event_count, total_usd)
+            result = await self._build_analysis(
+                event,
+                event_count,
+                total_usd,
+                skip_trend_gate=skip_trend_gate,
+            )
             if result is None:
                 return
             min_conf = float(getattr(settings, "analysis_min_confidence", 62.0))
@@ -370,6 +471,8 @@ class LiquidationAnalysisEngine:
         event: LiquidationAlertEvent,
         event_count: int,
         total_usd: float,
+        *,
+        skip_trend_gate: bool = False,
     ) -> LiquidationAnalysisResult | None:
         settings = self._get_settings()
         symbol = event.symbol.upper()
@@ -428,16 +531,17 @@ class LiquidationAnalysisEngine:
             self._stats["skipped_trend"] += 1
             return None
 
-        require_trend = bool(getattr(settings, "analysis_require_trend", True))
-        min_trend = float(getattr(settings, "analysis_min_trend_pct", 2.0))
-        force_liq = float(getattr(settings, "analysis_force_liq_usd", 80_000.0))
-        if require_trend and abs(ctx.trend_pct_1h) < min_trend and total_usd < force_liq:
+        require_trend = bool(getattr(settings, "analysis_require_trend", True)) and not skip_trend_gate
+        min_trend = float(getattr(settings, "analysis_min_trend_pct", 1.5))
+        force_liq = float(getattr(settings, "analysis_force_liq_usd", 50_000.0))
+        trend_strength = max(abs(ctx.trend_pct_1h), abs(ctx.trend_pct_4h))
+        if require_trend and trend_strength < min_trend and total_usd < force_liq:
             self._stats["skipped_trend"] += 1
             logger.info(
-                "Analysis skip %s: weak trend %.1f%% < %.1f%% (liq $%.0f)",
+                "Analysis skip %s: weak trend 1h=%.1f%% 4h=%.1f%% (liq $%.0f)",
                 symbol,
                 ctx.trend_pct_1h,
-                min_trend,
+                ctx.trend_pct_4h,
                 total_usd,
             )
             return None
