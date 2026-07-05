@@ -1,5 +1,5 @@
 {
-  "settings_version": 19,
+  "settings_version": 20,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -117,10 +117,15 @@
   "anomaly_cooldown_seconds": 300,
 
   "analysis_enabled": true,
-  "analysis_min_liq_usd": 40000,
+  "analysis_min_liq_usd": 100000,
+  "analysis_major_min_liq_usd": 80000,
+  "analysis_alt_min_liq_usd": 250000,
+  "analysis_skip_alt_tier": true,
+  "analysis_min_oi_usd": 1500000,
+  "analysis_min_price_move_pct": 0.4,
   "analysis_delay_seconds": 90,
-  "analysis_min_confidence": 58,
-  "analysis_cooldown_seconds": 1800,
+  "analysis_min_confidence": 68,
+  "analysis_cooldown_seconds": 3600,
   "analysis_outcome_tracking_enabled": true,
   "analysis_chart_enabled": true,
   "analysis_chart_interval_minutes": 5

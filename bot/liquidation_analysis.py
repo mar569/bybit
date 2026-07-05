@@ -21,10 +21,55 @@ from .liquidation_alerts import (
 from .market_structure import FiveMinOiBar, analyze_market_structure
 from .probability_engine import _liquidation_strength, _long_short_strength
 from .scanner_engine import SignalEngine
+from .symbol_tiers import SymbolTier, classify_symbol
 
 logger = logging.getLogger(__name__)
 
 OI_BAR_MAX_COUNT = 72
+
+
+def resolve_analysis_min_liq_usd(
+    symbol: str,
+    settings: object,
+    *,
+    in_top_n: bool = True,
+) -> tuple[float | None, str]:
+    """Порог liq для разбора. None = монета не попадает в analysis-чат."""
+    tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top_n)
+    if bool(getattr(settings, "analysis_skip_alt_tier", True)) and tier == SymbolTier.ALT:
+        return None, "alt_tier"
+    if tier == SymbolTier.MAJOR:
+        return float(getattr(settings, "analysis_major_min_liq_usd", 80_000.0)), ""
+    if tier == SymbolTier.ALT:
+        return float(getattr(settings, "analysis_alt_min_liq_usd", 250_000.0)), ""
+    return float(getattr(settings, "analysis_min_liq_usd", 100_000.0)), ""
+
+
+def _analysis_prefilter(
+    scanner: SignalEngine,
+    exchange: str,
+    symbol: str,
+    settings: object,
+    total_usd: float,
+) -> str | None:
+    """Причина отказа или None если можно планировать разбор."""
+    in_top = True
+    try:
+        in_top = scanner._is_in_top_n(exchange, symbol)
+    except Exception:
+        in_top = True
+
+    min_liq, skip = resolve_analysis_min_liq_usd(symbol, settings, in_top_n=in_top)
+    if min_liq is None:
+        return skip or "tier"
+    if total_usd < min_liq:
+        return f"liq_${total_usd:.0f}_lt_{min_liq:.0f}"
+
+    min_oi = float(getattr(settings, "analysis_min_oi_usd", 1_500_000.0))
+    oi_usd = scanner.get_symbol_oi_usd(symbol)
+    if oi_usd is not None and oi_usd < min_oi:
+        return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
+    return None
 
 FACTOR_WEIGHTS: dict[str, float] = {
     "cluster": 0.16,
@@ -299,6 +344,9 @@ class LiquidationAnalysisEngine:
             "scheduled": 0,
             "sent": 0,
             "skipped_threshold": 0,
+            "skipped_alt_tier": 0,
+            "skipped_oi": 0,
+            "skipped_price_move": 0,
             "skipped_no_price": 0,
             "skipped_confidence": 0,
             "errors": 0,
@@ -334,18 +382,30 @@ class LiquidationAnalysisEngine:
         if not self.enabled():
             return
         settings = self._get_settings()
-        min_usd = float(getattr(settings, "analysis_min_liq_usd", 80_000.0))
-        if total_usd < min_usd:
-            self._stats["skipped_threshold"] += 1
-            logger.debug(
-                "Analysis skip %s: cluster $%.0f < min $%.0f",
-                event.symbol,
-                total_usd,
-                min_usd,
-            )
+        symbol = event.symbol.upper()
+
+        reject = _analysis_prefilter(
+            self._scanner, event.exchange, symbol, settings, total_usd,
+        )
+        if reject:
+            if reject == "alt_tier":
+                self._stats["skipped_alt_tier"] += 1
+            elif reject.startswith("oi_"):
+                self._stats["skipped_oi"] += 1
+            else:
+                self._stats["skipped_threshold"] += 1
+            logger.debug("Analysis skip %s: %s (cluster $%.0f)", symbol, reject, total_usd)
             return
 
-        symbol = event.symbol.upper()
+        min_liq, _ = resolve_analysis_min_liq_usd(
+            symbol,
+            settings,
+            in_top_n=self._scanner._is_in_top_n(event.exchange, symbol),
+        )
+        if min_liq is None or total_usd < min_liq:
+            self._stats["skipped_threshold"] += 1
+            return
+
         now = time.time()
         cooldown = int(getattr(settings, "analysis_cooldown_seconds", 1800))
         self._stats["scheduled"] += 1
@@ -376,7 +436,7 @@ class LiquidationAnalysisEngine:
             result = await self._build_analysis(event, event_count, total_usd)
             if result is None:
                 return
-            min_conf = float(getattr(settings, "analysis_min_confidence", 60.0))
+            min_conf = float(getattr(settings, "analysis_min_confidence", 68.0))
             if result.confidence < min_conf:
                 self._stats["skipped_confidence"] += 1
                 logger.info(
@@ -386,6 +446,17 @@ class LiquidationAnalysisEngine:
                     min_conf,
                     total_usd,
                     result.price_change_since_cluster_pct,
+                )
+                return
+            min_move = float(getattr(settings, "analysis_min_price_move_pct", 0.4))
+            if abs(result.price_change_since_cluster_pct) < min_move:
+                self._stats["skipped_price_move"] += 1
+                logger.info(
+                    "Analysis skip %s: price move %.2f%% < %.2f%% after cluster $%.0f",
+                    symbol,
+                    result.price_change_since_cluster_pct,
+                    min_move,
+                    total_usd,
                 )
                 return
             async with self._lock:
@@ -416,7 +487,13 @@ class LiquidationAnalysisEngine:
         total_usd: float,
     ) -> LiquidationAnalysisResult | None:
         settings = self._get_settings()
-        min_usd = float(getattr(settings, "analysis_min_liq_usd", 80_000.0))
+        min_usd, _ = resolve_analysis_min_liq_usd(
+            symbol,
+            settings,
+            in_top_n=self._scanner._is_in_top_n(exchange, symbol),
+        )
+        if min_usd is None:
+            min_usd = float(getattr(settings, "analysis_min_liq_usd", 100_000.0))
         symbol = event.symbol.upper()
         exchange = event.exchange
         cluster_side = event.side

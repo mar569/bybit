@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 19
+SETTINGS_VERSION = 20
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -275,12 +275,17 @@ class ScannerSettings:
     anomaly_symbol_cooldown_seconds: int = 1800
     anomaly_min_importance: float = 55.0
 
-    # Аналитический чат (post-liquidation разбор) → TELEGRAM_ANALYSIS_CHAT_ID
+    # Аналитический чат — только крупные ликвидации с толком (не все монеты)
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 40_000.0
+    analysis_min_liq_usd: float = 100_000.0
+    analysis_major_min_liq_usd: float = 80_000.0
+    analysis_alt_min_liq_usd: float = 250_000.0
+    analysis_skip_alt_tier: bool = True
+    analysis_min_oi_usd: float = 1_500_000.0
+    analysis_min_price_move_pct: float = 0.4
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 58.0
-    analysis_cooldown_seconds: int = 1800
+    analysis_min_confidence: float = 68.0
+    analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
     analysis_chart_interval_minutes: int = 5
@@ -587,10 +592,21 @@ class ScannerSettings:
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
-            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 40_000.0)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 100_000.0)),
+            analysis_major_min_liq_usd=float(
+                base.get("analysis_major_min_liq_usd", 80_000.0)
+            ),
+            analysis_alt_min_liq_usd=float(
+                base.get("analysis_alt_min_liq_usd", 250_000.0)
+            ),
+            analysis_skip_alt_tier=bool(base.get("analysis_skip_alt_tier", True)),
+            analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 1_500_000.0)),
+            analysis_min_price_move_pct=float(
+                base.get("analysis_min_price_move_pct", 0.4)
+            ),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 58.0)),
-            analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 1800)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 68.0)),
+            analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 3600)),
             analysis_outcome_tracking_enabled=bool(
                 base.get("analysis_outcome_tracking_enabled", True)
             ),
@@ -696,6 +712,22 @@ class SettingsManager:
                 merged["anomaly_types_enabled"] = [
                     "pump_dump", "oi_spike", "funding_extreme",
                 ]
+            # v20: analysis — только крупные liq, без альт-мусора
+            if version < 20:
+                merged["analysis_min_liq_usd"] = max(
+                    float(merged.get("analysis_min_liq_usd", 40_000.0)), 100_000.0
+                )
+                merged["analysis_min_confidence"] = max(
+                    float(merged.get("analysis_min_confidence", 58.0)), 68.0
+                )
+                merged.setdefault("analysis_skip_alt_tier", True)
+                merged.setdefault("analysis_min_oi_usd", 1_500_000.0)
+                merged.setdefault("analysis_major_min_liq_usd", 80_000.0)
+                merged.setdefault("analysis_alt_min_liq_usd", 250_000.0)
+                merged.setdefault("analysis_min_price_move_pct", 0.4)
+                merged["analysis_cooldown_seconds"] = max(
+                    int(merged.get("analysis_cooldown_seconds", 1800)), 3600
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -703,7 +735,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v19: anomaly queue anti-spam; preserved: %s)",
+                "Settings migrated v%d → v%d (v20: analysis majors+large liq only; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
