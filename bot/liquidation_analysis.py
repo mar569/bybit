@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -18,10 +19,15 @@ from .liquidation_alerts import (
     coinglass_url,
     exchange_trade_url,
 )
-from .market_structure import FiveMinOiBar, analyze_market_structure
+from .market_structure import FiveMinOiBar
 from .probability_engine import _liquidation_strength, _long_short_strength
 from .scanner_engine import SignalEngine
 from .symbol_tiers import SymbolTier, classify_symbol
+from .trend_liq_context import (
+    build_trend_liq_context,
+    resolve_scenario,
+    score_trend_liq_factors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +42,13 @@ def resolve_analysis_min_liq_usd(
 ) -> tuple[float | None, str]:
     """Порог liq для разбора. None = монета не попадает в analysis-чат."""
     tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top_n)
-    if bool(getattr(settings, "analysis_skip_alt_tier", True)) and tier == SymbolTier.ALT:
+    if bool(getattr(settings, "analysis_skip_alt_tier", False)) and tier == SymbolTier.ALT:
         return None, "alt_tier"
     if tier == SymbolTier.MAJOR:
-        return float(getattr(settings, "analysis_major_min_liq_usd", 80_000.0)), ""
+        return float(getattr(settings, "analysis_major_min_liq_usd", 50_000.0)), ""
     if tier == SymbolTier.ALT:
-        return float(getattr(settings, "analysis_alt_min_liq_usd", 250_000.0)), ""
-    return float(getattr(settings, "analysis_min_liq_usd", 100_000.0)), ""
+        return float(getattr(settings, "analysis_alt_min_liq_usd", 35_000.0)), ""
+    return float(getattr(settings, "analysis_min_liq_usd", 30_000.0)), ""
 
 
 def _analysis_prefilter(
@@ -65,21 +71,22 @@ def _analysis_prefilter(
     if total_usd < min_liq:
         return f"liq_${total_usd:.0f}_lt_{min_liq:.0f}"
 
-    min_oi = float(getattr(settings, "analysis_min_oi_usd", 1_500_000.0))
+    min_oi = float(getattr(settings, "analysis_min_oi_usd", 500_000.0))
     oi_usd = scanner.get_symbol_oi_usd(symbol)
     if oi_usd is not None and oi_usd < min_oi:
         return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
     return None
 
+
 FACTOR_WEIGHTS: dict[str, float] = {
-    "cluster": 0.16,
-    "liq_imbalance": 0.22,
-    "post_price": 0.18,
-    "oi_flow": 0.12,
-    "funding": 0.08,
-    "crowd_ls": 0.10,
-    "structure": 0.12,
-    "btc": 0.05,
+    "cluster": 0.14,
+    "liq_imbalance": 0.18,
+    "trend": 0.20,
+    "cvd": 0.16,
+    "oi_narrative": 0.12,
+    "correction": 0.08,
+    "post_price": 0.08,
+    "crowd_ls": 0.04,
 }
 
 
@@ -113,6 +120,9 @@ class LiquidationAnalysisResult:
     invalidation_label: str
     factors: list[AnalysisFactor] = field(default_factory=list)
     continuation_risk: bool = False
+    trend_label: str = ""
+    scenario_text: str = ""
+    is_correction: bool = False
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -139,168 +149,37 @@ def _score_post_price(
     price_change_pct: float,
     *,
     predict_long: bool,
+    is_correction: bool,
 ) -> tuple[float, str]:
-    """Оценка реакции цены после кластера (через delay)."""
     detail = f"цена {price_change_pct:+.2f}% от кластера"
+    if is_correction:
+        if -3.5 < price_change_pct < 0.5 and cluster_side == SIDE_SHORT_LIQ:
+            return 0.82, detail + " — коррекция после смыва шортов"
+        if -0.5 < price_change_pct < 3.5 and cluster_side == SIDE_LONG_LIQ:
+            return 0.82, detail + " — стабилизация после смыва лонгов"
     if predict_long:
         if price_change_pct <= -2.5:
             return 0.22, detail + " — продолжение слива"
-        if price_change_pct <= -1.0:
-            return 0.48, detail + " — ещё давят вниз"
-        if -1.0 < price_change_pct <= 0.2:
-            return 0.82, detail + " — стабилизация у дна"
-        if 0.2 < price_change_pct <= 1.5:
-            return 0.90, detail + " — начало отскока"
-        if 1.5 < price_change_pct <= 3.0:
-            return 0.62, detail + " — отскок уже идёт"
-        return 0.40, detail + " — поздно, ход частично отыгран"
-    # predict short (откат вниз после short liq)
+        if -1.0 < price_change_pct <= 0.5:
+            return 0.78, detail + " — удержание у дна"
+        if 0.5 < price_change_pct <= 2.0:
+            return 0.72, detail + " — отскок идёт"
+        return 0.50, detail
     if price_change_pct >= 2.5:
         return 0.22, detail + " — продолжение роста"
-    if price_change_pct >= 1.0:
-        return 0.48, detail + " — ещё тянут вверх"
-    if -0.2 <= price_change_pct < 1.0:
-        return 0.82, detail + " — стабилизация у вершины"
-    if -1.5 <= price_change_pct < -0.2:
-        return 0.90, detail + " — начало отката"
-    if -3.0 <= price_change_pct < -1.5:
-        return 0.62, detail + " — откат уже идёт"
-    return 0.40, detail + " — поздно, ход частично отыгран"
-
-
-def _score_oi_flow(
-    oi_change_pct: float | None,
-    *,
-    predict_long: bool,
-) -> tuple[float, str]:
-    if oi_change_pct is None:
-        return 0.50, "нет данных OI"
-    detail = f"OI {oi_change_pct:+.1f}% с момента кластера"
-    if predict_long:
-        if oi_change_pct <= -5.0:
-            return 0.92, detail + " — капитуляция, позиции смыты"
-        if oi_change_pct <= -2.0:
-            return 0.78, detail + " — закрытие лонгов"
-        if oi_change_pct >= 2.0:
-            return 0.32, detail + " — набор новых позиций против отскока"
-        return 0.55, detail + " — нейтральный поток"
-    if oi_change_pct <= -5.0:
-        return 0.92, detail + " — шорты закрывают, топливо кончилось"
-    if oi_change_pct <= -2.0:
-        return 0.78, detail + " — сокращение OI"
-    if oi_change_pct >= 2.0:
-        return 0.32, detail + " — набор шортов против отката"
-    return 0.55, detail + " — нейтральный поток"
-
-
-def _score_funding(funding_rate: float | None, *, predict_long: bool) -> tuple[float, str]:
-    if funding_rate is None:
-        return 0.50, "нет funding"
-    pct = funding_rate * 100.0
-    detail = f"funding {pct:+.3f}%"
-    if predict_long:
-        if pct >= 0.05:
-            return 0.88, detail + " — перегрев лонгов"
-        if pct >= 0.02:
-            return 0.72, detail + " — лонги платят"
-        if pct <= -0.02:
-            return 0.38, detail + " — шорты платят, слабый контртренд"
-        return 0.55, detail + " — нейтрально"
-    if pct <= -0.05:
-        return 0.88, detail + " — перегрев шортов"
-    if pct <= -0.02:
-        return 0.72, detail + " — шорты платят"
-    if pct >= 0.02:
-        return 0.38, detail + " — лонги платят, слабый контртренд"
-    return 0.55, detail + " — нейтрально"
-
-
-def _score_structure(
-    ms_dict: dict[str, object] | None,
-    *,
-    predict_long: bool,
-) -> tuple[float, str]:
-    if not isinstance(ms_dict, dict):
-        return 0.50, "структура: нет данных"
-    phase = str(ms_dict.get("phase", "neutral"))
-    narrative = str(ms_dict.get("oi_narrative", "mixed"))
-    phase_label = str(ms_dict.get("phase_label", phase))
-    narrative_label = str(ms_dict.get("oi_narrative_label", narrative))
-    detail = f"{phase_label} · {narrative_label}"
-
-    if predict_long:
-        phase_scores = {
-            "impulse_down": 0.25,
-            "post_crash_weak": 0.55,
-            "correction_down": 0.72,
-            "consolidation": 0.68,
-            "breakout_setup": 0.60,
-            "correction_up": 0.45,
-            "impulse_up": 0.30,
-            "neutral": 0.52,
-        }
-        narrative_bonus = {
-            "capitulation": 0.18,
-            "long_unwind": 0.12,
-            "squeeze_risk": 0.10,
-            "aligned_short": 0.08,
-            "shorts_building": -0.15,
-            "aligned_long": -0.10,
-        }
-        score = phase_scores.get(phase, 0.50) + narrative_bonus.get(narrative, 0.0)
-        if ms_dict.get("post_crash"):
-            score += 0.06
-        if ms_dict.get("dead_cat_bounce"):
-            score -= 0.12
-        return _clamp(score, 0.0, 1.0), detail
-    phase_scores = {
-        "impulse_up": 0.25,
-        "correction_up": 0.72,
-        "consolidation": 0.68,
-        "breakout_setup": 0.58,
-        "correction_down": 0.45,
-        "impulse_down": 0.30,
-        "post_crash_weak": 0.40,
-        "neutral": 0.52,
-    }
-    narrative_bonus = {
-        "squeeze_risk": 0.15,
-        "aligned_long": 0.08,
-        "capitulation": -0.08,
-        "aligned_short": -0.10,
-        "shorts_building": 0.06,
-    }
-    score = phase_scores.get(phase, 0.50) + narrative_bonus.get(narrative, 0.0)
-    return _clamp(score, 0.0, 1.0), detail
-
-
-def _score_btc(btc_change_pct: float | None, *, predict_long: bool) -> tuple[float, str]:
-    if btc_change_pct is None:
-        return 0.50, "BTC: нет данных"
-    detail = f"BTC {btc_change_pct:+.2f}% за 5м"
-    if predict_long:
-        if btc_change_pct <= -0.8:
-            return 0.28, detail + " — рынок слабый"
-        if btc_change_pct <= -0.3:
-            return 0.45, detail + " — BTC давит"
-        if btc_change_pct >= 0.3:
-            return 0.78, detail + " — BTC поддерживает"
-        return 0.58, detail + " — BTC нейтрален"
-    if btc_change_pct >= 0.8:
-        return 0.28, detail + " — рынок сильный вверх"
-    if btc_change_pct >= 0.3:
-        return 0.45, detail + " — BTC тянет вверх"
-    if btc_change_pct <= -0.3:
-        return 0.78, detail + " — BTC слабеет"
-    return 0.58, detail + " — BTC нейтрален"
+    if -0.5 <= price_change_pct < 1.0:
+        return 0.78, detail + " — удержание у вершины"
+    if -2.0 <= price_change_pct < -0.5:
+        return 0.72, detail + " — откат идёт"
+    return 0.50, detail
 
 
 def _estimate_window(confidence: float) -> tuple[int, int]:
     if confidence >= 75.0:
-        return 5, 20
+        return 15, 60
     if confidence >= 65.0:
-        return 10, 30
-    return 15, 45
+        return 30, 120
+    return 60, 240
 
 
 def _invalidation_level(
@@ -312,13 +191,13 @@ def _invalidation_level(
 ) -> tuple[float, str]:
     if predict_long:
         level = recent_low if recent_low and recent_low < cluster_price else cluster_price * 0.992
-        return level, f"пробой ${level:.4g} вниз → слив продолжается"
+        return level, f"пробой ${level:.4g} вниз → сценарий отменён"
     level = recent_high if recent_high and recent_high > cluster_price else cluster_price * 1.008
-    return level, f"пробой ${level:.4g} вверх → рост продолжается"
+    return level, f"пробой ${level:.4g} вверх → сценарий отменён"
 
 
 class LiquidationAnalysisEngine:
-    """Post-liquidation разбор для отдельного аналитического чата."""
+    """Разбор: тренд → кластер ликвидаций → коррекция → OI/CVD (без funding)."""
 
     def __init__(
         self,
@@ -339,6 +218,7 @@ class LiquidationAnalysisEngine:
         self._account_ratio_cache = BybitAccountRatioCache()
         self._cooldown_until: dict[str, float] = {}
         self._pending_tasks: dict[str, asyncio.Task] = {}
+        self._hourly_sent: deque[float] = deque()
         self._lock = asyncio.Lock()
         self._stats: dict[str, int] = {
             "scheduled": 0,
@@ -346,9 +226,11 @@ class LiquidationAnalysisEngine:
             "skipped_threshold": 0,
             "skipped_alt_tier": 0,
             "skipped_oi": 0,
+            "skipped_trend": 0,
             "skipped_price_move": 0,
             "skipped_no_price": 0,
             "skipped_confidence": 0,
+            "skipped_rate_limit": 0,
             "errors": 0,
         }
 
@@ -358,8 +240,8 @@ class LiquidationAnalysisEngine:
         return {
             **self._stats,
             "pending": pending,
-            "analysis_min_liq_usd": float(getattr(settings, "analysis_min_liq_usd", 80_000.0)),
-            "analysis_min_confidence": float(getattr(settings, "analysis_min_confidence", 60.0)),
+            "analysis_min_liq_usd": float(getattr(settings, "analysis_min_liq_usd", 30_000.0)),
+            "analysis_min_confidence": float(getattr(settings, "analysis_min_confidence", 62.0)),
             "analysis_delay_seconds": int(getattr(settings, "analysis_delay_seconds", 90)),
         }
 
@@ -372,6 +254,18 @@ class LiquidationAnalysisEngine:
     def enabled(self) -> bool:
         settings = self._get_settings()
         return bool(getattr(settings, "analysis_enabled", True))
+
+    def _can_send_global(self, settings: object, *, confidence: float) -> bool:
+        max_h = int(getattr(settings, "analysis_max_per_hour", 4))
+        now = time.time()
+        while self._hourly_sent and self._hourly_sent[0] < now - 3600:
+            self._hourly_sent.popleft()
+        if len(self._hourly_sent) < max_h:
+            return True
+        return confidence >= 78.0
+
+    def _record_sent(self) -> None:
+        self._hourly_sent.append(time.time())
 
     async def schedule(
         self,
@@ -397,17 +291,8 @@ class LiquidationAnalysisEngine:
             logger.debug("Analysis skip %s: %s (cluster $%.0f)", symbol, reject, total_usd)
             return
 
-        min_liq, _ = resolve_analysis_min_liq_usd(
-            symbol,
-            settings,
-            in_top_n=self._scanner._is_in_top_n(event.exchange, symbol),
-        )
-        if min_liq is None or total_usd < min_liq:
-            self._stats["skipped_threshold"] += 1
-            return
-
         now = time.time()
-        cooldown = int(getattr(settings, "analysis_cooldown_seconds", 1800))
+        cooldown = int(getattr(settings, "analysis_cooldown_seconds", 3600))
         self._stats["scheduled"] += 1
         async with self._lock:
             if now < self._cooldown_until.get(symbol, 0.0):
@@ -436,32 +321,32 @@ class LiquidationAnalysisEngine:
             result = await self._build_analysis(event, event_count, total_usd)
             if result is None:
                 return
-            min_conf = float(getattr(settings, "analysis_min_confidence", 68.0))
+            min_conf = float(getattr(settings, "analysis_min_confidence", 62.0))
             if result.confidence < min_conf:
                 self._stats["skipped_confidence"] += 1
                 logger.info(
-                    "Analysis skip %s: confidence %.0f%% < %.0f%% (cluster $%.0f, price %+.2f%%)",
+                    "Analysis skip %s: confidence %.0f%% < %.0f%%",
                     symbol,
                     result.confidence,
                     min_conf,
-                    total_usd,
-                    result.price_change_since_cluster_pct,
                 )
                 return
-            min_move = float(getattr(settings, "analysis_min_price_move_pct", 0.4))
-            if abs(result.price_change_since_cluster_pct) < min_move:
+            min_move = float(getattr(settings, "analysis_min_price_move_pct", 0.0))
+            if (
+                min_move > 0
+                and not result.is_correction
+                and abs(result.price_change_since_cluster_pct) < min_move
+            ):
                 self._stats["skipped_price_move"] += 1
-                logger.info(
-                    "Analysis skip %s: price move %.2f%% < %.2f%% after cluster $%.0f",
-                    symbol,
-                    result.price_change_since_cluster_pct,
-                    min_move,
-                    total_usd,
-                )
+                return
+            if not self._can_send_global(settings, confidence=result.confidence):
+                self._stats["skipped_rate_limit"] += 1
+                logger.info("Analysis skip %s: hourly limit", symbol)
                 return
             async with self._lock:
                 self._cooldown_until[symbol] = time.time() + cooldown
             await self._on_dispatch(result)
+            self._record_sent()
             self._stats["sent"] += 1
             logger.info(
                 "Analysis sent %s %s conf=%.0f%% dir=%s",
@@ -487,17 +372,17 @@ class LiquidationAnalysisEngine:
         total_usd: float,
     ) -> LiquidationAnalysisResult | None:
         settings = self._get_settings()
+        symbol = event.symbol.upper()
+        exchange = event.exchange
+        cluster_side = event.side
+
         min_usd, _ = resolve_analysis_min_liq_usd(
             symbol,
             settings,
             in_top_n=self._scanner._is_in_top_n(exchange, symbol),
         )
         if min_usd is None:
-            min_usd = float(getattr(settings, "analysis_min_liq_usd", 100_000.0))
-        symbol = event.symbol.upper()
-        exchange = event.exchange
-        cluster_side = event.side
-        predict_long = cluster_side == SIDE_LONG_LIQ
+            min_usd = float(getattr(settings, "analysis_min_liq_usd", 30_000.0))
 
         metrics = self._scanner.get_metrics_since(exchange, symbol, event.timestamp)
         current_price = metrics.get("current_price")
@@ -510,39 +395,67 @@ class LiquidationAnalysisEngine:
                 if snap_bybit is not None and snap_bybit.price:
                     current_price = snap_bybit.price
                     exchange = "Bybit"
+
+        klines = await self._kline_cache.get_klines(symbol, limit=OI_BAR_MAX_COUNT)
         if current_price is None or current_price <= 0:
-            klines = await self._kline_cache.get_klines(symbol, limit=24)
             if klines:
                 current_price = klines[-1].close
-                cluster_price = event.price
-                if cluster_price > 0:
-                    price_change_pct = (current_price - cluster_price) / cluster_price * 100.0
-                else:
-                    price_change_pct = 0.0
-                oi_change_pct = None
-                funding_rate = None
             else:
                 self._stats["skipped_no_price"] += 1
-                logger.warning(
-                    "Analysis skip %s: no price (exchange=%s, cluster $%.0f)",
-                    symbol,
-                    exchange,
-                    total_usd,
-                )
                 return None
+
+        price_change_pct = float(metrics.get("price_change_pct") or 0.0)
+        if event.price > 0:
+            price_change_pct = (current_price - event.price) / event.price * 100.0
+
+        oi_change_pct = metrics.get("oi_change_pct")
+        if isinstance(oi_change_pct, (int, float)):
+            oi_change_pct = float(oi_change_pct)
         else:
-            metrics = self._scanner.get_metrics_since(exchange, symbol, event.timestamp)
-            price_change_pct = float(metrics.get("price_change_pct") or 0.0)
-            oi_change_pct = metrics.get("oi_change_pct")
-            if isinstance(oi_change_pct, (int, float)):
-                oi_change_pct = float(oi_change_pct)
-            else:
-                oi_change_pct = None
-            funding_rate = metrics.get("funding_rate")
-            if isinstance(funding_rate, (int, float)):
-                funding_rate = float(funding_rate)
-            else:
-                funding_rate = None
+            oi_change_pct = None
+
+        oi_bars: list[FiveMinOiBar] = self._scanner.get_five_min_oi_bars("Bybit", symbol)
+        if not oi_bars:
+            oi_bars = self._scanner.get_five_min_oi_bars(exchange, symbol)
+
+        ctx = build_trend_liq_context(
+            klines,
+            oi_bars,
+            cluster_side=cluster_side,
+            price_change_since_cluster_pct=price_change_pct,
+        )
+        if ctx is None:
+            self._stats["skipped_trend"] += 1
+            return None
+
+        require_trend = bool(getattr(settings, "analysis_require_trend", True))
+        min_trend = float(getattr(settings, "analysis_min_trend_pct", 2.0))
+        force_liq = float(getattr(settings, "analysis_force_liq_usd", 80_000.0))
+        if require_trend and abs(ctx.trend_pct_1h) < min_trend and total_usd < force_liq:
+            self._stats["skipped_trend"] += 1
+            logger.info(
+                "Analysis skip %s: weak trend %.1f%% < %.1f%% (liq $%.0f)",
+                symbol,
+                ctx.trend_pct_1h,
+                min_trend,
+                total_usd,
+            )
+            return None
+
+        account_ratio = await self._account_ratio_cache.get_ratio(symbol)
+        buy_ratio = account_ratio.buy_ratio if account_ratio else None
+
+        verdict = resolve_scenario(
+            ctx,
+            cluster_side,
+            price_change_since_cluster_pct=price_change_pct,
+            oi_change_pct=oi_change_pct,
+            buy_ratio=buy_ratio,
+        )
+
+        predict_long = verdict.direction == "long"
+        if verdict.direction == "wait":
+            predict_long = cluster_side == SIDE_LONG_LIQ
 
         factor_weights = dict(FACTOR_WEIGHTS)
         if self._weights_getter is not None:
@@ -558,18 +471,19 @@ class LiquidationAnalysisEngine:
         factors: list[AnalysisFactor] = []
 
         cluster_score, cluster_detail = _score_cluster(total_usd, event_count, min_usd)
-        factors.append(AnalysisFactor("cluster", "Кластер", cluster_score, factor_weights["cluster"], cluster_detail))
+        factors.append(
+            AnalysisFactor("cluster", "Кластер liq", cluster_score, factor_weights["cluster"], cluster_detail)
+        )
 
         long_liq_15 = 0.0
         short_liq_15 = 0.0
-        liq_window = 15
         liq_tracker = (
             self._binance_liquidation_tracker
             if "binance" in exchange.lower()
             else self._liquidation_tracker
         )
         if liq_tracker is not None:
-            stats = liq_tracker.get_stats(symbol, window_minutes=liq_window)
+            stats = liq_tracker.get_stats(symbol, window_minutes=15)
             long_liq_15 = stats.long_liq_usd
             short_liq_15 = stats.short_liq_usd
             if stats.total_usd < total_usd * 0.5:
@@ -585,59 +499,46 @@ class LiquidationAnalysisEngine:
             long_liq_15,
             short_liq_15,
             predict_long,
-            window_minutes=liq_window,
+            window_minutes=15,
         )
         factors.append(
-            AnalysisFactor("liq_imbalance", "Ликвидации 15м", liq_score, factor_weights["liq_imbalance"], liq_detail)
+            AnalysisFactor(
+                "liq_imbalance", "Ликвидации 15м", liq_score, factor_weights["liq_imbalance"], liq_detail
+            )
         )
 
-        post_score, post_detail = _score_post_price(cluster_side, price_change_pct, predict_long=predict_long)
-        factors.append(AnalysisFactor("post_price", "Реакция цены", post_score, factor_weights["post_price"], post_detail))
+        for key, label, score, detail in score_trend_liq_factors(
+            ctx, cluster_side, predict_long=predict_long,
+        ):
+            weight = factor_weights.get(key, 0.1)
+            factors.append(AnalysisFactor(key, label, score, weight, detail))
 
-        oi_score, oi_detail = _score_oi_flow(oi_change_pct, predict_long=predict_long)
-        factors.append(AnalysisFactor("oi_flow", "Поток OI", oi_score, factor_weights["oi_flow"], oi_detail))
+        post_score, post_detail = _score_post_price(
+            cluster_side,
+            price_change_pct,
+            predict_long=predict_long,
+            is_correction=ctx.is_correction,
+        )
+        factors.append(
+            AnalysisFactor("post_price", "Коррекция", post_score, factor_weights["post_price"], post_detail)
+        )
 
-        fund_score, fund_detail = _score_funding(funding_rate, predict_long=predict_long)
-        factors.append(AnalysisFactor("funding", "Funding", fund_score, factor_weights["funding"], fund_detail))
-
-        account_ratio = await self._account_ratio_cache.get_ratio(symbol)
         ls_score, ls_detail = _long_short_strength(
             account_ratio.long_short_ratio if account_ratio else None,
-            account_ratio.buy_ratio if account_ratio else None,
+            buy_ratio,
             account_ratio.sell_ratio if account_ratio else None,
             predict_long,
         )
-        factors.append(AnalysisFactor("crowd_ls", "Толпа L/S", ls_score, factor_weights["crowd_ls"], ls_detail))
-
-        ms_dict: dict[str, object] | None = None
-        klines = await self._kline_cache.get_klines(symbol, limit=OI_BAR_MAX_COUNT)
-        oi_bars: list[FiveMinOiBar] = self._scanner.get_five_min_oi_bars("Bybit", symbol)
-        if not oi_bars:
-            oi_bars = self._scanner.get_five_min_oi_bars(exchange, symbol)
-        if klines:
-            ms_ctx = analyze_market_structure(
-                klines,
-                oi_bars,
-                is_long=predict_long,
-                hours=int(getattr(self._get_settings(), "market_structure_hours", 5)),
-            )
-            ms_dict = ms_ctx.to_dict()
-        struct_score, struct_detail = _score_structure(ms_dict, predict_long=predict_long)
-        factors.append(AnalysisFactor("structure", "Структура", struct_score, factor_weights["structure"], struct_detail))
-
-        btc_change = self._scanner.get_btc_change_percent(5)
-        btc_score, btc_detail = _score_btc(btc_change, predict_long=predict_long)
-        factors.append(AnalysisFactor("btc", "BTC контекст", btc_score, factor_weights["btc"], btc_detail))
+        factors.append(
+            AnalysisFactor("crowd_ls", "Дисбаланс L/S", ls_score, factor_weights["crowd_ls"], ls_detail)
+        )
 
         weight_sum = sum(f.weight for f in factors)
         confidence = sum(f.score * f.weight for f in factors) / weight_sum * 100.0
 
-        continuation_risk = (
-            (predict_long and post_score < 0.35 and struct_score < 0.35)
-            or (not predict_long and post_score < 0.35 and struct_score < 0.35)
-        )
-        if continuation_risk:
-            confidence *= 0.90
+        continuation_risk = verdict.continuation_up or verdict.continuation_down
+        if verdict.direction == "wait":
+            confidence *= 0.92
 
         window_min, window_max = _estimate_window(confidence)
         low_high = self._scanner.get_price_extremes_since(exchange, symbol, event.timestamp)
@@ -647,9 +548,6 @@ class LiquidationAnalysisEngine:
             recent_low=low_high.get("low"),
             recent_high=low_high.get("high"),
         )
-
-        direction = "long" if predict_long else "short"
-        direction_label = "↗️ отскок вверх" if predict_long else "↘️ откат вниз"
 
         return LiquidationAnalysisResult(
             symbol=symbol,
@@ -662,8 +560,8 @@ class LiquidationAnalysisEngine:
             current_price=current_price,
             price_change_since_cluster_pct=price_change_pct,
             oi_change_since_cluster_pct=oi_change_pct,
-            direction=direction,
-            direction_label=direction_label,
+            direction=verdict.direction,
+            direction_label=verdict.direction_label,
             confidence=round(confidence, 1),
             window_min=window_min,
             window_max=window_max,
@@ -671,6 +569,9 @@ class LiquidationAnalysisEngine:
             invalidation_label=inv_label,
             factors=factors,
             continuation_risk=continuation_risk,
+            trend_label=ctx.trend_label,
+            scenario_text=verdict.scenario_text,
+            is_correction=ctx.is_correction,
         )
 
 
@@ -689,31 +590,32 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
 
     oi_part = ""
     if result.oi_change_since_cluster_pct is not None:
-        oi_part = f", OI <b>{result.oi_change_since_cluster_pct:+.1f}%</b>"
+        oi_part = f" · OI <b>{result.oi_change_since_cluster_pct:+.1f}%</b>"
+
+    phase_note = " · <i>коррекция</i>" if result.is_correction else ""
 
     lines = [
         f"🧠 <b>АНАЛИЗ</b> · <a href=\"{cg_url}\">#{ticker}</a> · {ex_emoji} {ex_name}",
         "",
+        f"📈 <b>Тренд:</b> {result.trend_label}",
         (
             f"{liq_emoji} Смылили <b>{liq_label}</b>: <b>{usd_text}</b> "
             f"({result.cluster_events} событий)"
         ),
         (
-            f"Цена: <b>{result.price_change_since_cluster_pct:+.2f}%</b> от кластера"
-            f"{oi_part} · сейчас <b>${result.current_price:.4g}</b>"
+            f"Цена <b>{result.price_change_since_cluster_pct:+.2f}%</b> от кластера"
+            f"{oi_part}{phase_note} · <b>${result.current_price:.4g}</b>"
         ),
         "",
-        (
-            f"📊 <b>Вердикт:</b> {result.direction_label} · "
-            f"<b>{result.confidence:.0f}%</b>"
-        ),
-        f"⏱ <b>Окно:</b> {result.window_min}–{result.window_max} мин",
+        f"📊 <b>Сценарий:</b> {result.direction_label} · <b>{result.confidence:.0f}%</b>",
+        f"<i>{result.scenario_text}</i>",
+        f"⏱ Окно наблюдения: {result.window_min}–{result.window_max} мин",
         "",
-        "<b>Почему:</b>",
+        "<b>Факторы (OI / CVD / liq):</b>",
     ]
 
     sorted_factors = sorted(result.factors, key=lambda f: f.score * f.weight, reverse=True)
-    for factor in sorted_factors[:5]:
+    for factor in sorted_factors[:6]:
         pct = int(round(factor.score * 100))
         bar = "🟢" if factor.score >= 0.65 else ("🟡" if factor.score >= 0.45 else "🔴")
         lines.append(f"{bar} {factor.label} ({pct}%): <i>{factor.detail}</i>")
@@ -721,10 +623,10 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
     lines.append("")
     lines.append(f"⚠️ <b>Отмена:</b> {result.invalidation_label}")
 
-    if result.continuation_risk:
-        lines.append(
-            "⚡ <i>Риск продолжения тренда — вход только с подтверждением</i>"
-        )
+    if result.direction == "wait":
+        lines.append("⏸ <i>Жди подтверждения — рынок в фазе выжидания после смыва</i>")
+    elif result.continuation_risk:
+        lines.append("⚡ <i>Импульс может продолжиться — вход только с подтверждением</i>")
 
     lines.append(
         f'\n<a href="{ex_url}">Торговать</a> · <a href="{cg_url}">CoinGlass</a>'

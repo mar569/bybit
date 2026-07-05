@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 20
+SETTINGS_VERSION = 21
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -256,7 +256,7 @@ class ScannerSettings:
     liquidation_show_reversal_hint: bool = True
 
     # Аномалии (volume/OI/funding/pump-dump) → TELEGRAM_ANOMALY_CHAT_ID или analysis
-    anomaly_enabled: bool = True
+    anomaly_enabled: bool = False
     anomaly_min_oi_change_pct: float = 3.0
     anomaly_min_price_change_pct: float = 4.0
     anomaly_funding_abs_min: float = 0.0015
@@ -277,14 +277,18 @@ class ScannerSettings:
 
     # Аналитический чат — только крупные ликвидации с толком (не все монеты)
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 100_000.0
-    analysis_major_min_liq_usd: float = 80_000.0
-    analysis_alt_min_liq_usd: float = 250_000.0
-    analysis_skip_alt_tier: bool = True
-    analysis_min_oi_usd: float = 1_500_000.0
-    analysis_min_price_move_pct: float = 0.4
+    analysis_min_liq_usd: float = 30_000.0
+    analysis_major_min_liq_usd: float = 50_000.0
+    analysis_alt_min_liq_usd: float = 35_000.0
+    analysis_skip_alt_tier: bool = False
+    analysis_min_oi_usd: float = 500_000.0
+    analysis_min_price_move_pct: float = 0.0
+    analysis_min_trend_pct: float = 2.0
+    analysis_require_trend: bool = True
+    analysis_force_liq_usd: float = 80_000.0
+    analysis_max_per_hour: int = 4
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 68.0
+    analysis_min_confidence: float = 62.0
     analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
@@ -560,7 +564,7 @@ class ScannerSettings:
             liquidation_show_reversal_hint=bool(
                 base.get("liquidation_show_reversal_hint", True)
             ),
-            anomaly_enabled=bool(base.get("anomaly_enabled", True)),
+            anomaly_enabled=bool(base.get("anomaly_enabled", False)),
             anomaly_min_oi_change_pct=float(base.get("anomaly_min_oi_change_pct", 3.0)),
             anomaly_min_price_change_pct=float(base.get("anomaly_min_price_change_pct", 4.0)),
             anomaly_funding_abs_min=float(base.get("anomaly_funding_abs_min", 0.0015)),
@@ -592,20 +596,24 @@ class ScannerSettings:
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
-            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 100_000.0)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 30_000.0)),
             analysis_major_min_liq_usd=float(
-                base.get("analysis_major_min_liq_usd", 80_000.0)
+                base.get("analysis_major_min_liq_usd", 50_000.0)
             ),
             analysis_alt_min_liq_usd=float(
-                base.get("analysis_alt_min_liq_usd", 250_000.0)
+                base.get("analysis_alt_min_liq_usd", 35_000.0)
             ),
-            analysis_skip_alt_tier=bool(base.get("analysis_skip_alt_tier", True)),
-            analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 1_500_000.0)),
+            analysis_skip_alt_tier=bool(base.get("analysis_skip_alt_tier", False)),
+            analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 500_000.0)),
             analysis_min_price_move_pct=float(
-                base.get("analysis_min_price_move_pct", 0.4)
+                base.get("analysis_min_price_move_pct", 0.0)
             ),
+            analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 2.0)),
+            analysis_require_trend=bool(base.get("analysis_require_trend", True)),
+            analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 80_000.0)),
+            analysis_max_per_hour=int(base.get("analysis_max_per_hour", 4)),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 68.0)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 62.0)),
             analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 3600)),
             analysis_outcome_tracking_enabled=bool(
                 base.get("analysis_outcome_tracking_enabled", True)
@@ -728,6 +736,21 @@ class SettingsManager:
                 merged["analysis_cooldown_seconds"] = max(
                     int(merged.get("analysis_cooldown_seconds", 1800)), 3600
                 )
+            # v21: тренд + liq + OI/CVD анализ; без funding-аномалий; фикс liq-порогов
+            if version < 21:
+                merged["anomaly_enabled"] = False
+                merged["analysis_min_liq_usd"] = 30_000.0
+                merged["analysis_major_min_liq_usd"] = 50_000.0
+                merged["analysis_alt_min_liq_usd"] = 35_000.0
+                merged["analysis_skip_alt_tier"] = False
+                merged["analysis_min_oi_usd"] = 500_000.0
+                merged["analysis_min_confidence"] = 62.0
+                merged["analysis_min_price_move_pct"] = 0.0
+                merged.setdefault("analysis_min_trend_pct", 2.0)
+                merged.setdefault("analysis_require_trend", True)
+                merged.setdefault("analysis_force_liq_usd", 80_000.0)
+                merged.setdefault("analysis_max_per_hour", 4)
+                merged["anomaly_types_enabled"] = ["pump_dump", "oi_spike"]
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -735,7 +758,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v20: analysis majors+large liq only; preserved: %s)",
+                "Settings migrated v%d → v%d (v21: trend+liq+OI/CVD analysis; anomalies off; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

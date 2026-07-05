@@ -83,6 +83,8 @@ class LiquidationAlertService:
             except Exception:
                 oi_usd = None
         if oi_usd is None or oi_usd <= 0:
+            if bool(getattr(settings, "liquidation_tier_enabled", True)):
+                return float(getattr(settings, "liquidation_alt_min_usd", 20_000.0))
             return base
         alt_max = float(getattr(settings, "liquidation_alt_max_oi_usd", 500_000.0))
         mid_max = float(getattr(settings, "liquidation_mid_max_oi_usd", 2_000_000.0))
@@ -107,9 +109,6 @@ class LiquidationAlertService:
         cooldown_sec = int(getattr(settings, "liquidation_cooldown_seconds", 60))
 
         async with self._lock:
-            if now < self._cooldown_until.get(cooldown_key, 0.0):
-                return
-
             burst = self._pending.get(key)
             if burst is None:
                 burst = _PendingBurst(
@@ -168,7 +167,9 @@ class LiquidationAlertService:
 
         total = sum(usd for _, usd in bucket.events)
         count = len(bucket.events)
-        if total < min_usd or count < 2:
+        if total < min_usd:
+            return None
+        if count < 2 and total < min_usd * 1.25:
             return None
         if now < self._cooldown_until.get(cooldown_key, 0.0):
             return None

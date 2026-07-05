@@ -651,7 +651,12 @@ def format_probability_block(assessment: ProbabilityAssessment) -> str:
     return "\n".join(lines)
 
 
-def format_probability_compact(signal: Signal, *, factor_limit: int = 4) -> str:
+def format_probability_compact(
+    signal: Signal,
+    *,
+    factor_limit: int = 4,
+    show_top_factors: bool = True,
+) -> str:
     factors_raw = signal.details.get("probability_factors") or []
     factors = [
         ProbabilityFactor(
@@ -700,14 +705,19 @@ def format_probability_compact(signal: Signal, *, factor_limit: int = 4) -> str:
     lines = [
         f"🎯 <b>{percent:.0f}%</b> {verdict} <code>{bar}</code>",
     ]
-    if top_lines:
+    if show_top_factors and top_lines:
         lines.append("Топ: " + " · ".join(top_lines))
     return "\n".join(lines)
 
 
-def format_probability_from_signal(signal: Signal, *, compact: bool = False) -> str:
+def format_probability_from_signal(
+    signal: Signal,
+    *,
+    compact: bool = False,
+    show_top_factors: bool = True,
+) -> str:
     if compact:
-        return format_probability_compact(signal)
+        return format_probability_compact(signal, show_top_factors=show_top_factors)
     factors_raw = signal.details.get("probability_factors") or []
     factors = [
         ProbabilityFactor(

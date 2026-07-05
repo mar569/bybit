@@ -605,28 +605,32 @@ class TelegramBot:
             return
         now = time.time()
         sample = LiquidationAnalysisResult(
-            symbol="ETHUSDT",
+            symbol="LABUSDT",
             exchange="Bybit",
-            cluster_side="long_liq",
-            cluster_usd=210_000.0,
-            cluster_events=14,
-            cluster_price=1768.0,
+            cluster_side="short_liq",
+            cluster_usd=85_000.0,
+            cluster_events=22,
+            cluster_price=14.2,
             cluster_time=now - 90,
-            current_price=1756.0,
-            price_change_since_cluster_pct=-0.68,
-            oi_change_since_cluster_pct=-1.4,
-            direction="long",
-            direction_label="↗️ отскок вверх",
-            confidence=72.0,
-            window_min=10,
-            window_max=30,
-            invalidation_price=1752.0,
-            invalidation_label="пробой $1752 вниз → слив продолжается",
+            current_price=13.8,
+            price_change_since_cluster_pct=-2.8,
+            oi_change_since_cluster_pct=1.8,
+            direction="wait",
+            direction_label="⏸ выжидание",
+            confidence=68.0,
+            window_min=30,
+            window_max=120,
+            invalidation_price=14.5,
+            invalidation_label="пробой $14.5 вверх → сценарий отменён",
             factors=[
-                AnalysisFactor("cluster", "Кластер", 0.85, 0.16, "$210,000 за всплеск"),
-                AnalysisFactor("liq_imbalance", "Ликвидации 15м", 0.92, 0.22, "лонги ликвидируют"),
+                AnalysisFactor("trend", "Тренд + liq", 0.88, 0.20, "тренд вверх + смыв шортов"),
+                AnalysisFactor("cvd", "CVD (объём)", 0.55, 0.16, "CVD≈ баланс"),
+                AnalysisFactor("oi_narrative", "Open Interest", 0.72, 0.12, "OI растёт на коррекции"),
             ],
-            continuation_risk=False,
+            continuation_risk=True,
+            trend_label="тренд вверх +8.2% (1ч) / +12.1% (4ч)",
+            scenario_text="шорты смыли на тренде → коррекция → жди подтверждения направления",
+            is_correction=True,
         )
         await self.dispatch_liquidation_analysis(sample)
         await update.message.reply_text(
@@ -742,11 +746,11 @@ class TelegramBot:
                 f"Отправлено: <b>{ad['sent']}</b> | "
                 f"В очереди: <b>{ad['pending']}</b>\n"
                 f"Отсечено: порог <b>{ad['skipped_threshold']}</b> | "
-                f"нет цены <b>{ad['skipped_no_price']}</b> | "
+                f"тренд <b>{ad.get('skipped_trend', 0)}</b> | "
+                f"лимит/ч <b>{ad.get('skipped_rate_limit', 0)}</b> | "
                 f"conf <b>{ad['skipped_confidence']}</b> | "
                 f"ошибки <b>{ad['errors']}</b>\n"
-                f"Порог: ≥${ad['analysis_min_liq_usd']:,.0f} · "
-                f"conf≥{ad['analysis_min_confidence']:.0f}% · "
+                f"Тренд+liq+OI/CVD · conf≥{ad['analysis_min_confidence']:.0f}% · "
                 f"delay {ad['analysis_delay_seconds']}с\n\n"
             ).replace(",", " ")
         text += (
@@ -939,10 +943,11 @@ class TelegramBot:
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
             f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
-            f"(liq: мейджор ≥<b>${s.analysis_major_min_liq_usd:,.0f}</b> · топ ≥<b>${s.analysis_min_liq_usd:,.0f}</b> · "
-            f"OI≥<b>${s.analysis_min_oi_usd:,.0f}</b> · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
+            f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
+            f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "
+            f"макс <b>{getattr(s, 'analysis_max_per_hour', 4)}</b>/ч · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
             f"{'альты OFF' if s.analysis_skip_alt_tier else 'альты ON'}"
-            f"{'' if not (s.anomaly_enabled and self.config.anomaly_chat_configured) else f' · аномалии топ {s.anomaly_max_per_minute}/мин'})\n\n"
+            f"{'' if not (s.anomaly_enabled and self.config.anomaly_chat_configured) else f' · аномалии {s.anomaly_max_per_minute}/мин'})\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
@@ -1205,7 +1210,8 @@ class TelegramBot:
             [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_settings")],
         ])
 
-    def _signal_type_header(self, signal: Signal) -> str:
+    @staticmethod
+    def _signal_type_header(signal: Signal, *, inline: bool = False) -> str:
         flash_tier = signal.details.get("flash_tier")
         labels = {
             "vertical_pump": "🚨 ВЕРТИКАЛЬНЫЙ ПАМП",
@@ -1230,16 +1236,18 @@ class TelegramBot:
         if flash_tier:
             tier_text = f"+{flash_tier:g}%" if signal.side == "long" else f"{-flash_tier:g}%"
             label = f"{label} {tier_text}"
-        return f"<b>{label}</b>\n" if label else ""
+        if not label:
+            return ""
+        return label if inline else f"<b>{label}</b>\n"
 
     @staticmethod
-    def _symbol_link_and_copy(signal: Signal) -> str:
+    def _symbol_link_and_copy(signal: Signal, *, inline: bool = False) -> str:
         """Ссылка на CoinGlass + code для быстрого копирования тикера."""
         sym = signal.symbol
-        return (
-            f'<a href="{signal.link}"><b>{sym}</b></a>\n'
-            f"<code>{sym}</code>"
-        )
+        link = f'<a href="{signal.link}"><b>{sym}</b></a>'
+        if inline:
+            return f"{link} <code>{sym}</code>"
+        return f"{link}\n<code>{sym}</code>"
 
     def _format_vertical_breakout_message(self, signal: Signal, *, compact: bool = False) -> str:
         if compact:
@@ -1363,41 +1371,54 @@ class TelegramBot:
         price_text = f"+{price_pct:.2f}%" if price_pct > 0 else f"{price_pct:.2f}%"
         oi_usd = format_oi_usd(signal.oi_change_usd)
 
-        lines: list[str] = []
+        header_bits: list[str] = []
         if is_priority:
-            lines.append("🔥 <b>РАННИЙ СИГНАЛ</b>")
-        type_header = self._signal_type_header(signal).strip()
-        if type_header:
-            lines.append(type_header)
-        lines.append(
-            f"{exchange_emoji} <b>{exchange_name} {signal.oi_period_minutes}м</b> · "
-            f"{side_emoji} <b>{side_label}</b>"
+            header_bits.append("🔥")
+        type_label = self._signal_type_header(signal, inline=True)
+        if type_label:
+            header_bits.append(type_label)
+        header_bits.append(
+            f"{exchange_emoji} {exchange_name} {signal.oi_period_minutes}м · "
+            f"{side_emoji} {side_label}"
         )
+
+        lines: list[str] = [" · ".join(header_bits)]
         lines.append(self._symbol_link_and_copy(signal))
-        lines.append(
-            f"OI <b>{abs(signal.oi_change_percent):.2f}%</b> ({oi_usd}) · "
-            f"цена <b>{price_text}</b> · ⏱ <b>{signal.signal_score}</b>/10"
-        )
+
         prior = signal.details.get("reversal_prior_move_pct")
         leg = signal.details.get("reversal_leg_pct")
         impulse_move = signal.details.get("impulse_move_pct")
+
+        context_bits: list[str] = []
         if impulse_move is not None:
-            lines.append(
-                f"📉 движение <b>{float(impulse_move):+.1f}%</b> за "
-                f"<b>{signal.oi_period_minutes}</b>м"
+            context_bits.append(
+                f"движение <b>{float(impulse_move):+.1f}%</b> за {signal.oi_period_minutes}м"
             )
         elif prior is not None and leg is not None:
-            lines.append(
-                f"↩️ было <b>{float(prior):+.1f}%</b> → сейчас <b>{float(leg):+.1f}%</b> "
-                f"за {signal.oi_period_minutes}м"
+            context_bits.append(
+                f"↩️ <b>{float(prior):+.1f}%</b> → <b>{float(leg):+.1f}%</b>"
             )
-        ms = format_market_structure_compact(signal.details.get("market_structure"))
-        if ms:
-            lines.append(ms)
+        else:
+            context_bits.append(f"цена <b>{price_text}</b>")
+
+        context_bits.append(
+            f"OI <b>{abs(signal.oi_change_percent):.2f}%</b> ({oi_usd})"
+        )
+        context_bits.append(f"⏱ <b>{signal.signal_score}</b>/10")
+
         bybit = format_bybit_real_data_compact(signal.details)
         if bybit:
-            lines.append(bybit)
-        lines.append(format_probability_from_signal(signal, compact=True))
+            context_bits.append(bybit.replace("📊 ", ""))
+
+        ms = format_market_structure_compact(
+            signal.details.get("market_structure"),
+            warnings_only=True,
+        )
+        if ms:
+            context_bits.append(ms.replace("📐 ", ""))
+
+        lines.append(" · ".join(context_bits))
+        lines.append(format_probability_from_signal(signal, compact=True, show_top_factors=False))
         return "\n".join(lines) + "\n"
 
     @staticmethod

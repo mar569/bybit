@@ -15,7 +15,7 @@ from .symbol_tiers import SymbolTier, TierThresholds
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ANOMALY_TYPES = ("PUMP_DUMP", "OI_SPIKE", "FUNDING_EXTREME")
+DEFAULT_ANOMALY_TYPES = ("PUMP_DUMP", "OI_SPIKE")
 
 ANOMALY_TYPE_PRIORITY: dict[str, int] = {
     "pump_dump": 0,
