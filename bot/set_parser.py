@@ -27,7 +27,9 @@ SET_HELP = (
     "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
-    "/set signals on — возобновить уведомления\n\n"
+    "/set chart annotated — TA-график к сигналам (рекомендуется)\n"
+    "/set chart on — включить графики к сигналам\n"
+    "/set chart off — только текст без картинки\n"
     "Ликвидации (REKT-алерты в обычный чат):\n"
     "/set liq on — включить алерты по ликвидациям\n"
     "/set liq off — выключить\n"
@@ -239,6 +241,12 @@ def parse_set_command(args: list[str]) -> SetResult:
             if not field:
                 return SetResult(False, f"Неизвестный параметр: {key_alias}. /set help", {})
 
+        if key_alias in {"chart", "chart_src"} and raw_value.lower() in {
+            "on", "off", "1", "0", "true", "false", "yes", "no", "вкл", "выкл",
+        }:
+            field = "signal_chart_enabled"
+            raw_value = raw_value.lower()
+
         if field == "top_n_symbols":
             value: Any = int(float(raw_value))
             if value <= 0:
@@ -254,6 +262,7 @@ def parse_set_command(args: list[str]) -> SetResult:
             "analysis_skip_alt_tier",
             "analysis_chart_enabled",
             "analysis_signal_trigger_enabled",
+            "signal_chart_enabled",
         }:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_filter_enabled":

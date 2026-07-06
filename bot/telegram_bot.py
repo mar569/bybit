@@ -375,8 +375,9 @@ class TelegramBot:
             png = None
             ta_result = None
             chart_source = ""
+            chart_fail = ""
             try:
-                png, chart_source, ta_result = await asyncio.wait_for(
+                png, chart_source, ta_result, chart_fail = await asyncio.wait_for(
                     get_signal_chart_png(
                         signal.exchange,
                         signal.symbol,
@@ -391,18 +392,29 @@ class TelegramBot:
                         coinglass_url=signal.link,
                         oi_bars=oi_bars,
                     ),
-                    timeout=25.0,
+                    timeout=35.0,
                 )
             except asyncio.TimeoutError:
                 logger.warning("Chart capture timeout for %s", signal.symbol)
+                chart_fail = "общий timeout 35с"
             except Exception:
                 logger.exception("Chart capture failed for %s", signal.symbol)
+                chart_fail = "исключение при построении"
             chart_caption = message
             if ta_result is not None and chart_source == "annotated":
                 chart_caption = f"{message}\n\n{ta_telegram_caption_html(ta_result)}"
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
+                )
+            elif chart_fail:
+                logger.warning(
+                    "Signal %s %s: chart skipped (%s), source=%s enabled=%s",
+                    signal.exchange,
+                    signal.symbol,
+                    chart_fail,
+                    settings.signal_chart_source,
+                    settings.signal_chart_enabled,
                 )
 
         if not sent_any:
@@ -1130,6 +1142,8 @@ class TelegramBot:
             f"крупн. <b>${s.liquidation_min_usd:,.0f}</b> · окно <b>{int(s.liquidation_sliding_window_seconds)}с</b>)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
             f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n"
+            f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
+            f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
             f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "

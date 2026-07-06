@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from datetime import datetime, timezone
@@ -492,8 +493,9 @@ async def get_signal_chart_png(
     probability_percent: float | None = None,
     coinglass_url: str = "",
     oi_bars: list[FiveMinOiBar] | None = None,
-) -> tuple[bytes | None, str, TAAnalysisResult | None]:
+) -> tuple[bytes | None, str, TAAnalysisResult | None, str]:
     source = (chart_source or "annotated").lower()
+    fail_reason = ""
 
     if source == "annotated":
         png, ta = await render_signal_chart(
@@ -504,23 +506,47 @@ async def get_signal_chart_png(
             probability_percent=probability_percent,
             oi_bars=oi_bars,
         )
-        return png, "annotated" if png else "none", ta
+        if png:
+            return png, "annotated", ta, ""
+        return None, "none", ta, "нет свечей Bybit или ошибка matplotlib"
 
     if source == "tradingview":
-        png = await chart_capture_service.capture_tradingview(
-            signal_exchange,
-            signal_symbol,
-            interval_minutes=chart_interval_minutes,
-        )
-        if png:
-            return png, "tradingview", None
+        try:
+            png = await asyncio.wait_for(
+                chart_capture_service.capture_tradingview(
+                    signal_exchange,
+                    signal_symbol,
+                    interval_minutes=chart_interval_minutes,
+                ),
+                timeout=12.0,
+            )
+            if png:
+                return png, "tradingview", None, ""
+            fail_reason = "TradingView screenshot пустой"
+        except asyncio.TimeoutError:
+            fail_reason = "TradingView timeout 12с"
+        except Exception as exc:
+            fail_reason = f"TradingView: {exc}"
+            logger.warning("TradingView chart failed for %s: %s", signal_symbol, exc)
     elif source == "coinglass" and coinglass_url:
-        png = await chart_capture_service.capture_coinglass(coinglass_url)
-        if png:
-            return png, "coinglass", None
+        try:
+            png = await asyncio.wait_for(
+                chart_capture_service.capture_coinglass(coinglass_url),
+                timeout=12.0,
+            )
+            if png:
+                return png, "coinglass", None, ""
+            fail_reason = "CoinGlass screenshot пустой"
+        except asyncio.TimeoutError:
+            fail_reason = "CoinGlass timeout 12с"
+        except Exception as exc:
+            fail_reason = f"CoinGlass: {exc}"
+            logger.warning("CoinGlass chart failed for %s: %s", signal_symbol, exc)
+    elif source == "coinglass":
+        fail_reason = "нет URL CoinGlass"
 
     if source not in {"generated", "annotated"}:
-        logger.info("Real chart unavailable for %s, fallback to annotated", signal_symbol)
+        logger.info("Chart %s unavailable for %s (%s), fallback to annotated", source, signal_symbol, fail_reason)
 
     png, ta = await render_signal_chart(
         signal_symbol,
@@ -530,4 +556,7 @@ async def get_signal_chart_png(
         probability_percent=probability_percent,
         oi_bars=oi_bars,
     )
-    return png, "annotated" if png else "none", ta
+    if png:
+        return png, "annotated", ta, fail_reason
+    extra = fail_reason or "annotated fallback не удался"
+    return None, "none", ta, extra

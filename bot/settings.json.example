@@ -128,5 +128,11 @@
   "analysis_cooldown_seconds": 3600,
   "analysis_outcome_tracking_enabled": true,
   "analysis_chart_enabled": true,
-  "analysis_chart_interval_minutes": 5
+  "analysis_chart_interval_minutes": 5,
+
+  "signal_chart_enabled": true,
+  "signal_chart_source": "annotated",
+  "signal_chart_hours": 5,
+  "signal_chart_interval_minutes": 5,
+  "signal_message_compact": true
 }
