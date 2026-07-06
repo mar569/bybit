@@ -820,6 +820,50 @@ def _resolve_verdict(
     return verdict, score, reason
 
 
+def _apply_signal_context_verdict(
+    *,
+    verdict: str,
+    conf: int,
+    reason: str,
+    is_long: bool,
+    long_s: int,
+    short_s: int,
+    action_priority: str,
+    momentum: str,
+    structure: str,
+    range_trade: RangeTradeSetup | None,
+) -> tuple[str, int, str]:
+    """Контекст сигнала: сканер уже дал сторону — учитываем range-сетап и мягче порог."""
+    want = "long" if is_long else "short"
+    side_s = long_s if is_long else short_s
+    opp_s = short_s if is_long else long_s
+
+    if range_trade is not None and range_trade.direction == want:
+        boosted = min(9, side_s + range_trade.score_boost)
+        if boosted >= 6:
+            v = "LONG" if is_long else "SHORT"
+            return v, boosted, f"{range_trade.label} · {range_trade.reason}"
+
+    if verdict in {"LONG", "SHORT"}:
+        return verdict, conf, reason
+
+    if side_s < 6 or side_s < opp_s:
+        return verdict, conf, reason
+
+    if is_long:
+        if action_priority == "short" or momentum not in {"up", "flat"}:
+            return verdict, conf, reason
+        if side_s >= 7 or (side_s >= 6 and momentum == "up" and "бычья" in structure):
+            return "LONG", side_s, reason or "сигнал LONG · структура поддерживает"
+    else:
+        if action_priority == "long" or momentum not in {"down", "flat"}:
+            return verdict, conf, reason
+        if side_s >= 7 or (side_s >= 6 and momentum == "down" and "медв." in structure):
+            return "SHORT", side_s, reason or "сигнал SHORT · структура поддерживает"
+
+    return verdict, conf, reason
+
+
 def _market_bias(
     structure: str,
     ms: MarketStructureContext,
@@ -1269,6 +1313,18 @@ def run_ta_analysis(
             momentum=momentum,
             btc_spread=btc_spread,
         )
+        verdict, conf, reason = _apply_signal_context_verdict(
+            verdict=verdict,
+            conf=conf,
+            reason=reason,
+            is_long=is_long,
+            long_s=long_s,
+            short_s=short_s,
+            action_priority=action_priority,
+            momentum=momentum,
+            structure=structure,
+            range_trade=range_trade,
+        )
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7 and range_trade is None:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
@@ -1423,60 +1479,77 @@ def ta_display_score(ta: TAAnalysisResult) -> int:
 
 
 def ta_action_summary_html(ta: TAAnalysisResult) -> str:
-    """Короткий блок: открывать позицию или нет — всегда в начале сообщения."""
-    lines: list[str] = ["<b>━━━ ИТОГ: ЧТО ДЕЛАТЬ ━━━</b>"]
+    """Короткий итог (3–5 строк)."""
+    score = ta_display_score(ta)
+    price = fmt_price(ta.current_price) if ta.current_price else "—"
 
     if ta.verdict == "LONG":
-        if ta.entry_mode == "range_edge" and ta.range_trade_label:
-            lines.append(f"✅ <b>Открывать LONG</b> — {ta.range_trade_label}")
-        else:
-            lines.append("✅ <b>Открывать LONG</b> — при подтверждении уровня")
+        lines = [f"✅ <b>LONG</b> {score}/10 · {price}"]
         if ta.breakout_level:
-            lines.append(f"Вход: 5m закрылась <b>выше {fmt_price(ta.breakout_level)}</b>")
-        if ta.invalidation_price:
-            lines.append(f"Стоп: <b>{fmt_price(ta.invalidation_price)}</b>")
-        if ta.target_prices:
-            tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
-            lines.append(f"Цели: {tps}")
+            lines.append(f"Вход: выше <b>{fmt_price(ta.breakout_level)}</b>")
     elif ta.verdict == "SHORT":
-        if ta.entry_mode == "range_edge" and ta.range_trade_label:
-            lines.append(f"✅ <b>Открывать SHORT</b> — {ta.range_trade_label}")
-        else:
-            lines.append("✅ <b>Открывать SHORT</b> — при подтверждении уровня")
+        lines = [f"✅ <b>SHORT</b> {score}/10 · {price}"]
         if ta.breakdown_level:
-            lines.append(f"Вход: 5m закрылась <b>ниже {fmt_price(ta.breakdown_level)}</b>")
-        if ta.invalidation_price:
-            lines.append(f"Стоп: <b>{fmt_price(ta.invalidation_price)}</b>")
-        if ta.target_prices:
-            tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
-            lines.append(f"Цели: {tps}")
+            lines.append(f"Вход: ниже <b>{fmt_price(ta.breakdown_level)}</b>")
     else:
-        lines.append("✋ <b>Позицию НЕ открывать</b> — ждать пробой уровня (WAIT)")
-        lines.append("<i>Цена между уровнями, входа с edge нет.</i>")
-        lines.append("")
-        lines.append("<b>Когда можно войти:</b>")
-        if ta.breakout_level:
-            lines.append(f"🟢 LONG — закрепление <b>выше {fmt_price(ta.breakout_level)}</b>")
-        if ta.breakdown_level:
-            lines.append(f"🔴 SHORT — закрепление <b>ниже {fmt_price(ta.breakdown_level)}</b>")
-        if ta.action_priority == "short":
-            lines.append("")
-            lines.append("⚡ <b>Сейчас ближе SHORT</b> — давление вниз, long только через верхний пробой")
-        elif ta.action_priority == "long":
-            lines.append("")
-            lines.append("⚡ <b>Сейчас ближе LONG</b> — short только через нижний пробой")
+        extra = ""
+        if ta.action_priority == "long":
+            extra = " · ближе LONG"
+        elif ta.action_priority == "short":
+            extra = " · ближе SHORT"
+        lines = [f"✋ <b>WAIT</b> {score}/10 · {price}{extra}"]
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    parts: list[str] = []
+    if ta.breakout_level and ta.verdict != "LONG":
+        parts.append(f"L≥{fmt_price(ta.breakout_level)}")
+    if ta.breakdown_level and ta.verdict != "SHORT":
+        parts.append(f"S≤{fmt_price(ta.breakdown_level)}")
+    if parts:
+        lines.append("Ждать: " + " · ".join(parts))
+
+    if ta.verdict in {"LONG", "SHORT"}:
+        if ta.invalidation_price:
+            lines.append(f"Стоп <b>{fmt_price(ta.invalidation_price)}</b>")
+        if ta.target_prices:
+            tps = "→".join(fmt_price(t) for t in ta.target_prices[:2])
+            lines.append(f"TP {tps}")
+
     return "\n".join(lines)
 
 
-def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
-    score_label = ta_display_score(ta)
+def ta_manual_compact_html(ta: TAAnalysisResult) -> str:
+    """Ручной TA: только суть, без дублей."""
+    return ta_action_summary_html(ta)
+
+
+def ta_signal_caption_html(ta: TAAnalysisResult) -> str:
+    """Сигналы: одна строка TA, без длинного разбора."""
+    score = ta_display_score(ta)
+    if ta.verdict == "LONG":
+        line = f"📐 TA · <b>LONG</b> {score}/10"
+        if ta.breakout_level:
+            line += f" · ≥{fmt_price(ta.breakout_level)}"
+    elif ta.verdict == "SHORT":
+        line = f"📐 TA · <b>SHORT</b> {score}/10"
+        if ta.breakdown_level:
+            line += f" · ≤{fmt_price(ta.breakdown_level)}"
+    else:
+        extra = ""
+        if ta.action_priority == "long":
+            extra = " · ближе LONG"
+        elif ta.action_priority == "short":
+            extra = " · ближе SHORT"
+        line = f"📐 TA · WAIT {score}/10{extra}"
+    return line
+
+
+def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
+    """Ручной TA: полный разбор для новичка."""
+    score = ta_display_score(ta)
     lines = [
-        ta_action_summary_html(ta),
-        "",
-        f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score_label}/10",
+        f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10",
         f"📍 <b>Сейчас:</b> {_situation_plain(ta)}",
+        f"💡 <b>Смысл:</b> {_verdict_plain(ta)}",
     ]
 
     if ta.breakout_level:
@@ -1511,7 +1584,7 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
             lines.append("👉 <b>Действие:</b> SHORT — ждать подтверждения падения")
     elif ta.action_priority == "short" and ta.breakdown_level:
         lines.append(
-            f"👉 <b>Действие:</b> WAIT, но <b>приоритет SHORT</b> — давление вниз, "
+            f"👉 <b>Действие:</b> WAIT, но <b>приоритет SHORT</b> — "
             f"смотреть пробой <b>{fmt_price(ta.breakdown_level)}</b>"
         )
     elif ta.action_priority == "long" and ta.breakout_level:
@@ -1528,7 +1601,16 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
         )
 
     if ta.verdict_reason:
-        lines.append(f"<i>Примечание: {ta.verdict_reason[:100]}</i>")
+        lines.append(f"<i>Примечание: {ta.verdict_reason[:120]}</i>")
+    return "\n".join(lines)
+
+
+def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
+    """Подпись к графику сигналов (компактно)."""
+    lines = [ta_action_summary_html(ta)]
+    if ta.verdict_reason:
+        note = ta.verdict_reason.split(" · ")[0][:60]
+        lines.append(f"<i>{note}</i>")
     return "\n".join(lines)
 
 
@@ -1566,95 +1648,24 @@ def _scenario_block_html(title: str, scenario: TradeScenario | None, *, emoji: s
 
 
 def ta_telegram_breakdown_html(ta: TAAnalysisResult, *, symbol: str = "", interval: str = "") -> str:
-    header = f"📊 <b>Профессиональный разбор"
-    if symbol:
-        header += f" · {symbol}"
-    if interval:
-        header += f" · {interval}"
-    header += "</b>"
-
+    """Доп. детали — коротко (опционально)."""
     score = ta_display_score(ta)
-    score_word = "ясность сетапа" if ta.verdict == "WAIT" else "уверенность"
+    lines = [ta_action_summary_html(ta)]
 
-    lines = [
-        header,
-        "",
-        ta_action_summary_html(ta),
-        "",
-        f"🎯 <b>Оценка:</b> {ta.verdict} · {score_word} <b>{score}/10</b>",
-    ]
-    if ta.professional_summary:
-        lines.append(f"💬 {ta.professional_summary}")
-    if ta.verdict == "WAIT" and ta.action_priority == "short":
-        lines.append("⚡ <b>Сейчас приоритет SHORT</b> — цена под давлением, long только через верхний пробой")
-    elif ta.verdict == "WAIT" and ta.action_priority == "long":
-        lines.append("⚡ <b>Сейчас приоритет LONG</b> — short только через нижний пробой")
-
-    lines.append("")
-    lines.append("📈 <b>Детали рынка</b>")
+    ctx: list[str] = []
     if ta.market_bias:
-        lines.append(f"• Bias: <b>{ta.market_bias}</b>")
+        ctx.append(ta.market_bias)
     if ta.momentum_label:
-        lines.append(f"• Импульс: <b>{ta.momentum_label}</b>")
-    for fl in ta.factor_lines[:3]:
-        lines.append(f"• {fl}")
-    if ta.structure_label:
-        lines.append(f"• Структура: {_structure_plain(ta.structure_label)}")
-    if ta.phase_label:
-        lines.append(f"• Фаза: {ta.phase_label}")
-    if ta.oi_narrative_label:
-        lines.append(f"• OI: {ta.oi_narrative_label}")
-    if ta.range_position:
-        lines.append(f"• Позиция в range: <b>{ta.range_position * 100:.0f}%</b>")
-    if ta.drawdown_from_high_pct:
-        lines.append(f"• Откат от хая: <b>−{ta.drawdown_from_high_pct:.1f}%</b>")
-    if ta.btc_context:
-        lines.append(f"• BTC: {ta.btc_context}")
-
-    if ta.key_levels:
-        lines.append("")
-        lines.append("🔑 <b>Ключевые уровни</b>")
-        for i, kl in enumerate(ta.key_levels[:5], 1):
-            lines.append(
-                f"{i}. <b>{fmt_price(kl.price)}</b> — {kl.label} ({_key_level_role_ru(kl.role)})"
-            )
-
-    bull_lines = _scenario_block_html("Бычий сценарий", ta.bullish_scenario, emoji="📗")
-    bear_lines = _scenario_block_html("Медвежий сценарий", ta.bearish_scenario, emoji="📕")
-    if bull_lines or bear_lines:
-        lines.append("")
-    if ta.action_priority == "short":
-        lines.extend(bear_lines)
-        if bull_lines and bear_lines:
-            lines.append("")
-        lines.extend(bull_lines)
-    else:
-        lines.extend(bull_lines)
-        if bull_lines and bear_lines:
-            lines.append("")
-        lines.extend(bear_lines)
-
-    if ta.trader_plan:
-        lines.append("")
-        lines.append("📋 <b>План действий</b>")
-        for i, step in enumerate(ta.trader_plan[:7], 1):
-            lines.append(f"{i}. {step}")
+        ctx.append(ta.momentum_label.split()[0] + " " + ta.momentum_label.split()[-1] if ta.momentum_label else "")
+    if ta.factor_lines:
+        ctx.append(ta.factor_lines[0][:40])
+    if ctx:
+        lines.append(" · ".join(ctx[:3]))
 
     if ta.risk_notes:
-        lines.append("")
-        lines.append("⚠️ <b>Риски</b>")
-        for risk in ta.risk_notes[:4]:
-            lines.append(f"• {risk}")
+        lines.append(f"⚠ {ta.risk_notes[0]}")
 
-    if ta.invalidation_price:
-        lines.append("")
-        lines.append(
-            f"🛑 <b>Инвалидация:</b> сценарий отменяется при уходе за "
-            f"<b>{fmt_price(ta.invalidation_price)}</b>"
-        )
-
-    lines.append("")
-    lines.append("<i>Аналитика, не финансовая рекомендация.</i>")
+    lines.append(f"<i>{symbol} {interval} · {score}/10</i>")
     return "\n".join(lines)
 
 

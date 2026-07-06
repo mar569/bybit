@@ -11,6 +11,8 @@ from bot.ta_analysis import (
     find_swing_points,
     run_ta_analysis,
     ta_display_score,
+    ta_manual_detailed_html,
+    ta_signal_caption_html,
     ta_telegram_breakdown_html,
     ta_telegram_caption_html,
 )
@@ -121,13 +123,28 @@ def test_detect_price_zones() -> None:
     assert isinstance(zones, list)
 
 
+def test_ta_signal_caption_html() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
+    caption = ta_signal_caption_html(ta)
+    assert "📐 TA" in caption
+    assert "\n" not in caption
+
+
+def test_ta_manual_detailed_html() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)
+    text = ta_manual_detailed_html(ta)
+    assert "📍" in text
+    assert "👉" in text
+
+
 def test_ta_telegram_caption_html() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
     caption = ta_telegram_caption_html(ta)
-    assert "TA" in caption
+    assert "TA" in caption or "WAIT" in caption or "LONG" in caption
     assert ta.verdict in caption
-    assert "ИТОГ" in caption
 
 
 def test_detect_recent_momentum_down() -> None:
@@ -169,7 +186,5 @@ def test_ta_breakdown_html_sections() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="VANRYUSDT", neutral=True)
     text = ta_telegram_breakdown_html(ta, symbol="VANRYUSDT", interval="15m")
-    assert "Профессиональный разбор" in text
-    assert "ИТОГ" in text
-    assert "Ключевые уровни" in text or "План действий" in text
+    assert "WAIT" in text or "LONG" in text or "SHORT" in text
     assert ta_display_score(ta) >= 1

@@ -43,7 +43,7 @@ from .manual_ta import (
     parse_mta_callback,
     parse_mtw_callback,
 )
-from .ta_analysis import ta_telegram_breakdown_html, ta_telegram_caption_html
+from .ta_analysis import ta_manual_detailed_html, ta_signal_caption_html, ta_telegram_caption_html
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
@@ -452,8 +452,8 @@ class TelegramBot:
                 logger.exception("Chart capture failed for %s", signal.symbol)
                 chart_fail = "исключение при построении"
             chart_caption = message
-            if ta_result is not None and chart_source == "annotated":
-                chart_caption = f"{message}\n\n{ta_telegram_caption_html(ta_result)}"
+            if ta_result is not None:
+                chart_caption = f"{message}\n\n{ta_signal_caption_html(ta_result)}"
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
@@ -1142,8 +1142,8 @@ class TelegramBot:
                 logger.exception("Failed to forward manual TA reference photo for %s", symbol)
 
         caption = (
-            f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n\n"
-            f"{ta_telegram_caption_html(ta)}"
+            f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
+            f"{ta_manual_detailed_html(ta)}"
         )
         keyboard = self._manual_ta_tf_keyboard(symbol, wizard=False)
         await self._send_chart(
@@ -1153,22 +1153,6 @@ class TelegramBot:
             is_priority=False,
             keyboard=keyboard,
         )
-
-        breakdown = ta_telegram_breakdown_html(
-            ta,
-            symbol=symbol,
-            interval=f"Bybit {interval_minutes}m · {hours}ч",
-        )
-        if self.application is not None:
-            try:
-                await self.application.bot.send_message(
-                    chat_id=target_chat_id,
-                    text=breakdown,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-            except Exception:
-                logger.exception("Failed to send manual TA breakdown for %s", symbol)
 
         if from_wizard and notify_chat_id is not None and notify_chat_id != target_chat_id:
             if self.application is not None:

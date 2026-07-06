@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 import matplotlib
 
@@ -594,6 +595,171 @@ def _price_to_axis_y(price: float, y_min: float, y_max: float) -> float:
     return 0.13 + (1.0 - ratio) * 0.74
 
 
+def _bar_x_norm(idx: int, n: int, *, x_start: float = 0.06, x_end: float = 0.88) -> float:
+    if n <= 1:
+        return x_end
+    return x_start + (idx / (n - 1)) * (x_end - x_start)
+
+
+def _ema_series(bars: list[KlineBar], period: int) -> list[float]:
+    if not bars:
+        return []
+    k = 2.0 / (period + 1)
+    out: list[float] = []
+    ema = bars[0].close
+    for bar in bars:
+        ema = bar.close * k + ema * (1 - k)
+        out.append(ema)
+    return out
+
+
+def _draw_tv_range_box(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    y_at: Any,
+) -> None:
+    if ta.consolidation:
+        z = ta.consolidation
+        x0 = _bar_x_norm(z.start_idx, len(bars))
+        x1 = _bar_x_norm(z.end_idx, len(bars))
+        y_bot, y_top = y_at(z.bottom), y_at(z.top)
+    elif ta.breakout_level and ta.breakdown_level:
+        x0, x1 = 0.18, 0.88
+        y_bot, y_top = y_at(ta.breakdown_level), y_at(ta.breakout_level)
+    else:
+        return
+
+    rect = Rectangle(
+        (x0, y_bot), x1 - x0, y_top - y_bot,
+        facecolor=CHART_STYLE["warning"], edgecolor=CHART_STYLE["warning"],
+        alpha=0.10, linewidth=1.0, linestyle="--", zorder=1,
+    )
+    ax.add_patch(rect)
+    ax.text(
+        (x0 + x1) / 2, y_top, " RANGE ",
+        color=CHART_STYLE["warning"], fontsize=6.5, ha="center", va="bottom", fontweight="bold",
+        bbox=dict(facecolor="#161b22aa", edgecolor="none", pad=1),
+    )
+
+
+def _draw_tv_trendlines(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    y_at: Any,
+) -> None:
+    n = len(bars)
+    for tl in ta.trend_lines[:2]:
+        color = CHART_STYLE["trend_bull"] if tl.kind == "bull" else CHART_STYLE["trend_bear"]
+        x0 = _bar_x_norm(tl.start_idx, n)
+        end_idx = min(n - 1, tl.end_idx + max(3, n // 8))
+        x1 = _bar_x_norm(end_idx, n)
+        if tl.end_idx == tl.start_idx:
+            slope = 0.0
+        else:
+            slope = (tl.end_price - tl.start_price) / (tl.end_idx - tl.start_idx)
+        ext_price = tl.start_price + slope * (end_idx - tl.start_idx)
+        ax.plot(
+            [x0, x1], [y_at(tl.start_price), y_at(ext_price)],
+            color=color, linewidth=1.4, alpha=0.85, zorder=2,
+        )
+        label = "тренд↑" if tl.kind == "bull" else "тренд↓"
+        ax.text(x1, y_at(ext_price), f" {label}", color=color, fontsize=6, va="bottom" if tl.kind == "bull" else "top")
+
+    ch = ta.channel
+    if ch is None:
+        return
+    color = CHART_STYLE["channel"]
+    for start_idx, start_p, end_idx, end_p in (
+        (ch.upper_start_idx, ch.upper_start_price, ch.upper_end_idx, ch.upper_end_price),
+        (ch.lower_start_idx, ch.lower_start_price, ch.lower_end_idx, ch.lower_end_price),
+    ):
+        if end_idx == start_idx:
+            continue
+        slope = (end_p - start_p) / (end_idx - start_idx)
+        ext_idx = min(n - 1, end_idx + max(2, n // 10))
+        ext_p = start_p + slope * (ext_idx - start_idx)
+        ax.plot(
+            [_bar_x_norm(start_idx, n), _bar_x_norm(ext_idx, n)],
+            [y_at(start_p), y_at(ext_p)],
+            color=color, linewidth=1.2, alpha=0.75, linestyle="-", zorder=2,
+        )
+
+
+def _draw_tv_emas(ax: plt.Axes, bars: list[KlineBar], y_at: Any) -> None:
+    if len(bars) < 25:
+        return
+    n = len(bars)
+    ema20 = _ema_series(bars, 20)
+    ema50 = _ema_series(bars, 50)
+    xs = [_bar_x_norm(i, n) for i in range(n)]
+    ax.plot(xs, [y_at(p) for p in ema20], color="#58a6ff", linewidth=0.9, alpha=0.55, zorder=2)
+    ax.plot(xs, [y_at(p) for p in ema50], color="#f0883e", linewidth=0.9, alpha=0.55, zorder=2)
+    ax.text(0.07, y_at(ema20[-1]), " 20", color="#58a6ff", fontsize=5.5, va="center")
+    ax.text(0.07, y_at(ema50[-1]), " 50", color="#f0883e", fontsize=5.5, va="center")
+
+
+def _draw_tv_forecast_paths(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    current: float,
+    y_at: Any,
+) -> None:
+    """Пунктирные сценарии вправо — как прогноз на референсных скринах."""
+    x0, x1, x2 = 0.76, 0.86, 0.96
+    y0 = y_at(current)
+    ax.plot(x0, y0, "o", color="white", markersize=5, zorder=5)
+    ax.text(x0 - 0.01, y0, " сейчас", color=CHART_STYLE["text"], fontsize=6, ha="right", va="center")
+
+    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+        bs = ta.bullish_scenario
+        y_trig = y_at(bs.trigger_price)
+        y_tp = y_at(bs.target_prices[0])
+        ax.plot(
+            [x0, x1, x2], [y0, y_trig, y_tp],
+            color=CHART_STYLE["accent_long"], linewidth=1.3, linestyle="--", alpha=0.85, zorder=3,
+        )
+        ax.annotate(
+            "", xy=(x2, y_tp), xytext=(x1, y_trig),
+            arrowprops=dict(
+                arrowstyle="-|>", color=CHART_STYLE["accent_long"],
+                lw=1.4, linestyle="dashed", alpha=0.9,
+            ),
+        )
+        ax.text(x2, y_tp, " прогноз↑", color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom", fontweight="bold")
+
+    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        bs = ta.bearish_scenario
+        y_trig = y_at(bs.trigger_price)
+        y_tp = y_at(bs.target_prices[0])
+        ax.plot(
+            [x0, x1, x2], [y0, y_trig, y_tp],
+            color=CHART_STYLE["accent_short"], linewidth=1.3, linestyle=":", alpha=0.85, zorder=3,
+        )
+        ax.annotate(
+            "", xy=(x2, y_tp), xytext=(x1, y_trig),
+            arrowprops=dict(
+                arrowstyle="-|>", color=CHART_STYLE["accent_short"],
+                lw=1.4, linestyle="dotted", alpha=0.9,
+            ),
+        )
+        ax.text(x2, y_tp, " прогноз↓", color=CHART_STYLE["accent_short"], fontsize=6.5, va="top", fontweight="bold")
+
+
+def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
+    lines = ["Сценарии →"]
+    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+        bs = ta.bullish_scenario
+        tps = "→".join(fmt_price(t) for t in bs.target_prices[:2])
+        lines.append(f"↑ {fmt_price(bs.trigger_price)} {tps}")
+    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        bs = ta.bearish_scenario
+        tps = "→".join(fmt_price(t) for t in bs.target_prices[:2])
+        lines.append(f"↓ {fmt_price(bs.trigger_price)} {tps}")
+    return "\n".join(lines[:3])
+
+
 def _overlay_ta_on_tradingview(
     tv_png: bytes,
     bars: list[KlineBar],
@@ -621,43 +787,53 @@ def _overlay_ta_on_tradingview(
     def y_at(price: float) -> float:
         return _price_to_axis_y(price, y_min, y_max)
 
+    _draw_tv_range_box(ax, ta, bars, y_at)
+    _draw_tv_trendlines(ax, ta, bars, y_at)
+    _draw_tv_emas(ax, bars, y_at)
+
     if ta.breakout_level:
         y = y_at(ta.breakout_level)
-        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["entry"], linewidth=1.4, alpha=0.9, zorder=2)
-        ax.text(0.88, y, f" LONG {fmt_price(ta.breakout_level)}", color=CHART_STYLE["entry"], fontsize=7, va="center")
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["entry"], linewidth=1.6, alpha=0.92, zorder=2)
+        ax.text(0.88, y, f" R {fmt_price(ta.breakout_level)}", color=CHART_STYLE["entry"], fontsize=7, va="center", fontweight="bold")
     if ta.breakdown_level:
         y = y_at(ta.breakdown_level)
-        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_short"], linewidth=1.4, alpha=0.9, zorder=2)
-        ax.text(0.88, y, f" SHORT {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7, va="center")
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_short"], linewidth=1.6, alpha=0.92, zorder=2)
+        ax.text(0.88, y, f" S {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7, va="center", fontweight="bold")
     if ta.invalidation_price:
         y = y_at(ta.invalidation_price)
-        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["inv"], linewidth=1.0, linestyle="--", alpha=0.85, zorder=2)
-    for lv in ta.levels[:2]:
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["inv"], linewidth=1.0, linestyle="--", alpha=0.8, zorder=2)
+        ax.text(0.88, y, f" SL {fmt_price(ta.invalidation_price)}", color=CHART_STYLE["inv"], fontsize=6.5, va="center")
+    for lv in ta.levels[:3]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         y = y_at(lv.price)
-        ax.axhline(y, xmin=0.03, xmax=0.87, color=color, linewidth=0.8, alpha=0.6, zorder=2)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=color, linewidth=0.7, alpha=0.45, linestyle=":", zorder=2)
 
     current = bars[-1].close
     y_cur = y_at(current)
-    ax.axhline(y_cur, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_long"], linewidth=0.9, linestyle=":", alpha=0.9, zorder=2)
-    ax.text(0.02, y_cur, f" {fmt_price(current)}", color=CHART_STYLE["accent_long"], fontsize=7, va="center",
-            bbox=dict(facecolor="#161b22", edgecolor="none", alpha=0.85))
+    ax.axhline(y_cur, xmin=0.03, xmax=0.75, color=CHART_STYLE["accent_long"], linewidth=0.8, linestyle=":", alpha=0.7, zorder=2)
 
-    header = (
-        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  Bybit {interval_minutes}m · {hours}ч"
-    )
-    sub = ta.range_trade_label or ta.verdict_reason[:60] if ta.verdict_reason else ""
+    _draw_tv_forecast_paths(ax, ta, current, y_at)
+
+    header = f"{symbol} · {ta.verdict} {ta_display_score(ta)}/10 · {interval_minutes}m"
     ax.text(
-        0.02, 0.97, header + (f"\n{sub}" if sub else ""),
-        transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+        0.02, 0.97, header,
+        transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
     )
+
+    legend = _tv_forecast_legend(ta)
+    if legend:
+        ax.text(
+            0.02, 0.14, legend,
+            transform=ax.transAxes, va="bottom", ha="left", color=CHART_STYLE["text"], fontsize=6.5,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22cc", edgecolor=CHART_STYLE["panel_border"]),
+        )
 
     panel = ta_chart_panel_text(ta)
     ax.text(
         0.98, 0.97, panel,
         transform=ax.transAxes, va="top", ha="right", color=CHART_STYLE["text"], fontsize=7,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
     )
 
     buffer = io.BytesIO()
