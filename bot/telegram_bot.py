@@ -832,6 +832,18 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
+        elif text in {"💧 Ликвидация", "Ликвидация"}:
+            await update.message.reply_text(
+                self._build_liquidation_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._liquidation_keyboard(),
+            )
+        elif text in {"🧠 Анализ", "Анализ"}:
+            await update.message.reply_text(
+                self._build_analysis_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._analysis_keyboard(),
+            )
         elif text in {"📈 Статус", "Статус"}:
             await update.message.reply_text(
                 await self._build_settings_panel_text_async(),
@@ -859,6 +871,8 @@ class TelegramBot:
             "/resume — возобновить уведомления\n"
             "/history [N] — последние N сигналов (нужен Redis)\n"
             "/help — эта справка\n\n"
+            "💧 <b>Ликвидация</b> — пороги REKT-алертов в обычный чат\n"
+            "🧠 <b>Анализ</b> — разборы в отдельный чат (liq, OI, тренд, цена)\n\n"
             "🟢 LONG = рост цены | 🔴 SHORT = падение\n"
             "🔥 score 1–2 = приоритет (звук)\n\n"
             "Все настройки применяются сразу."
@@ -871,6 +885,68 @@ class TelegramBot:
             f"Binance: {'✅ включена' if s.enabled_binance else '❌ выключена'}\n"
             f"Bybit: {'✅ включена' if s.enabled_bybit else '❌ выключена'}"
         )
+
+    def _build_liquidation_panel_text(self) -> str:
+        s = self.settings_manager.settings
+        tier_note = (
+            f"альт <b>${s.liquidation_alt_min_usd:,.0f}</b> · "
+            f"mid <b>${s.liquidation_mid_min_usd:,.0f}</b> · "
+            f"крупн. <b>${s.liquidation_min_usd:,.0f}</b>"
+            if s.liquidation_tier_enabled
+            else f"единый порог <b>${s.liquidation_min_usd:,.0f}</b>"
+        )
+        return (
+            "<b>💧 Ликвидации</b> (обычный чат сигналов)\n"
+            f"Статус: <b>{'ON' if s.liquidation_alerts_enabled else 'OFF'}</b>\n\n"
+            f"Пороги: {tier_note}\n"
+            f"Tier по OI: <b>{'ON' if s.liquidation_tier_enabled else 'OFF'}</b>\n"
+            f"Окно всплеска: <b>{s.liquidation_burst_window_seconds:g}с</b> · "
+            f"скользящее: <b>{int(s.liquidation_sliding_window_seconds)}с</b>\n"
+            f"Cooldown: <b>{s.liquidation_cooldown_seconds}с</b> · "
+            f"все монеты: <b>{'ON' if s.liquidation_all_symbols else 'OFF'}</b>\n"
+            f"Подсказка разворота: <b>{'ON' if s.liquidation_show_reversal_hint else 'OFF'}</b>\n\n"
+            "<i>Кнопки применяются сразу</i>"
+        ).replace(",", " ")
+
+    def _build_analysis_panel_text(self) -> str:
+        s = self.settings_manager.settings
+        chat_ok = self.config.analysis_chat_configured
+        chat_line = "чат OK" if chat_ok else "⚠️ нет TELEGRAM_ANALYSIS_CHAT_ID"
+        oi_line = (
+            f"мин. OI <b>${s.analysis_min_oi_usd:,.0f}</b>"
+            if s.analysis_min_oi_usd > 0
+            else "мин. OI <b>любой</b>"
+        )
+        price_line = (
+            f"движение цены ≥<b>{s.analysis_min_price_move_pct:g}%</b>"
+            if s.analysis_min_price_move_pct > 0
+            else "движение цены <b>любое</b>"
+        )
+        diag = ""
+        if self.analysis_engine is not None:
+            ad = self.analysis_engine.get_diagnostics()
+            diag = (
+                f"\n\n<b>Диагностика:</b> заплан. <b>{ad['scheduled']}</b> · "
+                f"отправлено <b>{ad['sent']}</b> · "
+                f"отсечено conf <b>{ad['skipped_confidence']}</b>"
+            )
+        return (
+            "<b>🧠 Анализ ликвидаций</b> (отдельный чат)\n"
+            f"Статус: <b>{'ON' if s.analysis_enabled and chat_ok else 'OFF'}</b> ({chat_line})\n\n"
+            f"Liq: альт <b>${s.analysis_alt_min_liq_usd:,.0f}</b> · "
+            f"стандарт <b>${s.analysis_min_liq_usd:,.0f}</b> · "
+            f"мейджор <b>${s.analysis_major_min_liq_usd:,.0f}</b>\n"
+            f"{oi_line} · {price_line} · тренд ≥<b>{s.analysis_min_trend_pct:g}%</b>\n"
+            f"Conf ≥<b>{s.analysis_min_confidence:.0f}%</b> · "
+            f"delay <b>{s.analysis_delay_seconds}с</b> · "
+            f"CD <b>{s.analysis_cooldown_seconds}с</b> · "
+            f"макс <b>{s.analysis_max_per_hour}</b>/ч\n"
+            f"Триггер от сигналов: <b>{'ON' if s.analysis_signal_trigger_enabled else 'OFF'}</b> · "
+            f"график: <b>{'ON' if s.analysis_chart_enabled else 'OFF'}</b> · "
+            f"альты: <b>{'OFF' if s.analysis_skip_alt_tier else 'ON'}</b>"
+            f"{diag}\n\n"
+            "<i>Сильные объёмные монеты с прыжком цены 2–3% + liq от $10k</i>"
+        ).replace(",", " ")
 
     def _exchange_effective_line(self, name: str, exchange: str) -> str:
         s = self.settings_manager.settings
@@ -1079,6 +1155,14 @@ class TelegramBot:
             )
             return
 
+        liq_changed = await self._handle_liquidation_callback(query, payload)
+        if liq_changed:
+            return
+
+        an_changed = await self._handle_analysis_callback(query, payload)
+        if an_changed:
+            return
+
         await query.answer()
 
         if payload == "toggle_binance":
@@ -1118,13 +1202,174 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
+        elif payload == "open_liq":
+            await self._safe_edit_message_text(
+                query,
+                self._build_liquidation_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._liquidation_keyboard(),
+            )
+        elif payload == "open_analysis":
+            await self._safe_edit_message_text(
+                query,
+                self._build_analysis_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._analysis_keyboard(),
+            )
         else:
             await self._safe_edit_message_text(query, "Неизвестное действие.")
+
+    async def _handle_liquidation_callback(self, query: CallbackQuery, payload: str) -> bool:
+        if not payload.startswith("liq:"):
+            return False
+
+        action = payload[4:]
+        label = ""
+
+        if action == "on":
+            current = self.settings_manager.settings.liquidation_alerts_enabled
+            self.settings_manager.update(liquidation_alerts_enabled=not current)
+            label = f"Ликвидации → {'ON' if not current else 'OFF'}"
+        elif action == "tier":
+            current = self.settings_manager.settings.liquidation_tier_enabled
+            self.settings_manager.update(liquidation_tier_enabled=not current)
+            label = f"Tier liq → {'ON' if not current else 'OFF'}"
+        elif action == "all":
+            current = self.settings_manager.settings.liquidation_all_symbols
+            self.settings_manager.update(liquidation_all_symbols=not current)
+            label = f"Все монеты → {'ON' if not current else 'OFF'}"
+        elif action == "hint":
+            current = self.settings_manager.settings.liquidation_show_reversal_hint
+            self.settings_manager.update(liquidation_show_reversal_hint=not current)
+            label = f"Подсказка → {'ON' if not current else 'OFF'}"
+        elif action == "ref":
+            self.settings_manager.reload()
+            label = "Обновлено"
+        elif action.startswith("m:"):
+            value = float(action[2:])
+            self.settings_manager.update(liquidation_min_usd=value)
+            label = f"Крупные → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("a:"):
+            value = float(action[2:])
+            self.settings_manager.update(liquidation_alt_min_usd=value)
+            label = f"Альты liq → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("d:"):
+            value = float(action[2:])
+            self.settings_manager.update(liquidation_mid_min_usd=value)
+            label = f"Mid liq → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("cd:"):
+            value = int(action[3:])
+            self.settings_manager.update(liquidation_cooldown_seconds=value)
+            label = f"Cooldown → {value}с"
+        elif action.startswith("win:"):
+            value = float(action[4:])
+            self.settings_manager.update(liquidation_burst_window_seconds=value)
+            label = f"Окно → {value:g}с"
+        else:
+            await query.answer("Неизвестное действие.", show_alert=True)
+            return True
+
+        await query.answer(f"✅ {label}", show_alert=False)
+        await self._safe_edit_message_text(
+            query,
+            self._build_liquidation_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._liquidation_keyboard(),
+        )
+        return True
+
+    async def _handle_analysis_callback(self, query: CallbackQuery, payload: str) -> bool:
+        if not payload.startswith("an:"):
+            return False
+
+        action = payload[3:]
+        label = ""
+
+        if action == "on":
+            current = self.settings_manager.settings.analysis_enabled
+            self.settings_manager.update(analysis_enabled=not current)
+            label = f"Анализ → {'ON' if not current else 'OFF'}"
+        elif action == "skalt":
+            current = self.settings_manager.settings.analysis_skip_alt_tier
+            self.settings_manager.update(analysis_skip_alt_tier=not current)
+            label = f"Альты → {'OFF' if not current else 'ON'}"
+        elif action == "chart":
+            current = self.settings_manager.settings.analysis_chart_enabled
+            self.settings_manager.update(analysis_chart_enabled=not current)
+            label = f"График → {'ON' if not current else 'OFF'}"
+        elif action == "sig":
+            current = self.settings_manager.settings.analysis_signal_trigger_enabled
+            self.settings_manager.update(analysis_signal_trigger_enabled=not current)
+            label = f"Триггер сигналов → {'ON' if not current else 'OFF'}"
+        elif action == "ref":
+            self.settings_manager.reload()
+            label = "Обновлено"
+        elif action.startswith("m:"):
+            value = float(action[2:])
+            self.settings_manager.update(analysis_min_liq_usd=value)
+            label = f"Стандарт liq → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("maj:"):
+            value = float(action[4:])
+            self.settings_manager.update(analysis_major_min_liq_usd=value)
+            label = f"Мейджор liq → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("alt:"):
+            value = float(action[4:])
+            self.settings_manager.update(analysis_alt_min_liq_usd=value)
+            label = f"Альт liq → ${value:,.0f}".replace(",", " ")
+        elif action.startswith("oi:"):
+            value = float(action[3:])
+            self.settings_manager.update(analysis_min_oi_usd=value)
+            label = (
+                f"Мин. OI → ${value:,.0f}".replace(",", " ")
+                if value > 0
+                else "Мин. OI → любой"
+            )
+        elif action.startswith("p:"):
+            value = float(action[2:])
+            self.settings_manager.update(analysis_min_price_move_pct=value)
+            label = (
+                f"Движение цены → ≥{value:g}%"
+                if value > 0
+                else "Движение цены → любое"
+            )
+        elif action.startswith("tr:"):
+            value = float(action[3:])
+            self.settings_manager.update(analysis_min_trend_pct=value)
+            label = f"Тренд → ≥{value:g}%"
+        elif action.startswith("cf:"):
+            value = float(action[3:])
+            self.settings_manager.update(analysis_min_confidence=value)
+            label = f"Conf → ≥{value:.0f}%"
+        elif action.startswith("dl:"):
+            value = int(action[3:])
+            self.settings_manager.update(analysis_delay_seconds=value)
+            label = f"Delay → {value}с"
+        elif action.startswith("mh:"):
+            value = int(action[3:])
+            self.settings_manager.update(analysis_max_per_hour=value)
+            label = f"Макс/ч → {value}"
+        elif action.startswith("cd:"):
+            value = int(action[3:])
+            self.settings_manager.update(analysis_cooldown_seconds=value)
+            label = f"Cooldown → {value}с"
+        else:
+            await query.answer("Неизвестное действие.", show_alert=True)
+            return True
+
+        await query.answer(f"✅ {label}", show_alert=False)
+        await self._safe_edit_message_text(
+            query,
+            self._build_analysis_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._analysis_keyboard(),
+        )
+        return True
 
     def _reply_keyboard(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton(self._signals_toggle_button_label())],
+                [KeyboardButton("💧 Ликвидация"), KeyboardButton("🧠 Анализ")],
                 [KeyboardButton("📊 Биржи"), KeyboardButton("🔧 Настройки")],
                 [KeyboardButton("📋 Команды")],
             ],
@@ -1217,6 +1462,248 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark(f"Bybit {'ON' if s.enabled_bybit else 'OFF'}", s.enabled_bybit), callback_data="toggle_bybit"),
             ],
             [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_settings")],
+            [
+                InlineKeyboardButton("💧 Ликвидация", callback_data="open_liq"),
+                InlineKeyboardButton("🧠 Анализ", callback_data="open_analysis"),
+            ],
+        ])
+
+    def _liquidation_keyboard(self) -> InlineKeyboardMarkup:
+        s = self.settings_manager.settings
+        on_btn = (
+            "💧 Ликвидации ON" if s.liquidation_alerts_enabled else "💧 Ликвидации OFF"
+        )
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(on_btn, callback_data="liq:on")],
+            [
+                InlineKeyboardButton(
+                    self._mark("$10k", s.liquidation_min_usd == 10_000),
+                    callback_data="liq:m:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$20k", s.liquidation_min_usd == 20_000),
+                    callback_data="liq:m:20000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$35k", s.liquidation_min_usd == 35_000),
+                    callback_data="liq:m:35000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$50k", s.liquidation_min_usd == 50_000),
+                    callback_data="liq:m:50000",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("альт $10k", s.liquidation_alt_min_usd == 10_000),
+                    callback_data="liq:a:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$20k", s.liquidation_alt_min_usd == 20_000),
+                    callback_data="liq:a:20000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("mid $10k", s.liquidation_mid_min_usd == 10_000),
+                    callback_data="liq:d:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$35k", s.liquidation_mid_min_usd == 35_000),
+                    callback_data="liq:d:35000",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Tier ON", s.liquidation_tier_enabled),
+                    callback_data="liq:tier",
+                ),
+                InlineKeyboardButton(
+                    self._mark("Все монеты", s.liquidation_all_symbols),
+                    callback_data="liq:all",
+                ),
+                InlineKeyboardButton(
+                    self._mark("Разворот", s.liquidation_show_reversal_hint),
+                    callback_data="liq:hint",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("CD 30с", s.liquidation_cooldown_seconds == 30),
+                    callback_data="liq:cd:30",
+                ),
+                InlineKeyboardButton(
+                    self._mark("60с", s.liquidation_cooldown_seconds == 60),
+                    callback_data="liq:cd:60",
+                ),
+                InlineKeyboardButton(
+                    self._mark("120с", s.liquidation_cooldown_seconds == 120),
+                    callback_data="liq:cd:120",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("окно 1с", s.liquidation_burst_window_seconds == 1.0),
+                    callback_data="liq:win:1",
+                ),
+                InlineKeyboardButton(
+                    self._mark("2с", s.liquidation_burst_window_seconds == 2.0),
+                    callback_data="liq:win:2",
+                ),
+                InlineKeyboardButton(
+                    self._mark("5с", s.liquidation_burst_window_seconds == 5.0),
+                    callback_data="liq:win:5",
+                ),
+            ],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="liq:ref")],
+        ])
+
+    def _analysis_keyboard(self) -> InlineKeyboardMarkup:
+        s = self.settings_manager.settings
+        on_btn = "🧠 Анализ ON" if s.analysis_enabled else "🧠 Анализ OFF"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(on_btn, callback_data="an:on")],
+            [
+                InlineKeyboardButton(
+                    self._mark("liq $10k", s.analysis_min_liq_usd == 10_000),
+                    callback_data="an:m:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$20k", s.analysis_min_liq_usd == 20_000),
+                    callback_data="an:m:20000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$35k", s.analysis_min_liq_usd == 35_000),
+                    callback_data="an:m:35000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$50k", s.analysis_min_liq_usd == 50_000),
+                    callback_data="an:m:50000",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("мейдж $10k", s.analysis_major_min_liq_usd == 10_000),
+                    callback_data="an:maj:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$35k", s.analysis_major_min_liq_usd == 35_000),
+                    callback_data="an:maj:35000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("альт $10k", s.analysis_alt_min_liq_usd == 10_000),
+                    callback_data="an:alt:10000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("$20k", s.analysis_alt_min_liq_usd == 20_000),
+                    callback_data="an:alt:20000",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("OI 500k", s.analysis_min_oi_usd == 500_000),
+                    callback_data="an:oi:500000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("1M", s.analysis_min_oi_usd == 1_000_000),
+                    callback_data="an:oi:1000000",
+                ),
+                InlineKeyboardButton(
+                    self._mark("OI любой", s.analysis_min_oi_usd == 0),
+                    callback_data="an:oi:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("цена ≥2%", s.analysis_min_price_move_pct == 2.0),
+                    callback_data="an:p:2",
+                ),
+                InlineKeyboardButton(
+                    self._mark("≥3%", s.analysis_min_price_move_pct == 3.0),
+                    callback_data="an:p:3",
+                ),
+                InlineKeyboardButton(
+                    self._mark("любая", s.analysis_min_price_move_pct == 0),
+                    callback_data="an:p:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("тренд 2%", s.analysis_min_trend_pct == 2.0),
+                    callback_data="an:tr:2",
+                ),
+                InlineKeyboardButton(
+                    self._mark("3%", s.analysis_min_trend_pct == 3.0),
+                    callback_data="an:tr:3",
+                ),
+                InlineKeyboardButton(
+                    self._mark("1.5%", s.analysis_min_trend_pct == 1.5),
+                    callback_data="an:tr:1.5",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("conf 42%", s.analysis_min_confidence == 42.0),
+                    callback_data="an:cf:42",
+                ),
+                InlineKeyboardButton(
+                    self._mark("48%", s.analysis_min_confidence == 48.0),
+                    callback_data="an:cf:48",
+                ),
+                InlineKeyboardButton(
+                    self._mark("55%", s.analysis_min_confidence == 55.0),
+                    callback_data="an:cf:55",
+                ),
+                InlineKeyboardButton(
+                    self._mark("58%", s.analysis_min_confidence == 58.0),
+                    callback_data="an:cf:58",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("delay 60с", s.analysis_delay_seconds == 60),
+                    callback_data="an:dl:60",
+                ),
+                InlineKeyboardButton(
+                    self._mark("90с", s.analysis_delay_seconds == 90),
+                    callback_data="an:dl:90",
+                ),
+                InlineKeyboardButton(
+                    self._mark("120с", s.analysis_delay_seconds == 120),
+                    callback_data="an:dl:120",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("3/ч", s.analysis_max_per_hour == 3),
+                    callback_data="an:mh:3",
+                ),
+                InlineKeyboardButton(
+                    self._mark("5/ч", s.analysis_max_per_hour == 5),
+                    callback_data="an:mh:5",
+                ),
+                InlineKeyboardButton(
+                    self._mark("6/ч", s.analysis_max_per_hour == 6),
+                    callback_data="an:mh:6",
+                ),
+                InlineKeyboardButton(
+                    self._mark("CD 1ч", s.analysis_cooldown_seconds == 3600),
+                    callback_data="an:cd:3600",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Сигналы", s.analysis_signal_trigger_enabled),
+                    callback_data="an:sig",
+                ),
+                InlineKeyboardButton(
+                    self._mark("График", s.analysis_chart_enabled),
+                    callback_data="an:chart",
+                ),
+                InlineKeyboardButton(
+                    self._mark("Без альтов", s.analysis_skip_alt_tier),
+                    callback_data="an:skalt",
+                ),
+            ],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="an:ref")],
         ])
 
     @staticmethod

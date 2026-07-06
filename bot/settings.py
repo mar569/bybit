@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 25
+SETTINGS_VERSION = 26
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -31,6 +31,9 @@ PRESERVE_ON_MIGRATE = frozenset({
 LIQUIDATION_PRESERVE_KEYS = frozenset({
     "liquidation_alerts_enabled",
     "liquidation_min_usd",
+    "liquidation_alt_min_usd",
+    "liquidation_mid_min_usd",
+    "liquidation_tier_enabled",
     "liquidation_burst_window_seconds",
     "liquidation_cooldown_seconds",
     "liquidation_all_symbols",
@@ -39,8 +42,19 @@ LIQUIDATION_PRESERVE_KEYS = frozenset({
 
 ANALYSIS_PRESERVE_KEYS = frozenset({
     "analysis_enabled",
+    "analysis_min_liq_usd",
+    "analysis_major_min_liq_usd",
+    "analysis_alt_min_liq_usd",
+    "analysis_min_oi_usd",
+    "analysis_min_price_move_pct",
+    "analysis_min_trend_pct",
+    "analysis_min_confidence",
     "analysis_delay_seconds",
     "analysis_cooldown_seconds",
+    "analysis_max_per_hour",
+    "analysis_skip_alt_tier",
+    "analysis_chart_enabled",
+    "analysis_signal_trigger_enabled",
 })
 
 # При изменении глобального порога сбрасываем биржевые override — иначе кнопки в боте «не работают».
@@ -239,14 +253,14 @@ class ScannerSettings:
 
       # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
     liquidation_alerts_enabled: bool = True
-    liquidation_min_usd: float = 50_000.0
+    liquidation_min_usd: float = 10_000.0
     liquidation_burst_window_seconds: float = 2.0
     liquidation_sliding_window_seconds: float = 300.0
     liquidation_tier_enabled: bool = True
     liquidation_alt_max_oi_usd: float = 500_000.0
-    liquidation_alt_min_usd: float = 20_000.0
+    liquidation_alt_min_usd: float = 10_000.0
     liquidation_mid_max_oi_usd: float = 2_000_000.0
-    liquidation_mid_min_usd: float = 35_000.0
+    liquidation_mid_min_usd: float = 10_000.0
     liquidation_cooldown_seconds: int = 60
     liquidation_all_symbols: bool = True
     liquidation_show_reversal_hint: bool = True
@@ -271,26 +285,26 @@ class ScannerSettings:
     anomaly_symbol_cooldown_seconds: int = 1800
     anomaly_min_importance: float = 55.0
 
-    # Аналитический чат — только крупные ликвидации с толком (не все монеты)
+    # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 25_000.0
-    analysis_major_min_liq_usd: float = 35_000.0
-    analysis_alt_min_liq_usd: float = 20_000.0
+    analysis_min_liq_usd: float = 10_000.0
+    analysis_major_min_liq_usd: float = 10_000.0
+    analysis_alt_min_liq_usd: float = 10_000.0
     analysis_skip_alt_tier: bool = False
-    analysis_min_oi_usd: float = 0.0
-    analysis_min_price_move_pct: float = 0.0
+    analysis_min_oi_usd: float = 500_000.0
+    analysis_min_price_move_pct: float = 2.0
     analysis_min_trend_pct: float = 2.0
     analysis_require_trend: bool = True
-    analysis_force_liq_usd: float = 35_000.0
+    analysis_force_liq_usd: float = 25_000.0
     analysis_max_per_hour: int = 5
     analysis_signal_trigger_enabled: bool = True
-    analysis_signal_min_liq_usd: float = 20_000.0
+    analysis_signal_min_liq_usd: float = 10_000.0
     analysis_delay_seconds: int = 90
     analysis_min_confidence: float = 48.0
     analysis_min_confidence_wait: float = 42.0
     analysis_min_confidence_directional: float = 58.0
     analysis_min_cluster_events: int = 1
-    analysis_single_event_min_usd: float = 25_000.0
+    analysis_single_event_min_usd: float = 10_000.0
     analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
@@ -820,6 +834,20 @@ class SettingsManager:
                 merged["analysis_min_cluster_events"] = 1
                 merged["analysis_max_per_hour"] = 6
                 merged["analysis_chart_enabled"] = False
+            # v26: liq/анализ от $10k, сильные монеты (OI≥500k), движение цены ≥2%
+            if version < 26:
+                merged["liquidation_min_usd"] = 10_000.0
+                merged["liquidation_alt_min_usd"] = 10_000.0
+                merged["liquidation_mid_min_usd"] = 10_000.0
+                merged["analysis_min_liq_usd"] = 10_000.0
+                merged["analysis_major_min_liq_usd"] = 10_000.0
+                merged["analysis_alt_min_liq_usd"] = 10_000.0
+                merged["analysis_signal_min_liq_usd"] = 10_000.0
+                merged["analysis_single_event_min_usd"] = 10_000.0
+                merged["analysis_force_liq_usd"] = 25_000.0
+                merged["analysis_min_oi_usd"] = 500_000.0
+                merged["analysis_min_price_move_pct"] = 2.0
+                merged["analysis_min_trend_pct"] = 2.0
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -827,7 +855,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v25: fix stuck analysis thresholds; preserved: %s)",
+                "Settings migrated v%d → v%d (v26: liq/analysis $10k + OI≥500k + price≥2%%; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

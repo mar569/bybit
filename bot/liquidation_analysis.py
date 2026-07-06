@@ -55,16 +55,16 @@ def resolve_analysis_min_liq_usd(
     tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top_n)
     if bool(getattr(settings, "analysis_skip_alt_tier", False)) and tier == SymbolTier.ALT:
         return None, "alt_tier"
-    alt_min = float(getattr(settings, "liquidation_alt_min_usd", 20_000.0))
-    mid_min = float(getattr(settings, "liquidation_mid_min_usd", 35_000.0))
-    major_min = float(getattr(settings, "liquidation_min_usd", 50_000.0))
+    alt_min = float(getattr(settings, "liquidation_alt_min_usd", 10_000.0))
+    mid_min = float(getattr(settings, "liquidation_mid_min_usd", 10_000.0))
+    major_min = float(getattr(settings, "liquidation_min_usd", 10_000.0))
     if tier == SymbolTier.MAJOR:
-        cap = float(getattr(settings, "analysis_major_min_liq_usd", 35_000.0))
+        cap = float(getattr(settings, "analysis_major_min_liq_usd", 10_000.0))
         return min(cap, major_min), ""
     if tier == SymbolTier.ALT:
-        cap = float(getattr(settings, "analysis_alt_min_liq_usd", 20_000.0))
+        cap = float(getattr(settings, "analysis_alt_min_liq_usd", 10_000.0))
         return min(cap, alt_min), ""
-    cap = float(getattr(settings, "analysis_min_liq_usd", 25_000.0))
+    cap = float(getattr(settings, "analysis_min_liq_usd", 10_000.0))
     return min(cap, mid_min), ""
 
 

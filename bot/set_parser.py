@@ -28,20 +28,29 @@ SET_HELP = (
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
     "/set signals on — возобновить уведомления\n\n"
-    "Ликвидации (REKT-алерты):\n"
+    "Ликвидации (REKT-алерты в обычный чат):\n"
     "/set liq on — включить алерты по ликвидациям\n"
     "/set liq off — выключить\n"
-    "/set liq_min 40000 — мин. сумма всплеска в USD\n"
+    "/set liq_min 10000 — мин. сумма всплеска в USD\n"
+    "/set liq_alt 10000 — порог для альтов (tier)\n"
+    "/set liq_mid 10000 — порог для mid-cap (tier)\n"
+    "/set liq_tier on — tier по OI (альт/mid/крупные)\n"
     "/set liq_window 2 — окно агрегации (сек)\n"
     "/set liq_cooldown 60 — пауза между алертами по монете\n"
     "/set liq_all on — все монеты Bybit (не только топ)\n\n"
     "Аналитический чат (разбор после ликвидаций):\n"
     "/set analysis on — включить умный разбор\n"
     "/set analysis off — выключить\n"
-    "/set analysis_min 80000 — мин. кластер для анализа (USD)\n"
+    "/set analysis_min 10000 — мин. кластер для анализа (USD)\n"
+    "/set analysis_major 10000 — порог для мейджоров\n"
+    "/set analysis_alt 10000 — порог для альтов\n"
+    "/set analysis_oi 500000 — мин. OI монеты (сильные/объёмные)\n"
+    "/set analysis_price 2 — мин. движение цены % от кластера\n"
+    "/set analysis_trend 2 — мин. тренд 1h/4h %\n"
     "/set analysis_delay 90 — пауза перед разбором (сек)\n"
-    "/set analysis_conf 60 — мин. уверенность %\n"
-    "/set analysis_cd 1800 — cooldown по монете (сек)\n\n"
+    "/set analysis_conf 48 — мин. уверенность %\n"
+    "/set analysis_cd 3600 — cooldown по монете (сек)\n"
+    "/set analysis_max_h 5 — макс. разборов в час\n\n"
     "По биржам (переопределяют глобальные):\n"
     "/set binance oi 3\n"
     "/set binance period 10\n"
@@ -87,15 +96,27 @@ GLOBAL_ALIASES: dict[str, str] = {
     "liq": "liquidation_alerts_enabled",
     "liq_alerts": "liquidation_alerts_enabled",
     "liq_min": "liquidation_min_usd",
+    "liq_alt": "liquidation_alt_min_usd",
+    "liq_mid": "liquidation_mid_min_usd",
+    "liq_tier": "liquidation_tier_enabled",
     "liq_window": "liquidation_burst_window_seconds",
     "liq_cooldown": "liquidation_cooldown_seconds",
     "liq_all": "liquidation_all_symbols",
     "liq_hint": "liquidation_show_reversal_hint",
     "analysis": "analysis_enabled",
     "analysis_min": "analysis_min_liq_usd",
+    "analysis_major": "analysis_major_min_liq_usd",
+    "analysis_alt": "analysis_alt_min_liq_usd",
+    "analysis_oi": "analysis_min_oi_usd",
+    "analysis_price": "analysis_min_price_move_pct",
+    "analysis_trend": "analysis_min_trend_pct",
     "analysis_delay": "analysis_delay_seconds",
     "analysis_conf": "analysis_min_confidence",
     "analysis_cd": "analysis_cooldown_seconds",
+    "analysis_max_h": "analysis_max_per_hour",
+    "analysis_chart": "analysis_chart_enabled",
+    "analysis_skip_alt": "analysis_skip_alt_tier",
+    "analysis_signal": "analysis_signal_trigger_enabled",
 }
 
 EXCHANGE_ALIASES: dict[str, str] = {
@@ -120,6 +141,7 @@ INT_FIELDS = {
     "liquidation_cooldown_seconds",
     "analysis_delay_seconds",
     "analysis_cooldown_seconds",
+    "analysis_max_per_hour",
     "top_n_symbols",
     "priority_score_max",
     "binance_oi_period_minutes",
@@ -153,8 +175,15 @@ FLOAT_FIELDS = {
     "bybit_price_drop_percent",
     "min_probability_percent",
     "liquidation_min_usd",
+    "liquidation_alt_min_usd",
+    "liquidation_mid_min_usd",
     "liquidation_burst_window_seconds",
     "analysis_min_liq_usd",
+    "analysis_major_min_liq_usd",
+    "analysis_alt_min_liq_usd",
+    "analysis_min_oi_usd",
+    "analysis_min_price_move_pct",
+    "analysis_min_trend_pct",
     "analysis_min_confidence",
 }
 
@@ -220,7 +249,11 @@ def parse_set_command(args: list[str]) -> SetResult:
             "liquidation_alerts_enabled",
             "liquidation_all_symbols",
             "liquidation_show_reversal_hint",
+            "liquidation_tier_enabled",
             "analysis_enabled",
+            "analysis_skip_alt_tier",
+            "analysis_chart_enabled",
+            "analysis_signal_trigger_enabled",
         }:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "probability_filter_enabled":
