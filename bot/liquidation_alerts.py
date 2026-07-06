@@ -203,10 +203,13 @@ class LiquidationAlertService:
             return
 
         async with self._lock:
-            burst = self._pending.pop(key, None)
+            burst = self._pending.get(key)
             if burst is None or burst.total_usd < min_usd:
                 return
             if time.time() < self._cooldown_until.get(cooldown_key, 0.0):
+                return
+            burst = self._pending.pop(key, None)
+            if burst is None:
                 return
             self._cooldown_until[cooldown_key] = time.time() + cooldown_sec
 

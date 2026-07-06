@@ -86,8 +86,8 @@ def _volume_cvd_proxy(klines: list[KlineBar], bars: int = 12) -> tuple[float, st
 def _oi_supports_direction(oi_change_pct: float | None, *, predict_long: bool) -> bool:
     oi = oi_change_pct if oi_change_pct is not None else 0.0
     if predict_long:
-        return oi >= 1.5
-    return oi <= -1.5
+        return oi >= 1.0
+    return oi <= -1.0
 
 
 def _has_reliable_oi(ctx: TrendLiqContext) -> bool:
@@ -163,7 +163,9 @@ def resolve_scenario(
     cvd_strong_bear = ctx.cvd_proxy <= 0.38
     oi_ok_long = _oi_supports_direction(oi_change_pct, predict_long=True)
     oi_ok_short = _oi_supports_direction(oi_change_pct, predict_long=False)
-    reliable_oi = _has_reliable_oi(ctx)
+    reliable_oi = _has_reliable_oi(ctx) or (
+        oi_change_pct is not None and abs(oi_change_pct) >= 0.8
+    )
 
     # Шорты смыли на росте
     if cluster_side == SIDE_SHORT_LIQ:
@@ -190,7 +192,6 @@ def resolve_scenario(
             if (
                 cvd_strong_bull
                 and oi_ok_long
-                and reliable_oi
                 and not crowd_long
             ):
                 return ScenarioVerdict(
@@ -200,7 +201,7 @@ def resolve_scenario(
                     continuation_up=True,
                     continuation_down=False,
                 )
-            if cvd_strong_bear or oi < -1.0 or (reliable_oi and not oi_ok_long):
+            if cvd_strong_bear or oi < -1.0 or (reliable_oi and not oi_ok_long and oi_change_pct is not None):
                 return ScenarioVerdict(
                     "short",
                     "↘️ откат вниз",

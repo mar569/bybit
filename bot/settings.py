@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 23
+SETTINGS_VERSION = 24
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -277,23 +277,23 @@ class ScannerSettings:
 
     # Аналитический чат — только крупные ликвидации с толком (не все монеты)
     analysis_enabled: bool = True
-    analysis_min_liq_usd: float = 40_000.0
-    analysis_major_min_liq_usd: float = 50_000.0
-    analysis_alt_min_liq_usd: float = 35_000.0
+    analysis_min_liq_usd: float = 25_000.0
+    analysis_major_min_liq_usd: float = 35_000.0
+    analysis_alt_min_liq_usd: float = 20_000.0
     analysis_skip_alt_tier: bool = False
     analysis_min_oi_usd: float = 0.0
     analysis_min_price_move_pct: float = 0.0
-    analysis_min_trend_pct: float = 3.0
+    analysis_min_trend_pct: float = 2.0
     analysis_require_trend: bool = True
-    analysis_force_liq_usd: float = 60_000.0
-    analysis_max_per_hour: int = 3
+    analysis_force_liq_usd: float = 35_000.0
+    analysis_max_per_hour: int = 5
     analysis_signal_trigger_enabled: bool = True
-    analysis_signal_min_liq_usd: float = 30_000.0
+    analysis_signal_min_liq_usd: float = 20_000.0
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 55.0
-    analysis_min_confidence_directional: float = 68.0
-    analysis_min_cluster_events: int = 2
-    analysis_single_event_min_usd: float = 55_000.0
+    analysis_min_confidence: float = 52.0
+    analysis_min_confidence_directional: float = 62.0
+    analysis_min_cluster_events: int = 1
+    analysis_single_event_min_usd: float = 25_000.0
     analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
@@ -601,36 +601,36 @@ class ScannerSettings:
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
-            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 40_000.0)),
+            analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
-                base.get("analysis_major_min_liq_usd", 50_000.0)
+                base.get("analysis_major_min_liq_usd", 35_000.0)
             ),
             analysis_alt_min_liq_usd=float(
-                base.get("analysis_alt_min_liq_usd", 35_000.0)
+                base.get("analysis_alt_min_liq_usd", 20_000.0)
             ),
             analysis_skip_alt_tier=bool(base.get("analysis_skip_alt_tier", False)),
             analysis_min_oi_usd=float(base.get("analysis_min_oi_usd", 0.0)),
             analysis_min_price_move_pct=float(
                 base.get("analysis_min_price_move_pct", 0.0)
             ),
-            analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 3.0)),
+            analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 2.0)),
             analysis_require_trend=bool(base.get("analysis_require_trend", True)),
-            analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 60_000.0)),
-            analysis_max_per_hour=int(base.get("analysis_max_per_hour", 3)),
+            analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 35_000.0)),
+            analysis_max_per_hour=int(base.get("analysis_max_per_hour", 5)),
             analysis_signal_trigger_enabled=bool(
                 base.get("analysis_signal_trigger_enabled", True)
             ),
             analysis_signal_min_liq_usd=float(
-                base.get("analysis_signal_min_liq_usd", 30_000.0)
+                base.get("analysis_signal_min_liq_usd", 20_000.0)
             ),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 55.0)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 52.0)),
             analysis_min_confidence_directional=float(
-                base.get("analysis_min_confidence_directional", 68.0)
+                base.get("analysis_min_confidence_directional", 62.0)
             ),
-            analysis_min_cluster_events=int(base.get("analysis_min_cluster_events", 2)),
+            analysis_min_cluster_events=int(base.get("analysis_min_cluster_events", 1)),
             analysis_single_event_min_usd=float(
-                base.get("analysis_single_event_min_usd", 55_000.0)
+                base.get("analysis_single_event_min_usd", 25_000.0)
             ),
             analysis_cooldown_seconds=int(base.get("analysis_cooldown_seconds", 3600)),
             analysis_outcome_tracking_enabled=bool(
@@ -794,6 +794,19 @@ class SettingsManager:
                 merged.setdefault("analysis_min_confidence_directional", 68.0)
                 merged.setdefault("analysis_min_cluster_events", 2)
                 merged.setdefault("analysis_single_event_min_usd", 55_000.0)
+            # v24: баланс — снова шлём разборы, но слабые кейсы → выжидание
+            if version < 24:
+                merged["analysis_min_liq_usd"] = 25_000.0
+                merged["analysis_major_min_liq_usd"] = 35_000.0
+                merged["analysis_alt_min_liq_usd"] = 20_000.0
+                merged["analysis_min_trend_pct"] = 2.0
+                merged["analysis_force_liq_usd"] = 35_000.0
+                merged["analysis_max_per_hour"] = 5
+                merged["analysis_signal_min_liq_usd"] = 20_000.0
+                merged["analysis_min_confidence"] = 52.0
+                merged["analysis_min_confidence_directional"] = 62.0
+                merged["analysis_min_cluster_events"] = 1
+                merged["analysis_single_event_min_usd"] = 25_000.0
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -801,7 +814,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v23: stricter analysis scenarios; preserved: %s)",
+                "Settings migrated v%d → v%d (v24: analysis flow restored; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

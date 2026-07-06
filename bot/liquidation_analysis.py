@@ -24,6 +24,7 @@ from .probability_engine import _liquidation_strength, _long_short_strength
 from .scanner_engine import SignalEngine
 from .symbol_tiers import SymbolTier, classify_symbol
 from .trend_liq_context import (
+    ScenarioVerdict,
     build_trend_liq_context,
     resolve_scenario,
     score_trend_liq_factors,
@@ -55,10 +56,10 @@ def resolve_analysis_min_liq_usd(
     if bool(getattr(settings, "analysis_skip_alt_tier", False)) and tier == SymbolTier.ALT:
         return None, "alt_tier"
     if tier == SymbolTier.MAJOR:
-        return float(getattr(settings, "analysis_major_min_liq_usd", 50_000.0)), ""
+        return float(getattr(settings, "analysis_major_min_liq_usd", 35_000.0)), ""
     if tier == SymbolTier.ALT:
-        return float(getattr(settings, "analysis_alt_min_liq_usd", 35_000.0)), ""
-    return float(getattr(settings, "analysis_min_liq_usd", 30_000.0)), ""
+        return float(getattr(settings, "analysis_alt_min_liq_usd", 20_000.0)), ""
+    return float(getattr(settings, "analysis_min_liq_usd", 25_000.0)), ""
 
 
 def _analysis_prefilter(
@@ -83,7 +84,7 @@ def _analysis_prefilter(
             tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top)
             if tier == SymbolTier.ALT:
                 return "alt_tier"
-        min_liq = float(getattr(settings, "analysis_signal_min_liq_usd", 10_000.0))
+        min_liq = float(getattr(settings, "analysis_signal_min_liq_usd", 20_000.0))
         if total_usd < min_liq:
             return f"liq_${total_usd:.0f}_lt_{min_liq:.0f}"
         return None
@@ -100,12 +101,47 @@ def _analysis_prefilter(
         if oi_usd is not None and oi_usd < min_oi:
             return f"oi_${oi_usd:.0f}_lt_{min_oi:.0f}"
 
-    min_events = int(getattr(settings, "analysis_min_cluster_events", 2))
-    min_single = float(getattr(settings, "analysis_single_event_min_usd", 55_000.0))
-    if source == "liq_alert" and event_count is not None:
-        if event_count < min_events and total_usd < min_single:
-            return f"cluster_{event_count}ev_lt_{min_single:.0f}"
+    min_events = int(getattr(settings, "analysis_min_cluster_events", 1))
+    min_single = float(getattr(settings, "analysis_single_event_min_usd", 25_000.0))
+    if (
+        source == "liq_alert"
+        and event_count is not None
+        and min_events > 1
+        and event_count < min_events
+        and total_usd < min_single
+    ):
+        return f"cluster_{event_count}ev_lt_{min_single:.0f}"
     return None
+
+
+def _finalize_verdict(
+    ctx: object,
+    verdict: ScenarioVerdict,
+    oi_change_pct: float | None,
+) -> ScenarioVerdict:
+    """Слабый тренд / нет OI → выжидание вместо полного молчания."""
+    if verdict.direction not in ("long", "short"):
+        return verdict
+    trend_quality = getattr(ctx, "trend_quality", "weak")
+    oi_narrative = getattr(ctx, "oi_narrative", "")
+    has_oi_delta = oi_change_pct is not None and abs(oi_change_pct) >= 0.8
+    if trend_quality == "weak":
+        return ScenarioVerdict(
+            "wait",
+            "⏸ выжидание",
+            "слабый тренд — наблюдай, не входи по направлению",
+            continuation_up=False,
+            continuation_down=False,
+        )
+    if oi_narrative == "insufficient_oi" and not has_oi_delta:
+        return ScenarioVerdict(
+            "wait",
+            "⏸ выжидание",
+            "мало данных OI — жди подтверждения на графике",
+            continuation_up=False,
+            continuation_down=False,
+        )
+    return verdict
 
 
 FACTOR_WEIGHTS: dict[str, float] = {
@@ -576,16 +612,7 @@ class LiquidationAnalysisEngine:
             oi_change_pct=oi_change_pct,
             buy_ratio=buy_ratio,
         )
-
-        if verdict.direction in ("long", "short"):
-            if ctx.trend_quality == "weak":
-                self._stats["skipped_trend"] += 1
-                logger.info("Analysis skip %s: directional %s on weak trend", symbol, verdict.direction)
-                return None
-            if ctx.oi_narrative == "insufficient_oi":
-                self._stats["skipped_oi"] += 1
-                logger.info("Analysis skip %s: directional %s without OI data", symbol, verdict.direction)
-                return None
+        verdict = _finalize_verdict(ctx, verdict, oi_change_pct)
 
         predict_long = verdict.direction == "long"
         if verdict.direction == "wait":
