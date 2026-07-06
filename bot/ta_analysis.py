@@ -1992,8 +1992,10 @@ def ta_chart_key_levels_text(ta: TAAnalysisResult) -> str:
     if not ta.key_levels:
         return ""
     lines = ["КЛЮЧЕВЫЕ УРОВНИ"]
-    for kl in ta.key_levels[:4]:
+    for kl in ta.key_levels[:6]:
+        role = _key_level_role_ru(kl.role)
         lines.append(f"{fmt_price(kl.price)} — {kl.label}")
+        lines.append(f"  ({role})")
     return "\n".join(lines)
 
 
@@ -2001,11 +2003,49 @@ def ta_chart_scenario_text(scenario: TradeScenario | None, *, title: str) -> str
     if scenario is None:
         return ""
     lines = [title, f"триггер {fmt_price(scenario.trigger_price)}"]
-    for cond in scenario.conditions[:2]:
+    for cond in scenario.conditions[:4]:
         lines.append(f"• {cond}")
-    tps = " → ".join(fmt_price(t) for t in scenario.target_prices[:2])
+    tps = " → ".join(fmt_price(t) for t in scenario.target_prices[:3])
     lines.append(f"цели: {tps}")
     lines.append(f"стоп {fmt_price(scenario.stop_price)}")
+    rr = _estimate_rr(
+        scenario.trigger_price,
+        scenario.stop_price,
+        scenario.target_prices,
+        is_long=scenario.direction == "long",
+    )
+    if rr:
+        lines.append(f"R:R {rr}")
+    return "\n".join(lines)
+
+
+def ta_chart_context_text(ta: TAAnalysisResult) -> str:
+    lines = ["КОНТЕКСТ"]
+    if ta.structure_label:
+        lines.append(_structure_plain(ta.structure_label))
+    if ta.momentum_label:
+        lines.append(ta.momentum_label)
+    if ta.phase_label and ta.phase_label != "Без явной фазы":
+        lines.append(ta.phase_label)
+    if ta.market_bias:
+        lines.append(f"bias: {ta.market_bias}")
+    if ta.oi_narrative_label:
+        lines.append(f"OI: {ta.oi_narrative_label}")
+    if ta.range_position:
+        lines.append(f"в range: {ta.range_position * 100:.0f}%")
+    if ta.post_pump:
+        lines.append("фаза: после пампа")
+    for fl in ta.factor_lines[:3]:
+        lines.append(fl[:48])
+    return "\n".join(lines[:10])
+
+
+def ta_chart_plan_text(ta: TAAnalysisResult) -> str:
+    if not ta.trader_plan:
+        return ""
+    lines = ["ПЛАН ДЕЙСТВИЙ"]
+    for i, step in enumerate(ta.trader_plan[:8], 1):
+        lines.append(f"{i}. {step}")
     return "\n".join(lines)
 
 
@@ -2013,10 +2053,9 @@ def ta_chart_summary_text(ta: TAAnalysisResult) -> str:
     score = ta_display_score(ta)
     lines = [f"ИТОГ: {ta.verdict} {score}/10"]
     if ta.professional_summary:
-        summary = ta.professional_summary
-        if len(summary) > 120:
-            summary = summary[:117] + "..."
-        lines.append(summary)
+        lines.append(ta.professional_summary[:200])
+    if ta.verdict_reason:
+        lines.append(ta.verdict_reason[:100])
     return "\n".join(lines)
 
 
@@ -2036,9 +2075,14 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
         lines.append(f"SHORT от: {fmt_price(ta.breakdown_level)}{extra}")
     if ta.invalidation_price:
         lines.append(f"стоп: {fmt_price(ta.invalidation_price)}")
+    if ta.target_prices:
+        tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
+        lines.append(f"цели: {tps}")
+    if ta.primary_scenario:
+        lines.append(ta.primary_scenario[:70])
     if ta.range_position:
         lines.append(f"range: {ta.range_position * 100:.0f}%")
-    return "\n".join(lines[:7])
+    return "\n".join(lines[:10])
 
 
 def ta_chart_legend_text() -> str:

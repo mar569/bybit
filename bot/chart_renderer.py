@@ -23,6 +23,8 @@ from .ta_analysis import (
     run_ta_analysis,
     ta_chart_key_levels_text,
     ta_chart_legend_text,
+    ta_chart_context_text,
+    ta_chart_plan_text,
     ta_chart_panel_text,
     ta_chart_scenario_text,
     ta_chart_summary_text,
@@ -460,63 +462,67 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
 
 def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
-    """Текстовые блоки в боковых полях figure — не поверх свечей."""
+    """Текстовые блоки в боковых полях — полная колонка слева/справа."""
     base_bbox = dict(
-        boxstyle="round,pad=0.35",
+        boxstyle="round,pad=0.4",
         facecolor=CHART_STYLE["panel"],
         edgecolor=CHART_STYLE["panel_border"],
-        alpha=0.93,
+        alpha=0.94,
     )
     panel_style = dict(
         transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=6.5,
-        linespacing=1.3,
+        fontsize=6.8,
+        linespacing=1.28,
         bbox=base_bbox,
     )
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
     bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
+    ctx_style = {**panel_style, "fontsize": 6.4}
+
+    lx, rx = 0.006, 0.994
 
     fig.text(
-        0.01, 0.97, ta_chart_legend_text(),
-        va="top", ha="left", fontsize=5.6, color=CHART_STYLE["text"],
+        lx, 0.985, ta_chart_legend_text(),
+        va="top", ha="left", fontsize=5.5, color=CHART_STYLE["text"],
         transform=fig.transFigure,
         bbox=dict(boxstyle="round,pad=0.25", facecolor=CHART_STYLE["panel"],
-                  edgecolor=CHART_STYLE["panel_border"], alpha=0.85),
+                  edgecolor=CHART_STYLE["panel_border"], alpha=0.88),
     )
 
     key_levels = ta_chart_key_levels_text(ta)
     if key_levels:
-        fig.text(0.01, 0.84, key_levels, va="top", ha="left", **panel_style)
+        fig.text(lx, 0.90, key_levels, va="top", ha="left", **panel_style)
 
-    if ta.trader_plan:
-        plan_lines = [f"{i + 1}. {step}" for i, step in enumerate(ta.trader_plan[:6])]
-        fig.text(
-            0.01, 0.50, "ПЛАН ДЕЙСТВИЙ:\n" + "\n".join(plan_lines),
-            va="top", ha="left", **panel_style,
-        )
+    plan = ta_chart_plan_text(ta)
+    if plan:
+        fig.text(lx, 0.58, plan, va="top", ha="left", **panel_style)
 
-    fig.text(0.99, 0.97, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
+    context = ta_chart_context_text(ta)
+    if len(context.splitlines()) > 1:
+        fig.text(lx, 0.22, context, va="top", ha="left", **ctx_style)
+
+    fig.text(rx, 0.985, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
 
     bull_text = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
     if bull_text:
-        fig.text(0.99, 0.66, bull_text, va="top", ha="right", **bull_style)
+        fig.text(rx, 0.58, bull_text, va="top", ha="right", **bull_style)
 
     bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
     if bear_text:
-        fig.text(0.99, 0.38, bear_text, va="top", ha="right", **bear_style)
+        fig.text(rx, 0.22, bear_text, va="top", ha="right", **bear_style)
 
     summary = ta_chart_summary_text(ta)
     if summary:
         fig.text(
-            0.50, 0.02, summary,
-            va="bottom", ha="center", fontsize=6.3, color=CHART_STYLE["text"],
+            0.50, 0.015, summary,
+            va="bottom", ha="center", fontsize=6.5, color=CHART_STYLE["text"],
             transform=fig.transFigure,
             bbox=dict(
-                boxstyle="round,pad=0.35",
+                boxstyle="round,pad=0.4",
                 facecolor=CHART_STYLE["panel"],
                 edgecolor=CHART_STYLE["warning"],
-                alpha=0.92,
+                alpha=0.93,
             ),
         )
 
@@ -545,10 +551,10 @@ def _render_chart_figure(
     accent_color: str,
     interval_minutes: int = 5,
 ) -> bytes:
-    fig, ax = plt.subplots(figsize=(13, 7.5), dpi=120)
+    fig, ax = plt.subplots(figsize=(17, 8.5), dpi=120)
     fig.patch.set_facecolor(CHART_STYLE["bg"])
     ax.set_facecolor(CHART_STYLE["bg"])
-    fig.subplots_adjust(left=0.27, right=0.73, top=0.91, bottom=0.11)
+    fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
 
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta)
