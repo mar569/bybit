@@ -32,6 +32,7 @@ from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
+    base_ticker,
     coinglass_url,
     format_liquidation_alert,
 )
@@ -500,9 +501,15 @@ class TelegramBot:
                 InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(result.symbol, result.exchange)),
             ],
         ])
-        sent = False
+        sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=False)
+        if not sent:
+            logger.warning(
+                "Analysis NOT delivered to chat %s for %s (send failed or rate limit)",
+                chat_id,
+                result.symbol,
+            )
+            return
         if settings.analysis_chart_enabled:
-            png = None
             try:
                 png = await asyncio.wait_for(
                     chart_capture_service.capture_tradingview(
@@ -510,18 +517,18 @@ class TelegramBot:
                         result.symbol,
                         interval_minutes=settings.analysis_chart_interval_minutes,
                     ),
-                    timeout=25.0,
+                    timeout=20.0,
                 )
             except asyncio.TimeoutError:
                 logger.warning("Analysis chart timeout for %s", result.symbol)
+                png = None
             except Exception:
                 logger.exception("Analysis chart capture failed for %s", result.symbol)
+                png = None
             if png:
-                sent = await self._send_chart(
-                    chat_id, png, message, is_priority=False, keyboard=keyboard,
+                await self._send_chart(
+                    chat_id, png, f"📊 #{base_ticker(result.symbol)}", is_priority=False,
                 )
-        if not sent:
-            sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=False)
         if sent:
             logger.info(
                 "Analysis alert %s %s conf=%.0f%% %s",

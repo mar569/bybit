@@ -51,15 +51,21 @@ def resolve_analysis_min_liq_usd(
     *,
     in_top_n: bool = True,
 ) -> tuple[float | None, str]:
-    """Порог liq для разбора. None = монета не попадает в analysis-чат."""
+    """Порог liq для разбора — не выше tier-порогов REKT-алертов."""
     tier = classify_symbol(symbol.upper(), settings, in_top_n=in_top_n)
     if bool(getattr(settings, "analysis_skip_alt_tier", False)) and tier == SymbolTier.ALT:
         return None, "alt_tier"
+    alt_min = float(getattr(settings, "liquidation_alt_min_usd", 20_000.0))
+    mid_min = float(getattr(settings, "liquidation_mid_min_usd", 35_000.0))
+    major_min = float(getattr(settings, "liquidation_min_usd", 50_000.0))
     if tier == SymbolTier.MAJOR:
-        return float(getattr(settings, "analysis_major_min_liq_usd", 35_000.0)), ""
+        cap = float(getattr(settings, "analysis_major_min_liq_usd", 35_000.0))
+        return min(cap, major_min), ""
     if tier == SymbolTier.ALT:
-        return float(getattr(settings, "analysis_alt_min_liq_usd", 20_000.0)), ""
-    return float(getattr(settings, "analysis_min_liq_usd", 25_000.0)), ""
+        cap = float(getattr(settings, "analysis_alt_min_liq_usd", 20_000.0))
+        return min(cap, alt_min), ""
+    cap = float(getattr(settings, "analysis_min_liq_usd", 25_000.0))
+    return min(cap, mid_min), ""
 
 
 def _analysis_prefilter(
@@ -472,13 +478,16 @@ class LiquidationAnalysisEngine:
                 skip_trend_gate=skip_trend_gate,
             )
             if result is None:
+                logger.info("Analysis skip %s: build returned None", symbol)
                 return
-            min_conf = float(getattr(settings, "analysis_min_confidence", 55.0))
-            if result.direction in ("long", "short"):
-                min_conf = max(
-                    min_conf,
-                    float(getattr(settings, "analysis_min_confidence_directional", 68.0)),
+            if result.direction == "wait":
+                min_conf = float(getattr(settings, "analysis_min_confidence_wait", 42.0))
+            elif result.direction in ("long", "short"):
+                min_conf = float(
+                    getattr(settings, "analysis_min_confidence_directional", 58.0)
                 )
+            else:
+                min_conf = float(getattr(settings, "analysis_min_confidence", 48.0))
             if result.confidence < min_conf:
                 self._stats["skipped_confidence"] += 1
                 logger.info(

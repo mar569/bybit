@@ -50,6 +50,25 @@ async def _scanner_heartbeat_loop(scanner: SignalEngine) -> None:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
+async def _analysis_heartbeat_loop(analysis_engine: LiquidationAnalysisEngine) -> None:
+    await asyncio.sleep(120)
+    while True:
+        ad = analysis_engine.get_diagnostics()
+        logger.info(
+            "Analysis heartbeat: scheduled=%d sent=%d pending=%d "
+            "skip_thr=%d skip_trend=%d skip_conf=%d skip_cd=%d errors=%d",
+            ad["scheduled"],
+            ad["sent"],
+            ad["pending"],
+            ad["skipped_threshold"],
+            ad.get("skipped_trend", 0),
+            ad["skipped_confidence"],
+            ad.get("skipped_cooldown", 0),
+            ad["errors"],
+        )
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+
 async def main() -> None:
     config = Config.load()
     settings = SettingsManager()
@@ -171,6 +190,7 @@ async def main() -> None:
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
     anomaly_task: asyncio.Task | None = None
+    analysis_heartbeat_task: asyncio.Task | None = None
     try:
         await telegram.start()
         try:
@@ -190,6 +210,22 @@ async def main() -> None:
             len(bybit.symbols),
             len(binance.symbols),
         )
+        if config.analysis_chat_configured:
+            logger.info(
+                "Analysis chat=%s | liq≥$%s/$%s/$%s alt/standard/major | "
+                "conf wait≥%.0f%% dir≥%.0f%% | chart=%s",
+                config.telegram_analysis_chat_id,
+                int(s.analysis_alt_min_liq_usd),
+                int(s.analysis_min_liq_usd),
+                int(s.analysis_major_min_liq_usd),
+                float(getattr(s, "analysis_min_confidence_wait", 42.0)),
+                float(getattr(s, "analysis_min_confidence_directional", 58.0)),
+                "ON" if s.analysis_chart_enabled else "OFF",
+            )
+        elif s.analysis_enabled:
+            logger.warning(
+                "analysis_enabled=ON but TELEGRAM_ANALYSIS_CHAT_ID is missing — no analysis alerts",
+            )
         if telegram.redis is not None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
@@ -198,6 +234,9 @@ async def main() -> None:
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
+        analysis_heartbeat_task = asyncio.create_task(
+            _analysis_heartbeat_loop(analysis_engine),
+        )
         liq_task = asyncio.create_task(liquidation_tracker.run())
         binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())
         scanner_task = asyncio.create_task(run_scan())
@@ -224,6 +263,8 @@ async def main() -> None:
             eval_task.cancel()
         if heartbeat_task is not None:
             heartbeat_task.cancel()
+        if analysis_heartbeat_task is not None:
+            analysis_heartbeat_task.cancel()
         if outcome_task is not None:
             outcome_task.cancel()
         if analysis_outcome_task is not None:
@@ -241,6 +282,7 @@ async def main() -> None:
                     scanner_task,
                     eval_task,
                     heartbeat_task,
+                    analysis_heartbeat_task,
                     outcome_task,
                     analysis_outcome_task,
                     liq_task,

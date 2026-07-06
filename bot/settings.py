@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 24
+SETTINGS_VERSION = 25
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -24,9 +24,7 @@ PRESERVE_ON_MIGRATE = frozenset({
     "liquidation_all_symbols",
     "liquidation_show_reversal_hint",
     "analysis_enabled",
-    "analysis_min_liq_usd",
     "analysis_delay_seconds",
-    "analysis_min_confidence",
     "analysis_cooldown_seconds",
 })
 
@@ -41,9 +39,7 @@ LIQUIDATION_PRESERVE_KEYS = frozenset({
 
 ANALYSIS_PRESERVE_KEYS = frozenset({
     "analysis_enabled",
-    "analysis_min_liq_usd",
     "analysis_delay_seconds",
-    "analysis_min_confidence",
     "analysis_cooldown_seconds",
 })
 
@@ -290,8 +286,9 @@ class ScannerSettings:
     analysis_signal_trigger_enabled: bool = True
     analysis_signal_min_liq_usd: float = 20_000.0
     analysis_delay_seconds: int = 90
-    analysis_min_confidence: float = 52.0
-    analysis_min_confidence_directional: float = 62.0
+    analysis_min_confidence: float = 48.0
+    analysis_min_confidence_wait: float = 42.0
+    analysis_min_confidence_directional: float = 58.0
     analysis_min_cluster_events: int = 1
     analysis_single_event_min_usd: float = 25_000.0
     analysis_cooldown_seconds: int = 3600
@@ -624,9 +621,12 @@ class ScannerSettings:
                 base.get("analysis_signal_min_liq_usd", 20_000.0)
             ),
             analysis_delay_seconds=int(base.get("analysis_delay_seconds", 90)),
-            analysis_min_confidence=float(base.get("analysis_min_confidence", 52.0)),
+            analysis_min_confidence=float(base.get("analysis_min_confidence", 48.0)),
+            analysis_min_confidence_wait=float(
+                base.get("analysis_min_confidence_wait", 42.0)
+            ),
             analysis_min_confidence_directional=float(
-                base.get("analysis_min_confidence_directional", 62.0)
+                base.get("analysis_min_confidence_directional", 58.0)
             ),
             analysis_min_cluster_events=int(base.get("analysis_min_cluster_events", 1)),
             analysis_single_event_min_usd=float(
@@ -807,6 +807,19 @@ class SettingsManager:
                 merged["analysis_min_confidence_directional"] = 62.0
                 merged["analysis_min_cluster_events"] = 1
                 merged["analysis_single_event_min_usd"] = 25_000.0
+            # v25: сброс залипших порогов (100k liq / 68% conf из старых preserve)
+            if version < 25:
+                merged["analysis_min_liq_usd"] = 25_000.0
+                merged["analysis_major_min_liq_usd"] = 35_000.0
+                merged["analysis_alt_min_liq_usd"] = 20_000.0
+                merged["analysis_min_confidence"] = 48.0
+                merged["analysis_min_confidence_wait"] = 42.0
+                merged["analysis_min_confidence_directional"] = 58.0
+                merged["analysis_min_oi_usd"] = 0.0
+                merged["analysis_signal_min_liq_usd"] = 20_000.0
+                merged["analysis_min_cluster_events"] = 1
+                merged["analysis_max_per_hour"] = 6
+                merged["analysis_chart_enabled"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -814,7 +827,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v24: analysis flow restored; preserved: %s)",
+                "Settings migrated v%d → v%d (v25: fix stuck analysis thresholds; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
