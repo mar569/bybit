@@ -459,62 +459,59 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         )
 
 
-def _draw_info_panels(ax: plt.Axes, ta: TAAnalysisResult) -> None:
+def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
+    """Текстовые блоки в боковых полях figure — не поверх свечей."""
+    base_bbox = dict(
+        boxstyle="round,pad=0.35",
+        facecolor=CHART_STYLE["panel"],
+        edgecolor=CHART_STYLE["panel_border"],
+        alpha=0.93,
+    )
     panel_style = dict(
-        transform=ax.transAxes,
+        transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=6.8,
-        linespacing=1.35,
-        bbox=dict(
-            boxstyle="round,pad=0.4",
-            facecolor=CHART_STYLE["panel"],
-            edgecolor=CHART_STYLE["panel_border"],
-            alpha=0.93,
-        ),
+        fontsize=6.5,
+        linespacing=1.3,
+        bbox=base_bbox,
     )
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
     bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
 
-    verdict_text = ta_chart_panel_text(ta)
-    ax.text(0.99, 0.98, verdict_text, va="top", ha="right", **panel_style)
+    fig.text(
+        0.01, 0.97, ta_chart_legend_text(),
+        va="top", ha="left", fontsize=5.6, color=CHART_STYLE["text"],
+        transform=fig.transFigure,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor=CHART_STYLE["panel"],
+                  edgecolor=CHART_STYLE["panel_border"], alpha=0.85),
+    )
 
     key_levels = ta_chart_key_levels_text(ta)
     if key_levels:
-        ax.text(0.01, 0.72, key_levels, va="top", ha="left", **panel_style)
-
-    ax.text(
-        0.01, 0.98, ta_chart_legend_text(),
-        va="top", ha="left", fontsize=5.8, color=CHART_STYLE["text"],
-        transform=ax.transAxes,
-        bbox=dict(
-            boxstyle="round,pad=0.25",
-            facecolor=CHART_STYLE["panel"],
-            edgecolor=CHART_STYLE["panel_border"],
-            alpha=0.85,
-        ),
-    )
+        fig.text(0.01, 0.84, key_levels, va="top", ha="left", **panel_style)
 
     if ta.trader_plan:
         plan_lines = [f"{i + 1}. {step}" for i, step in enumerate(ta.trader_plan[:6])]
-        ax.text(
-            0.01, 0.38, "ПЛАН ДЕЙСТВИЙ:\n" + "\n".join(plan_lines),
+        fig.text(
+            0.01, 0.50, "ПЛАН ДЕЙСТВИЙ:\n" + "\n".join(plan_lines),
             va="top", ha="left", **panel_style,
         )
 
+    fig.text(0.99, 0.97, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
+
     bull_text = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
     if bull_text:
-        ax.text(0.99, 0.58, bull_text, va="top", ha="right", **bull_style)
+        fig.text(0.99, 0.66, bull_text, va="top", ha="right", **bull_style)
 
     bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
     if bear_text:
-        ax.text(0.99, 0.30, bear_text, va="top", ha="right", **bear_style)
+        fig.text(0.99, 0.38, bear_text, va="top", ha="right", **bear_style)
 
     summary = ta_chart_summary_text(ta)
     if summary:
-        ax.text(
-            0.5, 0.01, summary,
-            va="bottom", ha="center", fontsize=6.5, color=CHART_STYLE["text"],
-            transform=ax.transAxes,
+        fig.text(
+            0.50, 0.02, summary,
+            va="bottom", ha="center", fontsize=6.3, color=CHART_STYLE["text"],
+            transform=fig.transFigure,
             bbox=dict(
                 boxstyle="round,pad=0.35",
                 facecolor=CHART_STYLE["panel"],
@@ -548,9 +545,10 @@ def _render_chart_figure(
     accent_color: str,
     interval_minutes: int = 5,
 ) -> bytes:
-    fig, ax = plt.subplots(figsize=(12, 7), dpi=120)
+    fig, ax = plt.subplots(figsize=(13, 7.5), dpi=120)
     fig.patch.set_facecolor(CHART_STYLE["bg"])
     ax.set_facecolor(CHART_STYLE["bg"])
+    fig.subplots_adjust(left=0.27, right=0.73, top=0.91, bottom=0.11)
 
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta)
@@ -566,7 +564,7 @@ def _render_chart_figure(
         f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}",
         color=CHART_STYLE["text"], fontsize=11, pad=14,
     )
-    _draw_info_panels(ax, ta)
+    _draw_info_panels(fig, ta)
     _style_axes(ax, bars)
     fig.autofmt_xdate(rotation=0)
 

@@ -1741,8 +1741,57 @@ def ta_manual_compact_html(ta: TAAnalysisResult) -> str:
     return ta_action_summary_html(ta)
 
 
+def ta_signal_scenario_line_html(ta: TAAnalysisResult) -> str:
+    """Одна строка сценария для обычных сигналов."""
+    if ta.verdict == "LONG":
+        head = "▶️ <b>Открывать LONG</b>"
+        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+            head = f"▶️ <b>LONG</b> · {ta.range_trade_label}"
+        parts = [head]
+        if ta.breakout_level:
+            parts.append(f"вход ≥<b>{fmt_price(ta.breakout_level)}</b>")
+        if ta.invalidation_price:
+            parts.append(f"стоп <b>{fmt_price(ta.invalidation_price)}</b>")
+        if ta.target_prices:
+            parts.append(f"TP <b>{fmt_price(ta.target_prices[0])}</b>")
+        return " · ".join(parts)
+
+    if ta.verdict == "SHORT":
+        head = "▶️ <b>Открывать SHORT</b>"
+        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+            head = f"▶️ <b>SHORT</b> · {ta.range_trade_label}"
+        parts = [head]
+        if ta.breakdown_level:
+            parts.append(f"вход ≤<b>{fmt_price(ta.breakdown_level)}</b>")
+        if ta.invalidation_price:
+            parts.append(f"стоп <b>{fmt_price(ta.invalidation_price)}</b>")
+        if ta.target_prices:
+            parts.append(f"TP <b>{fmt_price(ta.target_prices[0])}</b>")
+        return " · ".join(parts)
+
+    if ta.action_priority == "long" and ta.breakout_level:
+        return (
+            f"▶️ <b>Не входить</b> · приоритет LONG при ≥"
+            f"<b>{fmt_price(ta.breakout_level)}</b>"
+        )
+    if ta.action_priority == "short" and ta.breakdown_level:
+        return (
+            f"▶️ <b>Не входить</b> · приоритет SHORT при ≤"
+            f"<b>{fmt_price(ta.breakdown_level)}</b>"
+        )
+
+    triggers: list[str] = []
+    if ta.breakout_level:
+        triggers.append(f"LONG ≥<b>{fmt_price(ta.breakout_level)}</b>")
+    if ta.breakdown_level:
+        triggers.append(f"SHORT ≤<b>{fmt_price(ta.breakdown_level)}</b>")
+    if triggers:
+        return f"▶️ <b>Не входить</b> · ждать {' / '.join(triggers)}"
+    return "▶️ <b>Не входить</b> · дождаться пробоя уровня"
+
+
 def ta_signal_caption_html(ta: TAAnalysisResult) -> str:
-    """Сигналы: одна строка TA, без длинного разбора."""
+    """Сигналы: TA + одна строка сценария."""
     score = ta_display_score(ta)
     if ta.verdict == "LONG":
         line = f"📐 TA · <b>LONG</b> {score}/10"
@@ -1759,7 +1808,7 @@ def ta_signal_caption_html(ta: TAAnalysisResult) -> str:
         elif ta.action_priority == "short":
             extra = " · ближе SHORT"
         line = f"📐 TA · WAIT {score}/10{extra}"
-    return line
+    return f"{line}\n{ta_signal_scenario_line_html(ta)}"
 
 
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:

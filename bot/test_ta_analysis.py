@@ -180,7 +180,8 @@ def test_ta_signal_caption_html() -> None:
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
     caption = ta_signal_caption_html(ta)
     assert "📐 TA" in caption
-    assert "\n" not in caption
+    assert "▶️" in caption
+    assert caption.count("\n") == 1
 
 
 def test_ta_manual_detailed_html() -> None:
