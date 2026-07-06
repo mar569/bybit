@@ -844,6 +844,22 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
         lines.append(f"🎯 цели: {tps}")
     if ta.verdict_reason:
         lines.append(f"<i>{ta.verdict_reason[:120]}</i>")
+    if ta.verdict == "LONG":
+        if ta.breakout_level:
+            lines.append(f"👉 Позиция: <b>LONG</b> при закреплении выше <b>{fmt_price(ta.breakout_level)}</b>")
+        else:
+            lines.append("👉 Позиция: <b>LONG</b> (вход по подтверждению импульса)")
+    elif ta.verdict == "SHORT":
+        if ta.breakdown_level:
+            lines.append(f"👉 Позиция: <b>SHORT</b> при пробое ниже <b>{fmt_price(ta.breakdown_level)}</b>")
+        else:
+            lines.append("👉 Позиция: <b>SHORT</b> (вход по подтверждению снижения)")
+    else:
+        long_hint = fmt_price(ta.breakout_level) if ta.breakout_level else "локального сопротивления"
+        short_hint = fmt_price(ta.breakdown_level) if ta.breakdown_level else "локальной поддержки"
+        lines.append(
+            f"👉 Позиция: <b>WAIT</b> · long при пробое <b>{long_hint}</b> / short при пробое <b>{short_hint}</b>"
+        )
     return "\n".join(lines)
 
 

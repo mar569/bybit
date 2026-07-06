@@ -121,6 +121,9 @@ class TelegramBot:
                     f"(≥${int(s.liquidation_min_usd):,} · Binance+Bybit)".replace(",", " ")
                     + f"\n🧠 Анализ: {'вкл' if s.analysis_enabled and self.config.analysis_chat_configured else 'выкл'} "
                     f"(≥${int(s.analysis_min_liq_usd):,} · conf≥{s.analysis_min_confidence:.0f}%)".replace(",", " ")
+                    + f"\n📈 График к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
+                    f"· режим <b>{s.signal_chart_source}</b> "
+                    f"{'(TA-разметка)' if s.signal_chart_source == 'annotated' else '(скрин TV/CG)'}"
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
