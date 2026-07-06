@@ -27,7 +27,8 @@ from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
 from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
-from .chart_renderer import get_signal_chart_png
+from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart
+from .ta_analysis import ta_telegram_caption_html
 from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
@@ -81,6 +82,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("test", self.on_test))
         self.application.add_handler(CommandHandler("test_analysis", self.on_test_analysis))
         self.application.add_handler(CommandHandler("scan", self.on_scan))
+        self.application.add_handler(CommandHandler("chart", self.on_chart))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
         self.application.add_handler(CommandHandler("resume", self.on_resume))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
@@ -364,9 +366,17 @@ class TelegramBot:
             warning = ""
             if isinstance(ms, dict):
                 warning = str(ms.get("structure_warning", ""))
+            oi_bars = None
+            if self.scanner is not None:
+                try:
+                    oi_bars = self.scanner.get_five_min_oi_bars(signal.exchange, signal.symbol)
+                except Exception:
+                    oi_bars = None
             png = None
+            ta_result = None
+            chart_source = ""
             try:
-                png, _source = await asyncio.wait_for(
+                png, chart_source, ta_result = await asyncio.wait_for(
                     get_signal_chart_png(
                         signal.exchange,
                         signal.symbol,
@@ -379,6 +389,7 @@ class TelegramBot:
                             signal.details.get("probability_percent", 0) or 0
                         ),
                         coinglass_url=signal.link,
+                        oi_bars=oi_bars,
                     ),
                     timeout=25.0,
                 )
@@ -386,9 +397,12 @@ class TelegramBot:
                 logger.warning("Chart capture timeout for %s", signal.symbol)
             except Exception:
                 logger.exception("Chart capture failed for %s", signal.symbol)
+            chart_caption = message
+            if ta_result is not None and chart_source == "annotated":
+                chart_caption = f"{message}\n\n{ta_telegram_caption_html(ta_result)}"
             if png:
                 sent_any = await self._send_chart(
-                    notify_chat_id, png, message, is_priority=is_priority, keyboard=keyboard,
+                    notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
                 )
 
         if not sent_any:
@@ -510,24 +524,62 @@ class TelegramBot:
             )
             return
         if settings.analysis_chart_enabled:
+            oi_bars = None
+            if self.scanner is not None:
+                try:
+                    oi_bars = self.scanner.get_five_min_oi_bars(result.exchange, result.symbol)
+                except Exception:
+                    oi_bars = None
+            png = None
+            ta_result = None
+            chart_src = getattr(settings, "analysis_chart_source", "annotated")
             try:
-                png = await asyncio.wait_for(
-                    chart_capture_service.capture_tradingview(
-                        result.exchange,
-                        result.symbol,
-                        interval_minutes=settings.analysis_chart_interval_minutes,
-                    ),
-                    timeout=20.0,
-                )
+                if chart_src == "annotated":
+                    png, ta_result = await asyncio.wait_for(
+                        render_analysis_chart(
+                            result.symbol,
+                            direction=result.direction,
+                            hours=settings.signal_chart_hours,
+                            invalidation_price=result.invalidation_price,
+                            oi_bars=oi_bars,
+                        ),
+                        timeout=20.0,
+                    )
+                else:
+                    png = await asyncio.wait_for(
+                        chart_capture_service.capture_tradingview(
+                            result.exchange,
+                            result.symbol,
+                            interval_minutes=settings.analysis_chart_interval_minutes,
+                        ),
+                        timeout=20.0,
+                    )
             except asyncio.TimeoutError:
                 logger.warning("Analysis chart timeout for %s", result.symbol)
                 png = None
             except Exception:
                 logger.exception("Analysis chart capture failed for %s", result.symbol)
                 png = None
+            if png is None and chart_src != "annotated":
+                try:
+                    png, ta_result = await render_analysis_chart(
+                        result.symbol,
+                        direction=result.direction,
+                        hours=settings.signal_chart_hours,
+                        invalidation_price=result.invalidation_price,
+                        oi_bars=oi_bars,
+                    )
+                except Exception:
+                    logger.exception("Analysis annotated fallback failed for %s", result.symbol)
             if png:
+                caption = (
+                    f"📊 #{base_ticker(result.symbol)} · {result.direction_label} "
+                    f"· {result.confidence:.0f}%"
+                )
+                if ta_result is not None:
+                    caption = f"{caption}\n\n{ta_telegram_caption_html(ta_result)}"
                 await self._send_chart(
-                    chat_id, png, f"📊 #{base_ticker(result.symbol)}", is_priority=False,
+                    chat_id, png, caption, is_priority=False,
                 )
         if sent:
             logger.info(
@@ -702,6 +754,56 @@ class TelegramBot:
             reply_markup=self._settings_keyboard(),
         )
 
+    async def on_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        if not update.message:
+            return
+
+        raw = (context.args[0] if context.args else "BTCUSDT").upper().strip()
+        symbol = raw if raw.endswith("USDT") else f"{raw}USDT"
+        side = "short" if len(context.args) > 1 and context.args[1].lower() == "short" else "long"
+        hours = settings.signal_chart_hours if (settings := self.settings_manager.settings) else 5
+
+        await update.message.reply_text(f"⏳ TA-график <b>{symbol}</b> ({side})…", parse_mode=ParseMode.HTML)
+
+        oi_bars = None
+        if self.scanner is not None:
+            try:
+                oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
+            except Exception:
+                oi_bars = None
+
+        try:
+            png, ta = await asyncio.wait_for(
+                render_annotated_chart(symbol, side=side, hours=hours, oi_bars=oi_bars),
+                timeout=25.0,
+            )
+        except asyncio.TimeoutError:
+            await update.message.reply_text(f"Таймаут загрузки свечей для {symbol}.")
+            return
+        except Exception:
+            logger.exception("Manual chart failed for %s", symbol)
+            await update.message.reply_text(f"Ошибка построения графика {symbol}.")
+            return
+
+        if not png or ta is None:
+            await update.message.reply_text(f"Нет данных Bybit для {symbol}.")
+            return
+
+        caption = ta_telegram_caption_html(ta)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))],
+        ])
+        await self._send_chart(
+            update.effective_chat.id,
+            png,
+            caption,
+            is_priority=False,
+            keyboard=keyboard,
+        )
+
     async def on_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -866,6 +968,7 @@ class TelegramBot:
             "/settings — inline-настройки порогов\n"
             "/set help — точная настройка через команды\n"
             "/test — тестовые сигналы LONG + SHORT\n"
+            "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить уведомления\n"
             "/resume — возобновить уведомления\n"

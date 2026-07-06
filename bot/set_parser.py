@@ -262,10 +262,11 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
             value = raw_value.lower()
-            if value not in {"tradingview", "coinglass", "generated"}:
+            if value not in {"tradingview", "coinglass", "generated", "annotated"}:
                 return SetResult(
                     False,
-                    "График: <code>tradingview</code> | <code>coinglass</code> | <code>generated</code>",
+                    "График: <code>annotated</code> | <code>tradingview</code> | "
+                    "<code>coinglass</code> | <code>generated</code>",
                     {},
                 )
         elif field in INT_FIELDS or field.endswith("_period_minutes"):

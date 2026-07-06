@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from bot.bybit_klines import KlineBar
+from bot.ta_analysis import (
+    classify_structure,
+    detect_candle_patterns,
+    detect_channel,
+    detect_consolidation,
+    detect_price_zones,
+    find_swing_points,
+    run_ta_analysis,
+    ta_telegram_caption_html,
+)
+
+
+def _bar(
+    i: int,
+    o: float,
+    h: float,
+    l: float,
+    c: float,
+    *,
+    base_ts: float = 1_700_000_000.0,
+) -> KlineBar:
+    return KlineBar(
+        open_time=base_ts + i * 300,
+        open=o,
+        high=h,
+        low=l,
+        close=c,
+        volume=1000.0,
+    )
+
+
+def _trend_up_bars(n: int = 40) -> list[KlineBar]:
+    bars: list[KlineBar] = []
+    price = 100.0
+    for i in range(n):
+        o = price
+        c = price + 0.4
+        bars.append(_bar(i, o, c + 0.2, o - 0.1, c))
+        price = c
+    return bars
+
+
+def test_find_swing_points_detects_local_extrema() -> None:
+    bars = [
+        _bar(0, 10, 11, 9, 10),
+        _bar(1, 10, 12, 9.5, 11),
+        _bar(2, 11, 13, 10, 12),
+        _bar(3, 12, 12.5, 11, 11.5),
+        _bar(4, 11.5, 12, 10, 10.5),
+        _bar(5, 10.5, 11, 9, 9.5),
+    ]
+    swings = find_swing_points(bars, window=1)
+    kinds = {s.kind for s in swings}
+    assert "high" in kinds
+    assert "low" in kinds
+
+
+def test_hammer_pattern() -> None:
+    bars = _trend_up_bars(20)
+    bars.append(_bar(20, 120.0, 120.5, 115.0, 120.2))
+    patterns = detect_candle_patterns(bars)
+    assert any(p.name == "hammer" for p in patterns)
+
+
+def test_consolidation_narrow_range() -> None:
+    bars = _trend_up_bars(25)
+    base = 110.0
+    for i in range(18):
+        o = base + (i % 3) * 0.1
+        bars.append(_bar(25 + i, o, o + 0.15, o - 0.15, o + 0.05))
+    zone = detect_consolidation(bars, lookback=18)
+    assert zone is not None
+    assert zone.top - zone.bottom < zone.top * 0.04
+
+
+def test_classify_structure_bullish() -> None:
+    swings = find_swing_points(_trend_up_bars(50))
+    label = classify_structure(swings)
+    assert "бычья" in label or "боковая" in label
+
+
+def test_run_ta_analysis_returns_levels_and_verdict() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="ETHUSDT")
+    assert ta.verdict in {"LONG", "SHORT", "WAIT"}
+    assert 1 <= ta.verdict_confidence <= 9
+    assert ta.invalidation_price is not None
+    assert len(ta.rulers) >= 1
+    assert isinstance(ta.trader_plan, list)
+    assert ta.bullish_scenario is not None or ta.bearish_scenario is not None
+
+
+def _descending_channel_bars(n: int = 50) -> list[KlineBar]:
+    bars: list[KlineBar] = []
+    for i in range(n):
+        mid = 100.0 - i * 0.35
+        o = mid + 0.1
+        c = mid - 0.1
+        bars.append(_bar(i, o, mid + 0.5, mid - 0.5, c))
+    return bars
+
+
+def test_detect_channel_bear() -> None:
+    bars = _descending_channel_bars(40)
+    swings = find_swing_points(bars, window=2)
+    channel = detect_channel(bars, swings)
+    assert channel is not None
+    assert channel.kind == "bear"
+
+
+def test_detect_price_zones() -> None:
+    bars = _trend_up_bars(50)
+    swings = find_swing_points(bars, window=2)
+    zones = detect_price_zones(bars, swings)
+    assert isinstance(zones, list)
+
+
+def test_ta_telegram_caption_html() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
+    caption = ta_telegram_caption_html(ta)
+    assert "TA" in caption
+    assert ta.verdict in caption

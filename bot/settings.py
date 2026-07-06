@@ -242,9 +242,9 @@ class ScannerSettings:
     market_structure_enabled: bool = True
     market_structure_hours: int = 5
 
-    # График к сигналу: tradingview = реальный TV (как Bybit), coinglass, generated
+    # График к сигналу: annotated = TA-разметка, tradingview, coinglass, generated
     signal_chart_enabled: bool = True
-    signal_chart_source: str = "tradingview"
+    signal_chart_source: str = "annotated"
     signal_chart_hours: int = 5
     signal_chart_interval_minutes: int = 5
 
@@ -308,6 +308,7 @@ class ScannerSettings:
     analysis_cooldown_seconds: int = 3600
     analysis_outcome_tracking_enabled: bool = True
     analysis_chart_enabled: bool = True
+    analysis_chart_source: str = "annotated"
     analysis_chart_interval_minutes: int = 5
 
     # Per-exchange override (None = использовать глобальные пороги из бота)
@@ -556,7 +557,7 @@ class ScannerSettings:
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
-            signal_chart_source=str(base.get("signal_chart_source", "tradingview")),
+            signal_chart_source=str(base.get("signal_chart_source", "annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 5)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
@@ -651,6 +652,7 @@ class ScannerSettings:
                 base.get("analysis_outcome_tracking_enabled", True)
             ),
             analysis_chart_enabled=bool(base.get("analysis_chart_enabled", True)),
+            analysis_chart_source=str(base.get("analysis_chart_source", "annotated")),
             analysis_chart_interval_minutes=int(
                 base.get("analysis_chart_interval_minutes", 5)
             ),
