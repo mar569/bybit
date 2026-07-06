@@ -298,15 +298,21 @@ def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             arrowprops=dict(
                 arrowstyle="-|>",
                 color=CHART_STYLE["accent_short"],
-                lw=1.6,
+                lw=2.0 if ta.momentum_label.startswith("импульс вниз") else 1.6,
                 alpha=0.95,
                 connectionstyle="arc3,rad=-0.12",
             ),
         )
+        label = "SHORT ↓" if ta.action_priority == "short" or ta.verdict == "SHORT" else "SHORT"
         ax.text(
             x + dx * 0.45, (y + ta.breakdown_level) / 2,
-            "SHORT",
+            label,
             color=CHART_STYLE["accent_short"], fontsize=7, fontweight="bold", ha="center",
+        )
+    elif ta.momentum_label.startswith("импульс вниз") and ta.breakdown_level:
+        ax.text(
+            x, y * 1.002, " давление ↓",
+            color=CHART_STYLE["accent_short"], fontsize=7, fontweight="bold", ha="left",
         )
 
 

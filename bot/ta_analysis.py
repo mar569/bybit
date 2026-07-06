@@ -143,6 +143,10 @@ class TAAnalysisResult:
     setup_clarity: int = 5
     risk_notes: list[str] = field(default_factory=list)
     professional_summary: str = ""
+    momentum_label: str = ""
+    momentum_pct: float = 0.0
+    btc_alt_spread: float | None = None
+    action_priority: str = "neutral"
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -487,6 +491,7 @@ def build_trader_plan(
     entry_zone: tuple[float, float] | None,
     consolidation: ConsolidationZone | None = None,
     supports: list[float] | None = None,
+    action_priority: str = "neutral",
 ) -> list[str]:
     plan: list[str] = []
     trigger = breakout or (bullish.trigger_price if bullish else None)
@@ -521,6 +526,15 @@ def build_trader_plan(
             stps = " / ".join(fmt_price(t) for t in bearish.target_prices[:3])
             plan.append(f"Цели SHORT: {stps}")
             plan.append(f"Стоп SHORT: выше {fmt_price(bearish.stop_price)}")
+
+    if action_priority == "short":
+        short_steps = [s for s in plan if "SHORT" in s or "short" in s.lower()]
+        long_steps = [s for s in plan if s not in short_steps]
+        plan = short_steps + long_steps
+    elif action_priority == "long":
+        long_steps = [s for s in plan if "LONG" in s or "long" in s.lower() or "Зона" in s]
+        short_steps = [s for s in plan if s not in long_steps]
+        plan = long_steps + short_steps
 
     return plan[:8]
 
@@ -654,6 +668,40 @@ def btc_correlation_label(btc_bars: list[KlineBar] | None, alt_bars: list[KlineB
     return f"⚠ альт против BTC (BTC {btc_chg:+.1f}%, альт {alt_chg:+.1f}%)"
 
 
+def btc_alt_spread_pct(btc_bars: list[KlineBar] | None, alt_bars: list[KlineBar]) -> float | None:
+    if not btc_bars or len(btc_bars) < 13 or len(alt_bars) < 13:
+        return None
+    btc_chg = (btc_bars[-1].close - btc_bars[-13].close) / btc_bars[-13].close * 100.0
+    alt_chg = (alt_bars[-1].close - alt_bars[-13].close) / alt_bars[-13].close * 100.0
+    return alt_chg - btc_chg
+
+
+def detect_recent_momentum(bars: list[KlineBar], *, lookback: int = 8) -> tuple[str, float]:
+    """Краткосрочный импульс по последним свечам: up / down / flat."""
+    if len(bars) < 3:
+        return "flat", 0.0
+    n = min(lookback, len(bars))
+    seg = bars[-n:]
+    start = seg[0].open
+    if start <= 0:
+        return "flat", 0.0
+    chg = (seg[-1].close - start) / start * 100.0
+    red = sum(1 for b in seg if b.close < b.open)
+    if chg <= -1.0 or red >= max(3, int(n * 0.62)):
+        return "down", chg
+    if chg >= 1.0 or red <= max(1, int(n * 0.38)):
+        return "up", chg
+    return "flat", chg
+
+
+def _momentum_label_ru(momentum: str, pct: float) -> str:
+    if momentum == "down":
+        return f"импульс вниз {pct:+.1f}%"
+    if momentum == "up":
+        return f"импульс вверх {pct:+.1f}%"
+    return "боковое движение"
+
+
 def _resolve_verdict(
     *,
     is_long: bool,
@@ -661,13 +709,22 @@ def _resolve_verdict(
     structure: str,
     patterns: list[CandlePattern],
     btc_ctx: str,
+    momentum: str = "flat",
+    btc_spread: float | None = None,
 ) -> tuple[str, int, str]:
     score = 5
     reasons: list[str] = []
     if is_long:
-        if ms.phase in {"correction_down", "consolidation", "breakout_setup"}:
+        if ms.phase in {"consolidation", "breakout_setup"}:
             score += 2
             reasons.append(ms.phase_label)
+        elif ms.phase == "correction_down":
+            if momentum == "down" or ms.drawdown_from_high_pct > 10:
+                score -= 2
+                reasons.append("коррекция вниз после роста")
+            else:
+                score += 1
+                reasons.append("откат для long")
         elif ms.phase in {"impulse_up"}:
             score -= 1
             reasons.append("уже в импульсе")
@@ -679,17 +736,38 @@ def _resolve_verdict(
         elif "медв." in structure:
             score -= 2
     else:
-        if ms.phase in {"correction_up", "consolidation", "breakout_setup", "post_crash_weak"}:
+        if ms.phase in {"correction_down", "impulse_down", "post_crash_weak"}:
             score += 2
             reasons.append(ms.phase_label)
-        elif ms.phase in {"impulse_down"}:
-            score -= 1
+        elif ms.phase in {"correction_up", "consolidation", "breakout_setup"}:
+            score += 1
         elif ms.phase in {"impulse_up"}:
             score -= 2
+            reasons.append("уже в импульсе вверх")
         if "медв." in structure:
             score += 1
         elif "бычья" in structure:
             score -= 2
+    if momentum == "down" and not is_long:
+        score += 2
+        if "импульс" not in " · ".join(reasons):
+            reasons.append("давление продавцов")
+    elif momentum == "down" and is_long:
+        score -= 2
+    elif momentum == "up" and is_long:
+        score += 1
+    elif momentum == "up" and not is_long:
+        score -= 1
+    if btc_spread is not None:
+        if btc_spread <= -8 and not is_long:
+            score += 2
+            reasons.append("альт слабее BTC")
+        elif btc_spread <= -8 and is_long:
+            score -= 2
+        elif btc_spread >= 8 and is_long:
+            score += 1
+        elif btc_spread >= 8 and not is_long:
+            score -= 1
     if ms.oi_narrative in {"aligned_long", "accumulation"} and is_long:
         score += 1
     elif ms.oi_narrative in {"aligned_short", "shorts_building"} and not is_long:
@@ -711,13 +789,21 @@ def _resolve_verdict(
         elif last_pat.bullish is False and is_long:
             score -= 1
     if "против BTC" in btc_ctx:
-        score -= 1
+        if not is_long:
+            score += 1
+        else:
+            score -= 1
         reasons.append("дивергенция с BTC")
-    if ms.range_position > 0.78:
+    if ms.drawdown_from_high_pct > 15 and not is_long:
+        score += 1
+        reasons.append(f"−{ms.drawdown_from_high_pct:.0f}% от хая")
+    elif ms.drawdown_from_high_pct > 15 and is_long:
         score -= 1
+    if ms.range_position > 0.78:
+        score -= 1 if is_long else 1
         reasons.append("у верха range")
     elif ms.range_position < 0.22:
-        score -= 1
+        score -= 1 if is_long else 1
         reasons.append("у дна range")
     score = int(_clamp(score, 1, 9))
     if score >= 7:
@@ -726,20 +812,62 @@ def _resolve_verdict(
         verdict = "WAIT"
     else:
         verdict = "WAIT"
-    reason = " · ".join(reasons[:3]) if reasons else ms.phase_detail
+    reason = " · ".join(dict.fromkeys(reasons[:4])) if reasons else ms.phase_detail
     return verdict, score, reason
 
 
-def _market_bias(structure: str, ms: MarketStructureContext) -> str:
-    if "бычья" in structure:
+def _market_bias(
+    structure: str,
+    ms: MarketStructureContext,
+    *,
+    momentum: str,
+    btc_spread: float | None,
+) -> str:
+    if momentum == "down" and (ms.drawdown_from_high_pct > 8 or (btc_spread is not None and btc_spread < -5)):
+        return "медвежий"
+    if momentum == "up" and ms.drawdown_from_high_pct < 6:
         return "бычий"
     if "медв." in structure:
         return "медвежий"
-    if ms.phase in {"impulse_up", "correction_down"}:
+    if "бычья" in structure:
         return "бычий"
     if ms.phase in {"impulse_down", "correction_up", "post_crash_weak"}:
         return "медвежий"
+    if ms.phase == "correction_down":
+        if momentum == "down" or ms.drawdown_from_high_pct > 10:
+            return "медвежий"
+        return "нейтральный"
+    if ms.phase == "impulse_up":
+        return "бычий"
     return "нейтральный"
+
+
+def _action_priority(
+    *,
+    current: float,
+    breakout: float | None,
+    breakdown: float | None,
+    momentum: str,
+    market_bias: str,
+    long_score: int,
+    short_score: int,
+) -> str:
+    if long_score >= short_score + 2 and market_bias == "бычий":
+        return "long"
+    if short_score >= long_score + 2 and market_bias == "медвежий":
+        return "short"
+    if breakout and breakdown and current > 0:
+        dist_up = (breakout - current) / current
+        dist_down = (current - breakdown) / current
+        if momentum == "down" and dist_down < dist_up:
+            return "short"
+        if momentum == "up" and dist_up < dist_down:
+            return "long"
+    if market_bias == "медвежий":
+        return "short"
+    if market_bias == "бычий":
+        return "long"
+    return "neutral"
 
 
 def _compute_setup_clarity(
@@ -826,23 +954,37 @@ def _build_professional_summary(
     bullish: TradeScenario | None,
     bearish: TradeScenario | None,
     setup_clarity: int,
+    momentum_label: str = "",
+    action_priority: str = "neutral",
 ) -> str:
     bias_ru = {"бычий": "бычий", "медвежий": "медвежий", "нейтральный": "нейтральный"}.get(market_bias, market_bias)
     parts: list[str] = []
     parts.append(f"Краткосрочный bias: {bias_ru}.")
+    if momentum_label:
+        parts.append(f"Импульс: {momentum_label}.")
     if ms.phase_label and ms.phase_label != "Без явной фазы":
         parts.append(f"Фаза: {ms.phase_label.lower()}.")
-    if structure:
-        parts.append(f"Структура: {_structure_plain(structure)}.")
+    if ms.drawdown_from_high_pct > 8:
+        parts.append(f"Откат от хая −{ms.drawdown_from_high_pct:.1f}%.")
     if verdict == "WAIT":
-        if bullish and bearish:
+        if action_priority == "short" and bearish:
             parts.append(
-                f"Сетап ясность {setup_clarity}/10 — ждать пробой "
+                f"Давление вниз — приоритет SHORT при пробое {fmt_price(bearish.trigger_price)} "
+                f"(ясность {setup_clarity}/10)."
+            )
+        elif action_priority == "long" and bullish:
+            parts.append(
+                f"Давление вверх — приоритет LONG при пробое {fmt_price(bullish.trigger_price)} "
+                f"(ясность {setup_clarity}/10)."
+            )
+        elif bullish and bearish:
+            parts.append(
+                f"Ясность {setup_clarity}/10 — ждать пробой "
                 f"{fmt_price(bullish.trigger_price)} (long) или "
                 f"{fmt_price(bearish.trigger_price)} (short)."
             )
         else:
-            parts.append(f"Ясность сетапа {setup_clarity}/10 — лучше дождаться подтверждения.")
+            parts.append(f"Ясность сетапа {setup_clarity}/10 — дождаться подтверждения.")
     elif verdict == "LONG" and bullish:
         parts.append(f"Приоритет long при закреплении выше {fmt_price(bullish.trigger_price)}.")
     elif verdict == "SHORT" and bearish:
@@ -858,12 +1000,29 @@ def _resolve_neutral_verdict(
     btc_ctx: str,
     setup_clarity: int,
     clarity_notes: list[str],
+    momentum: str,
+    btc_spread: float | None,
+    current: float,
+    breakout: float | None,
+    breakdown: float | None,
 ) -> tuple[str, int, str]:
     long_v, long_s, long_r = _resolve_verdict(
-        is_long=True, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+        is_long=True,
+        ms=ms,
+        structure=structure,
+        patterns=patterns,
+        btc_ctx=btc_ctx,
+        momentum=momentum,
+        btc_spread=btc_spread,
     )
     short_v, short_s, short_r = _resolve_verdict(
-        is_long=False, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+        is_long=False,
+        ms=ms,
+        structure=structure,
+        patterns=patterns,
+        btc_ctx=btc_ctx,
+        momentum=momentum,
+        btc_spread=btc_spread,
     )
 
     if long_v == "LONG" and long_s >= 7 and long_s >= short_s + 1:
@@ -871,12 +1030,39 @@ def _resolve_neutral_verdict(
     if short_v == "SHORT" and short_s >= 7 and short_s >= long_s + 1:
         return short_v, short_s, short_r
 
+    # Сильное давление вниз: short даже без классических 7/10
+    if (
+        short_s >= 6
+        and short_s >= long_s + 1
+        and momentum == "down"
+        and (ms.drawdown_from_high_pct > 8 or (btc_spread is not None and btc_spread < -5))
+    ):
+        reason = short_r or "давление вниз · коррекция после роста"
+        return "SHORT", short_s, reason
+
+    if (
+        long_s >= 6
+        and long_s >= short_s + 1
+        and momentum == "up"
+        and ms.drawdown_from_high_pct < 6
+    ):
+        reason = long_r or "импульс вверх"
+        return "LONG", long_s, reason
+
     reasons = clarity_notes[:2]
-    if long_r:
-        reasons.append(long_r)
-    if short_r and short_r not in reasons:
+    if momentum == "down" and breakdown and current > 0:
+        dist_down = (current - breakdown) / current * 100
+        reasons.append(f"ближе к short-триггеру (~{dist_down:.1f}%)")
+    elif momentum == "up" and breakout and current > 0:
+        dist_up = (breakout - current) / current * 100
+        reasons.append(f"ближе к long-триггеру (~{dist_up:.1f}%)")
+    if short_r and momentum == "down":
         reasons.append(short_r)
-    return "WAIT", setup_clarity, " · ".join(reasons[:3])
+    elif long_r:
+        reasons.append(long_r)
+    elif short_r and short_r not in reasons:
+        reasons.append(short_r)
+    return "WAIT", setup_clarity, " · ".join(dict.fromkeys(reasons[:4]))
 
 
 def _estimate_rr(
@@ -970,8 +1156,14 @@ def run_ta_analysis(
     signal_markers = detect_signal_markers(bars, levels)
     ms = analyze_market_structure(bars, oi_bars, is_long=is_long, hours=hours)
     btc_ctx = ""
+    btc_spread: float | None = None
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_ctx = btc_correlation_label(btc_bars, bars)
+        btc_spread = btc_alt_spread_pct(btc_bars, bars)
+
+    momentum, momentum_pct = detect_recent_momentum(bars)
+    momentum_label = _momentum_label_ru(momentum, momentum_pct)
+    current = bars[-1].close if bars else 0.0
 
     setup_clarity, clarity_notes = _compute_setup_clarity(
         ms=ms,
@@ -984,7 +1176,37 @@ def run_ta_analysis(
         bearish=bearish,
         key_levels=key_levels,
     )
-    market_bias = _market_bias(structure, ms)
+    market_bias = _market_bias(
+        structure, ms, momentum=momentum, btc_spread=btc_spread,
+    )
+
+    long_v, long_s, _ = _resolve_verdict(
+        is_long=True,
+        ms=ms,
+        structure=structure,
+        patterns=patterns,
+        btc_ctx=btc_ctx,
+        momentum=momentum,
+        btc_spread=btc_spread,
+    )
+    short_v, short_s, _ = _resolve_verdict(
+        is_long=False,
+        ms=ms,
+        structure=structure,
+        patterns=patterns,
+        btc_ctx=btc_ctx,
+        momentum=momentum,
+        btc_spread=btc_spread,
+    )
+    action_priority = _action_priority(
+        current=current,
+        breakout=breakout,
+        breakdown=breakdown,
+        momentum=momentum,
+        market_bias=market_bias,
+        long_score=long_s,
+        short_score=short_s,
+    )
 
     if neutral:
         verdict, conf, reason = _resolve_neutral_verdict(
@@ -994,16 +1216,35 @@ def run_ta_analysis(
             btc_ctx=btc_ctx,
             setup_clarity=setup_clarity,
             clarity_notes=clarity_notes,
+            momentum=momentum,
+            btc_spread=btc_spread,
+            current=current,
+            breakout=breakout,
+            breakdown=breakdown,
         )
     else:
         verdict, conf, reason = _resolve_verdict(
-            is_long=is_long, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+            is_long=is_long,
+            ms=ms,
+            structure=structure,
+            patterns=patterns,
+            btc_ctx=btc_ctx,
+            momentum=momentum,
+            btc_spread=btc_spread,
         )
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
+
+    trade_is_long = is_long
+    if neutral:
+        if verdict == "SHORT" or action_priority == "short":
+            trade_is_long = False
+        elif verdict == "LONG" or action_priority == "long":
+            trade_is_long = True
+
     inv, entry, targets = _trade_levels(
-        bars, levels, is_long=is_long, invalidation=invalidation_price,
+        bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
         bullish=bullish, bearish=bearish,
     )
     supports = sorted([lv.price for lv in levels if lv.kind == "support"], reverse=True)
@@ -1016,6 +1257,7 @@ def run_ta_analysis(
         entry_zone=entry,
         consolidation=consolidation,
         supports=supports,
+        action_priority=action_priority,
     )
     risk_notes = _build_risk_notes(
         ms=ms,
@@ -1032,6 +1274,8 @@ def run_ta_analysis(
         bullish=bullish,
         bearish=bearish,
         setup_clarity=setup_clarity if verdict == "WAIT" else conf,
+        momentum_label=momentum_label,
+        action_priority=action_priority,
     )
     return TAAnalysisResult(
         swings=swings,
@@ -1068,6 +1312,10 @@ def run_ta_analysis(
         setup_clarity=setup_clarity,
         risk_notes=risk_notes,
         professional_summary=professional_summary,
+        momentum_label=momentum_label,
+        momentum_pct=momentum_pct,
+        btc_alt_spread=btc_spread,
+        action_priority=action_priority,
     )
 
 
@@ -1113,11 +1361,13 @@ def _situation_plain(ta: TAAnalysisResult) -> str:
     if ta.channel:
         ch = "нисходящий канал" if ta.channel.kind == "bear" else "восходящий канал"
         parts.append(ch)
+    if ta.momentum_label:
+        parts.append(ta.momentum_label)
     if ta.phase_label and ta.phase_label != "Без явной фазы":
         parts.append(ta.phase_label.lower())
-    if ta.rulers:
+    if ta.rulers and ta.momentum_label not in (ta.rulers[0].label if ta.rulers else ""):
         parts.append(ta.rulers[0].label)
-    return " · ".join(parts[:4])
+    return " · ".join(parts[:5])
 
 
 def ta_display_score(ta: TAAnalysisResult) -> int:
@@ -1148,7 +1398,11 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
         lines.append(f"🛑 <b>Стоп</b> (если пошли в сделку): <b>{fmt_price(ta.invalidation_price)}</b>")
     if ta.target_prices:
         tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
-        lines.append(f"🎯 <b>Цели</b> (куда смотреть профит): {tps}")
+        side_word = "SHORT" if ta.action_priority == "short" or ta.verdict == "SHORT" else (
+            "LONG" if ta.verdict == "LONG" or ta.action_priority == "long" else ""
+        )
+        label = f" ({side_word})" if side_word else ""
+        lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
 
     if ta.verdict == "LONG":
         if ta.breakout_level:
@@ -1160,6 +1414,16 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
             lines.append(f"👉 <b>Действие:</b> SHORT при пробое ниже <b>{fmt_price(ta.breakdown_level)}</b>")
         else:
             lines.append("👉 <b>Действие:</b> SHORT — ждать подтверждения падения")
+    elif ta.action_priority == "short" and ta.breakdown_level:
+        lines.append(
+            f"👉 <b>Действие:</b> WAIT, но <b>приоритет SHORT</b> — давление вниз, "
+            f"смотреть пробой <b>{fmt_price(ta.breakdown_level)}</b>"
+        )
+    elif ta.action_priority == "long" and ta.breakout_level:
+        lines.append(
+            f"👉 <b>Действие:</b> WAIT, но <b>приоритет LONG</b> — "
+            f"смотреть пробой <b>{fmt_price(ta.breakout_level)}</b>"
+        )
     else:
         long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "сопротивления"
         short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "поддержки"
@@ -1224,11 +1488,17 @@ def ta_telegram_breakdown_html(ta: TAAnalysisResult, *, symbol: str = "", interv
     ]
     if ta.professional_summary:
         lines.append(f"💬 {ta.professional_summary}")
+    if ta.verdict == "WAIT" and ta.action_priority == "short":
+        lines.append("⚡ <b>Сейчас приоритет SHORT</b> — цена под давлением, long только через верхний пробой")
+    elif ta.verdict == "WAIT" and ta.action_priority == "long":
+        lines.append("⚡ <b>Сейчас приоритет LONG</b> — short только через нижний пробой")
 
     lines.append("")
     lines.append("📈 <b>Контекст рынка</b>")
     if ta.market_bias:
         lines.append(f"• Bias: <b>{ta.market_bias}</b>")
+    if ta.momentum_label:
+        lines.append(f"• Импульс: <b>{ta.momentum_label}</b>")
     if ta.structure_label:
         lines.append(f"• Структура: {_structure_plain(ta.structure_label)}")
     if ta.phase_label:
@@ -1254,10 +1524,16 @@ def ta_telegram_breakdown_html(ta: TAAnalysisResult, *, symbol: str = "", interv
     bear_lines = _scenario_block_html("Медвежий сценарий", ta.bearish_scenario, emoji="📕")
     if bull_lines or bear_lines:
         lines.append("")
-    lines.extend(bull_lines)
-    if bull_lines and bear_lines:
-        lines.append("")
-    lines.extend(bear_lines)
+    if ta.action_priority == "short":
+        lines.extend(bear_lines)
+        if bull_lines and bear_lines:
+            lines.append("")
+        lines.extend(bull_lines)
+    else:
+        lines.extend(bull_lines)
+        if bull_lines and bear_lines:
+            lines.append("")
+        lines.extend(bear_lines)
 
     if ta.trader_plan:
         lines.append("")

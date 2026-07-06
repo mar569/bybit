@@ -7,6 +7,7 @@ from bot.ta_analysis import (
     detect_channel,
     detect_consolidation,
     detect_price_zones,
+    detect_recent_momentum,
     find_swing_points,
     run_ta_analysis,
     ta_display_score,
@@ -126,6 +127,33 @@ def test_ta_telegram_caption_html() -> None:
     caption = ta_telegram_caption_html(ta)
     assert "TA" in caption
     assert ta.verdict in caption
+
+
+def test_detect_recent_momentum_down() -> None:
+    bars = _trend_up_bars(25)
+    base = bars[-1].close
+    for i in range(8):
+        c = base - (i + 1) * 0.8
+        bars.append(_bar(25 + i, base - i * 0.8, base - i * 0.8 + 0.1, c - 0.2, c))
+    momentum, pct = detect_recent_momentum(bars)
+    assert momentum == "down"
+    assert pct < 0
+
+
+def test_neutral_ta_short_priority_after_dump() -> None:
+    bars: list[KlineBar] = []
+    price = 0.007
+    for i in range(35):
+        price *= 1.025
+        o = price / 1.025
+        bars.append(_bar(i, o, price * 1.01, o * 0.99, price))
+    for i in range(15):
+        price *= 0.985
+        o = price / 0.985
+        bars.append(_bar(35 + i, o, o * 1.005, price * 0.995, price))
+    ta = run_ta_analysis(bars, symbol="VANRYUSDT", neutral=True)
+    assert ta.market_bias in {"медвежий", "нейтральный"}
+    assert ta.action_priority in {"short", "neutral"} or ta.verdict == "SHORT"
 
 
 def test_neutral_ta_has_setup_clarity() -> None:
