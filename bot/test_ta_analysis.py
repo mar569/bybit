@@ -9,6 +9,8 @@ from bot.ta_analysis import (
     detect_price_zones,
     find_swing_points,
     run_ta_analysis,
+    ta_display_score,
+    ta_telegram_breakdown_html,
     ta_telegram_caption_html,
 )
 
@@ -124,3 +126,20 @@ def test_ta_telegram_caption_html() -> None:
     caption = ta_telegram_caption_html(ta)
     assert "TA" in caption
     assert ta.verdict in caption
+
+
+def test_neutral_ta_has_setup_clarity() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="ETHUSDT", neutral=True)
+    assert ta.setup_clarity >= 3
+    assert ta.professional_summary
+    assert isinstance(ta.risk_notes, list)
+
+
+def test_ta_breakdown_html_sections() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="VANRYUSDT", neutral=True)
+    text = ta_telegram_breakdown_html(ta, symbol="VANRYUSDT", interval="15m")
+    assert "Профессиональный разбор" in text
+    assert "Ключевые уровни" in text or "План действий" in text
+    assert ta_display_score(ta) >= 1

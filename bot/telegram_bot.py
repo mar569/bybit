@@ -43,7 +43,7 @@ from .manual_ta import (
     parse_mta_callback,
     parse_mtw_callback,
 )
-from .ta_analysis import ta_telegram_caption_html
+from .ta_analysis import ta_telegram_breakdown_html, ta_telegram_caption_html
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
@@ -1086,6 +1086,7 @@ class TelegramBot:
                     hours=hours,
                     interval_minutes=interval_minutes,
                     oi_bars=oi_bars,
+                    neutral=True,
                 ),
                 timeout=35.0,
             )
@@ -1139,6 +1140,22 @@ class TelegramBot:
             is_priority=False,
             keyboard=keyboard,
         )
+
+        breakdown = ta_telegram_breakdown_html(
+            ta,
+            symbol=symbol,
+            interval=f"Bybit {interval_minutes}m · {hours}ч",
+        )
+        if self.application is not None:
+            try:
+                await self.application.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=breakdown,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.exception("Failed to send manual TA breakdown for %s", symbol)
 
         if from_wizard and notify_chat_id is not None and notify_chat_id != target_chat_id:
             if self.application is not None:

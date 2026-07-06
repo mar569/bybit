@@ -135,6 +135,14 @@ class TAAnalysisResult:
     entry_zone: tuple[float, float] | None = None
     target_prices: list[float] = field(default_factory=list)
     current_price: float = 0.0
+    oi_narrative_label: str = ""
+    range_position: float = 0.5
+    phase_detail: str = ""
+    drawdown_from_high_pct: float = 0.0
+    market_bias: str = ""
+    setup_clarity: int = 5
+    risk_notes: list[str] = field(default_factory=list)
+    professional_summary: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -437,14 +445,19 @@ def build_scenarios(
     bullish: TradeScenario | None = None
     bearish: TradeScenario | None = None
 
-    if breakout:
+    if bullish:
         bullish = TradeScenario(
             direction="long",
             trigger_price=breakout,
             trigger_label="пробой и закрепление выше",
             stop_price=stop_long,
             target_prices=bull_targets,
-            conditions=["пробой уровня", "объём растёт", "OI не против"],
+            conditions=[
+                f"закрепление 5m/15m выше {fmt_price(breakout)}",
+                "объём выше среднего на пробое",
+                "ретест уровня снизу без слома",
+                "OI не падает на росте",
+            ],
         )
     if breakdown:
         bearish = TradeScenario(
@@ -453,7 +466,12 @@ def build_scenarios(
             trigger_label="пробой ниже поддержки",
             stop_price=stop_short,
             target_prices=bear_targets,
-            conditions=["отбой от сопр.", "CVD↓", "OI↑ при падении"],
+            conditions=[
+                f"закрытие свечи ниже {fmt_price(breakdown)}",
+                "отбой от сопротивления / слабый рост",
+                "CVD не подтверждает покупки",
+                "OI растёт при падении (новые шорты)",
+            ],
         )
 
     return bullish, bearish, breakout, breakdown
@@ -467,35 +485,44 @@ def build_trader_plan(
     breakout: float | None,
     breakdown: float | None,
     entry_zone: tuple[float, float] | None,
+    consolidation: ConsolidationZone | None = None,
+    supports: list[float] | None = None,
 ) -> list[str]:
     plan: list[str] = []
     trigger = breakout or (bullish.trigger_price if bullish else None)
     inv = bearish.trigger_price if bearish else breakdown
+    supports = supports or []
 
     if verdict == "WAIT":
-        plan.append("Не входить в середине движения")
+        plan.append("Не входить в середине движения — ждать край range")
     elif verdict == "LONG":
-        plan.append("Можно искать LONG по плану")
+        plan.append("Приоритет LONG — вход только по триггеру")
     elif verdict == "SHORT":
-        plan.append("Можно искать SHORT по плану")
+        plan.append("Приоритет SHORT — вход только по триггеру")
 
     if trigger:
-        plan.append(f"LONG: ждать пробой {fmt_price(trigger)} вверх")
-        plan.append("Вход после ретеста уровня (не в пик)")
-    elif entry_zone:
-        plan.append(f"Зона входа: {fmt_price(entry_zone[0])}–{fmt_price(entry_zone[1])}")
+        plan.append(f"LONG: покупка при пробое {fmt_price(trigger)} вверх")
+        plan.append("Вход после ретеста уровня (не в пик импульса)")
+        if bullish:
+            tps = " / ".join(fmt_price(t) for t in bullish.target_prices[:3])
+            plan.append(f"Цели LONG: {tps}")
+            plan.append(f"Стоп LONG: ниже {fmt_price(bullish.stop_price)}")
 
-    if bullish:
-        plan.append(f"Стоп LONG: {fmt_price(bullish.stop_price)}")
-        tps = " → ".join(fmt_price(t) for t in bullish.target_prices[:3])
-        plan.append(f"Цели LONG: {tps}")
+    if consolidation and supports:
+        lo = min(supports[0], consolidation.bottom) if supports else consolidation.bottom
+        hi = consolidation.bottom + (consolidation.top - consolidation.bottom) * 0.35
+        plan.append(f"Альт. LONG: откат в зону {fmt_price(lo)}–{fmt_price(hi)}")
+    elif entry_zone and verdict != "SHORT":
+        plan.append(f"Зона набора: {fmt_price(entry_zone[0])}–{fmt_price(entry_zone[1])}")
+
     if inv:
         plan.append(f"SHORT: если пробой {fmt_price(inv)} вниз")
         if bearish:
-            stps = " → ".join(fmt_price(t) for t in bearish.target_prices[:3])
+            stps = " / ".join(fmt_price(t) for t in bearish.target_prices[:3])
             plan.append(f"Цели SHORT: {stps}")
+            plan.append(f"Стоп SHORT: выше {fmt_price(bearish.stop_price)}")
 
-    return plan[:7]
+    return plan[:8]
 
 
 def detect_consolidation(bars: list[KlineBar], *, lookback: int = 18) -> ConsolidationZone | None:
@@ -703,6 +730,178 @@ def _resolve_verdict(
     return verdict, score, reason
 
 
+def _market_bias(structure: str, ms: MarketStructureContext) -> str:
+    if "бычья" in structure:
+        return "бычий"
+    if "медв." in structure:
+        return "медвежий"
+    if ms.phase in {"impulse_up", "correction_down"}:
+        return "бычий"
+    if ms.phase in {"impulse_down", "correction_up", "post_crash_weak"}:
+        return "медвежий"
+    return "нейтральный"
+
+
+def _compute_setup_clarity(
+    *,
+    ms: MarketStructureContext,
+    structure: str,
+    levels: list[HorizontalLevel],
+    zones: list[PriceZone],
+    consolidation: ConsolidationZone | None,
+    channel: PriceChannel | None,
+    bullish: TradeScenario | None,
+    bearish: TradeScenario | None,
+    key_levels: list[KeyLevel],
+) -> tuple[int, list[str]]:
+    score = 4
+    notes: list[str] = []
+    if bullish and bearish:
+        score += 2
+        notes.append("два сценария с уровнями")
+    elif bullish or bearish:
+        score += 1
+    if consolidation:
+        score += 1
+        notes.append("чёткий боковик")
+    if channel:
+        score += 1
+        notes.append("канал виден")
+    if len(levels) >= 3:
+        score += 1
+        notes.append("несколько уровней")
+    if len(zones) >= 1:
+        score += 1
+    if len(key_levels) >= 4:
+        score += 1
+    if "бычья" in structure or "медв." in structure:
+        score += 1
+        notes.append("структура читается")
+    if 0.25 <= ms.range_position <= 0.75:
+        score += 1
+        notes.append("цена в середине range")
+    elif ms.range_position > 0.75:
+        notes.append("у верха range")
+    elif ms.range_position < 0.25:
+        notes.append("у дна range")
+    return int(_clamp(score, 3, 10)), notes[:4]
+
+
+def _build_risk_notes(
+    *,
+    ms: MarketStructureContext,
+    structure: str,
+    btc_ctx: str,
+    verdict_reason: str,
+    channel: PriceChannel | None,
+) -> list[str]:
+    risks: list[str] = []
+    if ms.phase in {"impulse_up", "impulse_down"}:
+        risks.append("уже в импульсе — поздний вход")
+    if ms.range_position > 0.78:
+        risks.append("цена у верха диапазона")
+    elif ms.range_position < 0.22:
+        risks.append("цена у дна диапазона")
+    if "против BTC" in btc_ctx:
+        risks.append("расхождение с BTC")
+    if channel and channel.kind == "bear":
+        risks.append("нисходящий канал — long только через пробой")
+    if channel and channel.kind == "bull":
+        risks.append("восходящий канал — short рискован без слома")
+    if "нестабильно" in structure:
+        risks.append("структура нестабильна")
+    if verdict_reason and verdict_reason not in risks:
+        for part in verdict_reason.split(" · "):
+            if part and part not in risks:
+                risks.append(part)
+    return risks[:5]
+
+
+def _build_professional_summary(
+    *,
+    verdict: str,
+    market_bias: str,
+    ms: MarketStructureContext,
+    structure: str,
+    bullish: TradeScenario | None,
+    bearish: TradeScenario | None,
+    setup_clarity: int,
+) -> str:
+    bias_ru = {"бычий": "бычий", "медвежий": "медвежий", "нейтральный": "нейтральный"}.get(market_bias, market_bias)
+    parts: list[str] = []
+    parts.append(f"Краткосрочный bias: {bias_ru}.")
+    if ms.phase_label and ms.phase_label != "Без явной фазы":
+        parts.append(f"Фаза: {ms.phase_label.lower()}.")
+    if structure:
+        parts.append(f"Структура: {_structure_plain(structure)}.")
+    if verdict == "WAIT":
+        if bullish and bearish:
+            parts.append(
+                f"Сетап ясность {setup_clarity}/10 — ждать пробой "
+                f"{fmt_price(bullish.trigger_price)} (long) или "
+                f"{fmt_price(bearish.trigger_price)} (short)."
+            )
+        else:
+            parts.append(f"Ясность сетапа {setup_clarity}/10 — лучше дождаться подтверждения.")
+    elif verdict == "LONG" and bullish:
+        parts.append(f"Приоритет long при закреплении выше {fmt_price(bullish.trigger_price)}.")
+    elif verdict == "SHORT" and bearish:
+        parts.append(f"Приоритет short при пробое ниже {fmt_price(bearish.trigger_price)}.")
+    return " ".join(parts)
+
+
+def _resolve_neutral_verdict(
+    *,
+    ms: MarketStructureContext,
+    structure: str,
+    patterns: list[CandlePattern],
+    btc_ctx: str,
+    setup_clarity: int,
+    clarity_notes: list[str],
+) -> tuple[str, int, str]:
+    long_v, long_s, long_r = _resolve_verdict(
+        is_long=True, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+    )
+    short_v, short_s, short_r = _resolve_verdict(
+        is_long=False, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+    )
+
+    if long_v == "LONG" and long_s >= 7 and long_s >= short_s + 1:
+        return long_v, long_s, long_r
+    if short_v == "SHORT" and short_s >= 7 and short_s >= long_s + 1:
+        return short_v, short_s, short_r
+
+    reasons = clarity_notes[:2]
+    if long_r:
+        reasons.append(long_r)
+    if short_r and short_r not in reasons:
+        reasons.append(short_r)
+    return "WAIT", setup_clarity, " · ".join(reasons[:3])
+
+
+def _estimate_rr(
+    trigger: float | None,
+    stop: float | None,
+    targets: list[float],
+    *,
+    is_long: bool,
+) -> str | None:
+    if not trigger or not stop or not targets:
+        return None
+    if is_long:
+        risk = trigger - stop
+        reward = targets[0] - trigger
+    else:
+        risk = stop - trigger
+        reward = trigger - targets[0]
+    if risk <= 0 or reward <= 0:
+        return None
+    ratio = reward / risk
+    if ratio < 0.5:
+        return None
+    return f"~1:{ratio:.1f}"
+
+
 def _trade_levels(
     bars: list[KlineBar],
     levels: list[HorizontalLevel],
@@ -754,6 +953,7 @@ def run_ta_analysis(
     symbol: str = "",
     hours: int = 5,
     invalidation_price: float | None = None,
+    neutral: bool = False,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -772,9 +972,33 @@ def run_ta_analysis(
     btc_ctx = ""
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_ctx = btc_correlation_label(btc_bars, bars)
-    verdict, conf, reason = _resolve_verdict(
-        is_long=is_long, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+
+    setup_clarity, clarity_notes = _compute_setup_clarity(
+        ms=ms,
+        structure=structure,
+        levels=levels,
+        zones=zones,
+        consolidation=consolidation,
+        channel=channel,
+        bullish=bullish,
+        bearish=bearish,
+        key_levels=key_levels,
     )
+    market_bias = _market_bias(structure, ms)
+
+    if neutral:
+        verdict, conf, reason = _resolve_neutral_verdict(
+            ms=ms,
+            structure=structure,
+            patterns=patterns,
+            btc_ctx=btc_ctx,
+            setup_clarity=setup_clarity,
+            clarity_notes=clarity_notes,
+        )
+    else:
+        verdict, conf, reason = _resolve_verdict(
+            is_long=is_long, ms=ms, structure=structure, patterns=patterns, btc_ctx=btc_ctx,
+        )
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
@@ -782,6 +1006,7 @@ def run_ta_analysis(
         bars, levels, is_long=is_long, invalidation=invalidation_price,
         bullish=bullish, bearish=bearish,
     )
+    supports = sorted([lv.price for lv in levels if lv.kind == "support"], reverse=True)
     trader_plan = build_trader_plan(
         verdict=verdict,
         bullish=bullish,
@@ -789,6 +1014,24 @@ def run_ta_analysis(
         breakout=breakout,
         breakdown=breakdown,
         entry_zone=entry,
+        consolidation=consolidation,
+        supports=supports,
+    )
+    risk_notes = _build_risk_notes(
+        ms=ms,
+        structure=structure,
+        btc_ctx=btc_ctx,
+        verdict_reason=reason,
+        channel=channel,
+    )
+    professional_summary = _build_professional_summary(
+        verdict=verdict,
+        market_bias=market_bias,
+        ms=ms,
+        structure=structure,
+        bullish=bullish,
+        bearish=bearish,
+        setup_clarity=setup_clarity if verdict == "WAIT" else conf,
     )
     return TAAnalysisResult(
         swings=swings,
@@ -817,6 +1060,14 @@ def run_ta_analysis(
         entry_zone=entry,
         target_prices=targets,
         current_price=bars[-1].close if bars else 0.0,
+        oi_narrative_label=ms.oi_narrative_label,
+        range_position=ms.range_position,
+        phase_detail=ms.phase_detail,
+        drawdown_from_high_pct=ms.drawdown_from_high_pct,
+        market_bias=market_bias,
+        setup_clarity=setup_clarity,
+        risk_notes=risk_notes,
+        professional_summary=professional_summary,
     )
 
 
@@ -869,9 +1120,16 @@ def _situation_plain(ta: TAAnalysisResult) -> str:
     return " · ".join(parts[:4])
 
 
+def ta_display_score(ta: TAAnalysisResult) -> int:
+    if ta.verdict == "WAIT" and ta.setup_clarity > ta.verdict_confidence:
+        return ta.setup_clarity
+    return ta.verdict_confidence
+
+
 def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
+    score_label = ta_display_score(ta)
     lines = [
-        f"📐 <b>TA</b> · <b>{ta.verdict}</b> {ta.verdict_confidence}/10",
+        f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score_label}/10",
         f"📍 <b>Сейчас:</b> {_situation_plain(ta)}",
         f"💡 <b>Смысл:</b> {_verdict_plain(ta)}",
     ]
@@ -915,9 +1173,152 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
     return "\n".join(lines)
 
 
-def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
+def _key_level_role_ru(role: str) -> str:
+    mapping = {
+        "breakout": "уровень пробоя вверх",
+        "breakdown": "уровень пробоя вниз",
+        "strong_resistance": "сильное сопротивление",
+        "strong_support": "сильная поддержка",
+        "nearest_support": "ближайшая поддержка",
+        "nearest_resistance": "ближайшее сопротивление",
+    }
+    return mapping.get(role, role)
+
+
+def _scenario_block_html(title: str, scenario: TradeScenario | None, *, emoji: str) -> list[str]:
+    if scenario is None:
+        return []
+    lines = [f"{emoji} <b>{title}</b>"]
+    lines.append(f"Триггер: закрепление {'выше' if scenario.direction == 'long' else 'ниже'} <b>{fmt_price(scenario.trigger_price)}</b>")
+    for i, cond in enumerate(scenario.conditions[:3], 1):
+        lines.append(f"  {i}. {cond}")
+    tps = " → ".join(fmt_price(t) for t in scenario.target_prices[:3])
+    lines.append(f"Цели: {tps}")
+    lines.append(f"Стоп: <b>{fmt_price(scenario.stop_price)}</b>")
+    rr = _estimate_rr(
+        scenario.trigger_price,
+        scenario.stop_price,
+        scenario.target_prices,
+        is_long=scenario.direction == "long",
+    )
+    if rr:
+        lines.append(f"R:R {rr}")
+    return lines
+
+
+def ta_telegram_breakdown_html(ta: TAAnalysisResult, *, symbol: str = "", interval: str = "") -> str:
+    header = f"📊 <b>Профессиональный разбор"
+    if symbol:
+        header += f" · {symbol}"
+    if interval:
+        header += f" · {interval}"
+    header += "</b>"
+
+    score = ta_display_score(ta)
+    score_word = "ясность сетапа" if ta.verdict == "WAIT" else "уверенность"
+
     lines = [
-        f"ИТОГ: {ta.verdict} {ta.verdict_confidence}/10",
+        header,
+        "",
+        f"🎯 <b>Вердикт:</b> {ta.verdict} · {score_word} <b>{score}/10</b>",
+    ]
+    if ta.professional_summary:
+        lines.append(f"💬 {ta.professional_summary}")
+
+    lines.append("")
+    lines.append("📈 <b>Контекст рынка</b>")
+    if ta.market_bias:
+        lines.append(f"• Bias: <b>{ta.market_bias}</b>")
+    if ta.structure_label:
+        lines.append(f"• Структура: {_structure_plain(ta.structure_label)}")
+    if ta.phase_label:
+        lines.append(f"• Фаза: {ta.phase_label}")
+    if ta.oi_narrative_label:
+        lines.append(f"• OI: {ta.oi_narrative_label}")
+    if ta.range_position:
+        lines.append(f"• Позиция в range: <b>{ta.range_position * 100:.0f}%</b>")
+    if ta.drawdown_from_high_pct:
+        lines.append(f"• Откат от хая: <b>−{ta.drawdown_from_high_pct:.1f}%</b>")
+    if ta.btc_context:
+        lines.append(f"• BTC: {ta.btc_context}")
+
+    if ta.key_levels:
+        lines.append("")
+        lines.append("🔑 <b>Ключевые уровни</b>")
+        for i, kl in enumerate(ta.key_levels[:5], 1):
+            lines.append(
+                f"{i}. <b>{fmt_price(kl.price)}</b> — {kl.label} ({_key_level_role_ru(kl.role)})"
+            )
+
+    bull_lines = _scenario_block_html("Бычий сценарий", ta.bullish_scenario, emoji="📗")
+    bear_lines = _scenario_block_html("Медвежий сценарий", ta.bearish_scenario, emoji="📕")
+    if bull_lines or bear_lines:
+        lines.append("")
+    lines.extend(bull_lines)
+    if bull_lines and bear_lines:
+        lines.append("")
+    lines.extend(bear_lines)
+
+    if ta.trader_plan:
+        lines.append("")
+        lines.append("📋 <b>План действий</b>")
+        for i, step in enumerate(ta.trader_plan[:7], 1):
+            lines.append(f"{i}. {step}")
+
+    if ta.risk_notes:
+        lines.append("")
+        lines.append("⚠️ <b>Риски</b>")
+        for risk in ta.risk_notes[:4]:
+            lines.append(f"• {risk}")
+
+    if ta.invalidation_price:
+        lines.append("")
+        lines.append(
+            f"🛑 <b>Инвалидация:</b> сценарий отменяется при уходе за "
+            f"<b>{fmt_price(ta.invalidation_price)}</b>"
+        )
+
+    lines.append("")
+    lines.append("<i>Аналитика, не финансовая рекомендация.</i>")
+    return "\n".join(lines)
+
+
+def ta_chart_key_levels_text(ta: TAAnalysisResult) -> str:
+    if not ta.key_levels:
+        return ""
+    lines = ["КЛЮЧЕВЫЕ УРОВНИ"]
+    for kl in ta.key_levels[:4]:
+        lines.append(f"{fmt_price(kl.price)} — {kl.label}")
+    return "\n".join(lines)
+
+
+def ta_chart_scenario_text(scenario: TradeScenario | None, *, title: str) -> str:
+    if scenario is None:
+        return ""
+    lines = [title, f"триггер {fmt_price(scenario.trigger_price)}"]
+    for cond in scenario.conditions[:2]:
+        lines.append(f"• {cond}")
+    tps = " → ".join(fmt_price(t) for t in scenario.target_prices[:2])
+    lines.append(f"цели: {tps}")
+    lines.append(f"стоп {fmt_price(scenario.stop_price)}")
+    return "\n".join(lines)
+
+
+def ta_chart_summary_text(ta: TAAnalysisResult) -> str:
+    score = ta_display_score(ta)
+    lines = [f"ИТОГ: {ta.verdict} {score}/10"]
+    if ta.professional_summary:
+        summary = ta.professional_summary
+        if len(summary) > 120:
+            summary = summary[:117] + "..."
+        lines.append(summary)
+    return "\n".join(lines)
+
+
+def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
+    score = ta_display_score(ta)
+    lines = [
+        f"ИТОГ: {ta.verdict} {score}/10",
         _verdict_plain(ta),
     ]
     if ta.current_price:

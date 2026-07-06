@@ -20,8 +20,12 @@ from .ta_analysis import (
     TradeScenario,
     fmt_price,
     run_ta_analysis,
+    ta_chart_key_levels_text,
     ta_chart_legend_text,
     ta_chart_panel_text,
+    ta_chart_scenario_text,
+    ta_chart_summary_text,
+    ta_display_score,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,24 +115,30 @@ def _draw_candles(ax: plt.Axes, bars: list[KlineBar], *, interval_minutes: int =
 def _draw_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
-    x0 = mdates.date2num(_idx_to_date(bars, max(0, len(bars) - 40)))
+    x0 = mdates.date2num(_idx_to_date(bars, max(0, len(bars) - 50)))
     x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
     width = max(x1 - x0, 0.001)
     for zone in ta.zones:
         color = CHART_STYLE["zone_resistance"] if zone.kind == "resistance" else CHART_STYLE["zone_support"]
+        alpha = 0.22 if zone.touches >= 2 else 0.14
         rect = Rectangle(
             (x0, zone.bottom),
             width,
             zone.top - zone.bottom,
             facecolor=color,
             edgecolor=color,
-            alpha=0.14,
-            linewidth=0.6,
+            alpha=alpha,
+            linewidth=1.0,
             linestyle="--",
         )
         ax.add_patch(rect)
+        label = zone.label
+        if zone.kind == "resistance" and zone.touches >= 2:
+            label = f"зона сопр. {label}"
+        elif zone.kind == "support" and zone.touches >= 2:
+            label = f"зона подд. {label}"
         ax.text(
-            x0, zone.top, f"  {zone.label}",
+            x0, zone.top, f"  {label}",
             color=color, fontsize=6.5, va="bottom", ha="left", alpha=0.95,
         )
 
@@ -439,25 +449,31 @@ def _draw_info_panels(ax: plt.Axes, ta: TAAnalysisResult) -> None:
     panel_style = dict(
         transform=ax.transAxes,
         color=CHART_STYLE["text"],
-        fontsize=7.0,
-        linespacing=1.4,
+        fontsize=6.8,
+        linespacing=1.35,
         bbox=dict(
-            boxstyle="round,pad=0.45",
+            boxstyle="round,pad=0.4",
             facecolor=CHART_STYLE["panel"],
             edgecolor=CHART_STYLE["panel_border"],
             alpha=0.93,
         ),
     )
+    bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
+    bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
 
     verdict_text = ta_chart_panel_text(ta)
     ax.text(0.99, 0.98, verdict_text, va="top", ha="right", **panel_style)
 
+    key_levels = ta_chart_key_levels_text(ta)
+    if key_levels:
+        ax.text(0.01, 0.72, key_levels, va="top", ha="left", **panel_style)
+
     ax.text(
         0.01, 0.98, ta_chart_legend_text(),
-        va="top", ha="left", fontsize=6.2, color=CHART_STYLE["text"],
+        va="top", ha="left", fontsize=5.8, color=CHART_STYLE["text"],
         transform=ax.transAxes,
         bbox=dict(
-            boxstyle="round,pad=0.3",
+            boxstyle="round,pad=0.25",
             facecolor=CHART_STYLE["panel"],
             edgecolor=CHART_STYLE["panel_border"],
             alpha=0.85,
@@ -467,27 +483,30 @@ def _draw_info_panels(ax: plt.Axes, ta: TAAnalysisResult) -> None:
     if ta.trader_plan:
         plan_lines = [f"{i + 1}. {step}" for i, step in enumerate(ta.trader_plan[:6])]
         ax.text(
-            0.01, 0.02, "ЧТО ДЕЛАТЬ:\n" + "\n".join(plan_lines),
-            va="bottom", ha="left", **panel_style,
+            0.01, 0.38, "ПЛАН ДЕЙСТВИЙ:\n" + "\n".join(plan_lines),
+            va="top", ha="left", **panel_style,
         )
 
-    scenario_lines: list[str] = []
-    if ta.bullish_scenario:
-        bs = ta.bullish_scenario
-        tps = " → ".join(fmt_price(t) for t in bs.target_prices[:3])
-        scenario_lines.append(f"ЕСЛИ ВВЕРХ (LONG)")
-        scenario_lines.append(f"триггер: {fmt_price(bs.trigger_price)}")
-        scenario_lines.append(f"цели: {tps}")
-    if ta.bearish_scenario:
-        bs = ta.bearish_scenario
-        tps = " → ".join(fmt_price(t) for t in bs.target_prices[:3])
-        scenario_lines.append(f"ЕСЛИ ВНИЗ (SHORT)")
-        scenario_lines.append(f"триггер: {fmt_price(bs.trigger_price)}")
-        scenario_lines.append(f"цели: {tps}")
-    if scenario_lines:
+    bull_text = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
+    if bull_text:
+        ax.text(0.99, 0.58, bull_text, va="top", ha="right", **bull_style)
+
+    bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
+    if bear_text:
+        ax.text(0.99, 0.30, bear_text, va="top", ha="right", **bear_style)
+
+    summary = ta_chart_summary_text(ta)
+    if summary:
         ax.text(
-            0.99, 0.02, "\n".join(scenario_lines),
-            va="bottom", ha="right", **panel_style,
+            0.5, 0.01, summary,
+            va="bottom", ha="center", fontsize=6.5, color=CHART_STYLE["text"],
+            transform=ax.transAxes,
+            bbox=dict(
+                boxstyle="round,pad=0.35",
+                facecolor=CHART_STYLE["panel"],
+                edgecolor=CHART_STYLE["warning"],
+                alpha=0.92,
+            ),
         )
 
 
@@ -530,7 +549,7 @@ def _render_chart_figure(
         color=accent_color, fontsize=7, va="center", ha="left",
     )
     ax.set_title(
-        f"{symbol}  ·  {ta.verdict} {ta.verdict_confidence}/10  ·  {title_suffix}",
+        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}",
         color=CHART_STYLE["text"], fontsize=11, pad=14,
     )
     _draw_info_panels(ax, ta)
@@ -572,6 +591,7 @@ async def render_annotated_chart(
     oi_bars: list[FiveMinOiBar] | None = None,
     invalidation_price: float | None = None,
     verdict_override: str | None = None,
+    neutral: bool = False,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     bars = await _fetch_bars(symbol, hours, interval_minutes=interval_minutes)
     if not bars:
@@ -590,6 +610,7 @@ async def render_annotated_chart(
         symbol=symbol,
         hours=hours,
         invalidation_price=invalidation_price,
+        neutral=neutral,
     )
     if verdict_override:
         ta.verdict = verdict_override
