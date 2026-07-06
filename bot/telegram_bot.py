@@ -28,8 +28,22 @@ from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
 from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
 from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart
+from .manual_ta import (
+    MANUAL_TA_TIMEFRAMES,
+    MTA_CALLBACK_PREFIX,
+    MTA_WIZARD_KEY,
+    MTW_CALLBACK_PREFIX,
+    MTW_CANCEL_CALLBACK,
+    build_mta_callback,
+    build_mtw_callback,
+    manual_ta_help_text,
+    manual_ta_hours,
+    manual_ta_wizard_start_text,
+    parse_manual_ta_input,
+    parse_mta_callback,
+    parse_mtw_callback,
+)
 from .ta_analysis import ta_telegram_caption_html
-from .probability_engine import format_probability_from_signal
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
@@ -83,9 +97,15 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("test_analysis", self.on_test_analysis))
         self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("chart", self.on_chart))
+        self.application.add_handler(CommandHandler("ta", self.on_ta_help))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
-        self.application.add_handler(CommandHandler("resume", self.on_resume))
+        self.application.add_handler(CommandHandler("cancel", self.on_cancel))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
+        self.application.add_handler(MessageHandler(filters.PHOTO, self.on_manual_ta_photo))
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_manual_ta_text),
+            group=1,
+        )
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text_message))
 
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -124,6 +144,11 @@ class TelegramBot:
                     + f"\n📈 График к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
                     f"· режим <b>{s.signal_chart_source}</b> "
                     f"{'(TA-разметка)' if s.signal_chart_source == 'annotated' else '(скрин TV/CG)'}"
+                    + (
+                        f"\n📐 Ручной TA-чат: <b>ON</b> (id {self.config.telegram_manual_ta_chat_id})"
+                        if self.config.manual_ta_chat_configured
+                        else "\n📐 Ручной TA-чат: <b>выкл</b> (задайте TELEGRAM_MANUAL_TA_CHAT_ID)"
+                    )
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
@@ -173,6 +198,29 @@ class TelegramBot:
                 "analysis_enabled=ON, но TELEGRAM_ANALYSIS_CHAT_ID не задан — "
                 "разборы ликвидаций не будут отправляться"
             )
+
+        manual_ta_chat_id = self.config.telegram_manual_ta_chat_id
+        if manual_ta_chat_id is not None:
+            try:
+                chat = await self.application.bot.get_chat(manual_ta_chat_id)
+                logger.info(
+                    "Manual TA chat OK: %s (%s)",
+                    chat.title or chat.username or chat.id,
+                    manual_ta_chat_id,
+                )
+            except BadRequest as exc:
+                logger.warning(
+                    "TELEGRAM_MANUAL_TA_CHAT_ID=%s недоступен: %s. "
+                    "Добавьте бота в чат или очистите переменную.",
+                    manual_ta_chat_id,
+                    exc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not verify TELEGRAM_MANUAL_TA_CHAT_ID=%s: %s",
+                    manual_ta_chat_id,
+                    exc,
+                )
 
         logger.info("Telegram bot started")
 
@@ -769,6 +817,394 @@ class TelegramBot:
             reply_markup=self._settings_keyboard(),
         )
 
+    async def on_ta_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._can_use_manual_ta(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        await update.message.reply_text(
+            manual_ta_help_text(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    def _is_manual_ta_chat(self, update: Update) -> bool:
+        chat = update.effective_chat
+        if chat is None or not self.config.manual_ta_chat_configured:
+            return False
+        return chat.id == self.config.telegram_manual_ta_chat_id
+
+    def _can_use_manual_ta(self, update: Update) -> bool:
+        return self._is_manual_ta_chat(update) or self._is_admin(update)
+
+    def _manual_ta_tf_keyboard(self, symbol: str, *, wizard: bool = False) -> InlineKeyboardMarkup:
+        builder = build_mtw_callback if wizard else build_mta_callback
+        buttons = [
+            InlineKeyboardButton(f"{tf}m", callback_data=builder(symbol, tf))
+            for tf in MANUAL_TA_TIMEFRAMES
+        ]
+        rows: list[list[InlineKeyboardButton]] = [buttons]
+        if wizard:
+            rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
+        else:
+            rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
+        return InlineKeyboardMarkup(rows)
+
+    def _mta_wizard_state(self, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
+        state = context.user_data.get(MTA_WIZARD_KEY)
+        return state if isinstance(state, dict) else None
+
+    def _clear_mta_wizard(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.pop(MTA_WIZARD_KEY, None)
+
+    def _start_mta_wizard(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data[MTA_WIZARD_KEY] = {
+            "symbol": None,
+            "interval": None,
+            "photo_file_id": None,
+        }
+
+    async def _cancel_mta_wizard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if self._mta_wizard_state(context) is None:
+            return False
+        self._clear_mta_wizard(context)
+        if update.message:
+            await update.message.reply_text(
+                "❌ Ручной анализ отменён.",
+                reply_markup=self._reply_keyboard(),
+            )
+        return True
+
+    async def on_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            return
+        if await self._cancel_mta_wizard(update, context):
+            return
+        if update.message:
+            await update.message.reply_text("Нечего отменять.")
+
+    async def _start_manual_ta_wizard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.config.manual_ta_chat_configured:
+            if update.message:
+                await update.message.reply_text(
+                    "⚠️ Чат ручного TA не настроен.\n"
+                    "Добавьте <code>TELEGRAM_MANUAL_TA_CHAT_ID</code> в .env и перезапустите бота.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self._reply_keyboard(),
+                )
+            return
+        self._start_mta_wizard(context)
+        if update.message:
+            await update.message.reply_text(
+                manual_ta_wizard_start_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._reply_keyboard(),
+            )
+
+    async def _prompt_manual_ta_timeframe(
+        self,
+        update: Update,
+        symbol: str,
+        *,
+        wizard: bool = False,
+    ) -> None:
+        if update.message is None:
+            return
+        photo_hint = ""
+        if wizard:
+            photo_hint = "\n\n<i>Скрин можно прислать до или после выбора TF.</i>"
+        await update.message.reply_text(
+            f"📐 <b>{symbol}</b>\nВыберите таймфрейм для TA-разметки:{photo_hint}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._manual_ta_tf_keyboard(symbol, wizard=wizard),
+        )
+
+    async def _advance_mta_wizard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        state = self._mta_wizard_state(context)
+        if state is None or update.message is None:
+            return
+
+        symbol = state.get("symbol")
+        interval = state.get("interval")
+        photo_file_id = state.get("photo_file_id")
+
+        if not symbol:
+            if photo_file_id:
+                await update.message.reply_text(
+                    "✅ Скрин получен.\n"
+                    "Теперь отправьте тикер:\n"
+                    "<code>GRASS</code> · <code>GRASS 10m</code> · <code>BTCUSDT 15m</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+
+        if interval in MANUAL_TA_TIMEFRAMES:
+            await self._finish_mta_wizard(update, context, symbol, interval)
+            return
+
+        hint = "✅ Тикер принят."
+        if not photo_file_id:
+            hint += "\n📷 Пришлите скрин CoinGlass/TradingView (можно после выбора TF)."
+        await update.message.reply_text(hint, parse_mode=ParseMode.HTML)
+        await self._prompt_manual_ta_timeframe(update, symbol, wizard=True)
+
+    async def _finish_mta_wizard(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        symbol: str,
+        interval_minutes: int,
+        *,
+        query: CallbackQuery | None = None,
+    ) -> None:
+        state = self._mta_wizard_state(context) or {}
+        photo_file_id = state.get("photo_file_id")
+        self._clear_mta_wizard(context)
+
+        deliver_chat_id = self.config.telegram_manual_ta_chat_id
+        notify_chat_id = update.effective_chat.id if update.effective_chat else None
+        if deliver_chat_id is None:
+            err = "Чат ручного TA не настроен."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+
+        await self._process_manual_ta_request(
+            update,
+            symbol,
+            interval_minutes,
+            query=query,
+            deliver_chat_id=deliver_chat_id,
+            notify_chat_id=notify_chat_id,
+            photo_file_id=photo_file_id,
+        )
+
+    async def _handle_mta_wizard_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if not self._is_admin(update) or update.message is None:
+            return False
+        state = self._mta_wizard_state(context)
+        if state is None:
+            return False
+
+        photos = update.message.photo
+        if not photos:
+            return False
+        state["photo_file_id"] = photos[-1].file_id
+
+        symbol, interval = parse_manual_ta_input(update.message.caption or "")
+        if symbol:
+            state["symbol"] = symbol
+        if interval in MANUAL_TA_TIMEFRAMES:
+            state["interval"] = interval
+
+        if state.get("symbol") and state.get("interval") in MANUAL_TA_TIMEFRAMES:
+            await self._finish_mta_wizard(
+                update,
+                context,
+                state["symbol"],
+                state["interval"],
+            )
+            return True
+
+        await self._advance_mta_wizard(update, context)
+        return True
+
+    async def _handle_mta_wizard_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if not self._is_admin(update) or update.message is None:
+            return False
+        state = self._mta_wizard_state(context)
+        if state is None:
+            return False
+
+        text = (update.message.text or "").strip()
+        if not text:
+            return True
+
+        symbol, interval = parse_manual_ta_input(text)
+        if not symbol:
+            await update.message.reply_text(
+                "Не распознал тикер. Пример: <code>GRASSUSDT</code> или <code>GRASS 10m</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return True
+
+        state["symbol"] = symbol
+        if interval in MANUAL_TA_TIMEFRAMES:
+            state["interval"] = interval
+
+        if state.get("interval") in MANUAL_TA_TIMEFRAMES:
+            await self._finish_mta_wizard(update, context, symbol, state["interval"])
+            return True
+
+        await self._advance_mta_wizard(update, context)
+        return True
+
+    async def _process_manual_ta_request(
+        self,
+        update: Update,
+        symbol: str,
+        interval_minutes: int,
+        *,
+        query: CallbackQuery | None = None,
+        deliver_chat_id: int | None = None,
+        notify_chat_id: int | None = None,
+        photo_file_id: str | None = None,
+    ) -> None:
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        target_chat_id = deliver_chat_id if deliver_chat_id is not None else chat.id
+        from_wizard = deliver_chat_id is not None and notify_chat_id is not None
+
+        hours = manual_ta_hours(interval_minutes)
+        progress = f"⏳ Строю TA: <b>{symbol}</b> · {interval_minutes}m · {hours}ч…"
+        if from_wizard:
+            progress += "\n<i>Результат уйдёт в чат ручного TA.</i>"
+
+        if query:
+            await query.answer(f"⏳ {symbol} · {interval_minutes}m")
+            try:
+                await query.edit_message_text(progress, parse_mode=ParseMode.HTML)
+            except BadRequest:
+                pass
+        elif update.message:
+            await update.message.reply_text(progress, parse_mode=ParseMode.HTML)
+
+        oi_bars = None
+        if self.scanner is not None and interval_minutes == 5:
+            try:
+                oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
+            except Exception:
+                oi_bars = None
+
+        try:
+            png, ta = await asyncio.wait_for(
+                render_annotated_chart(
+                    symbol,
+                    side="long",
+                    hours=hours,
+                    interval_minutes=interval_minutes,
+                    oi_bars=oi_bars,
+                ),
+                timeout=35.0,
+            )
+        except asyncio.TimeoutError:
+            err = f"Таймаут загрузки свечей для {symbol} ({interval_minutes}m)."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+        except Exception:
+            logger.exception("Manual TA failed for %s %sm", symbol, interval_minutes)
+            err = f"Ошибка построения графика {symbol}."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+
+        if not png or ta is None:
+            err = f"Нет данных Bybit для {symbol} ({interval_minutes}m)."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+
+        if photo_file_id and self.application is not None:
+            ref_caption = f"📷 Референс · <b>{symbol}</b> · {interval_minutes}m"
+            if from_wizard and update.effective_user:
+                ref_caption += f"\nЗапрос: {update.effective_user.mention_html()}"
+            try:
+                await self.application.bot.send_photo(
+                    chat_id=target_chat_id,
+                    photo=photo_file_id,
+                    caption=ref_caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.exception("Failed to forward manual TA reference photo for %s", symbol)
+
+        caption = (
+            f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n\n"
+            f"{ta_telegram_caption_html(ta)}"
+        )
+        keyboard = self._manual_ta_tf_keyboard(symbol, wizard=False)
+        await self._send_chart(
+            target_chat_id,
+            png,
+            caption,
+            is_priority=False,
+            keyboard=keyboard,
+        )
+
+        if from_wizard and notify_chat_id is not None and notify_chat_id != target_chat_id:
+            if self.application is not None:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=notify_chat_id,
+                        text=(
+                            f"✅ <b>{symbol}</b> · {interval_minutes}m отправлен "
+                            f"в чат ручного TA."
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=self._reply_keyboard(),
+                    )
+                except Exception:
+                    logger.exception("Failed to notify admin about manual TA delivery")
+
+    async def on_manual_ta_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        if await self._handle_mta_wizard_photo(update, context):
+            return
+        if not self._is_manual_ta_chat(update):
+            return
+
+        symbol, interval = parse_manual_ta_input(update.message.caption or "")
+        if not symbol:
+            await update.message.reply_text(
+                "Укажите тикер в подписи к фото:\n<code>GRASSUSDT</code> или <code>GRASS 10m</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if interval in MANUAL_TA_TIMEFRAMES:
+            await self._process_manual_ta_request(update, symbol, interval)
+        else:
+            await self._prompt_manual_ta_timeframe(update, symbol)
+
+    async def on_manual_ta_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        if await self._handle_mta_wizard_text(update, context):
+            return
+        if not self._is_manual_ta_chat(update):
+            return
+
+        text = (update.message.text or "").strip()
+        if not text:
+            return
+        if text.lower() in {"/ta", "/help", "/start", "help", "помощь", "команды"}:
+            await update.message.reply_text(
+                manual_ta_help_text(),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        symbol, interval = parse_manual_ta_input(text)
+        if not symbol:
+            await update.message.reply_text(
+                "Не распознал тикер. Пример: <code>GRASSUSDT</code> или <code>GRASS 10m</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if interval in MANUAL_TA_TIMEFRAMES:
+            await self._process_manual_ta_request(update, symbol, interval)
+        else:
+            await self._prompt_manual_ta_timeframe(update, symbol)
+
     async def on_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -967,6 +1403,8 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._reply_keyboard(),
             )
+        elif text in {"📐 Ручной анализ", "Ручной анализ"}:
+            await self._start_manual_ta_wizard(update, context)
         elif text in {"📋 Команды", "Команды", "❓ Помощь", "Помощь"}:
             await update.message.reply_text(
                 self._build_help_text(),
@@ -984,6 +1422,8 @@ class TelegramBot:
             "/set help — точная настройка через команды\n"
             "/test — тестовые сигналы LONG + SHORT\n"
             "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
+            "/ta — справка по ручному TA-чату\n"
+            "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить уведомления\n"
             "/resume — возобновить уведомления\n"
@@ -1219,11 +1659,53 @@ class TelegramBot:
         query = update.callback_query
         if query is None:
             return
+
+        payload = query.data or ""
+        if payload == MTW_CANCEL_CALLBACK:
+            if not self._is_admin(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            self._clear_mta_wizard(context)
+            await query.answer("Отменено")
+            try:
+                await query.edit_message_text("❌ Ручной анализ отменён.")
+            except BadRequest:
+                pass
+            return
+
+        if payload.startswith(MTW_CALLBACK_PREFIX):
+            if not self._is_admin(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mtw_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval = parsed
+            await self._finish_mta_wizard(update, context, symbol, interval, query=query)
+            return
+
+        if payload.startswith(MTA_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mta_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval = parsed
+            await self._process_manual_ta_request(
+                update,
+                symbol,
+                interval,
+                query=query,
+            )
+            return
+
         if not self._is_admin(update):
             await query.answer("Нет доступа.", show_alert=True)
             return
 
-        payload = query.data or ""
         changed_label = ""
 
         handlers: dict[str, tuple[str, type, str]] = {
@@ -1490,8 +1972,8 @@ class TelegramBot:
             [
                 [KeyboardButton(self._signals_toggle_button_label())],
                 [KeyboardButton("💧 Ликвидация"), KeyboardButton("🧠 Анализ")],
-                [KeyboardButton("📊 Биржи"), KeyboardButton("🔧 Настройки")],
-                [KeyboardButton("📋 Команды")],
+                [KeyboardButton("📐 Ручной анализ"), KeyboardButton("🔧 Настройки")],
+                [KeyboardButton("📊 Биржи"), KeyboardButton("📋 Команды")],
             ],
             resize_keyboard=True,
         )
@@ -1874,7 +2356,6 @@ class TelegramBot:
             spike_pct = signal.details.get("spike_percent", signal.price_change_percent)
             spike_text = f"+{float(spike_pct):.2f}%" if isinstance(spike_pct, (int, float)) else str(spike_pct)
             oi_usd = format_oi_usd(signal.oi_change_usd)
-            prob = format_probability_from_signal(signal, compact=True)
             title = "🚨 ВЕРТ. ПАМП" if is_long else "🚨 ВЕРТ. СЛИВ"
             if signal.signal_type in {"impulse_pump", "impulse_dump"}:
                 win = signal.details.get("impulse_window_min", signal.oi_period_minutes)
@@ -1883,7 +2364,6 @@ class TelegramBot:
                 f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
                 f"{side_emoji} {self._symbol_link_and_copy(signal)}\n"
                 f"взлёт {spike_text} · OI {abs(signal.oi_change_percent):.2f}% ({oi_usd})\n"
-                f"{prob}\n"
             )
 
         exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
@@ -1923,7 +2403,6 @@ class TelegramBot:
             f"<i>Ранний вход в вертикаль, как на графике</i>\n\n"
             f"{self._market_structure_section(signal)}"
             f"{self._bybit_real_data_section(signal)}"
-            f"{format_probability_from_signal(signal)}"
         )
 
     def _format_signal_message(self, signal: Signal, *, is_priority: bool = False, compact: bool = False) -> str:
@@ -1974,7 +2453,6 @@ class TelegramBot:
             f"(1=рано, 10=поздно) | сегодня: <b>{signal.signals_today}</b>\n\n"
             f"{self._market_structure_section(signal)}"
             f"{self._bybit_real_data_section(signal)}"
-            f"{format_probability_from_signal(signal)}"
         )
 
     def _format_signal_message_compact(self, signal: Signal, *, is_priority: bool = False) -> str:
@@ -2034,7 +2512,6 @@ class TelegramBot:
             context_bits.append(ms.replace("📐 ", ""))
 
         lines.append(" · ".join(context_bits))
-        lines.append(format_probability_from_signal(signal, compact=True, show_top_factors=False))
         return "\n".join(lines) + "\n"
 
     @staticmethod

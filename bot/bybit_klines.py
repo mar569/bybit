@@ -30,27 +30,35 @@ class BybitKlineCache:
         self._cache: dict[str, tuple[float, list[KlineBar]]] = {}
         self._lock = asyncio.Lock()
 
-    async def get_klines(self, symbol: str, *, limit: int = 72) -> list[KlineBar]:
+    async def get_klines(
+        self,
+        symbol: str,
+        *,
+        limit: int = 72,
+        interval_minutes: int = 5,
+    ) -> list[KlineBar]:
         symbol = symbol.upper()
+        interval = str(interval_minutes)
+        cache_key = f"{symbol}:{interval}"
         now = time.time()
-        cached = self._cache.get(symbol)
+        cached = self._cache.get(cache_key)
         if cached and now - cached[0] < self._ttl:
             return cached[1]
 
         async with self._lock:
-            cached = self._cache.get(symbol)
+            cached = self._cache.get(cache_key)
             if cached and now - cached[0] < self._ttl:
                 return cached[1]
 
-            bars = await self._fetch(symbol, limit=limit)
-            self._cache[symbol] = (time.time(), bars)
+            bars = await self._fetch(symbol, limit=limit, interval_minutes=interval_minutes)
+            self._cache[cache_key] = (time.time(), bars)
             return bars
 
-    async def _fetch(self, symbol: str, limit: int) -> list[KlineBar]:
+    async def _fetch(self, symbol: str, limit: int, *, interval_minutes: int = 5) -> list[KlineBar]:
         params = {
             "category": "linear",
             "symbol": symbol,
-            "interval": "5",
+            "interval": str(interval_minutes),
             "limit": min(max(limit, 12), 200),
         }
         try:
