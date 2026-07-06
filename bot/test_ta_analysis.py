@@ -127,6 +127,7 @@ def test_ta_telegram_caption_html() -> None:
     caption = ta_telegram_caption_html(ta)
     assert "TA" in caption
     assert ta.verdict in caption
+    assert "ИТОГ" in caption
 
 
 def test_detect_recent_momentum_down() -> None:
@@ -169,5 +170,6 @@ def test_ta_breakdown_html_sections() -> None:
     ta = run_ta_analysis(bars, is_long=True, symbol="VANRYUSDT", neutral=True)
     text = ta_telegram_breakdown_html(ta, symbol="VANRYUSDT", interval="15m")
     assert "Профессиональный разбор" in text
+    assert "ИТОГ" in text
     assert "Ключевые уровни" in text or "План действий" in text
     assert ta_display_score(ta) >= 1
