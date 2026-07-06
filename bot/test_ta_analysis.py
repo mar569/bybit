@@ -6,9 +6,13 @@ from bot.ta_analysis import (
     detect_candle_patterns,
     detect_channel,
     detect_consolidation,
+    detect_local_consolidation,
+    detect_post_pump_phase,
     detect_price_zones,
     detect_recent_momentum,
     find_swing_points,
+    primary_forecast_direction,
+    resolve_trade_triggers,
     run_ta_analysis,
     ta_display_score,
     ta_manual_detailed_html,
@@ -121,6 +125,54 @@ def test_detect_price_zones() -> None:
     swings = find_swing_points(bars, window=2)
     zones = detect_price_zones(bars, swings)
     assert isinstance(zones, list)
+
+
+def test_bullish_scenario_on_uptrend() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="ETHUSDT")
+    assert ta.bullish_scenario is not None
+    assert ta.breakout_level is not None
+
+
+def test_post_pump_local_range() -> None:
+    bars: list[KlineBar] = []
+    price = 0.00030
+    for i in range(35):
+        price *= 1.012
+        o = price / 1.012
+        bars.append(_bar(i, o, price * 1.004, o * 0.998, price))
+    peak = price
+    for i in range(18):
+        wobble = 1.0 + (i % 4) * 0.0015 - 0.002
+        price = peak * wobble
+        bars.append(_bar(35 + i, price * 0.999, price * 1.002, price * 0.997, price))
+    assert detect_post_pump_phase(bars)
+    swings = find_swing_points(bars, window=2)
+    levels = []
+    zones = []
+    key_levels = []
+    breakout, breakdown, cons, post_pump = resolve_trade_triggers(
+        bars, swings, levels, zones, key_levels,
+    )
+    assert post_pump
+    assert cons is not None
+    assert breakout is not None and breakdown is not None
+    if breakout and breakdown:
+        assert breakout > breakdown
+
+
+def test_primary_forecast_direction() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)
+    assert primary_forecast_direction(ta) in {"long", "short", "neutral"}
+
+
+def test_manual_detailed_has_distances() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)
+    text = ta_manual_detailed_html(ta)
+    assert "📍" in text
+    assert "👉" in text or "Действие" in text
 
 
 def test_ta_signal_caption_html() -> None:

@@ -27,6 +27,7 @@ from .ta_analysis import (
     ta_chart_scenario_text,
     ta_chart_summary_text,
     ta_display_score,
+    primary_forecast_direction,
 )
 
 logger = logging.getLogger(__name__)
@@ -420,8 +421,14 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         marker = "^" if pat.bullish else "v" if pat.bullish is False else "o"
         ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
 
-    _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-    _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+    direction = primary_forecast_direction(ta)
+    if direction == "long":
+        _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+    elif direction == "short":
+        _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+    else:
+        _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+        _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
 
     _draw_signal_markers(ax, bars, ta)
 
@@ -588,11 +595,45 @@ async def _fetch_bars(
     return bars[-hours * per_hour:]
 
 
+# Область свечей на скриншоте TradingView (норм. координаты, 0=низ)
+TV_CHART_Y_BOTTOM = 0.24
+TV_CHART_Y_TOP = 0.84
+
+
 def _price_to_axis_y(price: float, y_min: float, y_max: float) -> float:
     if y_max <= y_min:
-        return 0.5
+        return (TV_CHART_Y_BOTTOM + TV_CHART_Y_TOP) / 2
     ratio = (price - y_min) / (y_max - y_min)
-    return 0.13 + (1.0 - ratio) * 0.74
+    return TV_CHART_Y_BOTTOM + (1.0 - ratio) * (TV_CHART_Y_TOP - TV_CHART_Y_BOTTOM)
+
+
+def _tv_visible_price_range(bars: list[KlineBar], ta: TAAnalysisResult) -> tuple[float, float]:
+    """Диапазон цен под видимое окно TV — линии попадают на свечи."""
+    n = len(bars)
+    visible_count = max(24, min(n, int(n * 0.58)))
+    visible = bars[-visible_count:]
+    prices: list[float] = []
+    for b in visible:
+        prices.extend([b.low, b.high])
+    if ta.current_price:
+        prices.append(ta.current_price)
+    for p in (ta.breakout_level, ta.breakdown_level, ta.invalidation_price):
+        if p:
+            prices.append(p)
+    for lv in ta.levels[:4]:
+        prices.append(lv.price)
+    if ta.consolidation:
+        prices.extend([ta.consolidation.top, ta.consolidation.bottom])
+    if ta.nearest_support:
+        prices.append(ta.nearest_support)
+    if ta.nearest_resistance:
+        prices.append(ta.nearest_resistance)
+    if not prices:
+        return 0.0, 1.0
+    y_min, y_max = min(prices), max(prices)
+    span = max(y_max - y_min, y_min * 0.0005)
+    pad = span * 0.035
+    return y_min - pad, y_max + pad
 
 
 def _bar_x_norm(idx: int, n: int, *, x_start: float = 0.06, x_end: float = 0.88) -> float:
@@ -703,60 +744,67 @@ def _draw_tv_emas(ax: plt.Axes, bars: list[KlineBar], y_at: Any) -> None:
 def _draw_tv_forecast_paths(
     ax: plt.Axes,
     ta: TAAnalysisResult,
+    bars: list[KlineBar],
     current: float,
     y_at: Any,
 ) -> None:
-    """Пунктирные сценарии вправо — как прогноз на референсных скринах."""
-    x0, x1, x2 = 0.76, 0.86, 0.96
+    """Один приоритетный сценарий вправо от последней свечи."""
+    n = len(bars)
+    x0 = _bar_x_norm(n - 1, n, x_start=0.62, x_end=0.90)
+    x1, x2 = x0 + 0.08, min(0.97, x0 + 0.16)
     y0 = y_at(current)
     ax.plot(x0, y0, "o", color="white", markersize=5, zorder=5)
-    ax.text(x0 - 0.01, y0, " сейчас", color=CHART_STYLE["text"], fontsize=6, ha="right", va="center")
+    ax.text(x0 - 0.008, y0, " сейчас", color=CHART_STYLE["text"], fontsize=6, ha="right", va="center")
 
-    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
-        bs = ta.bullish_scenario
-        y_trig = y_at(bs.trigger_price)
-        y_tp = y_at(bs.target_prices[0])
+    direction = primary_forecast_direction(ta)
+
+    def _draw_path(scenario: TradeScenario, *, color: str, label: str, va: str) -> None:
+        y_trig = y_at(scenario.trigger_price)
+        y_tp = y_at(scenario.target_prices[0])
         ax.plot(
             [x0, x1, x2], [y0, y_trig, y_tp],
-            color=CHART_STYLE["accent_long"], linewidth=1.3, linestyle="--", alpha=0.85, zorder=3,
+            color=color, linewidth=1.4, linestyle="--", alpha=0.9, zorder=3,
         )
         ax.annotate(
             "", xy=(x2, y_tp), xytext=(x1, y_trig),
-            arrowprops=dict(
-                arrowstyle="-|>", color=CHART_STYLE["accent_long"],
-                lw=1.4, linestyle="dashed", alpha=0.9,
-            ),
+            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5, linestyle="dashed", alpha=0.95),
         )
-        ax.text(x2, y_tp, " прогноз↑", color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom", fontweight="bold")
+        ax.text(x2, y_tp, f" {label}", color=color, fontsize=6.5, va=va, fontweight="bold")
 
-    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
-        bs = ta.bearish_scenario
-        y_trig = y_at(bs.trigger_price)
-        y_tp = y_at(bs.target_prices[0])
-        ax.plot(
-            [x0, x1, x2], [y0, y_trig, y_tp],
-            color=CHART_STYLE["accent_short"], linewidth=1.3, linestyle=":", alpha=0.85, zorder=3,
-        )
-        ax.annotate(
-            "", xy=(x2, y_tp), xytext=(x1, y_trig),
-            arrowprops=dict(
-                arrowstyle="-|>", color=CHART_STYLE["accent_short"],
-                lw=1.4, linestyle="dotted", alpha=0.9,
-            ),
-        )
-        ax.text(x2, y_tp, " прогноз↓", color=CHART_STYLE["accent_short"], fontsize=6.5, va="top", fontweight="bold")
+    if direction == "long" and ta.bullish_scenario and ta.bullish_scenario.target_prices:
+        _draw_path(ta.bullish_scenario, color=CHART_STYLE["accent_long"], label="прогноз↑", va="bottom")
+    elif direction == "short" and ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        _draw_path(ta.bearish_scenario, color=CHART_STYLE["accent_short"], label="прогноз↓", va="top")
+    elif direction == "neutral":
+        if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+            bs = ta.bullish_scenario
+            ax.plot(
+                [x0, x1], [y0, y_at(bs.trigger_price)],
+                color=CHART_STYLE["accent_long"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
+            )
+        if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+            bs = ta.bearish_scenario
+            ax.plot(
+                [x0, x1], [y0, y_at(bs.trigger_price)],
+                color=CHART_STYLE["accent_short"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
+            )
 
 
 def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
-    lines = ["Сценарии →"]
-    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+    direction = primary_forecast_direction(ta)
+    if direction == "long" and ta.bullish_scenario and ta.bullish_scenario.target_prices:
         bs = ta.bullish_scenario
         tps = "→".join(fmt_price(t) for t in bs.target_prices[:2])
-        lines.append(f"↑ {fmt_price(bs.trigger_price)} {tps}")
-    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        return f"Сценарий ↑ {fmt_price(bs.trigger_price)} {tps}"
+    if direction == "short" and ta.bearish_scenario and ta.bearish_scenario.target_prices:
         bs = ta.bearish_scenario
         tps = "→".join(fmt_price(t) for t in bs.target_prices[:2])
-        lines.append(f"↓ {fmt_price(bs.trigger_price)} {tps}")
+        return f"Сценарий ↓ {fmt_price(bs.trigger_price)} {tps}"
+    lines = ["Уровни →"]
+    if ta.breakout_level:
+        lines.append(f"↑ {fmt_price(ta.breakout_level)}")
+    if ta.breakdown_level:
+        lines.append(f"↓ {fmt_price(ta.breakdown_level)}")
     return "\n".join(lines[:3])
 
 
@@ -778,11 +826,7 @@ def _overlay_ta_on_tradingview(
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    y_min = min(b.low for b in bars)
-    y_max = max(b.high for b in bars)
-    pad = (y_max - y_min) * 0.08
-    y_min -= pad
-    y_max += pad
+    y_min, y_max = _tv_visible_price_range(bars, ta)
 
     def y_at(price: float) -> float:
         return _price_to_axis_y(price, y_min, y_max)
@@ -812,9 +856,16 @@ def _overlay_ta_on_tradingview(
     y_cur = y_at(current)
     ax.axhline(y_cur, xmin=0.03, xmax=0.75, color=CHART_STYLE["accent_long"], linewidth=0.8, linestyle=":", alpha=0.7, zorder=2)
 
-    _draw_tv_forecast_paths(ax, ta, current, y_at)
+    _draw_tv_forecast_paths(ax, ta, bars, current, y_at)
 
     header = f"{symbol} · {ta.verdict} {ta_display_score(ta)}/10 · {interval_minutes}m"
+    if ta.dist_to_long_pct is not None or ta.dist_to_short_pct is not None:
+        bits: list[str] = []
+        if ta.dist_to_long_pct is not None:
+            bits.append(f"L {ta.dist_to_long_pct:.1f}%")
+        if ta.dist_to_short_pct is not None:
+            bits.append(f"S {ta.dist_to_short_pct:.1f}%")
+        header += f" · {' / '.join(bits)}"
     ax.text(
         0.02, 0.97, header,
         transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8, fontweight="bold",

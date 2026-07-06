@@ -151,6 +151,12 @@ class TAAnalysisResult:
     range_trade_label: str = ""
     entry_mode: str = "breakout"
     factor_lines: list[str] = field(default_factory=list)
+    nearest_support: float | None = None
+    nearest_resistance: float | None = None
+    dist_to_long_pct: float | None = None
+    dist_to_short_pct: float | None = None
+    post_pump: bool = False
+    primary_scenario: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -362,6 +368,155 @@ def detect_signal_markers(
     return deduped[-5:]
 
 
+def _distance_pct(current: float, level: float | None) -> float | None:
+    if not level or current <= 0:
+        return None
+    return abs(level - current) / current * 100.0
+
+
+def detect_post_pump_phase(bars: list[KlineBar], *, lookback: int = 30) -> bool:
+    """Резкий рост в окне + цена держится у хая (консолидация после пампа)."""
+    if len(bars) < lookback + 5:
+        return False
+    seg = bars[-lookback:]
+    start = seg[0].open
+    peak = max(b.high for b in seg)
+    current = bars[-1].close
+    if start <= 0 or peak <= 0:
+        return False
+    pump_pct = (peak - start) / start * 100.0
+    off_peak = (peak - current) / peak * 100.0
+    return pump_pct >= 6.0 and off_peak <= 12.0 and current >= peak * 0.80
+
+
+def detect_local_consolidation(
+    bars: list[KlineBar],
+    *,
+    lookback: int = 36,
+    max_range_pct: float = 6.5,
+) -> ConsolidationZone | None:
+    if len(bars) < 10:
+        return None
+    lb = min(lookback, len(bars))
+    segment = bars[-lb:]
+    high = max(b.high for b in segment)
+    low = min(b.low for b in segment)
+    mid = (high + low) / 2.0
+    if mid <= 0:
+        return None
+    range_pct = (high - low) / mid * 100.0
+    if range_pct > max_range_pct:
+        return None
+    return ConsolidationZone(
+        top=high,
+        bottom=low,
+        start_idx=len(bars) - lb,
+        end_idx=len(bars) - 1,
+        label=f"лок. боковик {range_pct:.1f}%",
+    )
+
+
+def detect_local_swing_levels(
+    bars: list[KlineBar],
+    swings: list[SwingPoint],
+    *,
+    lookback: int = 48,
+    max_dist_pct: float = 7.0,
+) -> tuple[float | None, float | None]:
+    if not bars:
+        return None, None
+    current = bars[-1].close
+    cutoff = max(0, len(bars) - lookback)
+    recent = [s for s in swings if s.index >= cutoff]
+    resistances = sorted(
+        {s.price for s in recent if s.kind == "high" and s.price > current * 1.0003},
+    )
+    supports = sorted(
+        {s.price for s in recent if s.kind == "low" and s.price < current * 0.9997},
+        reverse=True,
+    )
+    max_dist = current * max_dist_pct / 100.0
+
+    def _nearest_above(levels: list[float]) -> float | None:
+        near = [p for p in levels if 0 < p - current <= max_dist]
+        if near:
+            return near[0]
+        return levels[0] if levels else None
+
+    def _nearest_below(levels: list[float]) -> float | None:
+        near = [p for p in levels if 0 < current - p <= max_dist]
+        if near:
+            return near[0]
+        return levels[0] if levels else None
+
+    return _nearest_above(resistances), _nearest_below(supports)
+
+
+def resolve_trade_triggers(
+    bars: list[KlineBar],
+    swings: list[SwingPoint],
+    levels: list[HorizontalLevel],
+    zones: list[PriceZone],
+    key_levels: list[KeyLevel],
+) -> tuple[float | None, float | None, ConsolidationZone | None, bool]:
+    """Локальные триггеры LONG/SHORT + боковик после пампа."""
+    if not bars:
+        return None, None, None, False
+
+    current = bars[-1].close
+    post_pump = detect_post_pump_phase(bars)
+    local_cons = detect_local_consolidation(
+        bars,
+        lookback=32 if post_pump else 42,
+        max_range_pct=8.5 if post_pump else 6.5,
+    )
+    local_r, local_s = detect_local_swing_levels(bars, swings)
+
+    resistances = sorted(
+        {lv.price for lv in levels if lv.kind == "resistance" and lv.price > current * 1.001},
+    )
+    supports = sorted(
+        {lv.price for lv in levels if lv.kind == "support" and lv.price < current * 0.999},
+        reverse=True,
+    )
+    for z in zones:
+        mid = (z.top + z.bottom) / 2
+        if z.kind == "resistance" and mid > current and mid not in resistances:
+            resistances.append(mid)
+        if z.kind == "support" and mid < current and mid not in supports:
+            supports.append(mid)
+    resistances.sort()
+    supports.sort(reverse=True)
+
+    breakout = next((kl.price for kl in key_levels if kl.role == "breakout"), None)
+    if breakout is None and resistances:
+        breakout = resistances[0]
+    breakdown = next((kl.price for kl in key_levels if kl.role == "breakdown"), None)
+    if breakdown is None and supports:
+        breakdown = supports[0]
+
+    max_dist = 7.0 if post_pump else 11.0
+    if breakout and (_distance_pct(current, breakout) or 999) > max_dist:
+        breakout = local_r or (local_cons.top if local_cons else breakout)
+    if breakdown and (_distance_pct(current, breakdown) or 999) > max_dist:
+        breakdown = local_s or (local_cons.bottom if local_cons else breakdown)
+
+    if post_pump and local_cons:
+        breakout = local_cons.top
+        breakdown = local_cons.bottom
+    elif local_cons and not breakout and not breakdown:
+        breakout = local_cons.top
+        breakdown = local_cons.bottom
+
+    if not breakout and local_r:
+        breakout = local_r
+    if not breakdown and local_s:
+        breakdown = local_s
+
+    cons = local_cons if post_pump and local_cons else None
+    return breakout, breakdown, cons, post_pump
+
+
 def build_key_levels(
     bars: list[KlineBar],
     levels: list[HorizontalLevel],
@@ -395,9 +550,13 @@ def build_key_levels(
         result.append(KeyLevel(mid, role, z.label))
 
     if supports:
-        result.append(KeyLevel(supports[0].price, "nearest_support", "поддержка"))
+        nearest_s = next((lv for lv in supports if lv.price < current * 0.999), supports[0] if supports else None)
+        if nearest_s:
+            result.append(KeyLevel(nearest_s.price, "nearest_support", "поддержка"))
     if resistances:
-        result.append(KeyLevel(resistances[-1].price, "nearest_resistance", "сопротивление"))
+        nearest_r = next((lv for lv in resistances if lv.price > current * 1.001), resistances[-1] if resistances else None)
+        if nearest_r:
+            result.append(KeyLevel(nearest_r.price, "nearest_resistance", "сопротивление"))
 
     seen: set[float] = set()
     unique: list[KeyLevel] = []
@@ -415,14 +574,22 @@ def build_scenarios(
     levels: list[HorizontalLevel],
     zones: list[PriceZone],
     key_levels: list[KeyLevel],
+    swings: list[SwingPoint] | None = None,
 ) -> tuple[TradeScenario | None, TradeScenario | None, float | None, float | None]:
     if not bars:
         return None, None, None, None
 
+    swings = swings or []
     current = bars[-1].close
-    resistances = sorted({lv.price for lv in levels if lv.kind == "resistance" and lv.price > current})
-    supports = sorted({lv.price for lv in levels if lv.kind == "support" and lv.price < current}, reverse=True)
+    breakout, breakdown, _, _ = resolve_trade_triggers(bars, swings, levels, zones, key_levels)
 
+    resistances = sorted(
+        {lv.price for lv in levels if lv.kind == "resistance" and lv.price > current * 1.001},
+    )
+    supports = sorted(
+        {lv.price for lv in levels if lv.kind == "support" and lv.price < current * 0.999},
+        reverse=True,
+    )
     for z in zones:
         mid = (z.top + z.bottom) / 2
         if z.kind == "resistance" and mid > current and mid not in resistances:
@@ -432,18 +599,15 @@ def build_scenarios(
     resistances.sort()
     supports.sort(reverse=True)
 
-    breakout = next((kl.price for kl in key_levels if kl.role == "breakout"), None)
-    if breakout is None and resistances:
-        breakout = resistances[0]
-    breakdown = next((kl.price for kl in key_levels if kl.role == "breakdown"), None)
-    if breakdown is None and supports:
-        breakdown = supports[0]
-
-    bull_targets = resistances[:4]
+    bull_targets = [p for p in resistances if breakout and p > breakout * 1.0005][:4]
+    if not bull_targets and breakout:
+        bull_targets = [breakout * 1.01, breakout * 1.02, breakout * 1.035]
     if not bull_targets:
         bull_targets = [current * 1.015, current * 1.03, current * 1.045, current * 1.06]
 
-    bear_targets = supports[:4]
+    bear_targets = [p for p in supports if breakdown and p < breakdown * 0.9995][:4]
+    if not bear_targets and breakdown:
+        bear_targets = [breakdown * 0.99, breakdown * 0.98, breakdown * 0.965]
     if not bear_targets:
         bear_targets = [current * 0.985, current * 0.97, current * 0.955, current * 0.94]
 
@@ -453,7 +617,7 @@ def build_scenarios(
     bullish: TradeScenario | None = None
     bearish: TradeScenario | None = None
 
-    if bullish:
+    if breakout:
         bullish = TradeScenario(
             direction="long",
             trigger_price=breakout,
@@ -1217,7 +1381,21 @@ def run_ta_analysis(
     rulers = compute_rulers(bars, swings)
     structure = classify_structure(swings)
     key_levels = build_key_levels(bars, levels, zones)
-    bullish, bearish, breakout, breakdown = build_scenarios(bars, levels, zones, key_levels)
+    bullish, bearish, breakout, breakdown = build_scenarios(
+        bars, levels, zones, key_levels, swings,
+    )
+    _, _, cons_override, post_pump = resolve_trade_triggers(
+        bars, swings, levels, zones, key_levels,
+    )
+    if cons_override:
+        consolidation = cons_override
+    elif consolidation is None:
+        local = detect_local_consolidation(bars, lookback=40, max_range_pct=6.5)
+        if local:
+            consolidation = local
+    nearest_resistance, nearest_support = detect_local_swing_levels(
+        bars, swings, max_dist_pct=12.0,
+    )
     signal_markers = detect_signal_markers(bars, levels)
     ms = analyze_market_structure(bars, oi_bars, is_long=is_long, hours=hours)
     btc_ctx = ""
@@ -1376,6 +1554,28 @@ def run_ta_analysis(
         momentum_label=momentum_label,
         action_priority=action_priority,
     )
+    dist_to_long_pct: float | None = None
+    dist_to_short_pct: float | None = None
+    if current > 0 and breakout and breakout > current * 1.0001:
+        dist_to_long_pct = (breakout - current) / current * 100.0
+    if current > 0 and breakdown and breakdown < current * 0.9999:
+        dist_to_short_pct = (current - breakdown) / current * 100.0
+
+    primary_scenario = ""
+    if post_pump:
+        primary_scenario = "консолидация после пампа — пробой границ локального range"
+    elif verdict == "LONG" and targets:
+        primary_scenario = f"рост к {fmt_price(targets[0])}"
+    elif verdict == "SHORT" and targets:
+        primary_scenario = f"снижение к {fmt_price(targets[0])}"
+    elif action_priority == "long" and breakout:
+        primary_scenario = f"приоритет вверх — пробой {fmt_price(breakout)}"
+    elif action_priority == "short" and breakdown:
+        primary_scenario = f"приоритет вниз — пробой {fmt_price(breakdown)}"
+
+    if post_pump:
+        risk_notes = ["после пампа — не гнаться, ждать пробой range"] + risk_notes
+
     return TAAnalysisResult(
         swings=swings,
         levels=levels,
@@ -1418,6 +1618,12 @@ def run_ta_analysis(
         range_trade_label=range_trade.label if range_trade else "",
         entry_mode=entry_mode,
         factor_lines=factors.factor_lines,
+        nearest_support=nearest_support,
+        nearest_resistance=nearest_resistance,
+        dist_to_long_pct=dist_to_long_pct,
+        dist_to_short_pct=dist_to_short_pct,
+        post_pump=post_pump,
+        primary_scenario=primary_scenario,
     )
 
 
@@ -1476,6 +1682,19 @@ def ta_display_score(ta: TAAnalysisResult) -> int:
     if ta.verdict == "WAIT" and ta.setup_clarity > ta.verdict_confidence:
         return ta.setup_clarity
     return ta.verdict_confidence
+
+
+def primary_forecast_direction(ta: TAAnalysisResult) -> str:
+    """Какой сценарий рисовать на графике: long / short / neutral."""
+    if ta.verdict == "LONG":
+        return "long"
+    if ta.verdict == "SHORT":
+        return "short"
+    if ta.action_priority == "long":
+        return "long"
+    if ta.action_priority == "short":
+        return "short"
+    return "neutral"
 
 
 def ta_action_summary_html(ta: TAAnalysisResult) -> str:
@@ -1551,6 +1770,20 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         f"📍 <b>Сейчас:</b> {_situation_plain(ta)}",
         f"💡 <b>Смысл:</b> {_verdict_plain(ta)}",
     ]
+
+    dist_bits: list[str] = []
+    if ta.dist_to_long_pct is not None:
+        dist_bits.append(f"до LONG <b>{ta.dist_to_long_pct:.1f}%</b>")
+    if ta.dist_to_short_pct is not None:
+        dist_bits.append(f"до SHORT <b>{ta.dist_to_short_pct:.1f}%</b>")
+    if dist_bits:
+        lines.append("📏 " + " · ".join(dist_bits))
+    if ta.range_position:
+        lines.append(f"📊 В range: <b>{ta.range_position * 100:.0f}%</b> (0=дно, 100=верх)")
+    if ta.primary_scenario:
+        lines.append(f"🧭 <b>Главный сценарий:</b> {ta.primary_scenario}")
+    if ta.post_pump:
+        lines.append("⚡ <b>Фаза:</b> консолидация после пампа")
 
     if ta.breakout_level:
         lines.append(
@@ -1710,12 +1943,16 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
     if ta.current_price:
         lines.append(f"цена: {fmt_price(ta.current_price)}")
     if ta.breakout_level:
-        lines.append(f"LONG от: {fmt_price(ta.breakout_level)}")
+        extra = f" ({ta.dist_to_long_pct:.1f}%)" if ta.dist_to_long_pct is not None else ""
+        lines.append(f"LONG от: {fmt_price(ta.breakout_level)}{extra}")
     if ta.breakdown_level:
-        lines.append(f"SHORT от: {fmt_price(ta.breakdown_level)}")
+        extra = f" ({ta.dist_to_short_pct:.1f}%)" if ta.dist_to_short_pct is not None else ""
+        lines.append(f"SHORT от: {fmt_price(ta.breakdown_level)}{extra}")
     if ta.invalidation_price:
         lines.append(f"стоп: {fmt_price(ta.invalidation_price)}")
-    return "\n".join(lines[:6])
+    if ta.range_position:
+        lines.append(f"range: {ta.range_position * 100:.0f}%")
+    return "\n".join(lines[:7])
 
 
 def ta_chart_legend_text() -> str:
