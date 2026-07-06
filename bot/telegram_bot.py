@@ -453,7 +453,7 @@ class TelegramBot:
                 chart_fail = "исключение при построении"
             chart_caption = message
             if ta_result is not None:
-                chart_caption = f"{message}\n\n{ta_signal_caption_html(ta_result)}"
+                chart_caption = f"{message}\n\n{ta_signal_caption_html(ta_result, signal_side=signal.side)}"
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,

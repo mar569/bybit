@@ -178,10 +178,18 @@ def test_manual_detailed_has_distances() -> None:
 def test_ta_signal_caption_html() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
-    caption = ta_signal_caption_html(ta)
+    caption = ta_signal_caption_html(ta, signal_side="long")
     assert "📐 TA" in caption
     assert "▶️" in caption
     assert caption.count("\n") == 1
+
+
+def test_signal_caption_aligns_with_short_signal() -> None:
+    bars = _trend_up_bars(60)
+    ta = run_ta_analysis(bars, is_long=False, symbol="ETHUSDT", neutral=True)
+    caption = ta_signal_caption_html(ta, signal_side="short")
+    assert "сигнал SHORT" in caption
+    assert "Сигнал <b>SHORT</b>" in caption or "Открывать SHORT" in caption
 
 
 def test_ta_manual_detailed_html() -> None:
