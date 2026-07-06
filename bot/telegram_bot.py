@@ -1072,11 +1072,21 @@ class TelegramBot:
             await update.message.reply_text(progress, parse_mode=ParseMode.HTML)
 
         oi_bars = None
-        if self.scanner is not None and interval_minutes == 5:
+        liq_context = None
+        if self.scanner is not None:
+            if interval_minutes == 5:
+                try:
+                    oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
+                except Exception:
+                    oi_bars = None
             try:
-                oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
+                stats = self.scanner._get_liquidation_stats("bybit", symbol, 15)
+                if stats is not None:
+                    liq_context = stats.to_dict()
             except Exception:
-                oi_bars = None
+                liq_context = None
+
+        chart_source = self.settings_manager.settings.manual_ta_chart_source
 
         try:
             png, ta = await asyncio.wait_for(
@@ -1087,8 +1097,11 @@ class TelegramBot:
                     interval_minutes=interval_minutes,
                     oi_bars=oi_bars,
                     neutral=True,
+                    chart_source=chart_source,
+                    exchange="bybit",
+                    liq_context=liq_context,
                 ),
-                timeout=35.0,
+                timeout=50.0,
             )
         except asyncio.TimeoutError:
             err = f"Таймаут загрузки свечей для {symbol} ({interval_minutes}m)."

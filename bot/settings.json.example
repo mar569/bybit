@@ -134,5 +134,6 @@
   "signal_chart_source": "annotated",
   "signal_chart_hours": 5,
   "signal_chart_interval_minutes": 5,
+  "manual_ta_chart_source": "tv_annotated",
   "signal_message_compact": true
 }

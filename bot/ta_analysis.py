@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from .bybit_klines import KlineBar
 from .market_structure import FiveMinOiBar, MarketStructureContext, analyze_market_structure
+from .ta_range_trade import RangeTradeSetup, build_factor_context, evaluate_range_trade
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,9 @@ class TAAnalysisResult:
     momentum_pct: float = 0.0
     btc_alt_spread: float | None = None
     action_priority: str = "neutral"
+    range_trade_label: str = ""
+    entry_mode: str = "breakout"
+    factor_lines: list[str] = field(default_factory=list)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -1005,6 +1009,9 @@ def _resolve_neutral_verdict(
     current: float,
     breakout: float | None,
     breakdown: float | None,
+    range_trade: RangeTradeSetup | None = None,
+    factor_long_boost: int = 0,
+    factor_short_boost: int = 0,
 ) -> tuple[str, int, str]:
     long_v, long_s, long_r = _resolve_verdict(
         is_long=True,
@@ -1025,6 +1032,19 @@ def _resolve_neutral_verdict(
         btc_spread=btc_spread,
     )
 
+    long_s = min(9, long_s + factor_long_boost)
+    short_s = min(9, short_s + factor_short_boost)
+
+    if range_trade is not None:
+        if range_trade.direction == "long":
+            score = min(9, long_s + range_trade.score_boost)
+            if score >= 6:
+                return "LONG", score, f"{range_trade.label} · {range_trade.reason}"
+        else:
+            score = min(9, short_s + range_trade.score_boost)
+            if score >= 6:
+                return "SHORT", score, f"{range_trade.label} · {range_trade.reason}"
+
     if long_v == "LONG" and long_s >= 7 and long_s >= short_s + 1:
         return long_v, long_s, long_r
     if short_v == "SHORT" and short_s >= 7 and short_s >= long_s + 1:
@@ -1033,7 +1053,7 @@ def _resolve_neutral_verdict(
     # Сильное давление вниз: short даже без классических 7/10
     if (
         short_s >= 6
-        and short_s >= long_s + 1
+        and short_s >= long_s
         and momentum == "down"
         and (ms.drawdown_from_high_pct > 8 or (btc_spread is not None and btc_spread < -5))
     ):
@@ -1140,6 +1160,7 @@ def run_ta_analysis(
     hours: int = 5,
     invalidation_price: float | None = None,
     neutral: bool = False,
+    liq_context: dict | None = None,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -1208,6 +1229,19 @@ def run_ta_analysis(
         short_score=short_s,
     )
 
+    factors = build_factor_context(bars, liq_context)
+    range_trade = evaluate_range_trade(
+        bars,
+        consolidation=consolidation,
+        breakout=breakout,
+        breakdown=breakdown,
+        ms=ms,
+        patterns=patterns,
+        momentum=momentum,
+        channel=channel,
+        factors=factors,
+    )
+
     if neutral:
         verdict, conf, reason = _resolve_neutral_verdict(
             ms=ms,
@@ -1221,6 +1255,9 @@ def run_ta_analysis(
             current=current,
             breakout=breakout,
             breakdown=breakdown,
+            range_trade=range_trade,
+            factor_long_boost=factors.liq_long_boost + (1 if factors.cvd_ratio >= 0.62 else 0),
+            factor_short_boost=factors.liq_short_boost + (1 if factors.cvd_ratio <= 0.38 else 0),
         )
     else:
         verdict, conf, reason = _resolve_verdict(
@@ -1232,7 +1269,7 @@ def run_ta_analysis(
             momentum=momentum,
             btc_spread=btc_spread,
         )
-    if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7:
+    if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7 and range_trade is None:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
 
@@ -1243,10 +1280,16 @@ def run_ta_analysis(
         elif verdict == "LONG" or action_priority == "long":
             trade_is_long = True
 
-    inv, entry, targets = _trade_levels(
-        bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
-        bullish=bullish, bearish=bearish,
-    )
+    entry_mode = "range_edge" if range_trade else "breakout"
+    if range_trade and verdict in {"LONG", "SHORT"}:
+        inv = range_trade.stop_price
+        entry = (range_trade.entry_price * 0.999, range_trade.entry_price * 1.001)
+        targets = list(range_trade.target_prices)
+    else:
+        inv, entry, targets = _trade_levels(
+            bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
+            bullish=bullish, bearish=bearish,
+        )
     supports = sorted([lv.price for lv in levels if lv.kind == "support"], reverse=True)
     trader_plan = build_trader_plan(
         verdict=verdict,
@@ -1316,6 +1359,9 @@ def run_ta_analysis(
         momentum_pct=momentum_pct,
         btc_alt_spread=btc_spread,
         action_priority=action_priority,
+        range_trade_label=range_trade.label if range_trade else "",
+        entry_mode=entry_mode,
+        factor_lines=factors.factor_lines,
     )
 
 
@@ -1381,7 +1427,10 @@ def ta_action_summary_html(ta: TAAnalysisResult) -> str:
     lines: list[str] = ["<b>━━━ ИТОГ: ЧТО ДЕЛАТЬ ━━━</b>"]
 
     if ta.verdict == "LONG":
-        lines.append("✅ <b>Открывать LONG</b> — при подтверждении уровня")
+        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+            lines.append(f"✅ <b>Открывать LONG</b> — {ta.range_trade_label}")
+        else:
+            lines.append("✅ <b>Открывать LONG</b> — при подтверждении уровня")
         if ta.breakout_level:
             lines.append(f"Вход: 5m закрылась <b>выше {fmt_price(ta.breakout_level)}</b>")
         if ta.invalidation_price:
@@ -1390,7 +1439,10 @@ def ta_action_summary_html(ta: TAAnalysisResult) -> str:
             tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
             lines.append(f"Цели: {tps}")
     elif ta.verdict == "SHORT":
-        lines.append("✅ <b>Открывать SHORT</b> — при подтверждении уровня")
+        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+            lines.append(f"✅ <b>Открывать SHORT</b> — {ta.range_trade_label}")
+        else:
+            lines.append("✅ <b>Открывать SHORT</b> — при подтверждении уровня")
         if ta.breakdown_level:
             lines.append(f"Вход: 5m закрылась <b>ниже {fmt_price(ta.breakdown_level)}</b>")
         if ta.invalidation_price:
@@ -1544,6 +1596,8 @@ def ta_telegram_breakdown_html(ta: TAAnalysisResult, *, symbol: str = "", interv
         lines.append(f"• Bias: <b>{ta.market_bias}</b>")
     if ta.momentum_label:
         lines.append(f"• Импульс: <b>{ta.momentum_label}</b>")
+    for fl in ta.factor_lines[:3]:
+        lines.append(f"• {fl}")
     if ta.structure_label:
         lines.append(f"• Структура: {_structure_plain(ta.structure_label)}")
     if ta.phase_label:

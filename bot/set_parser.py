@@ -30,6 +30,8 @@ SET_HELP = (
     "/set chart annotated — TA-график к сигналам (рекомендуется)\n"
     "/set chart on — включить графики к сигналам\n"
     "/set chart off — только текст без картинки\n"
+    "/set manual_chart tv_annotated — ручной TA: TradingView + уровни\n"
+    "/set manual_chart annotated — ручной TA: matplotlib\n"
     "Ликвидации (REKT-алерты в обычный чат):\n"
     "/set liq on — включить алерты по ликвидациям\n"
     "/set liq off — выключить\n"
@@ -89,6 +91,8 @@ GLOBAL_ALIASES: dict[str, str] = {
     "mega_cooldown": "mega_cooldown_seconds",
     "chart": "signal_chart_source",
     "chart_src": "signal_chart_source",
+    "manual_chart": "manual_ta_chart_source",
+    "manual_ta_chart": "manual_ta_chart_source",
     "compact": "signal_message_compact",
     "prob": "min_probability_percent",
     "prob_filter": "probability_filter_enabled",
@@ -276,6 +280,15 @@ def parse_set_command(args: list[str]) -> SetResult:
                     False,
                     "График: <code>annotated</code> | <code>tradingview</code> | "
                     "<code>coinglass</code> | <code>generated</code>",
+                    {},
+                )
+        elif field == "manual_ta_chart_source":
+            value = raw_value.lower()
+            if value not in {"tv_annotated", "tradingview", "annotated"}:
+                return SetResult(
+                    False,
+                    "Ручной TA: <code>tv_annotated</code> | <code>tradingview</code> | "
+                    "<code>annotated</code>",
                     {},
                 )
         elif field in INT_FIELDS or field.endswith("_period_minutes"):

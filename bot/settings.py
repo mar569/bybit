@@ -248,6 +248,9 @@ class ScannerSettings:
     signal_chart_hours: int = 5
     signal_chart_interval_minutes: int = 5
 
+    # Ручной TA: tv_annotated = TradingView + уровни, annotated = matplotlib
+    manual_ta_chart_source: str = "tv_annotated"
+
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
 
@@ -560,6 +563,7 @@ class ScannerSettings:
             signal_chart_source=str(base.get("signal_chart_source", "annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 5)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
+            manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),

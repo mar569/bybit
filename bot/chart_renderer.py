@@ -587,6 +587,86 @@ async def _fetch_bars(
     return bars[-hours * per_hour:]
 
 
+def _price_to_axis_y(price: float, y_min: float, y_max: float) -> float:
+    if y_max <= y_min:
+        return 0.5
+    ratio = (price - y_min) / (y_max - y_min)
+    return 0.13 + (1.0 - ratio) * 0.74
+
+
+def _overlay_ta_on_tradingview(
+    tv_png: bytes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    symbol: str,
+    interval_minutes: int,
+    hours: int,
+) -> bytes:
+    import matplotlib.image as mpimg
+
+    fig, ax = plt.subplots(figsize=(12.8, 7.2), dpi=100)
+    fig.patch.set_facecolor(CHART_STYLE["bg"])
+    ax.imshow(mpimg.imread(io.BytesIO(tv_png)), extent=[0, 1, 0, 1], aspect="auto", zorder=0)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    y_min = min(b.low for b in bars)
+    y_max = max(b.high for b in bars)
+    pad = (y_max - y_min) * 0.08
+    y_min -= pad
+    y_max += pad
+
+    def y_at(price: float) -> float:
+        return _price_to_axis_y(price, y_min, y_max)
+
+    if ta.breakout_level:
+        y = y_at(ta.breakout_level)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["entry"], linewidth=1.4, alpha=0.9, zorder=2)
+        ax.text(0.88, y, f" LONG {fmt_price(ta.breakout_level)}", color=CHART_STYLE["entry"], fontsize=7, va="center")
+    if ta.breakdown_level:
+        y = y_at(ta.breakdown_level)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_short"], linewidth=1.4, alpha=0.9, zorder=2)
+        ax.text(0.88, y, f" SHORT {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7, va="center")
+    if ta.invalidation_price:
+        y = y_at(ta.invalidation_price)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["inv"], linewidth=1.0, linestyle="--", alpha=0.85, zorder=2)
+    for lv in ta.levels[:2]:
+        color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
+        y = y_at(lv.price)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=color, linewidth=0.8, alpha=0.6, zorder=2)
+
+    current = bars[-1].close
+    y_cur = y_at(current)
+    ax.axhline(y_cur, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_long"], linewidth=0.9, linestyle=":", alpha=0.9, zorder=2)
+    ax.text(0.02, y_cur, f" {fmt_price(current)}", color=CHART_STYLE["accent_long"], fontsize=7, va="center",
+            bbox=dict(facecolor="#161b22", edgecolor="none", alpha=0.85))
+
+    header = (
+        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  Bybit {interval_minutes}m · {hours}ч"
+    )
+    sub = ta.range_trade_label or ta.verdict_reason[:60] if ta.verdict_reason else ""
+    ax.text(
+        0.02, 0.97, header + (f"\n{sub}" if sub else ""),
+        transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+    )
+
+    panel = ta_chart_panel_text(ta)
+    ax.text(
+        0.98, 0.97, panel,
+        transform=ax.transAxes, va="top", ha="right", color=CHART_STYLE["text"], fontsize=7,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+    )
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 async def render_annotated_chart(
     symbol: str,
     *,
@@ -598,6 +678,9 @@ async def render_annotated_chart(
     invalidation_price: float | None = None,
     verdict_override: str | None = None,
     neutral: bool = False,
+    chart_source: str = "annotated",
+    exchange: str = "bybit",
+    liq_context: dict | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     bars = await _fetch_bars(symbol, hours, interval_minutes=interval_minutes)
     if not bars:
@@ -617,9 +700,35 @@ async def render_annotated_chart(
         hours=hours,
         invalidation_price=invalidation_price,
         neutral=neutral,
+        liq_context=liq_context,
     )
     if verdict_override:
         ta.verdict = verdict_override
+
+    source = (chart_source or "annotated").lower()
+    if source in {"tv_annotated", "tradingview"}:
+        try:
+            tv_png = await asyncio.wait_for(
+                chart_capture_service.capture_tradingview(
+                    exchange, symbol, interval_minutes=interval_minutes,
+                ),
+                timeout=18.0,
+            )
+        except asyncio.TimeoutError:
+            tv_png = None
+        if tv_png:
+            if source == "tv_annotated":
+                return (
+                    _overlay_ta_on_tradingview(
+                        tv_png, bars, ta,
+                        symbol=symbol,
+                        interval_minutes=interval_minutes,
+                        hours=hours,
+                    ),
+                    ta,
+                )
+            return tv_png, ta
+        logger.info("TradingView unavailable for %s, fallback to matplotlib", symbol)
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
     png = _render_chart_figure(
