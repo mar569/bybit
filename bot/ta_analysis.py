@@ -1518,7 +1518,7 @@ def run_ta_analysis(
     if range_trade and verdict in {"LONG", "SHORT"}:
         inv = range_trade.stop_price
         entry = (range_trade.entry_price * 0.999, range_trade.entry_price * 1.001)
-        targets = list(range_trade.target_prices)
+        targets = list(range_trade.targets)
     else:
         inv, entry, targets = _trade_levels(
             bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
