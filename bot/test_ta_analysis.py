@@ -21,10 +21,13 @@ from bot.ta_analysis import (
     ta_signal_forecast_summary_line,
     ta_signal_caption_html,
     ta_signal_scenario_line_html,
+    should_skip_noise_signal,
+    ta_signal_compact_block,
     ta_telegram_breakdown_html,
     ta_telegram_caption_html,
     TAAnalysisResult,
     ForecastPath,
+    ConsolidationZone,
 )
 
 
@@ -189,16 +192,60 @@ def test_ta_signal_caption_html() -> None:
     assert "▶️" in caption
 
     compact = ta_signal_caption_html(ta, signal_side="long", compact=True)
-    assert "▶️" in compact
-    assert compact.count("\n") <= 4
+    assert "LONG" in compact.upper() or "Готов" in compact
+    assert compact.count("\n") <= 3
 
 
 def test_signal_caption_aligns_with_short_signal() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=False, symbol="ETHUSDT", neutral=True)
     caption = ta_signal_caption_html(ta, signal_side="short")
-    assert "сигнал SHORT" in caption
-    assert "Сигнал <b>SHORT</b>" in caption or "Открывать SHORT" in caption
+    assert "SHORT" in caption.upper()
+    assert "ждём подтверждения" not in caption.lower()
+
+
+def test_should_skip_noise_bad_rr() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        verdict_reason="вход невыгоден · плохой R:R",
+        current_price=1.0,
+        breakout_level=1.05,
+    )
+    skip, reason = should_skip_noise_signal(ta, "long", 3.0)
+    assert skip is True
+    assert "R:R" in reason
+
+
+def test_should_skip_scanner_vs_ta_priority() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="short",
+        current_price=0.35,
+        breakdown_level=0.32,
+        breakout_level=0.36,
+    )
+    skip, reason = should_skip_noise_signal(ta, "long", 2.0, signal_type="reversal_pump")
+    assert skip is True
+    assert "приоритет" in reason
+
+
+def test_signal_compact_wait_long() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        current_price=0.19,
+        breakout_level=0.1942,
+        consolidation=ConsolidationZone(top=0.1942, bottom=0.18, start_idx=0, end_idx=5, label="range"),
+        post_pump=True,
+    )
+    text = ta_signal_compact_block(
+        ta,
+        signal_side="long",
+        readiness=(False, "TA ждёт пробой уровня"),
+        signal_type="reversal_pump",
+    )
+    assert "Ждать LONG" in text
+    assert "0.1942" in text
+    assert "ждём подтверждения" not in text.lower()
 
 
 def test_ta_manual_detailed_html() -> None:

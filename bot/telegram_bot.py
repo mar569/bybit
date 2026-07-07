@@ -767,7 +767,10 @@ class TelegramBot:
 
                 if settings.signal_skip_noise and not skip_dedupe and not settings.actionable_signals_only:
                     skip, noise_reason = should_skip_noise_signal(
-                        ta_result, signal.side, signal.signal_score,
+                        ta_result,
+                        signal.side,
+                        signal.signal_score,
+                        signal_type=signal.signal_type,
                     )
                     if skip:
                         logger.info(
@@ -804,6 +807,7 @@ class TelegramBot:
                     readiness=readiness,
                     show_readiness_badge=settings.actionable_show_readiness_badge,
                     compact=settings.signal_ta_compact,
+                    signal_type=signal.signal_type,
                 )
             chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
             if png:
