@@ -1036,10 +1036,15 @@ async def render_annotated_chart(
 
     btc_bars: list[KlineBar] | None = None
     htf_bars: list[KlineBar] | None = None
+    history_bars: list[KlineBar] | None = None
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_bars = await _fetch_bars("BTCUSDT", hours, interval_minutes=interval_minutes)
     if interval_minutes <= 15:
         htf_bars = await _fetch_bars(symbol, max(24, hours * 2), interval_minutes=60)
+    # Для ручного TA (neutral=True) подтягиваем более глубокую историю паттернов.
+    if neutral:
+        hist_hours = 48 if interval_minutes <= 15 else 72
+        history_bars = await _fetch_bars(symbol, hist_hours, interval_minutes=interval_minutes)
 
     is_long = side == "long"
     ta = run_ta_analysis(
@@ -1054,6 +1059,7 @@ async def render_annotated_chart(
         neutral=neutral,
         liq_context=liq_context,
         interval_minutes=interval_minutes,
+        history_bars=history_bars,
     )
     if verdict_override:
         ta.verdict = verdict_override

@@ -1434,6 +1434,7 @@ def run_ta_analysis(
     neutral: bool = False,
     liq_context: dict | None = None,
     interval_minutes: int = 5,
+    history_bars: list[KlineBar] | None = None,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -1523,6 +1524,12 @@ def run_ta_analysis(
 
     factors = build_factor_context(bars, liq_context)
     repeat_spike_dump_risk, repeat_spike_dump_note = detect_repeat_spike_dump_risk(bars)
+    if history_bars:
+        hist_risk, hist_note = detect_repeat_spike_dump_risk(history_bars)
+        if hist_risk:
+            repeat_spike_dump_risk = True
+            if hist_note:
+                repeat_spike_dump_note = hist_note
     range_trade = evaluate_range_trade(
         bars,
         consolidation=consolidation,
@@ -1612,6 +1619,22 @@ def run_ta_analysis(
             f"{reason} · высокий риск повторного слива после пампа"
             if reason
             else "высокий риск повторного слива после пампа"
+        )
+    # Защита от входа в LONG на перегретом пике после резкого пампа.
+    if (
+        verdict == "LONG"
+        and post_pump
+        and ms.range_position >= 0.90
+        and momentum == "up"
+        and ms.drawdown_from_high_pct <= 2.0
+    ):
+        verdict = "WAIT"
+        action_priority = "short"
+        conf = min(conf, 7)
+        reason = (
+            f"{reason} · перегретый пик после пампа, высокий риск коррекции"
+            if reason
+            else "перегретый пик после пампа, высокий риск коррекции"
         )
 
     trade_is_long = is_long
@@ -1963,7 +1986,7 @@ def _manual_decision_block(ta: TAAnalysisResult) -> list[str]:
         or any("давление вниз" in s for s in ta.factor_lines)
         or ta.repeat_spike_dump_risk
     )
-    if short_pressure and ta.momentum_pct <= -1.2:
+    if (short_pressure and ta.momentum_pct <= -1.2) or (ta.post_pump and ta.range_position >= 0.88):
         risk = "высокий"
     elif short_pressure:
         risk = "средний"
@@ -1972,6 +1995,8 @@ def _manual_decision_block(ta: TAAnalysisResult) -> list[str]:
     why: list[str] = []
     if ta.repeat_spike_dump_risk:
         why.append("паттерн spike→dump")
+    if ta.post_pump and ta.range_position >= 0.88:
+        why.append("перегрев у верха range")
     if any("CVD↓" in s for s in ta.factor_lines):
         why.append("CVD вниз")
     if any("лонги ликвидированы" in s for s in ta.factor_lines):
