@@ -284,3 +284,45 @@ def test_continuation_followup_omits_correction_forecast() -> None:
     assert "Простыми словами" not in text
     assert "снят" in text.lower()
     assert "LONG" in text
+
+
+def test_readiness_badge_ignores_scanner_timing_for_reversal() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=0.00625,
+        breakdown_level=0.006238333,
+        dist_to_short_pct=0.2,
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "short",
+        1,
+        check_scanner_timing=False,
+        signal_type="reversal_dump",
+    )
+    assert ready, reason
+    assert "рано для входа" not in reason
+
+
+def test_readiness_filter_still_checks_scanner_timing() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=0.00625,
+        breakdown_level=0.006238333,
+        dist_to_short_pct=0.2,
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "short",
+        1,
+        check_scanner_timing=True,
+        signal_type="reversal_dump",
+    )
+    assert not ready
+    assert "рано для входа" in reason

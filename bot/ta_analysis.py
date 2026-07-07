@@ -2516,18 +2516,22 @@ def evaluate_entry_readiness(
     min_timing_score: int = 3,
     max_timing_score: int = 9,
     require_smc: bool = False,
+    check_scanner_timing: bool = True,
+    signal_type: str | None = None,
 ) -> tuple[bool, str]:
     """Готов ли сигнал к входу: TA LONG/SHORT, триггер близко, без конфликтов."""
-    timing = int(round(float(signal_score)))
-    if timing < min_timing_score:
-        return False, f"рано для входа ({timing}/10)"
-    if timing > max_timing_score:
-        return False, f"поздно ({timing}/10)"
+    if check_scanner_timing:
+        timing = int(round(float(signal_score)))
+        if timing < min_timing_score:
+            return False, f"рано для входа ({timing}/10)"
+        if timing > max_timing_score:
+            return False, f"поздно ({timing}/10)"
 
     if "вход невыгоден" in (ta.verdict_reason or "").lower():
         return False, "плохой R:R"
 
-    if ta_conflicts_with_signal(ta, signal_side):
+    is_reversal = signal_type in {"reversal_pump", "reversal_dump"}
+    if ta_conflicts_with_signal(ta, signal_side) and not is_reversal:
         return False, "сканер и TA в разные стороны"
 
     if ta.verdict == "WAIT":
@@ -2571,6 +2575,8 @@ def evaluate_entry_readiness(
 def entry_readiness_line_html(ready: bool, reason: str) -> str:
     if ready:
         return "✅ <b>Готов к входу</b> — можно открывать по плану TA"
+    if "TA ждёт" in reason:
+        return f"⏳ <b>Ждать уровень</b> · {reason}"
     return f"⏳ <b>Рано / ждать</b> · {reason}"
 
 

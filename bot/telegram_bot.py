@@ -282,7 +282,13 @@ class TelegramBot:
         )
         return True
 
-    def _eval_signal_readiness(self, ta: Any, signal: Signal) -> tuple[bool, str]:
+    def _eval_signal_readiness(
+        self,
+        ta: Any,
+        signal: Signal,
+        *,
+        for_filter: bool = False,
+    ) -> tuple[bool, str]:
         s = self.settings_manager.settings
         return evaluate_entry_readiness(
             ta,
@@ -293,6 +299,8 @@ class TelegramBot:
             min_timing_score=s.actionable_min_signal_score,
             max_timing_score=s.actionable_max_signal_score,
             require_smc=s.actionable_require_smc,
+            check_scanner_timing=for_filter,
+            signal_type=signal.signal_type,
         )
 
     async def start(self) -> None:
@@ -753,7 +761,7 @@ class TelegramBot:
                     logger.exception("TA-only fetch failed for %s", signal.symbol)
 
             if ta_result is not None:
-                readiness = self._eval_signal_readiness(ta_result, signal)
+                readiness = self._eval_signal_readiness(ta_result, signal, for_filter=False)
 
             if settings.actionable_signals_only and not skip_dedupe:
                 if ta_result is None:
@@ -763,7 +771,9 @@ class TelegramBot:
                         signal.symbol,
                     )
                     return
-                ready, reason = readiness or (False, "нет TA")
+                ready, reason = self._eval_signal_readiness(
+                    ta_result, signal, for_filter=True,
+                )
                 if not ready:
                     logger.info(
                         "Telegram skip %s %s: not actionable — %s",
@@ -2571,6 +2581,8 @@ class TelegramBot:
             f"✅ Только готовые входы: <b>{'ON' if s.actionable_signals_only else 'OFF'}</b> "
             f"(TA≥<b>{s.actionable_min_ta_score}</b>/10 · триггер ≤<b>{s.actionable_max_trigger_dist_pct:g}%</b> · "
             f"⏱ <b>{s.actionable_min_signal_score}–{s.actionable_max_signal_score}</b>/10)\n"
+            f"🏷 Бейдж готовности: <b>{'ON' if s.actionable_show_readiness_badge else 'OFF'}</b> "
+            f"(по TA, без ⏱ ранности сканера)\n"
             f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
             f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
