@@ -19,6 +19,7 @@ from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
+from .analysis_outcome_tracker import AnalysisOutcomeTracker
 from .bybit_cvd import BybitTakerCvdLiveTracker, get_taker_cvd_cache
 
 logging.basicConfig(
