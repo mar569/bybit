@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict
 from typing import Any
@@ -30,18 +31,25 @@ from .market_structure import format_market_structure_block, format_market_struc
 from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
 from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart
 from .manual_ta import (
+    MANUAL_TA_CHART_SOURCES,
     MANUAL_TA_TIMEFRAMES,
     MTA_CALLBACK_PREFIX,
     MTA_WIZARD_KEY,
+    MTC_CALLBACK_PREFIX,
+    MTCW_CALLBACK_PREFIX,
     MTW_CALLBACK_PREFIX,
     MTW_CANCEL_CALLBACK,
     build_mta_callback,
+    build_mtc_callback,
+    build_mtcw_callback,
     build_mtw_callback,
     manual_ta_help_text,
     manual_ta_hours,
     manual_ta_wizard_start_text,
     parse_manual_ta_input,
     parse_mta_callback,
+    parse_mtc_callback,
+    parse_mtcw_callback,
     parse_mtw_callback,
 )
 from .ta_analysis import ta_manual_detailed_html, ta_signal_caption_html, ta_telegram_caption_html
@@ -63,6 +71,12 @@ from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
 logger = logging.getLogger(__name__)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain_caption(text: str) -> str:
+    stripped = _HTML_TAG_RE.sub("", text or "")
+    return html.unescape(stripped)
 
 EXCHANGE_LABEL = {
     "binance": ("🟡", "Binance"),
@@ -314,9 +328,28 @@ class TelegramBot:
         if self.application is None:
             return False
         async with self._send_lock:
-            # Telegram limits photo caption to 1024 chars; keep margin and avoid
-            # cutting HTML entities/tags in the middle by using plain-text fallback.
-            html_caption = (caption or "")[:1000]
+            raw_caption = caption or ""
+            # Long captions often exceed safe HTML entity boundaries.
+            # Send them as plain text to avoid malformed-tag BadRequest.
+            if len(raw_caption) > 900:
+                try:
+                    await self.application.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=png_bytes,
+                        caption=_plain_caption(raw_caption)[:1000],
+                        disable_notification=not is_priority,
+                        reply_markup=keyboard,
+                    )
+                    self._last_send_time[chat_id] = time.time()
+                    return True
+                except RetryAfter as exc:
+                    logger.warning("Telegram chart flood chat %s, wait %ss", chat_id, exc.retry_after)
+                    await asyncio.sleep(float(exc.retry_after) + 1.0)
+                    return False
+                except Exception:
+                    logger.exception("Failed to send long chart caption to chat %s", chat_id)
+                    return False
+            html_caption = raw_caption[:1000]
             try:
                 await self.application.bot.send_photo(
                     chat_id=chat_id,
@@ -335,7 +368,7 @@ class TelegramBot:
             except BadRequest as exc:
                 logger.warning("Telegram chart BadRequest for chat %s: %s", chat_id, exc)
                 try:
-                    plain_caption = html.unescape((caption or "").replace("<", "").replace(">", ""))[:1000]
+                    plain_caption = _plain_caption(raw_caption)[:1000]
                     await self.application.bot.send_photo(
                         chat_id=chat_id,
                         photo=png_bytes,
@@ -868,6 +901,33 @@ class TelegramBot:
             rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
         return InlineKeyboardMarkup(rows)
 
+    def _manual_ta_chart_source_keyboard(
+        self,
+        symbol: str,
+        interval_minutes: int,
+        *,
+        wizard: bool = False,
+    ) -> InlineKeyboardMarkup:
+        default_source = self.settings_manager.settings.manual_ta_chart_source
+        if default_source not in MANUAL_TA_CHART_SOURCES:
+            default_source = "tv_annotated"
+        builder = build_mtcw_callback if wizard else build_mtc_callback
+        rows: list[list[InlineKeyboardButton]] = [[
+            InlineKeyboardButton(
+                ("✅ " if default_source == "tv_annotated" else "") + "TV + TA (overlay)",
+                callback_data=builder(symbol, interval_minutes, "tv_annotated"),
+            ),
+            InlineKeyboardButton(
+                ("✅ " if default_source == "annotated" else "") + "Полный TA (annotated)",
+                callback_data=builder(symbol, interval_minutes, "annotated"),
+            ),
+        ]]
+        if wizard:
+            rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
+        else:
+            rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
+        return InlineKeyboardMarkup(rows)
+
     def _mta_wizard_state(self, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
         state = context.user_data.get(MTA_WIZARD_KEY)
         return state if isinstance(state, dict) else None
@@ -974,7 +1034,48 @@ class TelegramBot:
         interval_minutes: int,
         *,
         query: CallbackQuery | None = None,
+        chart_source: str | None = None,
     ) -> None:
+        if chart_source is None:
+            text = (
+                f"📐 <b>{symbol}</b> · {interval_minutes}m\n"
+                "Выберите тип графика:"
+            )
+            if query:
+                await query.answer("Выберите вид графика")
+                try:
+                    await query.edit_message_text(
+                        text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=self._manual_ta_chart_source_keyboard(
+                            symbol,
+                            interval_minutes,
+                            wizard=True,
+                        ),
+                    )
+                except BadRequest:
+                    if query.message:
+                        await query.message.reply_text(
+                            text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=self._manual_ta_chart_source_keyboard(
+                                symbol,
+                                interval_minutes,
+                                wizard=True,
+                            ),
+                        )
+            elif update.message:
+                await update.message.reply_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self._manual_ta_chart_source_keyboard(
+                        symbol,
+                        interval_minutes,
+                        wizard=True,
+                    ),
+                )
+            return
+
         state = self._mta_wizard_state(context) or {}
         photo_file_id = state.get("photo_file_id")
         self._clear_mta_wizard(context)
@@ -997,6 +1098,7 @@ class TelegramBot:
             deliver_chat_id=deliver_chat_id,
             notify_chat_id=notify_chat_id,
             photo_file_id=photo_file_id,
+            chart_source=chart_source,
         )
 
     async def _handle_mta_wizard_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1069,6 +1171,7 @@ class TelegramBot:
         deliver_chat_id: int | None = None,
         notify_chat_id: int | None = None,
         photo_file_id: str | None = None,
+        chart_source: str | None = None,
     ) -> None:
         chat = update.effective_chat
         if chat is None:
@@ -1106,7 +1209,7 @@ class TelegramBot:
             except Exception:
                 liq_context = None
 
-        chart_source = self.settings_manager.settings.manual_ta_chart_source
+        chart_source = chart_source or self.settings_manager.settings.manual_ta_chart_source
 
         try:
             png, ta = await asyncio.wait_for(
@@ -1205,7 +1308,11 @@ class TelegramBot:
             )
             return
         if interval in MANUAL_TA_TIMEFRAMES:
-            await self._process_manual_ta_request(update, symbol, interval)
+            await update.message.reply_text(
+                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
+            )
         else:
             await self._prompt_manual_ta_timeframe(update, symbol)
 
@@ -1235,7 +1342,11 @@ class TelegramBot:
             )
             return
         if interval in MANUAL_TA_TIMEFRAMES:
-            await self._process_manual_ta_request(update, symbol, interval)
+            await update.message.reply_text(
+                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
+            )
         else:
             await self._prompt_manual_ta_timeframe(update, symbol)
 
@@ -1719,6 +1830,25 @@ class TelegramBot:
             await self._finish_mta_wizard(update, context, symbol, interval, query=query)
             return
 
+        if payload.startswith(MTCW_CALLBACK_PREFIX):
+            if not self._is_admin(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mtcw_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval, chart_source = parsed
+            await self._finish_mta_wizard(
+                update,
+                context,
+                symbol,
+                interval,
+                query=query,
+                chart_source=chart_source,
+            )
+            return
+
         if payload.startswith(MTA_CALLBACK_PREFIX):
             if not self._can_use_manual_ta(update):
                 await query.answer("Нет доступа.", show_alert=True)
@@ -1728,11 +1858,45 @@ class TelegramBot:
                 await query.answer("Некорректный запрос.", show_alert=True)
                 return
             symbol, interval = parsed
+            await query.answer("Выберите вид графика")
+            try:
+                await query.edit_message_text(
+                    f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self._manual_ta_chart_source_keyboard(
+                        symbol,
+                        interval,
+                        wizard=False,
+                    ),
+                )
+            except BadRequest:
+                if query.message:
+                    await query.message.reply_text(
+                        f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=self._manual_ta_chart_source_keyboard(
+                            symbol,
+                            interval,
+                            wizard=False,
+                        ),
+                    )
+            return
+
+        if payload.startswith(MTC_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mtc_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval, chart_source = parsed
             await self._process_manual_ta_request(
                 update,
                 symbol,
                 interval,
                 query=query,
+                chart_source=chart_source,
             )
             return
 

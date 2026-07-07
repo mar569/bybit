@@ -880,6 +880,22 @@ def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
     return "\n".join(lines[:3])
 
 
+def _tv_context_block(ta: TAAnalysisResult, *, interval_minutes: int, hours: int) -> str:
+    """Короткий блок факторов, которыми руководствуется бот."""
+    bits = [
+        f"фаза: {ta.market_phase}",
+        f"моментум: {ta.momentum_label}",
+    ]
+    if ta.oi_narrative:
+        bits.append(f"OI: {ta.oi_narrative}")
+    if ta.btc_correlation_label:
+        bits.append(f"BTC: {ta.btc_correlation_label}")
+    if ta.current_volatility_pct is not None:
+        bits.append(f"вола: {ta.current_volatility_pct:.2f}%")
+    bits.append(f"окно: {hours}ч / {interval_minutes}m")
+    return "\n".join(bits[:6])
+
+
 def _overlay_ta_on_tradingview(
     tv_png: bytes,
     bars: list[KlineBar],
@@ -919,10 +935,35 @@ def _overlay_ta_on_tradingview(
         y = y_at(ta.invalidation_price)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["inv"], linewidth=1.0, linestyle="--", alpha=0.8, zorder=2)
         ax.text(0.88, y, f" SL {fmt_price(ta.invalidation_price)}", color=CHART_STYLE["inv"], fontsize=6.5, va="center")
-    for lv in ta.levels[:3]:
+    for lv in ta.levels[:5]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         y = y_at(lv.price)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=color, linewidth=0.7, alpha=0.45, linestyle=":", zorder=2)
+        label = "S" if lv.kind == "support" else "R"
+        ax.text(0.03, y, f" {label} {fmt_price(lv.price)}", color=color, fontsize=5.8, va="center", ha="left")
+
+    for j, tp in enumerate(ta.target_prices[:3]):
+        y = y_at(tp)
+        ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["target"], linewidth=0.95, alpha=0.72, linestyle="--", zorder=2)
+        ax.text(0.88, y, f" TP{j + 1} {fmt_price(tp)}", color=CHART_STYLE["target"], fontsize=6.1, va="center")
+
+    if ta.entry_zone:
+        lo, hi = ta.entry_zone
+        y_lo = y_at(lo)
+        y_hi = y_at(hi)
+        y_bottom = min(y_lo, y_hi)
+        height = abs(y_hi - y_lo)
+        rect = Rectangle(
+            (0.03, y_bottom),
+            0.84,
+            max(height, 0.0015),
+            facecolor=CHART_STYLE["accent_long"] if ta.verdict == "LONG" else CHART_STYLE["accent_short"],
+            edgecolor="none",
+            alpha=0.08,
+            zorder=1,
+        )
+        ax.add_patch(rect)
+        ax.text(0.03, max(y_lo, y_hi), " ENTRY ZONE", color=CHART_STYLE["text"], fontsize=5.8, va="bottom")
 
     current = bars[-1].close
     y_cur = y_at(current)
@@ -957,6 +998,13 @@ def _overlay_ta_on_tradingview(
         0.98, 0.97, panel,
         transform=ax.transAxes, va="top", ha="right", color=CHART_STYLE["text"], fontsize=7,
         bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+    )
+
+    context = _tv_context_block(ta, interval_minutes=interval_minutes, hours=hours)
+    ax.text(
+        0.98, 0.13, context,
+        transform=ax.transAxes, va="bottom", ha="right", color=CHART_STYLE["text"], fontsize=6.2,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22cc", edgecolor=CHART_STYLE["panel_border"]),
     )
 
     buffer = io.BytesIO()

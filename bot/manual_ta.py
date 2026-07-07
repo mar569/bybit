@@ -4,8 +4,11 @@ from __future__ import annotations
 import re
 
 MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 60)
+MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("tv_annotated", "annotated")
 MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
+MTC_CALLBACK_PREFIX = "mtc|"
+MTCW_CALLBACK_PREFIX = "mtcw|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
 MTA_WIZARD_KEY = "mta_wizard"
 
@@ -65,6 +68,14 @@ def build_mtw_callback(symbol: str, interval_minutes: int) -> str:
     return f"{MTW_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}"
 
 
+def build_mtc_callback(symbol: str, interval_minutes: int, chart_source: str) -> str:
+    return f"{MTC_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{chart_source}"
+
+
+def build_mtcw_callback(symbol: str, interval_minutes: int, chart_source: str) -> str:
+    return f"{MTCW_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{chart_source}"
+
+
 def _parse_mta_style_callback(data: str, prefix: str) -> tuple[str, int] | None:
     if not data.startswith(prefix):
         return None
@@ -89,6 +100,35 @@ def parse_mta_callback(data: str) -> tuple[str, int] | None:
 
 def parse_mtw_callback(data: str) -> tuple[str, int] | None:
     return _parse_mta_style_callback(data, MTW_CALLBACK_PREFIX)
+
+
+def _parse_chart_callback(data: str, prefix: str) -> tuple[str, int, str] | None:
+    if not data.startswith(prefix):
+        return None
+    parts = data.split("|")
+    if len(parts) != 4 or parts[0] != prefix.rstrip("|"):
+        return None
+    try:
+        interval = int(parts[2])
+    except ValueError:
+        return None
+    if interval not in MANUAL_TA_TIMEFRAMES:
+        return None
+    symbol = normalize_symbol(parts[1])
+    if not symbol:
+        return None
+    chart_source = parts[3].strip().lower()
+    if chart_source not in MANUAL_TA_CHART_SOURCES:
+        return None
+    return symbol, interval, chart_source
+
+
+def parse_mtc_callback(data: str) -> tuple[str, int, str] | None:
+    return _parse_chart_callback(data, MTC_CALLBACK_PREFIX)
+
+
+def parse_mtcw_callback(data: str) -> tuple[str, int, str] | None:
+    return _parse_chart_callback(data, MTCW_CALLBACK_PREFIX)
 
 
 def manual_ta_help_text() -> str:
