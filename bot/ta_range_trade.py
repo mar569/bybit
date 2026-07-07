@@ -29,6 +29,124 @@ class TaFactorContext:
     factor_lines: list[str]
 
 
+@dataclass(frozen=True)
+class MarketFlowScores:
+    """Сводка потока рынка (OI + CVD + liq) — как матрица CoinGlass, под капотом."""
+    continuation: int
+    correction: int
+    convergence: str  # aligned_up / aligned_down / mixed / weak
+    notes: list[str]
+
+
+def evaluate_market_flow(
+    *,
+    momentum: str,
+    momentum_pct: float,
+    phase: str,
+    oi_narrative: str,
+    oi_context_strength: float,
+    cvd_ratio: float,
+    liq_long_boost: int,
+    liq_short_boost: int,
+    range_position: float,
+    post_pump: bool,
+    drawdown_from_high_pct: float,
+) -> MarketFlowScores:
+    """
+    Матрица «цена + OI + CVD + ликвидации» для сценария коррекция vs продолжение.
+    Не требует CoinGlass API — те же сигналы из Bybit OI, liq-трекера и CVD-прокси.
+    """
+    cont = 42
+    corr = 42
+    notes: list[str] = []
+
+    # CVD (агрессивный поток)
+    if cvd_ratio >= 0.62:
+        cont += 16
+        notes.append("CVD: агрессивные покупки")
+    elif cvd_ratio <= 0.38:
+        corr += 16
+        notes.append("CVD: агрессивные продажи")
+    elif cvd_ratio >= 0.55:
+        cont += 6
+    elif cvd_ratio <= 0.45:
+        corr += 6
+
+    # Ликвидации
+    if liq_long_boost > 0:
+        cont += 14
+        notes.append("смыв шортов (liq)")
+    if liq_short_boost > 0:
+        corr += 14
+        notes.append("смыв лонгов (liq)")
+
+    # OI-нарратив (позиции на бирже)
+    oi_map_cont = {
+        "aligned_long": 18,
+        "squeeze_risk": 12,
+        "accumulation": 8,
+    }
+    oi_map_corr = {
+        "aligned_short": 18,
+        "shorts_building": 14,
+        "long_unwind": 16,
+        "capitulation": 10,
+    }
+    if oi_narrative in oi_map_cont:
+        cont += oi_map_cont[oi_narrative]
+        notes.append(f"OI: {oi_narrative}")
+    if oi_narrative in oi_map_corr:
+        corr += oi_map_corr[oi_narrative]
+        if oi_narrative not in {"accumulation"}:
+            notes.append(f"OI: {oi_narrative}")
+
+    # Конвергенция: импульс + поток в одну сторону
+    if momentum == "up" and cvd_ratio >= 0.58 and oi_narrative in {"aligned_long", "squeeze_risk"}:
+        cont += 12
+        notes.append("цена↑ + CVD↑ + OI поддерживают рост")
+    elif momentum == "up" and cvd_ratio <= 0.42:
+        corr += 18
+        notes.append("цена↑ при CVD↓ — слабый рост / distribution")
+    elif momentum == "down" and cvd_ratio <= 0.42 and oi_narrative in {"aligned_short", "shorts_building"}:
+        corr += 12
+        notes.append("цена↓ + CVD↓ + OI шорты")
+    elif momentum == "down" and cvd_ratio >= 0.58:
+        cont += 10
+        notes.append("цена↓ при CVD↑ — поглощение, возможен отскок")
+
+    if oi_context_strength >= 0.82 and oi_narrative in {"aligned_long", "squeeze_risk", "accumulation"}:
+        cont += 6
+    elif oi_context_strength >= 0.82 and oi_narrative in {"aligned_short", "shorts_building"}:
+        corr += 6
+
+    # Позиция в range / post-pump
+    if post_pump or phase == "impulse_up":
+        if range_position > 0.82 and drawdown_from_high_pct < 3.0:
+            corr += 14
+            notes.append("перегрев у хая после импульса")
+        elif momentum == "up" and liq_long_boost > 0:
+            cont += 8
+
+    cont = min(100, cont)
+    corr = min(100, corr)
+    spread = cont - corr
+    if spread >= 22:
+        convergence = "aligned_up"
+    elif spread <= -22:
+        convergence = "aligned_down"
+    elif abs(spread) <= 8:
+        convergence = "mixed"
+    else:
+        convergence = "weak"
+
+    return MarketFlowScores(
+        continuation=cont,
+        correction=corr,
+        convergence=convergence,
+        notes=notes,
+    )
+
+
 def compute_cvd_proxy(bars: list[KlineBar], *, lookback: int = 12) -> tuple[float, str]:
     if len(bars) < 3:
         return 0.5, "CVD: мало данных"

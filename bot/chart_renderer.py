@@ -200,6 +200,73 @@ def _draw_scenario_path(
         x, y = next_x, tp
 
 
+def _draw_zigzag_forecast_path(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    waypoints: list[float],
+    *,
+    color: str,
+    label: str,
+    alpha: float = 0.88,
+    lw: float = 1.35,
+) -> None:
+    """Пунктирный путь коррекции/продолжения вправо от последней свечи."""
+    if not bars or len(waypoints) < 2:
+        return
+    times = _bar_times(bars)
+    start_x = mdates.date2num(times[-1])
+    span = mdates.date2num(times[-1]) - mdates.date2num(times[max(0, len(bars) - 24)])
+    step = span / max(len(waypoints), 2)
+    xs = [start_x + step * i for i in range(len(waypoints))]
+    ax.plot(xs, waypoints, color=color, linestyle="--", linewidth=lw, alpha=alpha, zorder=4)
+    ax.annotate(
+        "",
+        xy=(xs[-1], waypoints[-1]),
+        xytext=(xs[-2], waypoints[-2]),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, linestyle="dashed", alpha=alpha),
+    )
+    va = "top" if waypoints[-1] < waypoints[0] else "bottom"
+    ax.text(xs[-1], waypoints[-1], f" {label}", color=color, fontsize=6.5, fontweight="bold", va=va)
+
+
+def _draw_market_forecast_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
+    """Рисует коррекцию и/или продолжение на основе данных биржи. Возвращает True если нарисовано."""
+    corr = ta.correction_path
+    cont = ta.continuation_path
+    if corr is None and cont is None:
+        return False
+
+    corr_color = "#ffa657"
+    cont_color = CHART_STYLE["accent_long"]
+    if corr and cont:
+        corr_primary = corr.confidence >= cont.confidence
+        _draw_zigzag_forecast_path(
+            ax, bars, corr.waypoints,
+            color=corr_color, label=corr.label,
+            alpha=0.92 if corr_primary else 0.52, lw=1.5 if corr_primary else 1.0,
+        )
+        _draw_zigzag_forecast_path(
+            ax, bars, cont.waypoints,
+            color=cont_color, label=cont.label,
+            alpha=0.92 if not corr_primary else 0.52, lw=1.5 if not corr_primary else 1.0,
+        )
+    elif corr:
+        _draw_zigzag_forecast_path(ax, bars, corr.waypoints, color=corr_color, label=corr.label)
+    elif cont:
+        _draw_zigzag_forecast_path(ax, bars, cont.waypoints, color=cont_color, label=cont.label)
+
+    if corr and len(corr.waypoints) >= 3:
+        pb = corr.waypoints[2]
+        times = _bar_times(bars)
+        x_end = mdates.date2num(times[-1])
+        ax.axhline(pb, color=corr_color, linestyle=":", linewidth=0.85, alpha=0.55, zorder=3)
+        ax.text(
+            x_end, pb, f" зона отката {fmt_price(pb)}",
+            color=corr_color, fontsize=6.5, va="top",
+        )
+    return True
+
+
 def _draw_extended_trend_lines(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
@@ -492,13 +559,14 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
 
     direction = primary_forecast_direction(ta)
-    if direction == "long":
-        _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-    elif direction == "short":
-        _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-    else:
-        _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-        _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+    if not _draw_market_forecast_paths(ax, bars, ta):
+        if direction == "long":
+            _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+        elif direction == "short":
+            _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+        else:
+            _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+            _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
 
     _draw_signal_markers(ax, bars, ta)
 
@@ -1144,17 +1212,50 @@ def _draw_tv_forecast_paths(
     current: float,
     y_at: Any,
 ) -> None:
-    """Один приоритетный сценарий вправо от последней свечи."""
+    """Коррекция / продолжение пунктиром вправо от последней свечи."""
     n = len(bars)
     x0 = _bar_x_norm(n - 1, n, x_start=0.62, x_end=0.90)
-    x1, x2 = x0 + 0.08, min(0.97, x0 + 0.16)
+    span = 0.08
     y0 = y_at(current)
     ax.plot(x0, y0, "o", color="white", markersize=5, zorder=5)
     ax.text(x0 - 0.008, y0, " сейчас", color=CHART_STYLE["text"], fontsize=6, ha="right", va="center")
 
+    def _draw_zigzag_tv(waypoints: list[float], *, color: str, label: str, alpha: float) -> None:
+        if len(waypoints) < 2:
+            return
+        xs = [x0 + span * i for i in range(len(waypoints))]
+        ys = [y_at(p) for p in waypoints]
+        ax.plot(xs, ys, color=color, linewidth=1.4, linestyle="--", alpha=alpha, zorder=3)
+        ax.annotate(
+            "", xy=(xs[-1], ys[-1]), xytext=(xs[-2], ys[-2]),
+            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.4, linestyle="dashed", alpha=alpha),
+        )
+        va = "top" if waypoints[-1] < waypoints[0] else "bottom"
+        ax.text(xs[-1], ys[-1], f" {label}", color=color, fontsize=6.5, va=va, fontweight="bold")
+
+    corr = ta.correction_path
+    cont = ta.continuation_path
+    if corr or cont:
+        if corr and cont:
+            primary_corr = corr.confidence >= cont.confidence
+            _draw_zigzag_tv(
+                corr.waypoints, color="#ffa657", label=corr.label,
+                alpha=0.92 if primary_corr else 0.5,
+            )
+            _draw_zigzag_tv(
+                cont.waypoints, color=CHART_STYLE["accent_long"], label=cont.label,
+                alpha=0.92 if not primary_corr else 0.5,
+            )
+        elif corr:
+            _draw_zigzag_tv(corr.waypoints, color="#ffa657", label=corr.label, alpha=0.9)
+        elif cont:
+            _draw_zigzag_tv(cont.waypoints, color=CHART_STYLE["accent_long"], label=cont.label, alpha=0.9)
+        return
+
     direction = primary_forecast_direction(ta)
 
     def _draw_path(scenario: TradeScenario, *, color: str, label: str, va: str) -> None:
+        x1, x2 = x0 + span, min(0.97, x0 + span * 2)
         y_trig = y_at(scenario.trigger_price)
         y_tp = y_at(scenario.target_prices[0])
         ax.plot(
@@ -1175,18 +1276,25 @@ def _draw_tv_forecast_paths(
         if ta.bullish_scenario and ta.bullish_scenario.target_prices:
             bs = ta.bullish_scenario
             ax.plot(
-                [x0, x1], [y0, y_at(bs.trigger_price)],
+                [x0, x0 + span], [y0, y_at(bs.trigger_price)],
                 color=CHART_STYLE["accent_long"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
             )
         if ta.bearish_scenario and ta.bearish_scenario.target_prices:
             bs = ta.bearish_scenario
             ax.plot(
-                [x0, x1], [y0, y_at(bs.trigger_price)],
+                [x0, x0 + span], [y0, y_at(bs.trigger_price)],
                 color=CHART_STYLE["accent_short"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
             )
 
 
 def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
+    if ta.forecast_summary:
+        lines = [ta.forecast_summary[:120]]
+        if ta.correction_path:
+            lines.append(f"↘ {ta.correction_path.reason}")
+        if ta.continuation_path:
+            lines.append(f"↗ {ta.continuation_path.reason}")
+        return "\n".join(lines[:3])
     direction = primary_forecast_direction(ta)
     if direction == "long" and ta.bullish_scenario and ta.bullish_scenario.target_prices:
         bs = ta.bullish_scenario
@@ -1217,6 +1325,8 @@ def _tv_context_block(ta: TAAnalysisResult, *, interval_minutes: int, hours: int
         bits.append(f"BTC: {ta.btc_context}")
     if ta.momentum_pct:
         bits.append(f"импульс: {ta.momentum_pct:+.1f}%")
+    if ta.forecast_summary:
+        bits.append(ta.forecast_summary[:72])
     bits.append(f"окно: {hours}ч / {interval_minutes}m")
     return "\n".join(bits[:6])
 
@@ -1437,16 +1547,25 @@ async def render_signal_chart(
     *,
     side: str = "long",
     hours: int = 5,
+    interval_minutes: int = 5,
     structure_warning: str = "",
     probability_percent: float | None = None,
     oi_bars: list[FiveMinOiBar] | None = None,
+    liq_context: dict | None = None,
+    chart_source: str = "annotated",
+    exchange: str = "bybit",
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     png, ta = await render_annotated_chart(
         symbol,
         side=side,
         hours=hours,
+        interval_minutes=interval_minutes,
         structure_warning=structure_warning,
         oi_bars=oi_bars,
+        liq_context=liq_context,
+        neutral=True,
+        chart_source=chart_source,
+        exchange=exchange,
     )
     if png is None:
         return None, None
@@ -1463,8 +1582,11 @@ async def render_analysis_chart(
     *,
     direction: str,
     hours: int = 5,
+    interval_minutes: int = 5,
     invalidation_price: float | None = None,
     oi_bars: list[FiveMinOiBar] | None = None,
+    liq_context: dict | None = None,
+    exchange: str = "bybit",
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     is_long = direction != "short"
     verdict_override = "WAIT" if direction == "wait" else None
@@ -1472,8 +1594,12 @@ async def render_analysis_chart(
         symbol,
         side="long" if is_long else "short",
         hours=hours,
+        interval_minutes=interval_minutes,
         invalidation_price=invalidation_price,
         oi_bars=oi_bars,
+        liq_context=liq_context,
+        neutral=True,
+        exchange=exchange,
         verdict_override=verdict_override,
     )
 
@@ -1490,21 +1616,26 @@ async def get_signal_chart_png(
     probability_percent: float | None = None,
     coinglass_url: str = "",
     oi_bars: list[FiveMinOiBar] | None = None,
+    liq_context: dict | None = None,
 ) -> tuple[bytes | None, str, TAAnalysisResult | None, str]:
     source = (chart_source or "annotated").lower()
     fail_reason = ""
 
-    if source == "annotated":
+    if source in {"annotated", "annotated_pro", "tv_annotated"}:
         png, ta = await render_signal_chart(
             signal_symbol,
             side=side,
             hours=chart_hours,
+            interval_minutes=chart_interval_minutes,
             structure_warning=structure_warning,
             probability_percent=probability_percent,
             oi_bars=oi_bars,
+            liq_context=liq_context,
+            chart_source=source,
+            exchange=signal_exchange,
         )
         if png:
-            return png, "annotated", ta, ""
+            return png, source, ta, ""
         return None, "none", ta, "нет свечей Bybit или ошибка matplotlib"
 
     if source == "tradingview":
@@ -1542,16 +1673,20 @@ async def get_signal_chart_png(
     elif source == "coinglass":
         fail_reason = "нет URL CoinGlass"
 
-    if source not in {"generated", "annotated"}:
+    if source not in {"generated", "annotated", "annotated_pro", "tv_annotated"}:
         logger.info("Chart %s unavailable for %s (%s), fallback to annotated", source, signal_symbol, fail_reason)
 
     png, ta = await render_signal_chart(
         signal_symbol,
         side=side,
         hours=chart_hours,
+        interval_minutes=chart_interval_minutes,
         structure_warning=structure_warning,
         probability_percent=probability_percent,
         oi_bars=oi_bars,
+        liq_context=liq_context,
+        chart_source="annotated",
+        exchange=signal_exchange,
     )
     if png:
         return png, "annotated", ta, fail_reason

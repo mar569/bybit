@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from .bybit_klines import KlineBar
 from .market_structure import FiveMinOiBar, MarketStructureContext, analyze_market_structure
 from .smc_analysis import SmcContext, analyze_smc, format_smc_compact_html, smc_verdict_boost
-from .ta_range_trade import RangeTradeSetup, build_factor_context, evaluate_range_trade
+from .ta_range_trade import RangeTradeSetup, build_factor_context, evaluate_market_flow, evaluate_range_trade
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,16 @@ class TradeScenario:
 
 
 @dataclass(frozen=True)
+class ForecastPath:
+    """Пунктирный прогноз на графике: коррекция или продолжение импульса."""
+    kind: str  # correction / continuation
+    label: str
+    waypoints: list[float]
+    confidence: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class KeyLevel:
     price: float
     role: str
@@ -163,6 +173,9 @@ class TAAnalysisResult:
     smc_summary: str = ""
     repeat_spike_dump_risk: bool = False
     repeat_spike_dump_note: str = ""
+    correction_path: ForecastPath | None = None
+    continuation_path: ForecastPath | None = None
+    forecast_summary: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -892,6 +905,205 @@ def _momentum_label_ru(momentum: str, pct: float) -> str:
     if momentum == "up":
         return f"импульс вверх {pct:+.1f}%"
     return "боковое движение"
+
+
+def _pick_pullback_target(
+    *,
+    current: float,
+    consolidation: ConsolidationZone | None,
+    smc: SmcContext | None,
+    nearest_support: float | None,
+    breakdown: float | None,
+    rulers: list[RulerMeasurement],
+) -> float | None:
+    """Ближайшая зона отката ниже текущей цены (2–25% от цены)."""
+    if current <= 0:
+        return None
+    candidates: list[float] = []
+    if smc and smc.equilibrium_50 and smc.equilibrium_50 < current * 0.998:
+        candidates.append(smc.equilibrium_50)
+    if smc and smc.discount_zone:
+        lo, hi = smc.discount_zone
+        candidates.extend([hi, (lo + hi) / 2.0, lo])
+    if consolidation:
+        candidates.append(consolidation.bottom)
+        candidates.append((consolidation.top + consolidation.bottom) / 2.0)
+    if nearest_support and nearest_support < current:
+        candidates.append(nearest_support)
+    if breakdown and breakdown < current:
+        candidates.append(breakdown)
+    if smc and smc.fvgs:
+        for gap in reversed(smc.fvgs):
+            if gap.direction == "bullish" and gap.bottom < current:
+                candidates.append((gap.top + gap.bottom) / 2.0)
+                break
+    for ruler in rulers:
+        if ruler.pct > 0 and ruler.to_price > ruler.from_price:
+            mid = ruler.from_price + (ruler.to_price - ruler.from_price) * 0.5
+            if mid < current:
+                candidates.append(mid)
+    valid = [
+        c for c in candidates
+        if c > 0 and 2.0 <= (current - c) / current * 100.0 <= 25.0
+    ]
+    if not valid:
+        return None
+    return max(valid)
+
+
+def build_market_forecast_paths(
+    *,
+    current: float,
+    post_pump: bool,
+    phase: str,
+    range_position: float,
+    drawdown_from_high_pct: float,
+    momentum: str,
+    momentum_pct: float,
+    market_bias: str,
+    oi_narrative: str,
+    oi_context_strength: float,
+    cvd_ratio: float,
+    liq_long_boost: int,
+    liq_short_boost: int,
+    factor_lines: list[str],
+    consolidation: ConsolidationZone | None,
+    smc: SmcContext | None,
+    breakout: float | None,
+    breakdown: float | None,
+    nearest_support: float | None,
+    nearest_resistance: float | None,
+    target_prices: list[float],
+    repeat_spike_dump_risk: bool,
+    verdict: str,
+    rulers: list[RulerMeasurement],
+) -> tuple[ForecastPath | None, ForecastPath | None, str]:
+    """
+    Прогноз «коррекция vs продолжение» после импульса/смыва шортов.
+    Использует матрицу OI + CVD + ликвидации (как CoinGlass), без отдельного UI.
+    """
+    if current <= 0:
+        return None, None, ""
+
+    relevant = (
+        post_pump
+        or repeat_spike_dump_risk
+        or phase in {"impulse_up", "correction_down", "consolidation", "breakout_setup"}
+        or range_position > 0.62
+    )
+    if not relevant:
+        return None, None, ""
+
+    pullback = _pick_pullback_target(
+        current=current,
+        consolidation=consolidation,
+        smc=smc,
+        nearest_support=nearest_support,
+        breakdown=breakdown,
+        rulers=rulers,
+    )
+
+    cont_candidates = [p for p in target_prices if p > current * 1.002]
+    if breakout and breakout > current * 1.001:
+        cont_candidates.append(breakout)
+    if nearest_resistance and nearest_resistance > current * 1.001:
+        cont_candidates.append(nearest_resistance)
+    cont_tp = min(cont_candidates) if cont_candidates else current * 1.012
+
+    corr_score = 0
+    cont_score = 0
+    factors_ru: list[str] = []
+
+    flow = evaluate_market_flow(
+        momentum=momentum,
+        momentum_pct=momentum_pct,
+        phase=phase,
+        oi_narrative=oi_narrative,
+        oi_context_strength=oi_context_strength,
+        cvd_ratio=cvd_ratio,
+        liq_long_boost=liq_long_boost,
+        liq_short_boost=liq_short_boost,
+        range_position=range_position,
+        post_pump=post_pump,
+        drawdown_from_high_pct=drawdown_from_high_pct,
+    )
+    corr_score += flow.correction // 4
+    cont_score += flow.continuation // 4
+    factors_ru.extend(flow.notes[:4])
+
+    if post_pump:
+        corr_score += 24
+        factors_ru.append("после пампа")
+    if phase == "impulse_up" and range_position > 0.75:
+        corr_score += 18
+    if repeat_spike_dump_risk:
+        corr_score += 20
+        factors_ru.append("паттерн spike→dump")
+    if drawdown_from_high_pct < 2.5 and range_position > 0.82:
+        corr_score += 14
+        factors_ru.append("у верха range")
+    if any("CVD↓" in line for line in factor_lines):
+        corr_score += 16
+        factors_ru.append("CVD продажи")
+    if any("лонги ликвидированы" in line for line in factor_lines):
+        corr_score += 14
+    if verdict == "SHORT":
+        corr_score += 12
+    if phase == "correction_down":
+        corr_score += 10
+
+    if momentum == "up" and momentum_pct >= 1.0:
+        cont_score += 8
+    if market_bias == "бычий":
+        cont_score += 8
+    if phase == "impulse_up":
+        cont_score += 6
+    if verdict == "LONG":
+        cont_score += 12
+
+    corr_conf = int(_clamp(4 + corr_score / 8, 4, 9))
+    cont_conf = int(_clamp(4 + cont_score / 8, 4, 9))
+
+    correction_path: ForecastPath | None = None
+    continuation_path: ForecastPath | None = None
+
+    if pullback:
+        pb_pct = (current - pullback) / current * 100.0
+        dip = current * 0.996
+        correction_path = ForecastPath(
+            kind="correction",
+            label="коррекция ↓",
+            waypoints=[current, dip, pullback, pullback * 1.004],
+            confidence=corr_conf,
+            reason=f"откат к {fmt_price(pullback)} (−{pb_pct:.1f}%)",
+        )
+
+    if cont_tp > current * 1.003:
+        shallow_dip = current * (0.992 if post_pump else 0.996)
+        continuation_path = ForecastPath(
+            kind="continuation",
+            label="продолжение ↑",
+            waypoints=[current, shallow_dip, breakout or current * 1.004, cont_tp],
+            confidence=cont_conf,
+            reason=f"рост к {fmt_price(cont_tp)}",
+        )
+
+    if correction_path is None and continuation_path is None:
+        return None, None, ""
+
+    primary = "коррекция" if corr_conf >= cont_conf else "продолжение"
+    if correction_path and continuation_path:
+        alt = "продолжение" if primary == "коррекция" else "коррекция"
+        summary = (
+            f"Базовый сценарий: {primary}. Альтернатива: {alt}. "
+            f"Факторы: {', '.join(dict.fromkeys(factors_ru[:4]))}."
+        )
+    elif correction_path:
+        summary = f"Ожидается коррекция. {correction_path.reason}. Факторы: {', '.join(dict.fromkeys(factors_ru[:3]))}."
+    else:
+        summary = f"Ожидается продолжение. {continuation_path.reason if continuation_path else ''}."
+
+    return correction_path, continuation_path, summary
 
 
 def detect_repeat_spike_dump_risk(
@@ -1764,6 +1976,56 @@ def run_ta_analysis(
     if post_pump:
         risk_notes = ["после пампа — не гнаться, ждать пробой range"] + risk_notes
 
+    flow = evaluate_market_flow(
+        momentum=momentum,
+        momentum_pct=momentum_pct,
+        phase=ms.phase,
+        oi_narrative=ms.oi_narrative,
+        oi_context_strength=ms.oi_context_strength,
+        cvd_ratio=factors.cvd_ratio,
+        liq_long_boost=factors.liq_long_boost,
+        liq_short_boost=factors.liq_short_boost,
+        range_position=ms.range_position,
+        post_pump=post_pump,
+        drawdown_from_high_pct=ms.drawdown_from_high_pct,
+    )
+    if verdict == "WAIT" and action_priority == "neutral":
+        if flow.continuation >= flow.correction + 18 and momentum in {"up", "flat"}:
+            action_priority = "long"
+        elif flow.correction >= flow.continuation + 18:
+            action_priority = "short"
+    for note in flow.notes:
+        if note not in risk_notes and note not in (reason or ""):
+            risk_notes.append(note)
+    risk_notes = risk_notes[:7]
+
+    correction_path, continuation_path, forecast_summary = build_market_forecast_paths(
+        current=current,
+        post_pump=post_pump,
+        phase=ms.phase,
+        range_position=ms.range_position,
+        drawdown_from_high_pct=ms.drawdown_from_high_pct,
+        momentum=momentum,
+        momentum_pct=momentum_pct,
+        market_bias=market_bias,
+        oi_narrative=ms.oi_narrative,
+        oi_context_strength=ms.oi_context_strength,
+        cvd_ratio=factors.cvd_ratio,
+        liq_long_boost=factors.liq_long_boost,
+        liq_short_boost=factors.liq_short_boost,
+        factor_lines=factors.factor_lines,
+        consolidation=consolidation,
+        smc=smc,
+        breakout=breakout,
+        breakdown=breakdown,
+        nearest_support=nearest_support,
+        nearest_resistance=nearest_resistance,
+        target_prices=targets,
+        repeat_spike_dump_risk=repeat_spike_dump_risk,
+        verdict=verdict,
+        rulers=rulers,
+    )
+
     return TAAnalysisResult(
         swings=swings,
         levels=levels,
@@ -1817,6 +2079,9 @@ def run_ta_analysis(
         smc_summary=smc.summary,
         repeat_spike_dump_risk=repeat_spike_dump_risk,
         repeat_spike_dump_note=repeat_spike_dump_note,
+        correction_path=correction_path,
+        continuation_path=continuation_path,
+        forecast_summary=forecast_summary,
     )
 
 
@@ -2109,6 +2374,9 @@ def ta_action_summary_html(ta: TAAnalysisResult) -> str:
             tps = "→".join(fmt_price(t) for t in ta.target_prices[:2])
             lines.append(f"TP {tps}")
 
+    if ta.forecast_summary:
+        lines.append(f"🔮 {ta.forecast_summary[:120]}")
+
     return "\n".join(lines)
 
 
@@ -2223,8 +2491,18 @@ def ta_signal_caption_html(
         line = f"📐 TA · WAIT {score}/10{extra}"
     smc_line = format_smc_compact_html(ta.smc) if ta.smc and ta.smc.smc_score >= 4 else ""
     base = f"{line}\n{ta_signal_scenario_line_html(ta, signal_side=signal_side)}"
+    extra: list[str] = []
+    if ta.forecast_summary:
+        extra.append(f"🔮 {ta.forecast_summary[:150]}")
+    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
+        extra.append(f"OI: {ta.oi_narrative_label}")
+    for fl in ta.factor_lines[:2]:
+        if fl and fl not in " ".join(extra):
+            extra.append(fl)
     if smc_line:
-        return f"{base}\n{smc_line}"
+        extra.append(smc_line)
+    if extra:
+        return base + "\n" + "\n".join(extra)
     return base
 
 
@@ -2305,6 +2583,9 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         risk_bits.append(ta.verdict_reason.split(" · ")[0])
     if risk_bits:
         lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:2])}.")
+
+    if ta.forecast_summary:
+        lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
 
     if ta.smc:
         fvg_near = False
@@ -2445,6 +2726,8 @@ def ta_chart_context_text(ta: TAAnalysisResult) -> str:
         lines.append(f"в range: {ta.range_position * 100:.0f}%")
     if ta.post_pump:
         lines.append("фаза: после пампа")
+    if ta.forecast_summary:
+        lines.append(ta.forecast_summary[:64])
     for fl in ta.factor_lines[:2]:
         lines.append(fl[:48])
     return "\n".join(lines[:8])

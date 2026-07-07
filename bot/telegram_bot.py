@@ -493,11 +493,18 @@ class TelegramBot:
             if isinstance(ms, dict):
                 warning = str(ms.get("structure_warning", ""))
             oi_bars = None
+            liq_context = None
             if self.scanner is not None:
                 try:
                     oi_bars = self.scanner.get_five_min_oi_bars(signal.exchange, signal.symbol)
                 except Exception:
                     oi_bars = None
+                try:
+                    stats = self.scanner._get_liquidation_stats(signal.exchange, signal.symbol, 15)
+                    if stats is not None:
+                        liq_context = stats.to_dict()
+                except Exception:
+                    liq_context = None
             png = None
             ta_result = None
             chart_source = ""
@@ -517,6 +524,7 @@ class TelegramBot:
                         ),
                         coinglass_url=signal.link,
                         oi_bars=oi_bars,
+                        liq_context=liq_context,
                     ),
                     timeout=35.0,
                 )
@@ -663,11 +671,18 @@ class TelegramBot:
             return
         if settings.analysis_chart_enabled:
             oi_bars = None
+            liq_context = None
             if self.scanner is not None:
                 try:
                     oi_bars = self.scanner.get_five_min_oi_bars(result.exchange, result.symbol)
                 except Exception:
                     oi_bars = None
+                try:
+                    stats = self.scanner._get_liquidation_stats(result.exchange, result.symbol, 15)
+                    if stats is not None:
+                        liq_context = stats.to_dict()
+                except Exception:
+                    liq_context = None
             png = None
             ta_result = None
             chart_src = getattr(settings, "analysis_chart_source", "annotated")
@@ -678,8 +693,11 @@ class TelegramBot:
                             result.symbol,
                             direction=result.direction,
                             hours=settings.signal_chart_hours,
+                            interval_minutes=settings.signal_chart_interval_minutes,
                             invalidation_price=result.invalidation_price,
                             oi_bars=oi_bars,
+                            liq_context=liq_context,
+                            exchange=result.exchange,
                         ),
                         timeout=20.0,
                     )
@@ -704,8 +722,11 @@ class TelegramBot:
                         result.symbol,
                         direction=result.direction,
                         hours=settings.signal_chart_hours,
+                        interval_minutes=settings.signal_chart_interval_minutes,
                         invalidation_price=result.invalidation_price,
                         oi_bars=oi_bars,
+                        liq_context=liq_context,
+                        exchange=result.exchange,
                     )
                 except Exception:
                     logger.exception("Analysis annotated fallback failed for %s", result.symbol)
