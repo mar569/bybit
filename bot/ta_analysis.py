@@ -3477,7 +3477,45 @@ def ta_chart_bottom_right_text(ta: TAAnalysisResult) -> str:
     for row in ctx.splitlines()[1:4]:
         if row and row not in " · ".join(lines):
             lines.append(row[:58])
-    return "\n".join(lines[:9])
+    return "\n".join(lines[:6])
+
+
+def ta_chart_tv_overlay_text(
+    ta: TAAnalysisResult,
+    *,
+    hours: int = 5,
+    interval_minutes: int = 5,
+) -> str:
+    """Компактная панель для TV-оверлея — без дублирования блоков."""
+    import re
+
+    score = ta_display_score(ta)
+    lines = [
+        f"ИТОГ: {ta.verdict} {score}/10",
+        _verdict_plain(ta)[:60],
+    ]
+    triggers: list[str] = []
+    if ta.breakout_level:
+        extra = f" +{ta.dist_to_long_pct:.1f}%" if ta.dist_to_long_pct is not None else ""
+        triggers.append(f"LONG {fmt_price(ta.breakout_level)}{extra}")
+    if ta.breakdown_level:
+        extra = f" −{ta.dist_to_short_pct:.1f}%" if ta.dist_to_short_pct is not None else ""
+        triggers.append(f"SHORT {fmt_price(ta.breakdown_level)}{extra}")
+    if triggers:
+        lines.append(" · ".join(triggers))
+    row_bits: list[str] = []
+    if ta.invalidation_price:
+        row_bits.append(f"SL {fmt_price(ta.invalidation_price)}")
+    if ta.target_prices:
+        row_bits.append(f"TP {' → '.join(fmt_price(t) for t in ta.target_prices[:2])}")
+    if row_bits:
+        lines.append(" · ".join(row_bits))
+    if ta.primary_scenario:
+        lines.append(ta.primary_scenario[:64])
+    elif ta.narrative_plain:
+        lines.append(re.sub(r"<[^>]+>", "", ta.narrative_plain).strip()[:64])
+    lines.append(f"{hours}ч / {interval_minutes}m")
+    return "\n".join(lines[:7])
 
 
 def ta_chart_legend_text() -> str:
