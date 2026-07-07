@@ -1529,6 +1529,31 @@ def run_ta_analysis(
             structure=structure,
             range_trade=range_trade,
         )
+    downside_pressure = (
+        momentum == "down"
+        and (
+            factors.liq_short_boost > 0
+            or factors.cvd_ratio <= 0.40
+            or ms.oi_narrative in {"aligned_short", "shorts_building"}
+        )
+    )
+    if breakdown and current > 0 and downside_pressure:
+        if current <= breakdown * 1.003:
+            verdict = "SHORT"
+            conf = max(conf, 7)
+            reason = (
+                "подтверждён пробой вниз · OI/CVD/ликвидации поддерживают слив"
+                if not reason
+                else f"{reason} · подтверждён пробой вниз"
+            )
+            action_priority = "short"
+        elif verdict == "WAIT" and current <= breakdown * 1.012:
+            reason = (
+                "риск слива: цена у short-триггера + OI/CVD/ликвидации"
+                if not reason
+                else f"{reason} · риск слива по OI/CVD/ликвидациям"
+            )
+            action_priority = "short"
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7 and range_trade is None:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
@@ -1569,6 +1594,9 @@ def run_ta_analysis(
         verdict_reason=reason,
         channel=channel,
     )
+    if factors.factor_lines:
+        risk_notes.extend([f for f in factors.factor_lines if f and f not in risk_notes])
+    risk_notes = risk_notes[:6]
     professional_summary = _build_professional_summary(
         verdict=verdict,
         market_bias=market_bias,
@@ -1724,6 +1752,37 @@ def primary_forecast_direction(ta: TAAnalysisResult) -> str:
     if ta.action_priority == "short":
         return "short"
     return "neutral"
+
+
+def _manual_now_action_html(ta: TAAnalysisResult) -> str:
+    """Оперативная подсказка для ручного TA: что делать прямо сейчас."""
+    current = ta.current_price
+    breakdown = ta.breakdown_level
+    breakout = ta.breakout_level
+    downside_factors = any("давление вниз" in line or "CVD↓" in line for line in ta.factor_lines)
+
+    if ta.verdict == "SHORT" and breakdown and current > 0 and current <= breakdown * 1.003:
+        return (
+            "🚨 <b>Прямо сейчас:</b> слив активен — "
+            "лонг не ловить. Ищите short от отката к пробитой поддержке."
+        )
+    if ta.verdict == "WAIT" and ta.action_priority == "short" and breakdown and current > 0 and current <= breakdown * 1.012:
+        return (
+            f"🚨 <b>Прямо сейчас:</b> риск слива высокий. "
+            f"Лонг пропустить, ждать закрытие 5m ниже <b>{fmt_price(breakdown)}</b> "
+            "и потом рассматривать short."
+        )
+    if ta.verdict == "WAIT" and ta.action_priority == "short" and downside_factors:
+        return (
+            "🚨 <b>Прямо сейчас:</b> давление вниз по OI/CVD/ликвидациям — "
+            "не входить против движения, ждать подтверждение уровня."
+        )
+    if ta.verdict == "LONG" and breakout and current > 0 and current >= breakout * 0.998:
+        return (
+            f"🚨 <b>Прямо сейчас:</b> long-сетап активируется у <b>{fmt_price(breakout)}</b>. "
+            "Не входить в середине свечи — лучше ретест/закрепление."
+        )
+    return "🚨 <b>Прямо сейчас:</b> режим ожидания — вход только по триггерам и подтверждению свечой."
 
 
 def ta_action_summary_html(ta: TAAnalysisResult) -> str:
@@ -1923,6 +1982,7 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         )
         label = f" ({side_word})" if side_word else ""
         lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
+    lines.append(_manual_now_action_html(ta))
 
     if ta.verdict == "LONG":
         if ta.breakout_level:
