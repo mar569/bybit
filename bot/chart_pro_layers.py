@@ -275,7 +275,7 @@ def draw_htf_inset(
 ) -> None:
     if not htf_bars or len(htf_bars) < 8:
         return
-    axins = fig.add_axes([0.70, 0.70, 0.27, 0.20])
+    axins = fig.add_axes([0.54, 0.72, 0.24, 0.18])
     axins.set_facecolor("#161b22")
     seg = htf_bars[-min(36, len(htf_bars)) :]
     xs = list(range(len(seg)))

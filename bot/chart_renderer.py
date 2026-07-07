@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Ellipse, Rectangle
 
 from .bybit_klines import BybitKlineCache, KlineBar
 from .chart_pro_layers import (
@@ -35,8 +35,10 @@ from .ta_analysis import (
     ta_chart_panel_text,
     ta_chart_scenario_text,
     ta_chart_summary_text,
+    ta_chart_bottom_right_text,
     ta_display_score,
     primary_forecast_direction,
+    _short_trigger_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -613,8 +615,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         )
 
 
-def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
+def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
     """Текстовые блоки в боковых полях — полная колонка слева/справа."""
+    bottom_br_y = 0.11 if with_subpanels else 0.04
     base_bbox = dict(
         boxstyle="round,pad=0.4",
         facecolor=CHART_STYLE["panel"],
@@ -624,19 +627,19 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     panel_style = dict(
         transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=6.6,
-        linespacing=1.24,
+        fontsize=7.8,
+        linespacing=1.28,
         bbox=base_bbox,
     )
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
     bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
-    ctx_style = {**panel_style, "fontsize": 6.4}
+    ctx_style = {**panel_style, "fontsize": 7.6}
 
     lx, rx = 0.006, 0.994
 
     fig.text(
         lx, 0.985, ta_chart_legend_text(),
-        va="top", ha="left", fontsize=5.5, color=CHART_STYLE["text"],
+        va="top", ha="left", fontsize=6.8, color=CHART_STYLE["text"],
         transform=fig.transFigure,
         bbox=dict(boxstyle="round,pad=0.25", facecolor=CHART_STYLE["panel"],
                   edgecolor=CHART_STYLE["panel_border"], alpha=0.88),
@@ -648,27 +651,38 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
 
     plan = ta_chart_plan_text(ta)
     if plan:
-        fig.text(lx, 0.58, plan, va="top", ha="left", **panel_style)
-
-    context = ta_chart_context_text(ta)
-    if len(context.splitlines()) > 1:
-        fig.text(lx, 0.22, context, va="top", ha="left", **ctx_style)
+        fig.text(lx, 0.62, plan, va="top", ha="left", **panel_style)
 
     fig.text(rx, 0.985, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
 
     bull_text = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
     if bull_text:
-        fig.text(rx, 0.58, bull_text, va="top", ha="right", **bull_style)
+        fig.text(rx, 0.62, bull_text, va="top", ha="right", **bull_style)
 
     bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
-    if bear_text:
-        fig.text(rx, 0.22, bear_text, va="top", ha="right", **bear_style)
+    if bear_text and ta.verdict != "SHORT":
+        fig.text(rx, 0.38, bear_text, va="top", ha="right", **bear_style)
+
+    br = ta_chart_bottom_right_text(ta)
+    if br:
+        fig.text(
+            rx, bottom_br_y, br,
+            va="bottom", ha="right", fontsize=7.6, color=CHART_STYLE["text"],
+            transform=fig.transFigure, linespacing=1.26,
+            bbox=dict(
+                boxstyle="round,pad=0.42",
+                facecolor=CHART_STYLE["panel"],
+                edgecolor="#355c8a",
+                alpha=0.95,
+            ),
+        )
 
     summary = ta_chart_summary_text(ta)
     if summary:
         fig.text(
-            0.50, 0.015, summary,
-            va="bottom", ha="center", fontsize=6.5, color=CHART_STYLE["text"],
+            0.50, 0.015 if not with_subpanels else 0.115,
+            summary,
+            va="bottom", ha="center", fontsize=7.8, color=CHART_STYLE["text"],
             transform=fig.transFigure,
             bbox=dict(
                 boxstyle="round,pad=0.4",
@@ -679,8 +693,9 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         )
 
 
-def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
+def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
     """PRO-версия: крупнее блоки и более явная структура."""
+    bottom_br_y = 0.12 if with_subpanels else 0.05
     def _drop_dup_title(text: str, title: str) -> str:
         if not text:
             return ""
@@ -761,9 +776,9 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
 
     base = dict(
         transform=fig.transFigure,
-        fontsize=7.1,
+        fontsize=8.4,
         color=text_color,
-        linespacing=1.30,
+        linespacing=1.32,
         bbox=dict(boxstyle="round,pad=0.45", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
     )
 
@@ -780,7 +795,7 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     )
     fig.text(
         left_x,
-        0.64,
+        0.68,
         "ПЛАН ДЕЙСТВИЙ\n" + (
             _drop_dup_title(ta_chart_plan_text(ta), "ПЛАН ДЕЙСТВИЙ")
             or "ожидать подтверждения"
@@ -788,21 +803,6 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         ha="left",
         va="top",
         **base,
-    )
-    fig.text(
-        left_x,
-        0.30,
-        "КОНТЕКСТ\n" + (
-            _drop_dup_title(ta_chart_context_text(ta), "КОНТЕКСТ")
-            or "контекст недоступен"
-        ),
-        ha="left",
-        va="top",
-        fontsize=7.0,
-        color=text_color,
-        transform=fig.transFigure,
-        linespacing=1.30,
-        bbox=dict(boxstyle="round,pad=0.42", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
     )
 
     fig.text(
@@ -827,14 +827,14 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         meta_lines.append(alt_line)
     fig.text(
         right_x,
-        0.86,
+        0.84,
         "\n".join(meta_lines),
         ha="right",
         va="top",
-        fontsize=7.0,
+        fontsize=8.0,
         color="#b3d4ff",
         transform=fig.transFigure,
-            linespacing=1.24,
+        linespacing=1.28,
         bbox=dict(boxstyle="round,pad=0.40", facecolor="#0f1a2b", edgecolor="#355c8a", alpha=0.97),
     )
     # Показываем детально только приоритетный сценарий, альтернативу уносим в PRO META.
@@ -855,12 +855,12 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
             f"SL: {fmt_price(bull.stop_price)}",
         ]
         fig.text(
-            right_x, 0.66, "\n".join(bull_lines),
-            ha="right", va="top", fontsize=7.1, color=CHART_STYLE["accent_long"],
-            transform=fig.transFigure, linespacing=1.28,
+            right_x, 0.58, "\n".join(bull_lines),
+            ha="right", va="top", fontsize=8.2, color=CHART_STYLE["accent_long"],
+            transform=fig.transFigure, linespacing=1.30,
             bbox=dict(boxstyle="round,pad=0.42", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
         )
-    if show_bear and ta.bearish_scenario:
+    if show_bear and ta.bearish_scenario and not show_bull:
         bear = ta.bearish_scenario
         bear_lines = [
             "МЕДВЕЖИЙ СЦЕНАРИЙ",
@@ -869,21 +869,33 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
             f"SL: {fmt_price(bear.stop_price)}",
         ]
         fig.text(
-            right_x, 0.34, "\n".join(bear_lines),
-            ha="right", va="top", fontsize=7.1, color=CHART_STYLE["accent_short"],
-            transform=fig.transFigure, linespacing=1.28,
+            right_x, 0.58, "\n".join(bear_lines),
+            ha="right", va="top", fontsize=8.2, color=CHART_STYLE["accent_short"],
+            transform=fig.transFigure, linespacing=1.30,
             bbox=dict(boxstyle="round,pad=0.42", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
+        )
+
+    br = ta_chart_bottom_right_text(ta)
+    if br:
+        fig.text(
+            right_x, bottom_br_y, br,
+            ha="right", va="bottom", fontsize=8.0, color=text_color,
+            transform=fig.transFigure, linespacing=1.28,
+            bbox=dict(
+                boxstyle="round,pad=0.45", facecolor="#101828",
+                edgecolor="#4a5568", alpha=0.98,
+            ),
         )
 
     summary = ta_chart_summary_text(ta)
     if summary:
         fig.text(
             0.50,
-            0.018,
+            0.115 if with_subpanels else 0.018,
             "ИТОГ: " + summary,
             ha="center",
             va="bottom",
-            fontsize=7.2,
+            fontsize=8.2,
             color=text_color,
             transform=fig.transFigure,
             bbox=dict(boxstyle="round,pad=0.45", facecolor="#181f2a", edgecolor=CHART_STYLE["warning"], alpha=0.97),
@@ -1066,9 +1078,9 @@ def _render_chart_figure(
         for lv in ta.levels[:6]:
             c = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
             ax.axhline(lv.price, color=c, linestyle="-", linewidth=1.15, alpha=0.42)
-        _draw_info_panels_pro(fig, ta)
+        _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
     else:
-        _draw_info_panels(fig, ta)
+        _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
     fig.autofmt_xdate(rotation=0)
 
@@ -1181,7 +1193,7 @@ def _draw_tv_range_box(
     ax.add_patch(rect)
     ax.text(
         (x0 + x1) / 2, y_top, " RANGE ",
-        color=CHART_STYLE["warning"], fontsize=6.5, ha="center", va="bottom", fontweight="bold",
+        color=CHART_STYLE["warning"], fontsize=7.5, ha="center", va="bottom", fontweight="bold",
         bbox=dict(facecolor="#161b22aa", edgecolor="none", pad=1),
     )
 
@@ -1208,7 +1220,7 @@ def _draw_tv_trendlines(
             color=color, linewidth=1.4, alpha=0.85, zorder=2,
         )
         label = "тренд↑" if tl.kind == "bull" else "тренд↓"
-        ax.text(x1, y_at(ext_price), f" {label}", color=color, fontsize=6, va="bottom" if tl.kind == "bull" else "top")
+        ax.text(x1, y_at(ext_price), f" {label}", color=color, fontsize=7.0, va="bottom" if tl.kind == "bull" else "top")
 
     ch = ta.channel
     if ch is None:
@@ -1239,8 +1251,167 @@ def _draw_tv_emas(ax: plt.Axes, bars: list[KlineBar], y_at: Any) -> None:
     xs = [_bar_x_norm(i, n) for i in range(n)]
     ax.plot(xs, [y_at(p) for p in ema20], color="#58a6ff", linewidth=0.9, alpha=0.55, zorder=2)
     ax.plot(xs, [y_at(p) for p in ema50], color="#f0883e", linewidth=0.9, alpha=0.55, zorder=2)
-    ax.text(0.07, y_at(ema20[-1]), " 20", color="#58a6ff", fontsize=5.5, va="center")
-    ax.text(0.07, y_at(ema50[-1]), " 50", color="#f0883e", fontsize=5.5, va="center")
+    ax.text(0.07, y_at(ema20[-1]), " 20", color="#58a6ff", fontsize=6.5, va="center")
+    ax.text(0.07, y_at(ema50[-1]), " 50", color="#f0883e", fontsize=6.5, va="center")
+
+
+def _tv_zone_levels(ta: TAAnalysisResult, bars: list[KlineBar]) -> tuple[float, float, float, float, float, float] | None:
+    sell_lo = sell_hi = flat_lo = flat_hi = buy_lo = buy_hi = 0.0
+    smc = ta.smc
+    if smc and smc.premium_zone and smc.discount_zone:
+        sell_lo, sell_hi = smc.premium_zone
+        buy_lo, buy_hi = smc.discount_zone
+        flat_lo, flat_hi = sell_lo, buy_hi
+    elif ta.consolidation:
+        z = ta.consolidation
+        span = z.top - z.bottom
+        sell_lo, sell_hi = z.top - span * 0.12, z.top
+        buy_lo, buy_hi = z.bottom, z.bottom + span * 0.12
+        flat_lo, flat_hi = buy_hi, sell_lo
+    else:
+        seg = bars[-min(60, len(bars)) :]
+        hi = max(b.high for b in seg)
+        lo = min(b.low for b in seg)
+        span = hi - lo
+        if span <= 0:
+            return None
+        sell_lo, sell_hi = hi - span * 0.28, hi
+        buy_lo, buy_hi = lo, lo + span * 0.28
+        flat_lo, flat_hi = buy_hi, sell_lo
+    if sell_hi <= sell_lo and buy_hi <= buy_lo:
+        return None
+    return buy_lo, buy_hi, flat_lo, flat_hi, sell_lo, sell_hi
+
+
+def _draw_tv_buy_flat_sell_zones(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    y_at: Any,
+) -> None:
+    levels = _tv_zone_levels(ta, bars)
+    if not levels:
+        return
+    buy_lo, buy_hi, flat_lo, flat_hi, sell_lo, sell_hi = levels
+    x0, width = 0.03, 0.84
+
+    def _band(lo: float, hi: float, color: str, label: str) -> None:
+        if hi <= lo:
+            return
+        y_bot = y_at(lo)
+        y_top = y_at(hi)
+        rect = Rectangle(
+            (x0, min(y_bot, y_top)),
+            width,
+            max(abs(y_top - y_bot), 0.0015),
+            facecolor=color,
+            edgecolor="none",
+            alpha=0.10,
+            zorder=0,
+        )
+        ax.add_patch(rect)
+        ax.text(
+            x0 + 0.01, (y_bot + y_top) / 2, f" {label}",
+            color=color, fontsize=7.2, fontweight="bold", va="center", alpha=0.92,
+        )
+
+    _band(buy_lo, buy_hi, "#3fb950", "BUY")
+    _band(flat_lo, flat_hi, "#8b949e", "flat")
+    _band(sell_lo, sell_hi, "#f85149", "SELL")
+
+
+def _draw_tv_sweep_circles(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    y_at: Any,
+) -> None:
+    smc = ta.smc
+    if smc is None or not bars:
+        return
+    n = len(bars)
+    w_x, h_y = 0.022, 0.014
+    for marker in smc.markers:
+        if marker.kind != "sweep" or marker.index >= n:
+            continue
+        x = _bar_x_norm(marker.index, n)
+        y = y_at(marker.price)
+        color = "#ffd33d" if marker.direction == "long" else "#ff7b72"
+        ax.add_patch(
+            Ellipse(
+                (x, y), w_x, h_y,
+                fill=False, edgecolor=color, linewidth=2.0, linestyle="-", zorder=6,
+            )
+        )
+        ax.text(x, y + h_y * 0.5, " sweep", color=color, fontsize=6.8, ha="center", va="bottom", fontweight="bold")
+
+
+def _draw_tv_zigzag(
+    ax: plt.Axes,
+    x0: float,
+    span: float,
+    waypoints: list[float],
+    y_at: Any,
+    *,
+    color: str,
+    label: str,
+    alpha: float,
+    lw: float = 1.4,
+) -> None:
+    if len(waypoints) < 2:
+        return
+    xs = [x0 + span * i for i in range(len(waypoints))]
+    ys = [y_at(p) for p in waypoints]
+    ax.plot(xs, ys, color=color, linewidth=lw, linestyle="--", alpha=alpha, zorder=3)
+    ax.annotate(
+        "", xy=(xs[-1], ys[-1]), xytext=(xs[-2], ys[-2]),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, linestyle="dashed", alpha=alpha),
+    )
+    va = "top" if waypoints[-1] < waypoints[0] else "bottom"
+    ax.text(xs[-1], ys[-1], f" {label}", color=color, fontsize=7.5, va=va, fontweight="bold")
+
+
+def _draw_tv_bounce_short_path(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    current: float,
+    y_at: Any,
+    *,
+    x0: float,
+    span: float,
+) -> bool:
+    if ta.verdict != "SHORT" or not ta.breakdown_level or not bars:
+        return False
+    state, _ = _short_trigger_state(ta)
+    if state == "ready":
+        return False
+    px = current
+    bd = ta.breakdown_level
+    if px <= bd * 1.001:
+        return False
+    resist = ta.breakout_level or ta.nearest_resistance
+    if not resist or resist <= px * 1.0005:
+        resist = px * 1.006
+    tp = ta.target_prices[0] if ta.target_prices else bd * 0.992
+    mid_pull = (px + resist) / 2.0
+    waypoints = [px, mid_pull, resist, bd, tp]
+    _draw_tv_zigzag(
+        ax, x0, span, waypoints, y_at,
+        color="#c9d1d9", label="отскок→short", alpha=0.88, lw=1.5,
+    )
+    return True
+
+
+def _draw_tv_pro_layers(
+    ax: plt.Axes,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    current: float,
+    y_at: Any,
+) -> None:
+    _draw_tv_buy_flat_sell_zones(ax, ta, bars, y_at)
+    _draw_tv_sweep_circles(ax, ta, bars, y_at)
 
 
 def _draw_tv_forecast_paths(
@@ -1256,20 +1427,13 @@ def _draw_tv_forecast_paths(
     span = 0.08
     y0 = y_at(current)
     ax.plot(x0, y0, "o", color="white", markersize=5, zorder=5)
-    ax.text(x0 - 0.008, y0, " сейчас", color=CHART_STYLE["text"], fontsize=6, ha="right", va="center")
+    ax.text(x0 - 0.008, y0, " сейчас", color=CHART_STYLE["text"], fontsize=7.2, ha="right", va="center")
+
+    if _draw_tv_bounce_short_path(ax, ta, bars, current, y_at, x0=x0, span=span):
+        return
 
     def _draw_zigzag_tv(waypoints: list[float], *, color: str, label: str, alpha: float) -> None:
-        if len(waypoints) < 2:
-            return
-        xs = [x0 + span * i for i in range(len(waypoints))]
-        ys = [y_at(p) for p in waypoints]
-        ax.plot(xs, ys, color=color, linewidth=1.4, linestyle="--", alpha=alpha, zorder=3)
-        ax.annotate(
-            "", xy=(xs[-1], ys[-1]), xytext=(xs[-2], ys[-2]),
-            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.4, linestyle="dashed", alpha=alpha),
-        )
-        va = "top" if waypoints[-1] < waypoints[0] else "bottom"
-        ax.text(xs[-1], ys[-1], f" {label}", color=color, fontsize=6.5, va=va, fontweight="bold")
+        _draw_tv_zigzag(ax, x0, span, waypoints, y_at, color=color, label=label, alpha=alpha)
 
     corr = ta.correction_path
     cont = ta.continuation_path
@@ -1304,7 +1468,7 @@ def _draw_tv_forecast_paths(
             "", xy=(x2, y_tp), xytext=(x1, y_trig),
             arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5, linestyle="dashed", alpha=0.95),
         )
-        ax.text(x2, y_tp, f" {label}", color=color, fontsize=6.5, va=va, fontweight="bold")
+        ax.text(x2, y_tp, f" {label}", color=color, fontsize=7.5, va=va, fontweight="bold")
 
     if direction == "long" and ta.bullish_scenario and ta.bullish_scenario.target_prices:
         _draw_path(ta.bullish_scenario, color=CHART_STYLE["accent_long"], label="прогноз↑", va="bottom")
@@ -1350,25 +1514,6 @@ def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
     return "\n".join(lines[:3])
 
 
-def _tv_context_block(ta: TAAnalysisResult, *, interval_minutes: int, hours: int) -> str:
-    """Короткий блок факторов, которыми руководствуется бот."""
-    phase_text = ta.phase_label or ta.phase or "н/д"
-    bits = [
-        f"фаза: {phase_text}",
-        f"моментум: {ta.momentum_label}",
-    ]
-    if ta.oi_narrative_label:
-        bits.append(f"OI: {ta.oi_narrative_label}")
-    if ta.btc_context:
-        bits.append(f"BTC: {ta.btc_context}")
-    if ta.momentum_pct:
-        bits.append(f"импульс: {ta.momentum_pct:+.1f}%")
-    if ta.forecast_summary:
-        bits.append(ta.forecast_summary[:72])
-    bits.append(f"окно: {hours}ч / {interval_minutes}m")
-    return "\n".join(bits[:6])
-
-
 def _overlay_ta_on_tradingview(
     tv_png: bytes,
     bars: list[KlineBar],
@@ -1392,6 +1537,7 @@ def _overlay_ta_on_tradingview(
     def y_at(price: float) -> float:
         return _price_to_axis_y(price, y_min, y_max)
 
+    _draw_tv_pro_layers(ax, ta, bars, bars[-1].close, y_at)
     _draw_tv_range_box(ax, ta, bars, y_at)
     _draw_tv_trendlines(ax, ta, bars, y_at)
     _draw_tv_emas(ax, bars, y_at)
@@ -1399,26 +1545,26 @@ def _overlay_ta_on_tradingview(
     if ta.breakout_level:
         y = y_at(ta.breakout_level)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["entry"], linewidth=1.6, alpha=0.92, zorder=2)
-        ax.text(0.88, y, f" R {fmt_price(ta.breakout_level)}", color=CHART_STYLE["entry"], fontsize=7, va="center", fontweight="bold")
+        ax.text(0.88, y, f" R {fmt_price(ta.breakout_level)}", color=CHART_STYLE["entry"], fontsize=7.8, va="center", fontweight="bold")
     if ta.breakdown_level:
         y = y_at(ta.breakdown_level)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["accent_short"], linewidth=1.6, alpha=0.92, zorder=2)
-        ax.text(0.88, y, f" S {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7, va="center", fontweight="bold")
+        ax.text(0.88, y, f" S {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7.8, va="center", fontweight="bold")
     if ta.invalidation_price:
         y = y_at(ta.invalidation_price)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["inv"], linewidth=1.0, linestyle="--", alpha=0.8, zorder=2)
-        ax.text(0.88, y, f" SL {fmt_price(ta.invalidation_price)}", color=CHART_STYLE["inv"], fontsize=6.5, va="center")
+        ax.text(0.88, y, f" SL {fmt_price(ta.invalidation_price)}", color=CHART_STYLE["inv"], fontsize=7.4, va="center")
     for lv in ta.levels[:5]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         y = y_at(lv.price)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=color, linewidth=0.7, alpha=0.45, linestyle=":", zorder=2)
         label = "S" if lv.kind == "support" else "R"
-        ax.text(0.03, y, f" {label} {fmt_price(lv.price)}", color=color, fontsize=5.8, va="center", ha="left")
+        ax.text(0.03, y, f" {label} {fmt_price(lv.price)}", color=color, fontsize=7.2, va="center", ha="left")
 
     for j, tp in enumerate(ta.target_prices[:3]):
         y = y_at(tp)
         ax.axhline(y, xmin=0.03, xmax=0.87, color=CHART_STYLE["target"], linewidth=0.95, alpha=0.72, linestyle="--", zorder=2)
-        ax.text(0.88, y, f" TP{j + 1} {fmt_price(tp)}", color=CHART_STYLE["target"], fontsize=6.1, va="center")
+        ax.text(0.88, y, f" TP{j + 1} {fmt_price(tp)}", color=CHART_STYLE["target"], fontsize=7.4, va="center")
 
     if ta.entry_zone:
         lo, hi = ta.entry_zone
@@ -1436,7 +1582,7 @@ def _overlay_ta_on_tradingview(
             zorder=1,
         )
         ax.add_patch(rect)
-        ax.text(0.03, max(y_lo, y_hi), " ENTRY ZONE", color=CHART_STYLE["text"], fontsize=5.8, va="bottom")
+        ax.text(0.03, max(y_lo, y_hi), " ENTRY ZONE", color=CHART_STYLE["text"], fontsize=7.2, va="bottom")
 
     current = bars[-1].close
     y_cur = y_at(current)
@@ -1454,37 +1600,41 @@ def _overlay_ta_on_tradingview(
         header += f" · {' / '.join(bits)}"
     ax.text(
         0.02, 0.97, header,
-        transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+        transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=9, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
     )
     if ta.verdict == "WAIT" and "вход невыгоден" in (ta.verdict_reason or ""):
         ax.text(
             0.02, 0.90, "⛔ NO TRADE",
-            transform=ax.transAxes, va="top", ha="left", color="#ff7b72", fontsize=8, fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="#161b22dd", edgecolor="#ff7b72"),
+            transform=ax.transAxes, va="top", ha="left", color="#ff7b72", fontsize=8.5, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#161b22dd", edgecolor="#ff7b72"),
         )
 
     legend = _tv_forecast_legend(ta)
     if legend:
         ax.text(
-            0.02, 0.14, legend,
-            transform=ax.transAxes, va="bottom", ha="left", color=CHART_STYLE["text"], fontsize=6.5,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22cc", edgecolor=CHART_STYLE["panel_border"]),
+            0.02, 0.16, legend,
+            transform=ax.transAxes, va="bottom", ha="left", color=CHART_STYLE["text"], fontsize=7.8,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22cc", edgecolor=CHART_STYLE["panel_border"]),
         )
 
     panel = ta_chart_panel_text(ta)
     ax.text(
         0.98, 0.97, panel,
-        transform=ax.transAxes, va="top", ha="right", color=CHART_STYLE["text"], fontsize=7,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+        transform=ax.transAxes, va="top", ha="right", color=CHART_STYLE["text"], fontsize=8.4,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
+        linespacing=1.28,
     )
 
-    context = _tv_context_block(ta, interval_minutes=interval_minutes, hours=hours)
-    ax.text(
-        0.98, 0.13, context,
-        transform=ax.transAxes, va="bottom", ha="right", color=CHART_STYLE["text"], fontsize=6.2,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22cc", edgecolor=CHART_STYLE["panel_border"]),
-    )
+    br = ta_chart_bottom_right_text(ta)
+    if br:
+        br += f"\nокно: {hours}ч / {interval_minutes}m"
+        ax.text(
+            0.98, 0.04, br,
+            transform=ax.transAxes, va="bottom", ha="right", color=CHART_STYLE["text"], fontsize=7.8,
+            bbox=dict(boxstyle="round,pad=0.38", facecolor="#161b22dd", edgecolor="#355c8a", alpha=0.96),
+            linespacing=1.26,
+        )
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.02)

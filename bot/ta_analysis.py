@@ -3452,6 +3452,34 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
     return "\n".join(lines[:8])
 
 
+def ta_chart_bottom_right_text(ta: TAAnalysisResult) -> str:
+    """Нижний правый блок: контекст, поток, факторы, прогноз."""
+    import re
+
+    def _plain(s: str) -> str:
+        return re.sub(r"<[^>]+>", "", s).strip()
+
+    lines = ["АНАЛИЗ"]
+    if ta.flow_correction or ta.flow_continuation:
+        lines.append(f"Поток: откат {ta.flow_correction} · рост {ta.flow_continuation}")
+    for note in ta.flow_notes[:3]:
+        if note not in lines:
+            lines.append(note[:56])
+    for fl in ta.factor_lines[:2]:
+        lines.append(fl[:52])
+    if ta.narrative_plain:
+        lines.append(_plain(ta.narrative_plain)[:100])
+    elif ta.narrative_plan:
+        lines.append(_plain(ta.narrative_plan)[:90])
+    if ta.smc and ta.smc.summary:
+        lines.append(ta.smc.summary[:72])
+    ctx = ta_chart_context_text(ta)
+    for row in ctx.splitlines()[1:4]:
+        if row and row not in " · ".join(lines):
+            lines.append(row[:58])
+    return "\n".join(lines[:9])
+
+
 def ta_chart_legend_text() -> str:
     return (
         "█ BUY/flat/SELL | пунктир = сценарий | sweep ○ | Vol/RSI | HTF inset | "
