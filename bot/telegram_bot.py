@@ -943,6 +943,11 @@ class TelegramBot:
                 ("✅ " if default_source == "annotated" else "") + "Полный TA (annotated)",
                 callback_data=builder(symbol, interval_minutes, "annotated"),
             ),
+        ], [
+            InlineKeyboardButton(
+                ("✅ " if default_source == "annotated_pro" else "") + "PRO annotated",
+                callback_data=builder(symbol, interval_minutes, "annotated_pro"),
+            ),
         ]]
         if wizard:
             rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])

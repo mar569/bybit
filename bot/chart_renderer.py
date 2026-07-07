@@ -618,11 +618,16 @@ def _render_chart_figure(
     title_suffix: str,
     accent_color: str,
     interval_minutes: int = 5,
+    pro_mode: bool = False,
 ) -> bytes:
-    fig, ax = plt.subplots(figsize=(17, 8.5), dpi=120)
+    fig_size = (19.2, 10.2) if pro_mode else (17, 8.5)
+    fig, ax = plt.subplots(figsize=fig_size, dpi=120)
     fig.patch.set_facecolor(CHART_STYLE["bg"])
     ax.set_facecolor(CHART_STYLE["bg"])
-    fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
+    if pro_mode:
+        fig.subplots_adjust(left=0.14, right=0.86, top=0.93, bottom=0.09)
+    else:
+        fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
 
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta)
@@ -634,9 +639,10 @@ def _render_chart_figure(
         mdates.date2num(last_ts), current, f"  сейчас {fmt_price(current)}",
         color=accent_color, fontsize=7, va="center", ha="left",
     )
+    mode_suffix = " · PRO" if pro_mode else ""
     ax.set_title(
-        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}",
-        color=CHART_STYLE["text"], fontsize=11, pad=14,
+        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}",
+        color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
     )
     _draw_info_panels(fig, ta)
     _style_axes(ax, bars)
@@ -985,6 +991,12 @@ def _overlay_ta_on_tradingview(
         transform=ax.transAxes, va="top", ha="left", color=CHART_STYLE["text"], fontsize=8, fontweight="bold",
         bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22dd", edgecolor=CHART_STYLE["panel_border"]),
     )
+    if ta.verdict == "WAIT" and "вход невыгоден" in (ta.verdict_reason or ""):
+        ax.text(
+            0.02, 0.90, "⛔ NO TRADE",
+            transform=ax.transAxes, va="top", ha="left", color="#ff7b72", fontsize=8, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#161b22dd", edgecolor="#ff7b72"),
+        )
 
     legend = _tv_forecast_legend(ta)
     if legend:
@@ -1090,12 +1102,14 @@ async def render_annotated_chart(
         logger.info("TradingView unavailable for %s, fallback to matplotlib", symbol)
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
+    pro_mode = source == "annotated_pro"
     png = _render_chart_figure(
         bars, ta,
         symbol=symbol,
         title_suffix=f"Bybit {interval_minutes}m · {hours}ч",
         accent_color=accent,
         interval_minutes=interval_minutes,
+        pro_mode=pro_mode,
     )
     return png, ta
 

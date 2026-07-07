@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 60)
-MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("tv_annotated", "annotated")
+MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("tv_annotated", "annotated", "annotated_pro")
 MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
 MTC_CALLBACK_PREFIX = "mtc|"

@@ -1379,6 +1379,30 @@ def _estimate_rr(
     return f"~1:{ratio:.1f}"
 
 
+def _trade_quality_guard(
+    *,
+    verdict: str,
+    current: float,
+    stop: float | None,
+    targets: list[float],
+) -> tuple[bool, str]:
+    """
+    Возвращает (is_bad, reason), если вход статистически невыгоден.
+    Нужен, чтобы не оставлять LONG/SHORT при плохом R:R.
+    """
+    if verdict not in {"LONG", "SHORT"} or current <= 0 or not stop or not targets:
+        return False, ""
+    tp1 = targets[0]
+    risk_pct = abs(current - stop) / current * 100.0
+    reward_pct = abs(tp1 - current) / current * 100.0
+    if risk_pct <= 0:
+        return False, ""
+    rr = reward_pct / risk_pct
+    if rr < 0.8 or (risk_pct > 8.0 and reward_pct < 3.0):
+        return True, f"вход невыгоден: риск {risk_pct:.1f}% к TP1 {reward_pct:.1f}% (R:R {rr:.2f})"
+    return False, ""
+
+
 def _trade_levels(
     bars: list[KlineBar],
     levels: list[HorizontalLevel],
@@ -1654,6 +1678,17 @@ def run_ta_analysis(
             bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
             bullish=bullish, bearish=bearish,
         )
+    is_bad_trade, bad_trade_reason = _trade_quality_guard(
+        verdict=verdict,
+        current=current,
+        stop=inv,
+        targets=targets,
+    )
+    if is_bad_trade:
+        verdict = "WAIT"
+        conf = min(conf, 7)
+        reason = f"{reason} · {bad_trade_reason}" if reason else bad_trade_reason
+
     supports = sorted([lv.price for lv in levels if lv.kind == "support"], reverse=True)
     trader_plan = build_trader_plan(
         verdict=verdict,
