@@ -3482,6 +3482,6 @@ def ta_chart_bottom_right_text(ta: TAAnalysisResult) -> str:
 
 def ta_chart_legend_text() -> str:
     return (
-        "█ BUY/flat/SELL | пунктир = сценарий | sweep ○ | Vol/RSI | HTF inset | "
+        "█ BUY/flat/SELL | пунктир = сценарий | sweep ○ | Vol/RSI | "
         "STOP/TP | коррекция/продолжение"
     )

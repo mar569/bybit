@@ -16,7 +16,6 @@ from matplotlib.patches import Ellipse, Rectangle
 from .bybit_klines import BybitKlineCache, KlineBar
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
-    draw_htf_inset,
     draw_pro_chart_layers,
     draw_rsi_panel,
     draw_volume_panel,
@@ -1023,7 +1022,6 @@ def _render_chart_figure(
     accent_color: str,
     interval_minutes: int = 5,
     pro_mode: bool = False,
-    htf_bars: list[KlineBar] | None = None,
     enhanced: bool = True,
 ) -> bytes:
     use_enhanced = enhanced
@@ -1055,8 +1053,6 @@ def _render_chart_figure(
         draw_rsi_panel(ax_rsi, bars)
         plt.setp(ax.get_xticklabels(), visible=False)
         plt.setp(ax_vol.get_xticklabels(), visible=False)
-    if use_enhanced and htf_bars:
-        draw_htf_inset(fig, htf_bars, ta, interval_label="2h")
     if pro_mode:
         _draw_pro_market_zones(ax, bars, ta)
         _draw_pro_paths(ax, bars, ta)
@@ -1664,16 +1660,11 @@ async def render_annotated_chart(
 
     btc_bars: list[KlineBar] | None = None
     htf_bars: list[KlineBar] | None = None
-    htf_2h_bars: list[KlineBar] | None = None
     history_bars: list[KlineBar] | None = None
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_bars = await _fetch_bars("BTCUSDT", hours, interval_minutes=interval_minutes)
     if interval_minutes <= 15:
         htf_bars = await _fetch_bars(symbol, max(24, hours * 2), interval_minutes=60)
-    try:
-        htf_2h_bars = await _fetch_bars(symbol, 96, interval_minutes=120)
-    except Exception:
-        htf_2h_bars = htf_bars
     # Для ручного TA (neutral=True) подтягиваем более глубокую историю паттернов.
     if neutral:
         hist_hours = 48 if interval_minutes <= 15 else 72
@@ -1731,7 +1722,6 @@ async def render_annotated_chart(
         accent_color=accent,
         interval_minutes=interval_minutes,
         pro_mode=pro_mode,
-        htf_bars=htf_2h_bars or htf_bars,
         enhanced=source in {"annotated", "annotated_pro"},
     )
     return png, ta
