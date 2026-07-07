@@ -1040,15 +1040,13 @@ class TelegramBot:
                     f"· {result.confidence:.0f}%"
                 )
                 if ta_result is not None:
-                    caption = (
-                        f"{caption}\n\n"
-                        f"{ta_analysis_chart_caption_html(
-                            ta_result,
-                            analysis_direction=result.direction,
-                            post_dump_late=result.post_dump_late,
-                            liq_cascade_note=result.liq_cascade_note,
-                        )}"
+                    ta_caption = ta_analysis_chart_caption_html(
+                        ta_result,
+                        analysis_direction=result.direction,
+                        post_dump_late=result.post_dump_late,
+                        liq_cascade_note=result.liq_cascade_note,
                     )
+                    caption = f"{caption}\n\n{ta_caption}"
                 await self._send_chart(
                     chat_id, png, caption, is_priority=False,
                 )
