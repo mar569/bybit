@@ -2802,18 +2802,32 @@ def _long_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
     return "far", f"LONG далеко ({dist_pct:.1f}% до уровня)"
 
 
+def should_skip_noise_signal(ta: TAAnalysisResult, signal_side: str, signal_score: float) -> tuple[bool, str]:
+    """Отсечь слабые WAIT-сигналы, чтобы не забивать чат."""
+    if ta.verdict != "WAIT":
+        return False, ""
+    score = ta_display_score(ta)
+    timing = int(round(float(signal_score)))
+    if ta_conflicts_with_signal(ta, signal_side) and score < 7:
+        return True, "WAIT + сканер и TA в разные стороны"
+    if timing <= 2 and score < 8:
+        return True, "ранний сканер + слабый WAIT"
+    return False, ""
+
+
 def evaluate_entry_readiness(
     ta: TAAnalysisResult,
     signal_side: str,
     signal_score: int | float,
     *,
     min_ta_score: int = 7,
-    max_trigger_dist_pct: float = 1.8,
-    min_timing_score: int = 3,
+    max_trigger_dist_pct: float = 2.5,
+    min_timing_score: int = 2,
     max_timing_score: int = 9,
     require_smc: bool = False,
     check_scanner_timing: bool = True,
     signal_type: str | None = None,
+    accept_armed: bool = False,
 ) -> tuple[bool, str]:
     """Готов ли сигнал к входу: TA LONG/SHORT, триггер близко, без конфликтов."""
     if check_scanner_timing:
@@ -2839,11 +2853,15 @@ def evaluate_entry_readiness(
 
     if ta.verdict == "LONG":
         state, reason = _long_trigger_state(ta)
-        if signal_type == "reversal_dump" and state != "ready":
+        if signal_type == "reversal_dump" and state not in {"ready", "armed"}:
             return False, f"откат вниз — {reason}"
         if ta.momentum_label and "вниз" in ta.momentum_label and ta.momentum_pct <= -0.8 and state != "ready":
             return False, f"импульс вниз — {reason}"
-        if state != "ready":
+        if state == "ready":
+            pass
+        elif state == "armed" and accept_armed:
+            return True, reason
+        else:
             return False, reason
         if require_smc and ta.smc:
             smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
@@ -2852,12 +2870,16 @@ def evaluate_entry_readiness(
         return True, "триггер LONG подтверждён"
     if ta.verdict == "SHORT":
         state, reason = _short_trigger_state(ta)
-        if signal_type == "reversal_pump" and state != "ready":
+        if signal_type == "reversal_pump" and state not in {"ready", "armed"}:
             return False, f"отскок вверх — {reason}"
         if ta.momentum_pct >= 0.8 and state != "ready":
             mom = ta.momentum_label or "рост"
             return False, f"{mom} — {reason}"
-        if state != "ready":
+        if state == "ready":
+            pass
+        elif state == "armed" and accept_armed:
+            return True, reason
+        else:
             return False, reason
         if require_smc and ta.smc:
             smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
@@ -2869,13 +2891,13 @@ def evaluate_entry_readiness(
 
 def entry_readiness_line_html(ready: bool, reason: str) -> str:
     if ready:
-        return "✅ <b>Готов к входу</b> — триггер сработал, можно по плану TA"
+        return "✅ <b>Готов</b> — вход по плану TA"
     low = reason.lower()
     if any(x in low for x in ("отскок", "откат", "ждать пробой", "цена выше", "цена ниже на")):
-        return f"🔶 <b>Сетап активен — не входить сейчас</b> · {reason}"
+        return f"🔶 <b>Не сейчас</b> · {reason}"
     if "TA ждёт" in reason:
         return f"⏳ <b>Ждать уровень</b> · {reason}"
-    return f"⏳ <b>Рано / ждать</b> · {reason}"
+    return f"⏳ <b>Ждать</b> · {reason}"
 
 
 def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
@@ -2936,15 +2958,11 @@ def format_scenario_update_html(
             body += "\n▶️ Пока <b>не входить</b> — ждём подтверждения уровня."
     elif update_kind == "continuation_confirmed":
         body = (
-            f"📈 <b>Продолжение вверх</b> — +{move_pct:.1f}% от точки первого алерта "
-            f"(хай <b>{fmt_price(reference_price)}</b>)."
-        )
-        body += "\nСценарий отката <b>отменён</b> — импульс сильнее."
-        body += (
-            "\n💡 <b>Итог:</b> не шортить только из-за первого алерта — цена пошла выше плана."
+            f"📈 <b>Продолжение</b> +{move_pct:.1f}% от алерта "
+            f"(хай <b>{fmt_price(reference_price)}</b>). Откат <b>снят</b>."
         )
         if breakout_level:
-            body += f"\n▶️ LONG при закреплении ≥<b>{fmt_price(breakout_level)}</b>."
+            body += f"\n▶️ LONG при ≥<b>{fmt_price(breakout_level)}</b>."
     elif update_kind == "entry_short":
         body = (
             f"🔻 <b>Можно смотреть SHORT</b> — цена ≤<b>{fmt_price(reference_price)}</b> "
@@ -2971,36 +2989,16 @@ def ta_scenario_followup_caption_html(
     update_kind: str,
     signal_side: str | None = None,
 ) -> str:
-    """Короткая подпись к обновлению сценария — без противоречия с заголовком."""
-    score = ta_display_score(ta)
-    lines: list[str] = []
-
+    """Одна строка к обновлению сценария."""
     if update_kind == "continuation_confirmed":
-        lines.append(f"📐 TA: <b>WAIT</b> {score}/10 · импульс вверх держится")
         if ta.breakout_level:
-            lines.append(
-                f"▶️ Следующий шаг: LONG при ≥<b>{fmt_price(ta.breakout_level)}</b>"
-            )
-        lines.append("❌ Прогноз отката — <b>снят</b> (цена выше плана)")
-        if ta.factor_lines:
-            lines.append(ta.factor_lines[0])
-        return "\n".join(lines)
-
+            return f"▶️ LONG при ≥<b>{fmt_price(ta.breakout_level)}</b>"
+        return ""
     if update_kind == "correction_started":
-        lines.append(f"📐 TA: <b>WAIT</b> {score}/10 · откат по плану")
-        plain = ta_plain_forecast_line(ta)
-        if plain:
-            lines.append(plain)
         if ta.breakdown_level:
-            lines.append(f"▶️ SHORT при ≤<b>{fmt_price(ta.breakdown_level)}</b>")
-        if ta.factor_lines:
-            lines.append(ta.factor_lines[0])
-        return "\n".join(lines)
-
-    lines.append(ta_signal_scenario_line_html(ta, signal_side=signal_side))
-    if ta.factor_lines:
-        lines.append(ta.factor_lines[0])
-    return "\n".join(lines)
+            return f"▶️ SHORT при ≤<b>{fmt_price(ta.breakdown_level)}</b>"
+        return ""
+    return ta_signal_scenario_line_html(ta, signal_side=signal_side)
 
 
 def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
@@ -3083,8 +3081,23 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
             d = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
             dist = f" (ещё ~{d:.1f}% до уровня)"
         lines.append(
-            f"▶️ <b>Когда входить:</b> закрепление ≤<b>{fmt_price(ta.breakdown_level)}</b>{dist}."
+            f"▶️ <b>Когда входить (подтверждение):</b> закрепление ≤<b>{fmt_price(ta.breakdown_level)}</b>{dist}."
         )
+        if ta.post_pump:
+            resist = ta.breakout_level or ta.nearest_resistance
+            if resist and ta.current_price and resist > ta.current_price * 1.002:
+                lines.append(
+                    f"💡 <b>Агрессивно (выше риск):</b> short от отскока к "
+                    f"<b>{fmt_price(resist)}</b> — не ждать пробоя вниз, стоп выше range. "
+                    f"Бот по умолчанию так не входит: после пампа часто дожимают к верху range."
+                )
+            elif resist and ta.current_price:
+                mid = (resist + ta.breakdown_level) / 2.0
+                if abs(ta.current_price - mid) / ta.current_price < 0.04:
+                    lines.append(
+                        f"💡 <b>Сейчас середина range</b> (~{fmt_price(mid)}): short «по рынку» "
+                        f"без пробоя ≤{fmt_price(ta.breakdown_level)} — плохой R:R, TA ждёт край."
+                    )
     elif side == "long" and ta.breakout_level:
         dist = ""
         if ta.current_price > 0 and ta.breakout_level > ta.current_price:
@@ -3115,8 +3128,55 @@ def ta_signal_caption_html(
     signal_side: str | None = None,
     readiness: tuple[bool, str] | None = None,
     show_readiness_badge: bool = True,
+    compact: bool = True,
 ) -> str:
-    """Сигналы: TA + одна строка сценария (согласовано с направлением сигнала)."""
+    """Сигналы: короткий блок для решения (по умолчанию compact)."""
+    if not compact:
+        return _ta_signal_caption_verbose(ta, signal_side=signal_side, readiness=readiness, show_readiness_badge=show_readiness_badge)
+    return ta_signal_caption_compact_html(
+        ta, signal_side=signal_side, readiness=readiness, show_readiness_badge=show_readiness_badge,
+    )
+
+
+def ta_signal_caption_compact_html(
+    ta: TAAnalysisResult,
+    *,
+    signal_side: str | None = None,
+    readiness: tuple[bool, str] | None = None,
+    show_readiness_badge: bool = True,
+) -> str:
+    """3–4 строки: статус, план, одна фраза почему."""
+    lines: list[str] = []
+    if readiness is not None and show_readiness_badge:
+        lines.append(entry_readiness_line_html(readiness[0], readiness[1]))
+
+    scenario = ta_signal_scenario_line_html(ta, signal_side=signal_side)
+    if scenario:
+        lines.append(scenario)
+
+    conflict = ta_scanner_conflict_line_html(ta, signal_side)
+    if conflict:
+        lines.append(conflict)
+
+    import re
+    plain = ta.narrative_plain or ""
+    if plain:
+        plain = re.sub(r"<[^>]+>", "", plain).strip()
+        if len(plain) > 110:
+            plain = plain[:107] + "…"
+        lines.append(plain)
+
+    return "\n".join(lines[:4])
+
+
+def _ta_signal_caption_verbose(
+    ta: TAAnalysisResult,
+    *,
+    signal_side: str | None = None,
+    readiness: tuple[bool, str] | None = None,
+    show_readiness_badge: bool = True,
+) -> str:
+    """Полный TA-блок (ручной разбор / отладка)."""
     score = ta_display_score(ta)
     sig = (signal_side or "").lower()
 

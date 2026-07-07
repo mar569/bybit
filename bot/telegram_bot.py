@@ -69,6 +69,7 @@ from .ta_analysis import (
     evaluate_entry_readiness,
     ta_manual_detailed_html,
     ta_signal_caption_html,
+    should_skip_noise_signal,
     ta_telegram_caption_html,
     ta_user_intent_html,
     ta_display_score,
@@ -301,6 +302,7 @@ class TelegramBot:
             require_smc=s.actionable_require_smc,
             check_scanner_timing=for_filter,
             signal_type=signal.signal_type,
+            accept_armed=for_filter and s.actionable_accept_armed,
         )
 
     async def start(self) -> None:
@@ -763,6 +765,17 @@ class TelegramBot:
             if ta_result is not None:
                 readiness = self._eval_signal_readiness(ta_result, signal, for_filter=False)
 
+                if settings.signal_skip_noise and not skip_dedupe and not settings.actionable_signals_only:
+                    skip, noise_reason = should_skip_noise_signal(
+                        ta_result, signal.side, signal.signal_score,
+                    )
+                    if skip:
+                        logger.info(
+                            "Telegram skip %s %s: noise — %s",
+                            signal.exchange, signal.symbol, noise_reason,
+                        )
+                        return
+
             if settings.actionable_signals_only and not skip_dedupe:
                 if ta_result is None:
                     logger.info(
@@ -790,6 +803,7 @@ class TelegramBot:
                     signal_side=signal.side,
                     readiness=readiness,
                     show_readiness_badge=settings.actionable_show_readiness_badge,
+                    compact=settings.signal_ta_compact,
                 )
             chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
             if png:
@@ -1536,10 +1550,8 @@ class TelegramBot:
                         breakout_level=watch.breakout_level,
                         ta=ta_fresh,
                     )
-                    caption = (
-                        f"{message}\n\n"
-                        f"{ta_scenario_followup_caption_html(ta_fresh, upd.kind, watch.side)}"
-                    )
+                    followup = ta_scenario_followup_caption_html(ta_fresh, upd.kind, watch.side)
+                    caption = f"{message}\n{followup}" if followup else message
                 else:
                     caption = message
                 if png:

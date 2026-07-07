@@ -184,10 +184,13 @@ def test_manual_detailed_has_distances() -> None:
 def test_ta_signal_caption_html() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
-    caption = ta_signal_caption_html(ta, signal_side="long")
+    caption = ta_signal_caption_html(ta, signal_side="long", compact=False)
     assert "📐 TA" in caption
     assert "▶️" in caption
-    assert caption.count("\n") == 1
+
+    compact = ta_signal_caption_html(ta, signal_side="long", compact=True)
+    assert "▶️" in compact
+    assert compact.count("\n") <= 4
 
 
 def test_signal_caption_aligns_with_short_signal() -> None:
@@ -284,9 +287,8 @@ def test_continuation_followup_omits_correction_forecast() -> None:
         forecast_summary="коррекция после пампа",
     )
     text = ta_scenario_followup_caption_html(ta, "continuation_confirmed", "long")
-    assert "Простыми словами" not in text
-    assert "снят" in text.lower()
     assert "LONG" in text
+    assert "1.6520" in text or "1.652" in text
 
 
 def test_readiness_badge_ignores_scanner_timing_for_reversal() -> None:

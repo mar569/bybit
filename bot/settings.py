@@ -242,11 +242,16 @@ class ScannerSettings:
     # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
     actionable_signals_only: bool = False
     actionable_min_ta_score: int = 7
-    actionable_max_trigger_dist_pct: float = 1.8
-    actionable_min_signal_score: int = 3
+    actionable_max_trigger_dist_pct: float = 2.5
+    actionable_min_signal_score: int = 2
     actionable_max_signal_score: int = 9
     actionable_require_smc: bool = False
     actionable_show_readiness_badge: bool = True
+    actionable_accept_armed: bool = True
+
+    # Не слать «шум»: WAIT + слабый TA + конфликт со сканером
+    signal_skip_noise: bool = True
+    signal_ta_compact: bool = True
 
     outcome_tracking_enabled: bool = True
 
@@ -254,7 +259,7 @@ class ScannerSettings:
     scenario_watch_enabled: bool = True
     scenario_watch_minutes: int = 45
     scenario_watch_pullback_pct: float = 3.0
-    scenario_watch_continuation_pct: float = 0.8
+    scenario_watch_continuation_pct: float = 1.5
     scenario_watch_zone_pct: float = 0.45
     scenario_watch_tick_seconds: float = 12.0
     scenario_watch_enroll_cooldown_seconds: int = 600
@@ -584,16 +589,19 @@ class ScannerSettings:
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
             actionable_signals_only=bool(base.get("actionable_signals_only", False)),
             actionable_min_ta_score=int(base.get("actionable_min_ta_score", 7)),
-            actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 1.8)),
-            actionable_min_signal_score=int(base.get("actionable_min_signal_score", 3)),
+            actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 2.5)),
+            actionable_min_signal_score=int(base.get("actionable_min_signal_score", 2)),
             actionable_max_signal_score=int(base.get("actionable_max_signal_score", 9)),
             actionable_require_smc=bool(base.get("actionable_require_smc", False)),
             actionable_show_readiness_badge=bool(base.get("actionable_show_readiness_badge", True)),
+            actionable_accept_armed=bool(base.get("actionable_accept_armed", True)),
+            signal_skip_noise=bool(base.get("signal_skip_noise", True)),
+            signal_ta_compact=bool(base.get("signal_ta_compact", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             scenario_watch_enabled=bool(base.get("scenario_watch_enabled", True)),
             scenario_watch_minutes=int(base.get("scenario_watch_minutes", 45)),
             scenario_watch_pullback_pct=float(base.get("scenario_watch_pullback_pct", 3.0)),
-            scenario_watch_continuation_pct=float(base.get("scenario_watch_continuation_pct", 0.8)),
+            scenario_watch_continuation_pct=float(base.get("scenario_watch_continuation_pct", 1.5)),
             scenario_watch_zone_pct=float(base.get("scenario_watch_zone_pct", 0.45)),
             scenario_watch_tick_seconds=float(base.get("scenario_watch_tick_seconds", 12.0)),
             scenario_watch_enroll_cooldown_seconds=int(

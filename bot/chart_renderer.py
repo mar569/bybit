@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -77,6 +78,124 @@ def _bar_times(bars: list[KlineBar]) -> list[datetime]:
 def _idx_to_date(bars: list[KlineBar], idx: int) -> datetime:
     idx = max(0, min(idx, len(bars) - 1))
     return datetime.fromtimestamp(bars[idx].open_time, tz=timezone.utc)
+
+
+def _bar_width_days(bars: list[KlineBar]) -> float:
+    times = _bar_times(bars)
+    if len(times) < 2:
+        return 5.0 / (24 * 60)
+    widths = [
+        mdates.date2num(times[i]) - mdates.date2num(times[i - 1])
+        for i in range(1, len(times))
+    ]
+    return max(sum(widths) / len(widths), 1e-6)
+
+
+def _x_after_last_bar(bars: list[KlineBar], bars_ahead: float = 12.0) -> float:
+    times = _bar_times(bars)
+    return mdates.date2num(times[-1]) + _bar_width_days(bars) * bars_ahead
+
+
+def _forecast_path_xs(bars: list[KlineBar], n_points: int) -> list[float]:
+    """X-координаты пунктирного прогноза — шире шаг, чтобы не слипалось у последней свечи."""
+    if not bars or n_points < 1:
+        return []
+    times = _bar_times(bars)
+    start_x = mdates.date2num(times[-1])
+    bar_w = _bar_width_days(bars)
+    step = bar_w * 5.5
+    return [start_x + step * i for i in range(n_points)]
+
+
+def _apply_chart_breathing_room(ax: plt.Axes, bars: list[KlineBar], *, trailing: float = 0.34, leading: float = 0.03) -> None:
+    """Пустое поле справа под подписи и пунктиры прогноза."""
+    times = _bar_times(bars)
+    t0 = mdates.date2num(times[0])
+    t1 = mdates.date2num(times[-1])
+    span = max(t1 - t0, 1e-6)
+    ax.set_xlim(t0 - span * leading, t1 + span * trailing)
+
+
+@dataclass
+class _RightLabel:
+    price: float
+    text: str
+    color: str
+    va: str = "center"
+
+
+def _price_near(a: float, b: float, ref: float) -> bool:
+    if ref <= 0:
+        ref = max(a, b, 1e-9)
+    return abs(a - b) <= ref * 0.0018
+
+
+def _collect_right_labels(ta: TAAnalysisResult) -> list[_RightLabel]:
+    """Подписи справа — без дублей на одной цене."""
+    ref = ta.current_price or 1.0
+    seen: list[float] = []
+    out: list[_RightLabel] = []
+
+    def add(price: float | None, text: str, color: str, va: str = "center") -> None:
+        if price is None:
+            return
+        if any(_price_near(price, s, ref) for s in seen):
+            return
+        seen.append(price)
+        out.append(_RightLabel(price, text, color, va))
+
+    if ta.breakout_level:
+        add(ta.breakout_level, f"LONG≥{fmt_price(ta.breakout_level)}", CHART_STYLE["entry"], "bottom")
+    if ta.breakdown_level and (
+        ta.breakout_level is None
+        or not _price_near(ta.breakdown_level, ta.breakout_level, ref)
+    ):
+        add(ta.breakdown_level, f"SHORT≤{fmt_price(ta.breakdown_level)}", CHART_STYLE["accent_short"], "top")
+    if ta.invalidation_price:
+        add(ta.invalidation_price, f"STOP {fmt_price(ta.invalidation_price)}", CHART_STYLE["inv"])
+    for j, tp in enumerate(ta.target_prices[:2]):
+        add(tp, f"TP{j + 1} {fmt_price(tp)}", CHART_STYLE["target"])
+    for lv in ta.levels[:2]:
+        color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
+        add(lv.price, fmt_price(lv.price), color)
+    if ta.entry_zone:
+        lo, hi = ta.entry_zone
+        add(hi, "зона входа", CHART_STYLE["accent_long"], "bottom")
+    return out
+
+
+def _layout_right_label_xs(bars: list[KlineBar], labels: list[_RightLabel]) -> list[float]:
+    """Разносит подписи по колонкам, если уровни близко по цене."""
+    if not labels:
+        return []
+    times = _bar_times(bars)
+    base = mdates.date2num(times[-1])
+    bar_w = _bar_width_days(bars)
+    ref = labels[0].price
+    min_gap = ref * 0.004
+    xs = [0.0] * len(labels)
+    col = 0
+    prev_price: float | None = None
+    for idx, lbl in sorted(enumerate(labels), key=lambda t: t[1].price):
+        if prev_price is not None and lbl.price - prev_price < min_gap:
+            col += 1
+        else:
+            col = 0
+        xs[idx] = base + bar_w * (11.0 + col * 4.5)
+        prev_price = lbl.price
+    return xs
+
+
+def _draw_right_price_labels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    labels = _collect_right_labels(ta)
+    if not labels:
+        return
+    xs = _layout_right_label_xs(bars, labels)
+    for lbl, x in zip(labels, xs):
+        ax.text(
+            x, lbl.price, lbl.text,
+            color=lbl.color, fontsize=6.9, va=lbl.va, ha="left",
+        )
 
 
 def _extend_channel_line(
@@ -184,8 +303,7 @@ def _draw_scenario_path(
     times = _bar_times(bars)
     start_x = mdates.date2num(times[-1])
     start_y = bars[-1].close
-    span = mdates.date2num(times[-1]) - mdates.date2num(times[max(0, len(bars) - 24)])
-    step = span / max(len(scenario.target_prices) + 1, 2)
+    step = _bar_width_days(bars) * 5.5
     x, y = start_x, start_y
     for tp in scenario.target_prices[:4]:
         next_x = x + step * 0.85
@@ -219,11 +337,7 @@ def _draw_zigzag_forecast_path(
     """Пунктирный путь коррекции/продолжения вправо от последней свечи."""
     if not bars or len(waypoints) < 2:
         return
-    times = _bar_times(bars)
-    start_x = mdates.date2num(times[-1])
-    span = mdates.date2num(times[-1]) - mdates.date2num(times[max(0, len(bars) - 24)])
-    step = span / max(len(waypoints), 2)
-    xs = [start_x + step * i for i in range(len(waypoints))]
+    xs = _forecast_path_xs(bars, len(waypoints))
     ax.plot(xs, waypoints, color=color, linestyle="--", linewidth=lw, alpha=alpha, zorder=4)
     ax.annotate(
         "",
@@ -232,7 +346,8 @@ def _draw_zigzag_forecast_path(
         arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, linestyle="dashed", alpha=alpha),
     )
     va = "top" if waypoints[-1] < waypoints[0] else "bottom"
-    ax.text(xs[-1], waypoints[-1], f" {label}", color=color, fontsize=6.5, fontweight="bold", va=va)
+    label_x = xs[-1] + _bar_width_days(bars) * (1.5 + len(xs) * 0.15)
+    ax.text(label_x, waypoints[-1], label, color=color, fontsize=7, fontweight="bold", va=va, ha="left")
 
 
 def _draw_market_forecast_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
@@ -245,17 +360,10 @@ def _draw_market_forecast_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalys
     corr_color = "#ffa657"
     cont_color = CHART_STYLE["accent_long"]
     if corr and cont:
-        corr_primary = corr.confidence >= cont.confidence
-        _draw_zigzag_forecast_path(
-            ax, bars, corr.waypoints,
-            color=corr_color, label=corr.label,
-            alpha=0.92 if corr_primary else 0.52, lw=1.5 if corr_primary else 1.0,
-        )
-        _draw_zigzag_forecast_path(
-            ax, bars, cont.waypoints,
-            color=cont_color, label=cont.label,
-            alpha=0.92 if not corr_primary else 0.52, lw=1.5 if not corr_primary else 1.0,
-        )
+        if corr.confidence >= cont.confidence:
+            _draw_zigzag_forecast_path(ax, bars, corr.waypoints, color=corr_color, label=corr.label, alpha=0.9, lw=1.5)
+        else:
+            _draw_zigzag_forecast_path(ax, bars, cont.waypoints, color=cont_color, label=cont.label, alpha=0.9, lw=1.5)
     elif corr:
         _draw_zigzag_forecast_path(ax, bars, corr.waypoints, color=corr_color, label=corr.label)
     elif cont:
@@ -263,12 +371,10 @@ def _draw_market_forecast_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalys
 
     if corr and len(corr.waypoints) >= 3:
         pb = corr.waypoints[2]
-        times = _bar_times(bars)
-        x_end = mdates.date2num(times[-1])
         ax.axhline(pb, color=corr_color, linestyle=":", linewidth=0.85, alpha=0.55, zorder=3)
         ax.text(
-            x_end, pb, f" зона отката {fmt_price(pb)}",
-            color=corr_color, fontsize=6.5, va="top",
+            _x_after_last_bar(bars, 4), pb, f"откат {fmt_price(pb)}",
+            color=corr_color, fontsize=6.8, va="top", ha="left",
         )
     return True
 
@@ -335,8 +441,8 @@ def _draw_consolidation_box(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
         xytext=(x1n, mid_y),
         arrowprops=dict(arrowstyle="->", color=CHART_STYLE["accent_short"], lw=1.4, alpha=0.9),
     )
-    ax.text(x1n, z.top * 1.0003, " пробой ↑", color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom")
-    ax.text(x1n, z.bottom * 0.9997, " пробой ↓", color=CHART_STYLE["accent_short"], fontsize=6.5, va="top")
+    ax.text(x1n + arrow_dx * 0.3, z.top * 1.0003, "↑", color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom", ha="left")
+    ax.text(x1n + arrow_dx * 0.3, z.bottom * 0.9997, "↓", color=CHART_STYLE["accent_short"], fontsize=6.5, va="top", ha="left")
 
 
 def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
@@ -362,9 +468,9 @@ def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             ),
         )
         ax.text(
-            x + dx * 0.45, (y + ta.breakout_level) / 2,
-            "LONG",
-            color=CHART_STYLE["accent_long"], fontsize=7, fontweight="bold", ha="center",
+            x + dx * 0.55, (y + ta.breakout_level) / 2,
+            "↑",
+            color=CHART_STYLE["accent_long"], fontsize=8, fontweight="bold", ha="center", va="center",
         )
 
     if ta.breakdown_level and y >= ta.breakdown_level * 0.998:
@@ -380,11 +486,10 @@ def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
                 connectionstyle="arc3,rad=-0.12",
             ),
         )
-        label = "SHORT ↓" if ta.action_priority == "short" or ta.verdict == "SHORT" else "SHORT"
         ax.text(
-            x + dx * 0.45, (y + ta.breakdown_level) / 2,
-            label,
-            color=CHART_STYLE["accent_short"], fontsize=7, fontweight="bold", ha="center",
+            x + dx * 0.55, (y + ta.breakdown_level) / 2,
+            "↓",
+            color=CHART_STYLE["accent_short"], fontsize=8, fontweight="bold", ha="center", va="center",
         )
     elif ta.momentum_label.startswith("импульс вниз") and ta.breakdown_level:
         ax.text(
@@ -486,23 +591,17 @@ def _draw_smc_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         color = "#8899aa"
         ax.axhline(lv.price, color=color, linestyle=ls, linewidth=0.6, alpha=0.5)
 
-    for marker in smc.markers:
+    for marker in smc.markers[:3]:
         if marker.index >= len(bars):
             continue
         ts = _idx_to_date(bars, marker.index)
         color = CHART_STYLE["accent_long"] if marker.direction == "long" else CHART_STYLE["accent_short"]
-        ax.plot(ts, marker.price, marker="*", color=color, markersize=9, linestyle="None")
-        ax.text(
-            mdates.date2num(ts), marker.price, f" {marker.label}",
-            color=color, fontsize=6.5, va="bottom",
-        )
+        ax.plot(ts, marker.price, marker="*", color=color, markersize=8, linestyle="None")
 
 
 def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
-    times = _bar_times(bars)
-    x_end = times[-1]
 
     draw_buy_flat_sell_zones(ax, bars, ta)
     _draw_zones(ax, bars, ta)
@@ -513,32 +612,17 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)
-        ax.text(
-            mdates.date2num(x_end), ta.breakout_level,
-            f" LONG≥{fmt_price(ta.breakout_level)}",
-            color=CHART_STYLE["entry"], fontsize=7, va="bottom",
-        )
-
     if ta.breakdown_level and (
         ta.breakout_level is None
         or abs(ta.breakdown_level - ta.breakout_level) > max(ta.current_price, 1e-9) * 0.0005
     ):
         ax.axhline(ta.breakdown_level, color=CHART_STYLE["accent_short"], linestyle="-", linewidth=0.9, alpha=0.8)
-        ax.text(
-            mdates.date2num(x_end), ta.breakdown_level,
-            f" SHORT≤{fmt_price(ta.breakdown_level)}",
-            color=CHART_STYLE["accent_short"], fontsize=7, va="top",
-        )
-
-    for lv in ta.levels[:3]:
+    for lv in ta.levels[:2]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.75, alpha=0.55)
-        ax.text(
-            mdates.date2num(x_end), lv.price, f" {fmt_price(lv.price)}",
-            color=color, fontsize=6.5, va="center", ha="left",
-        )
 
-    _draw_level_hints(ax, bars, ta)
+    if len(ta.levels) < 2:
+        _draw_level_hints(ax, bars, ta)
     _draw_breakout_arrows(ax, bars, ta)
 
     for ruler in ta.rulers[:1]:
@@ -573,9 +657,15 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
             elif direction == "short":
                 _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-            else:
-                _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-                _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+            elif direction == "neutral":
+                if ta.action_priority == "short" and ta.bearish_scenario:
+                    _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+                elif ta.action_priority == "long" and ta.bullish_scenario:
+                    _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+                elif ta.bullish_scenario:
+                    _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+                elif ta.bearish_scenario:
+                    _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
     elif path_kind == "bounce_short" and ta.continuation_path:
         _draw_zigzag_forecast_path(
             ax, bars, ta.continuation_path.waypoints,
@@ -590,26 +680,13 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             ta.invalidation_price, color=CHART_STYLE["inv"],
             linestyle="--", linewidth=1.0, alpha=0.9,
         )
-        ax.text(
-            mdates.date2num(x_end), ta.invalidation_price,
-            f" STOP {fmt_price(ta.invalidation_price)}",
-            color=CHART_STYLE["inv"], fontsize=7, va="center",
-        )
-
-    for j, tp in enumerate(ta.target_prices[:3]):
+    for j, tp in enumerate(ta.target_prices[:2]):
         ax.axhline(tp, color=CHART_STYLE["target"], linestyle=":", linewidth=0.75, alpha=0.65)
-        ax.text(
-            mdates.date2num(x_end), tp, f" TP{j + 1} {fmt_price(tp)}",
-            color=CHART_STYLE["target"], fontsize=6.5, va="center",
-        )
-
     if ta.entry_zone:
         lo, hi = ta.entry_zone
         ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.1)
-        ax.text(
-            mdates.date2num(x_end), hi, " зона входа",
-            color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom",
-        )
+
+    _draw_right_price_labels(ax, bars, ta)
 
 
 def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
@@ -630,7 +707,7 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
     bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
 
-    lx, rx = 0.012, 0.988
+    lx, rx = 0.008, 0.992
 
     key_levels = ta_chart_key_levels_text(ta)
     if key_levels:
@@ -676,7 +753,7 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
             return "\n".join(lines[1:]).strip()
         return text
 
-    left_x, right_x = 0.012, 0.988
+    left_x, right_x = 0.008, 0.992
     text_color = CHART_STYLE["text"]
     panel_fc = "#101828"
     edge = CHART_STYLE["panel_border"]
@@ -866,7 +943,7 @@ def _style_axes(ax: plt.Axes, bars: list[KlineBar]) -> None:
         peak = max(b.high for b in bars)
         trough = min(b.low for b in bars)
         if peak > trough:
-            pad = (peak - trough) * 0.08
+            pad = (peak - trough) * 0.12
             ax.set_ylim(trough - pad, peak + pad)
 
 
@@ -889,7 +966,7 @@ def _render_chart_figure(
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
-        fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.08)
+        fig.subplots_adjust(left=0.20, right=0.78, top=0.92, bottom=0.08)
     else:
         fig_size = (19.2, 10.2) if pro_mode else (17, 8.5)
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
@@ -910,14 +987,11 @@ def _render_chart_figure(
         draw_rsi_panel(ax_rsi, bars)
         plt.setp(ax.get_xticklabels(), visible=False)
         plt.setp(ax_vol.get_xticklabels(), visible=False)
-    if pro_mode:
-        _draw_pro_paths(ax, bars, ta)
 
     current = bars[-1].close
     ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
-    last_ts = _idx_to_date(bars, len(bars) - 1)
     ax.text(
-        mdates.date2num(last_ts), current, f"  сейчас {fmt_price(current)}",
+        _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
         color=accent_color, fontsize=7, va="center", ha="left",
     )
     mode_suffix = " · PRO" if pro_mode else ""
@@ -926,14 +1000,14 @@ def _render_chart_figure(
         color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
     )
     if pro_mode:
-        # Усиливаем визуальную разницу PRO-режима.
-        for lv in ta.levels[:6]:
-            c = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
-            ax.axhline(lv.price, color=c, linestyle="-", linewidth=1.15, alpha=0.42)
         _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
     else:
         _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
+    _apply_chart_breathing_room(ax, bars)
+    if use_enhanced and ax_vol is not None and ax_rsi is not None:
+        _apply_chart_breathing_room(ax_vol, bars)
+        _apply_chart_breathing_room(ax_rsi, bars)
     fig.autofmt_xdate(rotation=0)
 
     buffer = io.BytesIO()

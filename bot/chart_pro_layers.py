@@ -24,6 +24,26 @@ def _bar_times(bars: list[KlineBar]) -> list[datetime]:
     return [datetime.fromtimestamp(b.open_time, tz=timezone.utc) for b in bars]
 
 
+def _bar_width_days(bars: list[KlineBar]) -> float:
+    times = _bar_times(bars)
+    if len(times) < 2:
+        return 5.0 / (24 * 60)
+    widths = [
+        mdates.date2num(times[i]) - mdates.date2num(times[i - 1])
+        for i in range(1, len(times))
+    ]
+    return max(sum(widths) / len(widths), 1e-6)
+
+
+def _forecast_path_xs(bars: list[KlineBar], n_points: int) -> list[float]:
+    if not bars or n_points < 1:
+        return []
+    times = _bar_times(bars)
+    start_x = mdates.date2num(times[-1])
+    step = _bar_width_days(bars) * 5.5
+    return [start_x + step * i for i in range(n_points)]
+
+
 def _draw_zigzag_path(
     ax: plt.Axes,
     bars: list[KlineBar],
@@ -36,11 +56,7 @@ def _draw_zigzag_path(
 ) -> None:
     if not bars or len(waypoints) < 2:
         return
-    times = _bar_times(bars)
-    start_x = mdates.date2num(times[-1])
-    span = mdates.date2num(times[-1]) - mdates.date2num(times[max(0, len(bars) - 24)])
-    step = span / max(len(waypoints), 2)
-    xs = [start_x + step * i for i in range(len(waypoints))]
+    xs = _forecast_path_xs(bars, len(waypoints))
     ax.plot(xs, waypoints, color=color, linestyle="--", linewidth=lw, alpha=alpha, zorder=4)
     ax.annotate(
         "",
@@ -49,7 +65,8 @@ def _draw_zigzag_path(
         arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, linestyle="dashed", alpha=alpha),
     )
     va = "top" if waypoints[-1] < waypoints[0] else "bottom"
-    ax.text(xs[-1], waypoints[-1], f" {label}", color=color, fontsize=6.5, fontweight="bold", va=va)
+    label_x = xs[-1] + _bar_width_days(bars) * 2.0
+    ax.text(label_x, waypoints[-1], label, color=color, fontsize=7, fontweight="bold", va=va, ha="left")
 
 
 def _compute_rsi(bars: list[KlineBar], period: int = 14) -> list[float]:
@@ -213,26 +230,30 @@ def draw_sweep_circles(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult)
 
 
 def draw_swing_liquidity_marks(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    """Метки объёма у swing high/low (ликвидность)."""
+    """Метки объёма у swing high/low (ликвидность) — только крупные, с отступом."""
     if not bars or not ta.swings:
         return
-    for swing in ta.swings[-8:]:
-        if swing.index >= len(bars):
+    bar_w = _bar_width_days(bars)
+    shown = 0
+    for swing in reversed(ta.swings[-6:]):
+        if swing.index >= len(bars) or shown >= 4:
             continue
         bar = bars[swing.index]
         vol_k = bar.volume / 1000.0
-        if vol_k < 0.5:
+        if vol_k < 8.0:
             continue
         ts = mdates.date2num(_idx_to_date(bars, swing.index))
         y = swing.price
         color = "#58a6ff" if swing.kind == "low" else "#f0883e"
         va = "top" if swing.kind == "high" else "bottom"
-        offset = y * 0.0015 if swing.kind == "high" else -y * 0.0015
+        offset = y * 0.004 if swing.kind == "high" else -y * 0.004
+        x_shift = bar_w * (1.2 if shown % 2 else -1.2)
         ax.text(
-            ts, y + offset, f"{vol_k:.1f}K",
-            color=color, fontsize=5.5, ha="center", va=va,
-            bbox=dict(boxstyle="round,pad=0.15", facecolor=CHART_BG, edgecolor=color, alpha=0.85),
+            ts + x_shift, y + offset, f"{vol_k:.0f}K",
+            color=color, fontsize=6.2, ha="center", va=va,
+            bbox=dict(boxstyle="round,pad=0.18", facecolor=CHART_BG, edgecolor=color, alpha=0.82),
         )
+        shown += 1
 
 
 def draw_volume_panel(ax: plt.Axes, bars: list[KlineBar]) -> None:
