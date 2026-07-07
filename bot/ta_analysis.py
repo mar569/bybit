@@ -519,6 +519,24 @@ def resolve_trade_triggers(
     if not breakdown and local_s:
         breakdown = local_s
 
+    # Анти-аномалия: не уводить триггер слишком далеко от текущей цены.
+    # Если ближайший валидный уровень далеко, лучше оставить триггер пустым и ждать
+    # нового формирования структуры, чем предлагать "short ниже всего графика".
+    near_res = sorted([p for p in resistances if p > current * 1.0002])
+    near_sup = sorted([p for p in supports if p < current * 0.9998], reverse=True)
+    hard_cap = 12.0 if post_pump else 16.0
+
+    if breakout and current > 0:
+        dist_up = (breakout - current) / current * 100.0
+        if dist_up > hard_cap:
+            candidate = next((p for p in near_res if (p - current) / current * 100.0 <= hard_cap), None)
+            breakout = candidate
+    if breakdown and current > 0:
+        dist_down = (current - breakdown) / current * 100.0
+        if dist_down > hard_cap:
+            candidate = next((p for p in near_sup if (current - p) / current * 100.0 <= hard_cap), None)
+            breakdown = candidate
+
     cons = local_cons if post_pump and local_cons else None
     return breakout, breakdown, cons, post_pump
 
@@ -2213,16 +2231,38 @@ def ta_signal_caption_html(
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     """Ручной TA: компактно и с акцентом на решение."""
     score = ta_display_score(ta)
+    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
+    signal_status = "не активен"
+    if rr_bad:
+        signal_status = "заблокирован (bad R:R)"
+    elif ta.verdict in {"LONG", "SHORT"}:
+        signal_status = "активен"
+    elif ta.action_priority in {"long", "short"}:
+        signal_status = "armed (ждёт триггер)"
+
+    p_short = 34
+    p_long = 33
+    if ta.verdict == "SHORT":
+        p_short, p_long = 62, 20
+    elif ta.verdict == "LONG":
+        p_long, p_short = 62, 20
+    elif ta.action_priority == "short":
+        p_short, p_long = 52, 24
+    elif ta.action_priority == "long":
+        p_long, p_short = 52, 24
+    p_flat = max(8, 100 - p_short - p_long)
+
     lines = [
         f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10",
         f"📍 <b>Сейчас:</b> цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст'}",
+        f"🧭 <b>Статус:</b> {signal_status}.",
+        f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
     ]
 
     long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "—"
     short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "—"
     stop_lvl = fmt_price(ta.invalidation_price) if ta.invalidation_price else "—"
     tp1 = fmt_price(ta.target_prices[0]) if ta.target_prices else "—"
-    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
 
     if rr_bad:
         lines.append("⛔ <b>Решение:</b> <b>NO TRADE</b> (пропуск до лучшей точки входа).")
@@ -2236,7 +2276,21 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
             f"или ниже <b>{short_lvl}</b>."
         )
 
+    if ta.current_price > 0 and ta.breakdown_level and ta.breakdown_level < ta.current_price:
+        dist_short = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
+        lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> (до уровня ~{dist_short:.1f}%).")
+    elif ta.breakdown_level:
+        lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> + ретест снизу.")
+
+    if ta.current_price > 0 and ta.breakout_level and ta.breakout_level > ta.current_price:
+        dist_long = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
+        lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> (до уровня ~{dist_long:.1f}%).")
+    elif ta.breakout_level:
+        lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> + ретест сверху.")
+
     lines.append(f"🎯 <b>План:</b> вход по факту · отмена <b>{stop_lvl}</b> · TP1 <b>{tp1}</b>.")
+    if ta.verdict_reason:
+        lines.append(f"⏱ <b>Протухание идеи:</b> если 3 свечи 5m без подтверждения — отменить вход.")
 
     risk_bits: list[str] = []
     if ta.post_pump:
@@ -2251,6 +2305,31 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         risk_bits.append(ta.verdict_reason.split(" · ")[0])
     if risk_bits:
         lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:2])}.")
+
+    if ta.smc:
+        fvg_near = False
+        if ta.smc.fvgs:
+            fvg_near = True
+            if ta.current_price > 0:
+                current = ta.current_price
+                for gap in ta.smc.fvgs[-3:]:
+                    if gap.bottom <= current <= gap.top:
+                        fvg_near = True
+                        break
+                    if abs(((gap.top + gap.bottom) / 2.0) - current) / current <= 0.02:
+                        fvg_near = True
+                        break
+        smc_lines = [
+            "🧠 <b>SMC / разворот</b>",
+            f"{'✅' if ta.smc.structure_break else '❌'} Слом структуры (BOS): {'да' if ta.smc.structure_break else 'нет'}",
+            f"{'✅' if ta.smc.discount_retrace else '❌'} Откат в зону дисконта/премии: {'да' if ta.smc.discount_retrace else 'нет'}",
+            f"{'✅' if ta.smc.structure_expansion else '❌'} Расширение структуры: {'да' if ta.smc.structure_expansion else 'нет'}",
+            f"{'✅' if ta.smc.liquidity_sweep else '❌'} Свип ликвидности: {'да' if ta.smc.liquidity_sweep else 'нет'}",
+            f"{'✅' if fvg_near else '❌'} Имбаланс (FVG) рядом: {'да' if fvg_near else 'нет'}",
+        ]
+        smc_ready = ta.smc.structure_break and ta.smc.discount_retrace and (ta.smc.structure_expansion or ta.smc.liquidity_sweep)
+        smc_lines.append(f"📌 <b>Статус SMC:</b> {'ГОТОВ' if smc_ready else 'НЕ ГОТОВ'} (ждём expansion/sweep).")
+        lines.extend(smc_lines)
 
     return "\n".join(lines)
 
