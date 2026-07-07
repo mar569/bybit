@@ -29,7 +29,7 @@ from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
 from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
-from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart
+from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart
 from .bybit_klines import BybitKlineCache
 from .manual_ta import (
     MANUAL_TA_CHART_SOURCES,
@@ -58,10 +58,12 @@ from .manual_ta import (
 )
 from .ta_analysis import (
     detect_repeat_spike_dump_risk,
+    format_scenario_update_html,
     ta_manual_detailed_html,
     ta_signal_caption_html,
     ta_telegram_caption_html,
 )
+from .scenario_watcher import ScenarioUpdate, ScenarioWatcher
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
@@ -112,6 +114,8 @@ class TelegramBot:
         self._manual_ta_alerts: dict[tuple[int, str, int, str], dict[str, Any]] = {}
         self._manual_ta_alert_task: asyncio.Task | None = None
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
+        self.scenario_watcher = ScenarioWatcher()
+        self._scenario_watch_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
@@ -253,6 +257,8 @@ class TelegramBot:
         logger.info("Telegram bot started")
         if self._manual_ta_alert_task is None or self._manual_ta_alert_task.done():
             self._manual_ta_alert_task = asyncio.create_task(self._manual_ta_alert_loop())
+        if self._scenario_watch_task is None or self._scenario_watch_task.done():
+            self._scenario_watch_task = asyncio.create_task(self._scenario_watch_loop())
 
     async def stop(self) -> None:
         if self.application is None:
@@ -267,6 +273,13 @@ class TelegramBot:
             except asyncio.CancelledError:
                 pass
             self._manual_ta_alert_task = None
+        if self._scenario_watch_task is not None:
+            self._scenario_watch_task.cancel()
+            try:
+                await self._scenario_watch_task
+            except asyncio.CancelledError:
+                pass
+            self._scenario_watch_task = None
         if self.redis is not None:
             try:
                 await self.redis.close()
@@ -487,6 +500,7 @@ class TelegramBot:
                 return
 
         sent_any = False
+        ta_result = None
         if settings.signal_chart_enabled:
             ms = signal.details.get("market_structure")
             warning = ""
@@ -506,7 +520,6 @@ class TelegramBot:
                 except Exception:
                     liq_context = None
             png = None
-            ta_result = None
             chart_source = ""
             chart_fail = ""
             try:
@@ -575,6 +588,17 @@ class TelegramBot:
                     )
                 except Exception:
                     logger.exception("Failed to update last_signal in Redis")
+
+        if (
+            sent_any
+            and ta_result is not None
+            and settings.scenario_watch_enabled
+            and not skip_dedupe
+        ):
+            try:
+                self.scenario_watcher.try_enroll(signal, ta_result, settings)
+            except Exception:
+                logger.exception("Scenario watch enroll failed for %s", signal.symbol)
 
         if self.redis is not None:
             try:
@@ -1065,6 +1089,125 @@ class TelegramBot:
                 raise
             except Exception:
                 logger.exception("Manual TA alert loop error")
+
+    async def _scenario_watch_loop(self) -> None:
+        while True:
+            try:
+                settings = self.settings_manager.settings
+                interval = float(getattr(settings, "scenario_watch_tick_seconds", 12.0))
+                await asyncio.sleep(interval)
+                if (
+                    not settings.scenario_watch_enabled
+                    or self.scanner is None
+                    or self.application is None
+                    or self.scenario_watcher.active_count == 0
+                ):
+                    continue
+                updates = self.scenario_watcher.tick(self.scanner, settings)
+                for upd in updates:
+                    try:
+                        await self._dispatch_scenario_update(upd)
+                    except Exception:
+                        logger.exception(
+                            "Scenario update dispatch failed %s %s",
+                            upd.watch.exchange,
+                            upd.watch.symbol,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Scenario watch loop error")
+
+    async def _dispatch_scenario_update(self, upd: ScenarioUpdate) -> None:
+        if self.application is None:
+            return
+        watch = upd.watch
+        settings = self.settings_manager.settings
+        notify_chat_id = self.config.notification_chat_id
+
+        ta_fresh = None
+        oi_bars = None
+        liq_context = None
+        if self.scanner is not None:
+            try:
+                oi_bars = self.scanner.get_five_min_oi_bars(watch.exchange, watch.symbol)
+            except Exception:
+                oi_bars = None
+            try:
+                stats = self.scanner._get_liquidation_stats(watch.exchange, watch.symbol, 15)
+                if stats is not None:
+                    liq_context = stats.to_dict()
+            except Exception:
+                liq_context = None
+
+        message = format_scenario_update_html(
+            symbol=watch.symbol,
+            exchange=watch.exchange,
+            update_kind=upd.kind,
+            price=upd.price,
+            move_pct=upd.move_pct,
+            reference_price=upd.reference_price,
+            correction_target=watch.correction_target,
+            breakdown_level=watch.breakdown_level,
+            breakout_level=watch.breakout_level,
+            ta=ta_fresh,
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=watch.coinglass_url)],
+        ])
+
+        sent = False
+        if settings.scenario_watch_chart_enabled:
+            try:
+                png, ta_fresh = await asyncio.wait_for(
+                    render_signal_chart(
+                        watch.symbol,
+                        side=watch.side,
+                        hours=settings.signal_chart_hours,
+                        interval_minutes=settings.signal_chart_interval_minutes,
+                        oi_bars=oi_bars,
+                        liq_context=liq_context,
+                        chart_source=settings.signal_chart_source,
+                        exchange=watch.exchange.lower(),
+                    ),
+                    timeout=35.0,
+                )
+                if ta_fresh is not None:
+                    message = format_scenario_update_html(
+                        symbol=watch.symbol,
+                        exchange=watch.exchange,
+                        update_kind=upd.kind,
+                        price=upd.price,
+                        move_pct=upd.move_pct,
+                        reference_price=upd.reference_price,
+                        correction_target=watch.correction_target,
+                        breakdown_level=watch.breakdown_level,
+                        breakout_level=watch.breakout_level,
+                        ta=ta_fresh,
+                    )
+                    caption = f"{message}\n\n{ta_signal_caption_html(ta_fresh, signal_side=watch.side)}"
+                else:
+                    caption = message
+                if png:
+                    sent = await self._send_chart(
+                        notify_chat_id, png, caption, is_priority=True, keyboard=keyboard,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("Scenario update chart timeout for %s", watch.symbol)
+            except Exception:
+                logger.exception("Scenario update chart failed for %s", watch.symbol)
+
+        if not sent:
+            sent = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
+
+        if sent:
+            logger.info(
+                "Scenario update %s %s kind=%s move=%.2f%%",
+                watch.exchange,
+                watch.symbol,
+                upd.kind,
+                upd.move_pct,
+            )
 
     def _mta_wizard_state(self, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
         state = context.user_data.get(MTA_WIZARD_KEY)

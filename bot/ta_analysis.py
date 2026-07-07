@@ -2460,6 +2460,100 @@ def ta_signal_scenario_line_html(
     return "▶️ <b>Не входить</b> · дождаться пробоя уровня"
 
 
+def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
+    """Одна простая строка прогноза для сигналов: откат или продолжение."""
+    corr = ta.correction_path
+    cont = ta.continuation_path
+    if corr is None and cont is None:
+        return ""
+
+    def _target(path: ForecastPath, *, correction: bool) -> float:
+        if len(path.waypoints) >= 3 and correction:
+            return path.waypoints[2]
+        return path.waypoints[-1]
+
+    wait_note = ""
+    if ta.verdict == "WAIT":
+        wait_note = " · это не вход в сделку, ждём подтверждения"
+
+    if corr and cont:
+        if corr.confidence >= cont.confidence:
+            return (
+                f"📉 <b>Простыми словами:</b> намечается откат вниз к ~<b>{fmt_price(_target(corr, correction=True))}</b>"
+                f" (альтернатива — рост){wait_note}."
+            )
+        return (
+            f"📈 <b>Простыми словами:</b> возможно продолжение вверх к ~<b>{fmt_price(_target(cont, correction=False))}</b>"
+            f" (альтернатива — откат){wait_note}."
+        )
+    if corr:
+        return (
+            f"📉 <b>Простыми словами:</b> намечается откат вниз к ~<b>{fmt_price(_target(corr, correction=True))}</b>{wait_note}."
+        )
+    if cont:
+        return (
+            f"📈 <b>Простыми словами:</b> возможно продолжение вверх к ~<b>{fmt_price(_target(cont, correction=False))}</b>{wait_note}."
+        )
+    return ""
+
+
+def format_scenario_update_html(
+    *,
+    symbol: str,
+    exchange: str,
+    update_kind: str,
+    price: float,
+    move_pct: float,
+    reference_price: float,
+    correction_target: float | None = None,
+    breakdown_level: float | None = None,
+    breakout_level: float | None = None,
+    ta: TAAnalysisResult | None = None,
+) -> str:
+    """Короткое уведомление фазы 2: подтверждение сценария после первого сигнала."""
+    ex = exchange.replace("Bybit", "ByBit").replace("bybit", "ByBit")
+    header = f"🔔 <b>Обновление сценария</b> · {ex}\n<b>{symbol}</b> · ${fmt_price(price)}\n"
+
+    if update_kind == "correction_started":
+        body = (
+            f"📉 <b>Откат начался</b> — −{move_pct:.1f}% от локального хая "
+            f"(<b>{fmt_price(reference_price)}</b>)."
+        )
+        if correction_target:
+            body += f"\nЦель отката по плану: ~<b>{fmt_price(correction_target)}</b>."
+        if breakdown_level:
+            body += f"\n▶️ SHORT только после закрепления ≤<b>{fmt_price(breakdown_level)}</b>."
+        else:
+            body += "\n▶️ Пока <b>не входить</b> — ждём подтверждения уровня."
+    elif update_kind == "continuation_confirmed":
+        body = (
+            f"📈 <b>Продолжение вверх</b> — +{move_pct:.1f}% от точки первого алерта "
+            f"(хай <b>{fmt_price(reference_price)}</b>)."
+        )
+        body += "\nСценарий отката <b>отменён</b> — импульс сильнее."
+        if breakout_level:
+            body += f"\n▶️ LONG при закреплении ≥<b>{fmt_price(breakout_level)}</b>."
+    elif update_kind == "entry_short":
+        body = (
+            f"🔻 <b>Можно смотреть SHORT</b> — цена ≤<b>{fmt_price(reference_price)}</b> "
+            f"({move_pct:+.1f}% от первого алерта)."
+        )
+        body += "\nПроверьте свечу и объём перед входом."
+    elif update_kind == "entry_long":
+        body = (
+            f"🔺 <b>Можно смотреть LONG</b> — цена ≥<b>{fmt_price(reference_price)}</b> "
+            f"({move_pct:+.1f}% от первого алерта)."
+        )
+        body += "\nПроверьте свечу и объём перед входом."
+    else:
+        body = f"Обновление: {update_kind}"
+
+    if ta is not None and ta.verdict in {"LONG", "SHORT"}:
+        score = ta_display_score(ta)
+        body += f"\n📐 TA сейчас: <b>{ta.verdict}</b> {score}/10"
+    return header + body
+
+
 def ta_signal_caption_html(
     ta: TAAnalysisResult,
     *,
@@ -2492,6 +2586,9 @@ def ta_signal_caption_html(
     smc_line = format_smc_compact_html(ta.smc) if ta.smc and ta.smc.smc_score >= 4 else ""
     base = f"{line}\n{ta_signal_scenario_line_html(ta, signal_side=signal_side)}"
     extra: list[str] = []
+    plain = ta_plain_forecast_line(ta)
+    if plain:
+        extra.append(plain)
     if ta.forecast_summary:
         extra.append(f"🔮 {ta.forecast_summary[:150]}")
     if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":

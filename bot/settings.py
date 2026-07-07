@@ -238,6 +238,16 @@ class ScannerSettings:
     probability_filter_enabled: bool = True
     outcome_tracking_enabled: bool = True
 
+    # Фаза 2: watch после WAIT+прогноз, пуш при старте отката/продолжения
+    scenario_watch_enabled: bool = True
+    scenario_watch_minutes: int = 45
+    scenario_watch_pullback_pct: float = 3.0
+    scenario_watch_continuation_pct: float = 0.8
+    scenario_watch_zone_pct: float = 0.45
+    scenario_watch_tick_seconds: float = 12.0
+    scenario_watch_enroll_cooldown_seconds: int = 600
+    scenario_watch_chart_enabled: bool = True
+
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
     market_structure_enabled: bool = True
     market_structure_hours: int = 5
@@ -557,6 +567,16 @@ class ScannerSettings:
             min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
+            scenario_watch_enabled=bool(base.get("scenario_watch_enabled", True)),
+            scenario_watch_minutes=int(base.get("scenario_watch_minutes", 45)),
+            scenario_watch_pullback_pct=float(base.get("scenario_watch_pullback_pct", 3.0)),
+            scenario_watch_continuation_pct=float(base.get("scenario_watch_continuation_pct", 0.8)),
+            scenario_watch_zone_pct=float(base.get("scenario_watch_zone_pct", 0.45)),
+            scenario_watch_tick_seconds=float(base.get("scenario_watch_tick_seconds", 12.0)),
+            scenario_watch_enroll_cooldown_seconds=int(
+                base.get("scenario_watch_enroll_cooldown_seconds", 600)
+            ),
+            scenario_watch_chart_enabled=bool(base.get("scenario_watch_chart_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
