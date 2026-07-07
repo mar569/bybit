@@ -2194,8 +2194,6 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         lines.append("📏 " + " · ".join(dist_bits))
     if ta.range_position:
         lines.append(f"📊 В range: <b>{ta.range_position * 100:.0f}%</b> (0=дно, 100=верх)")
-    if ta.primary_scenario:
-        lines.append(f"🧭 <b>Главный сценарий:</b> {ta.primary_scenario}")
     if ta.post_pump:
         lines.append("⚡ <b>Фаза:</b> консолидация после пампа")
     if ta.repeat_spike_dump_note:
@@ -2222,28 +2220,8 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
 
     lines.extend(_manual_concrete_block(ta))
+    # Один финальный блок действия без дублей.
     lines.append(_simple_manual_plan_line(ta))
-
-    if ta.verdict == "WAIT":
-        lines.append(_manual_now_action_html(ta))
-
-    if ta.verdict == "WAIT" and ta.action_priority == "short" and ta.breakdown_level:
-        lines.append(
-            f"👉 <b>Действие:</b> WAIT, но <b>приоритет SHORT</b> — "
-            f"смотреть пробой <b>{fmt_price(ta.breakdown_level)}</b>"
-        )
-    elif ta.verdict == "WAIT" and ta.action_priority == "long" and ta.breakout_level:
-        lines.append(
-            f"👉 <b>Действие:</b> WAIT, но <b>приоритет LONG</b> — "
-            f"смотреть пробой <b>{fmt_price(ta.breakout_level)}</b>"
-        )
-    elif ta.verdict == "WAIT":
-        long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "сопротивления"
-        short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "поддержки"
-        lines.append(
-            f"👉 <b>Действие:</b> WAIT — не входить сейчас. "
-            f"Смотреть пробой {long_lvl} (long) или {short_lvl} (short)"
-        )
 
     if ta.verdict_reason:
         lines.append(f"<i>Примечание: {ta.verdict_reason[:120]}</i>")
