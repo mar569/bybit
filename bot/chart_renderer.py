@@ -647,12 +647,23 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         va="top",
         **base,
     )
-    bull = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
+    bull = ta.bullish_scenario
     if bull:
+        bull_lines = [
+            "БЫЧИЙ СЦЕНАРИЙ",
+            "Условия:",
+            f"1) Закрепление выше {fmt_price(bull.trigger_price)}",
+            "2) Рост объёмов",
+            "3) Удержание трендовой",
+            "",
+            "Цели:",
+        ]
+        for i, tp in enumerate(bull.target_prices[:3], 1):
+            bull_lines.append(f"{i}. {fmt_price(tp)}")
         fig.text(
             right_x,
             0.66,
-            bull,
+            "\n".join(bull_lines),
             ha="right",
             va="top",
             fontsize=7.2,
@@ -661,12 +672,23 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
             linespacing=1.32,
             bbox=dict(boxstyle="round,pad=0.45", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
         )
-    bear = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
+    bear = ta.bearish_scenario
     if bear:
+        bear_lines = [
+            "МЕДВЕЖИЙ СЦЕНАРИЙ",
+            "Условия:",
+            f"1) Отказ от {fmt_price(bear.trigger_price)}",
+            "2) Пробой поддержки",
+            "3) Давление объёмов",
+            "",
+            "Цели:",
+        ]
+        for i, tp in enumerate(bear.target_prices[:3], 1):
+            bear_lines.append(f"{i}. {fmt_price(tp)}")
         fig.text(
             right_x,
             0.34,
-            bear,
+            "\n".join(bear_lines),
             ha="right",
             va="top",
             fontsize=7.2,
@@ -707,6 +729,19 @@ def _draw_pro_market_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRes
             mdates.date2num(x1), price + span, f" R{i} {fmt_price(price)}",
             color="#ffb3ad", fontsize=7, va="bottom", ha="left",
         )
+        if i == 1:
+            # Широкая плашка "зона сильного сопротивления"
+            top_span = max(price * 0.006, 1e-9)
+            ax.axhspan(price - top_span, price + top_span, xmin=0.26, xmax=0.96, color="#7d1f25", alpha=0.23, zorder=1)
+            ax.text(
+                mdates.date2num(_idx_to_date(bars, max(0, len(bars) - 25))),
+                price + top_span * 0.15,
+                "Зона сильного сопротивления",
+                color="#ffd0cc",
+                fontsize=8,
+                ha="left",
+                va="center",
+            )
 
     # Поддержки
     supports = [lv.price for lv in ta.levels if lv.kind == "support"][:2]
@@ -733,6 +768,27 @@ def _draw_pro_market_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRes
             color=CHART_STYLE["trend_bull"] if tl.kind == "bull" else CHART_STYLE["trend_bear"],
             fontsize=7,
             va="bottom" if tl.kind == "bull" else "top",
+        )
+    # Подписи локальных зон
+    if supports:
+        s = supports[0]
+        ax.annotate(
+            "Локальная поддержка",
+            xy=(_idx_to_date(bars, max(0, len(bars) - 20)), s),
+            xytext=(_idx_to_date(bars, max(0, len(bars) - 38)), s * 1.01),
+            color="#8ee7a7",
+            fontsize=7,
+            arrowprops=dict(arrowstyle="->", color="#8ee7a7", lw=1.0, alpha=0.8),
+        )
+    if resistances:
+        r = resistances[0]
+        ax.annotate(
+            "Локальное сопротивление",
+            xy=(_idx_to_date(bars, max(0, len(bars) - 16)), r),
+            xytext=(_idx_to_date(bars, max(0, len(bars) - 34)), r * 1.01),
+            color="#ffb3ad",
+            fontsize=7,
+            arrowprops=dict(arrowstyle="->", color="#ffb3ad", lw=1.0, alpha=0.8),
         )
 
 
