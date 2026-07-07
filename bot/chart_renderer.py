@@ -882,16 +882,17 @@ def _tv_forecast_legend(ta: TAAnalysisResult) -> str:
 
 def _tv_context_block(ta: TAAnalysisResult, *, interval_minutes: int, hours: int) -> str:
     """Короткий блок факторов, которыми руководствуется бот."""
+    phase_text = ta.phase_label or ta.phase or "н/д"
     bits = [
-        f"фаза: {ta.market_phase}",
+        f"фаза: {phase_text}",
         f"моментум: {ta.momentum_label}",
     ]
-    if ta.oi_narrative:
-        bits.append(f"OI: {ta.oi_narrative}")
-    if ta.btc_correlation_label:
-        bits.append(f"BTC: {ta.btc_correlation_label}")
-    if ta.current_volatility_pct is not None:
-        bits.append(f"вола: {ta.current_volatility_pct:.2f}%")
+    if ta.oi_narrative_label:
+        bits.append(f"OI: {ta.oi_narrative_label}")
+    if ta.btc_context:
+        bits.append(f"BTC: {ta.btc_context}")
+    if ta.momentum_pct:
+        bits.append(f"импульс: {ta.momentum_pct:+.1f}%")
     bits.append(f"окно: {hours}ч / {interval_minutes}m")
     return "\n".join(bits[:6])
 
