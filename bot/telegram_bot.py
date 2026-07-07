@@ -124,6 +124,158 @@ class TelegramBot:
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
+        self._pause_snapshot: dict[str, bool] | None = None
+
+    _BOT_PAUSE_KEYS: tuple[str, ...] = (
+        "signals_enabled",
+        "liquidation_alerts_enabled",
+        "analysis_enabled",
+        "anomaly_enabled",
+        "scenario_watch_enabled",
+        "manual_ta_alerts_enabled",
+    )
+
+    _NOTIFICATION_CHANNELS: tuple[tuple[str, str, str], ...] = (
+        ("signals_enabled", "signals", "📡 Сигналы сканера"),
+        ("liquidation_alerts_enabled", "liq", "💧 Ликвидации"),
+        ("analysis_enabled", "analysis", "🧠 Анализ ликвидаций"),
+        ("anomaly_enabled", "anomaly", "⚡ Аномалии"),
+        ("scenario_watch_enabled", "scenario", "🔮 Сценарии (фаза 2)"),
+        ("manual_ta_alerts_enabled", "mta_alert", "🔔 Алерты ручного TA"),
+    )
+
+    def _bot_notifications_blocked(self) -> bool:
+        return bool(self.settings_manager.settings.bot_paused)
+
+    def _channel_setting_field(self, channel_id: str) -> str | None:
+        for field, cid, _ in self._NOTIFICATION_CHANNELS:
+            if cid == channel_id:
+                return field
+        return None
+
+    def _any_notification_channel_on(self) -> bool:
+        settings = self.settings_manager.settings
+        return any(getattr(settings, field) for field, _, _ in self._NOTIFICATION_CHANNELS)
+
+    def _sync_bot_paused_from_channels(self) -> None:
+        self.settings_manager.update(bot_paused=not self._any_notification_channel_on())
+
+    def _on_channel_disabled(self, channel_id: str) -> None:
+        if channel_id == "scenario":
+            self.scenario_watcher.clear_all()
+        elif channel_id == "mta_alert":
+            self._manual_ta_alerts.clear()
+
+    def _set_all_notification_channels(self, enabled: bool) -> None:
+        updates = {field: enabled for field, _, _ in self._NOTIFICATION_CHANNELS}
+        self.settings_manager.update(**updates)
+        self._sync_bot_paused_from_channels()
+        if not enabled:
+            self.scenario_watcher.clear_all()
+            self._manual_ta_alerts.clear()
+
+    def _toggle_notification_channel(self, channel_id: str) -> str:
+        field = self._channel_setting_field(channel_id)
+        if field is None:
+            return ""
+        settings = self.settings_manager.settings
+        new_val = not bool(getattr(settings, field))
+        self.settings_manager.update(**{field: new_val})
+        if not new_val:
+            self._on_channel_disabled(channel_id)
+        self._sync_bot_paused_from_channels()
+        if new_val:
+            self._pause_snapshot = None
+        for _, cid, label in self._NOTIFICATION_CHANNELS:
+            if cid == channel_id:
+                return f"{label} → {'ВКЛ' if new_val else 'ВЫКЛ'}"
+        return ""
+
+    def _build_notifications_panel_text(self) -> str:
+        settings = self.settings_manager.settings
+        lines = [
+            "<b>🎛 Каналы уведомлений</b>",
+            "Включайте и выключайте каждое направление отдельно.",
+            f"Общий статус: <b>{'⏸ всё выкл' if settings.bot_paused else '▶️ работает'}</b>\n",
+        ]
+        for field, _, label in self._NOTIFICATION_CHANNELS:
+            on = bool(getattr(settings, field))
+            mark = "✅" if on else "❌"
+            lines.append(f"{mark} {label}: <b>{'ВКЛ' if on else 'ВЫКЛ'}</b>")
+        lines.append(
+            "\n<i>⏸ Стоп / ▶️ Старт на клавиатуре — быстро выключить или восстановить всё.</i>"
+        )
+        return "\n".join(lines)
+
+    def _notifications_keyboard(self) -> InlineKeyboardMarkup:
+        settings = self.settings_manager.settings
+        rows: list[list[InlineKeyboardButton]] = []
+        for field, channel_id, label in self._NOTIFICATION_CHANNELS:
+            on = bool(getattr(settings, field))
+            short = label.split(" ", 1)[-1][:22]
+            rows.append([
+                InlineKeyboardButton(
+                    self._mark(f"{short} {'ON' if on else 'OFF'}", on),
+                    callback_data=f"toggle_ch:{channel_id}",
+                ),
+            ])
+        rows.append([
+            InlineKeyboardButton("▶️ Всё ВКЛ", callback_data="toggle_ch:all_on"),
+            InlineKeyboardButton("⏸ Всё ВЫКЛ", callback_data="toggle_ch:all_off"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    async def _show_notifications_panel(self, update: Update) -> None:
+        if update.message is None:
+            return
+        await update.message.reply_text(
+            self._build_notifications_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._notifications_keyboard(),
+        )
+
+    async def _handle_channels_callback(
+        self,
+        update: Update,
+        query: CallbackQuery,
+        payload: str,
+    ) -> bool:
+        if not payload.startswith("toggle_ch:"):
+            return False
+        if not self._is_admin(update):
+            await query.answer("Нет доступа.", show_alert=True)
+            return True
+
+        action = payload[len("toggle_ch:"):]
+        label = ""
+        if action == "all_on":
+            if self._pause_snapshot is None:
+                settings = self.settings_manager.settings
+                self._pause_snapshot = {
+                    key: bool(getattr(settings, key)) for key in self._BOT_PAUSE_KEYS
+                }
+            self._set_all_notification_channels(True)
+            self._pause_snapshot = None
+            label = "Все каналы → ВКЛ"
+        elif action == "all_off":
+            settings = self.settings_manager.settings
+            if not settings.bot_paused:
+                self._pause_snapshot = {
+                    key: bool(getattr(settings, key)) for key in self._BOT_PAUSE_KEYS
+                }
+            self._set_all_notification_channels(False)
+            label = "Все каналы → ВЫКЛ"
+        else:
+            label = self._toggle_notification_channel(action)
+
+        await query.answer(f"✅ {label}" if label else "OK", show_alert=False)
+        await self._safe_edit_message_text(
+            query,
+            self._build_notifications_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._notifications_keyboard(),
+        )
+        return True
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
@@ -431,6 +583,8 @@ class TelegramBot:
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
+        if not skip_dedupe and self._bot_notifications_blocked():
+            return
         if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
             return
 
@@ -601,6 +755,7 @@ class TelegramBot:
             sent_any
             and ta_result is not None
             and settings.scenario_watch_enabled
+            and not settings.bot_paused
             and not skip_dedupe
         ):
             try:
@@ -625,6 +780,8 @@ class TelegramBot:
         if self.application is None:
             return
         settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return
         if not settings.liquidation_alerts_enabled:
             return
 
@@ -652,6 +809,8 @@ class TelegramBot:
         if self.application is None:
             return
         settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return
         if not settings.anomaly_enabled:
             return
         chat_id = self.config.anomaly_chat_id
@@ -683,6 +842,8 @@ class TelegramBot:
         chat_id = self.config.telegram_analysis_chat_id
         if chat_id is None:
             logger.warning("Analysis dispatch skipped: TELEGRAM_ANALYSIS_CHAT_ID not set")
+            return
+        if self._bot_notifications_blocked():
             return
         if not settings.analysis_enabled:
             return
@@ -1049,6 +1210,10 @@ class TelegramBot:
                 await asyncio.sleep(12.0)
                 if not self._manual_ta_alerts or self.application is None:
                     continue
+                if self._bot_notifications_blocked():
+                    continue
+                if not self.settings_manager.settings.manual_ta_alerts_enabled:
+                    continue
                 now = time.time()
                 for key, watcher in list(self._manual_ta_alerts.items()):
                     chat_id, symbol, interval, mode = key
@@ -1116,6 +1281,7 @@ class TelegramBot:
                 await asyncio.sleep(interval)
                 if (
                     not settings.scenario_watch_enabled
+                    or settings.bot_paused
                     or self.scanner is None
                     or self.application is None
                     or self.scenario_watcher.active_count == 0
@@ -1138,6 +1304,8 @@ class TelegramBot:
 
     async def _dispatch_scenario_update(self, upd: ScenarioUpdate) -> None:
         if self.application is None:
+            return
+        if self._bot_notifications_blocked():
             return
         watch = upd.watch
         settings = self.settings_manager.settings
@@ -1946,26 +2114,52 @@ class TelegramBot:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
-        await self._set_signals_enabled(update, enabled=False)
+        await self._set_bot_paused(update, paused=True)
 
     async def on_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
             return
-        await self._set_signals_enabled(update, enabled=True)
+        await self._set_bot_paused(update, paused=False)
 
-    async def _set_signals_enabled(self, update: Update, *, enabled: bool) -> None:
-        self.settings_manager.update(signals_enabled=enabled)
-        if enabled:
+    async def _set_bot_paused(self, update: Update, *, paused: bool) -> None:
+        settings = self.settings_manager.settings
+        if paused:
+            if not settings.bot_paused:
+                self._pause_snapshot = {
+                    key: bool(getattr(settings, key))
+                    for key in self._BOT_PAUSE_KEYS
+                }
+            self._set_all_notification_channels(False)
             text = (
-                "▶️ <b>Сигналы включены</b>\n"
-                "Уведомления снова приходят при срабатывании порогов."
+                "⏸ <b>Бот остановлен</b> — все каналы выключены.\n"
+                "Тонкая настройка: кнопка <b>🎛 Каналы</b>.\n\n"
+                "Сканер продолжает собирать данные в фоне.\n"
+                "Нажмите <b>▶️ Старт</b> или /resume для восстановления."
             )
         else:
+            restore = self._pause_snapshot
+            if restore is None:
+                restore = {
+                    "signals_enabled": True,
+                    "liquidation_alerts_enabled": True,
+                    "analysis_enabled": True,
+                    "anomaly_enabled": settings.anomaly_enabled,
+                    "scenario_watch_enabled": True,
+                    "manual_ta_alerts_enabled": True,
+                }
+            self.settings_manager.update(bot_paused=False, **restore)
+            self._pause_snapshot = None
+            self._sync_bot_paused_from_channels()
             text = (
-                "⏸ <b>Сигналы остановлены</b>\n"
-                "Уведомления не приходят. Сканер продолжает собирать данные в фоне.\n"
-                "Нажмите <b>▶️ Старт</b> или /resume, когда будете готовы."
+                "▶️ <b>Бот запущен</b> — каналы восстановлены:\n"
+                f"• сигналы: <b>{'ВКЛ' if restore.get('signals_enabled') else 'ВЫКЛ'}</b>\n"
+                f"• ликвидации: <b>{'ВКЛ' if restore.get('liquidation_alerts_enabled') else 'ВЫКЛ'}</b>\n"
+                f"• анализ: <b>{'ВКЛ' if restore.get('analysis_enabled') else 'ВЫКЛ'}</b>\n"
+                f"• аномалии: <b>{'ВКЛ' if restore.get('anomaly_enabled') else 'ВЫКЛ'}</b>\n"
+                f"• сценарии: <b>{'ВКЛ' if restore.get('scenario_watch_enabled') else 'ВЫКЛ'}</b>\n"
+                f"• алерты руч. TA: <b>{'ВКЛ' if restore.get('manual_ta_alerts_enabled') else 'ВЫКЛ'}</b>\n\n"
+                "Или настройте выборочно: <b>🎛 Каналы</b>."
             )
         await update.message.reply_text(
             text,
@@ -1974,23 +2168,31 @@ class TelegramBot:
         )
 
     def _signals_status_line(self) -> str:
-        if self.settings_manager.settings.signals_enabled:
-            return "🔔 Сигналы: <b>ВКЛ</b> — уведомления приходят"
-        return "🔕 Сигналы: <b>ВЫКЛ</b> — уведомления приостановлены"
+        if self.settings_manager.settings.bot_paused:
+            return "⏸ <b>Бот на паузе</b> — все каналы выкл · 🎛 Каналы для выборочного вкл"
+        settings = self.settings_manager.settings
+        parts: list[str] = []
+        for field, _, label in self._NOTIFICATION_CHANNELS:
+            short = label.split(" ", 1)[0]
+            on = bool(getattr(settings, field))
+            parts.append(f"{short} {'✅' if on else '❌'}")
+        return "🔔 " + " · ".join(parts)
 
     def _signals_toggle_button_label(self) -> str:
-        if self.settings_manager.settings.signals_enabled:
-            return "⏸ Стоп"
-        return "▶️ Старт"
+        if self.settings_manager.settings.bot_paused:
+            return "▶️ Старт"
+        return "⏸ Стоп"
 
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update) or update.message is None:
             return
         text = (update.message.text or "").strip()
-        if text in {"⏸ Стоп", "Стоп", "⏸ Стоп сигналы"}:
-            await self._set_signals_enabled(update, enabled=False)
-        elif text in {"▶️ Старт", "Старт", "▶️ Старт сигналы"}:
-            await self._set_signals_enabled(update, enabled=True)
+        if text in {"⏸ Стоп", "Стоп", "⏸ Стоп сигналы", "⏸ Стоп бот", "Стоп бот"}:
+            await self._set_bot_paused(update, paused=True)
+        elif text in {"▶️ Старт", "Старт", "▶️ Старт сигналы", "▶️ Старт бот", "Старт бот"}:
+            await self._set_bot_paused(update, paused=False)
+        elif text in {"🎛 Каналы", "Каналы", "🎛 Уведомления", "Уведомления"}:
+            await self._show_notifications_panel(update)
         elif text in {"📊 Биржи", "Биржи"}:
             await update.message.reply_text(
                 self._build_exchanges_text(),
@@ -2043,8 +2245,9 @@ class TelegramBot:
             "/ta — справка по ручному TA-чату\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
             "/scan — диагностика сканера\n"
-            "/pause — остановить уведомления\n"
-            "/resume — возобновить уведомления\n"
+            "/pause — остановить все каналы\n"
+            "/resume — восстановить каналы\n"
+            "🎛 <b>Каналы</b> — выборочно вкл/выкл каждое направление\n"
             "/history [N] — последние N сигналов (нужен Redis)\n"
             "/help — эта справка\n\n"
             "💧 <b>Ликвидация</b> — пороги REKT-алертов в обычный чат\n"
@@ -2279,6 +2482,8 @@ class TelegramBot:
             return
 
         payload = query.data or ""
+        if await self._handle_channels_callback(update, query, payload):
+            return
         if payload == MTW_CANCEL_CALLBACK:
             if not self._is_admin(update):
                 await query.answer("Нет доступа.", show_alert=True)
@@ -2379,6 +2584,12 @@ class TelegramBot:
         if payload.startswith(MTA_ALERT_CALLBACK_PREFIX):
             if not self._can_use_manual_ta(update):
                 await query.answer("Нет доступа.", show_alert=True)
+                return
+            if self._bot_notifications_blocked():
+                await query.answer("Бот на паузе — сначала ▶️ Старт", show_alert=True)
+                return
+            if not self.settings_manager.settings.manual_ta_alerts_enabled:
+                await query.answer("Алерты ручного TA выкл — 🎛 Каналы", show_alert=True)
                 return
             parsed = parse_mta_alert_callback(payload)
             if parsed is None:
@@ -2526,6 +2737,9 @@ class TelegramBot:
         elif payload == "toggle_signals":
             current = self.settings_manager.settings.signals_enabled
             self.settings_manager.update(signals_enabled=not current)
+            self._sync_bot_paused_from_channels()
+            if not current:
+                self._pause_snapshot = None
             state = "включены" if not current else "остановлены"
             await query.answer(f"✅ Сигналы {state}", show_alert=False)
             await self._safe_edit_message_text(
@@ -2541,6 +2755,13 @@ class TelegramBot:
                 self._build_settings_panel_text(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
+            )
+        elif payload == "open_channels":
+            await self._safe_edit_message_text(
+                query,
+                self._build_notifications_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._notifications_keyboard(),
             )
         elif payload == "open_liq":
             await self._safe_edit_message_text(
@@ -2569,6 +2790,9 @@ class TelegramBot:
         if action == "on":
             current = self.settings_manager.settings.liquidation_alerts_enabled
             self.settings_manager.update(liquidation_alerts_enabled=not current)
+            self._sync_bot_paused_from_channels()
+            if not current:
+                self._pause_snapshot = None
             label = f"Ликвидации → {'ON' if not current else 'OFF'}"
         elif action == "tier":
             current = self.settings_manager.settings.liquidation_tier_enabled
@@ -2628,6 +2852,9 @@ class TelegramBot:
         if action == "on":
             current = self.settings_manager.settings.analysis_enabled
             self.settings_manager.update(analysis_enabled=not current)
+            self._sync_bot_paused_from_channels()
+            if not current:
+                self._pause_snapshot = None
             label = f"Анализ → {'ON' if not current else 'OFF'}"
         elif action == "skalt":
             current = self.settings_manager.settings.analysis_skip_alt_tier
@@ -2708,7 +2935,10 @@ class TelegramBot:
     def _reply_keyboard(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
-                [KeyboardButton(self._signals_toggle_button_label())],
+                [
+                    KeyboardButton(self._signals_toggle_button_label()),
+                    KeyboardButton("🎛 Каналы"),
+                ],
                 [KeyboardButton("💧 Ликвидация"), KeyboardButton("🧠 Анализ")],
                 [KeyboardButton("📐 Ручной анализ"), KeyboardButton("🔧 Настройки")],
                 [KeyboardButton("📊 Биржи"), KeyboardButton("📋 Команды")],
@@ -2737,6 +2967,7 @@ class TelegramBot:
             "🔔 Сигналы ON" if s.signals_enabled else "🔕 Сигналы OFF"
         )
         return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎛 Каналы", callback_data="open_channels")],
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),

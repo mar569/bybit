@@ -13,6 +13,7 @@ SETTINGS_VERSION = 26
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
+    "bot_paused",
     "signals_enabled",
     "enabled_binance",
     "enabled_bybit",
@@ -230,6 +231,7 @@ class ScannerSettings:
     top_n_symbols: int | None = None
     priority_score_max: int = 5
     signals_enabled: bool = True
+    bot_paused: bool = False
     price_only_min_percent: float = 3.0
     telegram_max_per_minute: int = 10
     telegram_min_interval_seconds: float = 2.0
@@ -247,6 +249,9 @@ class ScannerSettings:
     scenario_watch_tick_seconds: float = 12.0
     scenario_watch_enroll_cooldown_seconds: int = 600
     scenario_watch_chart_enabled: bool = True
+
+    # Алерты ручного TA (пробой / ретест / объём)
+    manual_ta_alerts_enabled: bool = True
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
     market_structure_enabled: bool = True
@@ -561,6 +566,7 @@ class ScannerSettings:
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(base.get("priority_score_max", 5)),
             signals_enabled=bool(base.get("signals_enabled", True)),
+            bot_paused=bool(base.get("bot_paused", False)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
@@ -577,6 +583,7 @@ class ScannerSettings:
                 base.get("scenario_watch_enroll_cooldown_seconds", 600)
             ),
             scenario_watch_chart_enabled=bool(base.get("scenario_watch_chart_enabled", True)),
+            manual_ta_alerts_enabled=bool(base.get("manual_ta_alerts_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),

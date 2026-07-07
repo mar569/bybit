@@ -120,6 +120,9 @@ class ScenarioWatcher:
     def active_count(self) -> int:
         return len(self._watches)
 
+    def clear_all(self) -> None:
+        self._watches.clear()
+
     def try_enroll(
         self,
         signal: Signal,
