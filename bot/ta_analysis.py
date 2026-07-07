@@ -1766,6 +1766,12 @@ def _manual_now_action_html(ta: TAAnalysisResult) -> str:
             "🚨 <b>Прямо сейчас:</b> слив активен — "
             "лонг не ловить. Ищите short от отката к пробитой поддержке."
         )
+    if ta.verdict == "SHORT" and breakdown and current > 0:
+        dist = max(0.0, (current - breakdown) / current * 100.0)
+        return (
+            f"🚨 <b>Прямо сейчас:</b> приоритет SHORT. "
+            f"До триггера вниз ~<b>{dist:.1f}%</b>; вход только после закрытия 5m ниже <b>{fmt_price(breakdown)}</b>."
+        )
     if ta.verdict == "WAIT" and ta.action_priority == "short" and breakdown and current > 0 and current <= breakdown * 1.012:
         return (
             f"🚨 <b>Прямо сейчас:</b> риск слива высокий. "
@@ -1982,6 +1988,23 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         )
         label = f" ({side_word})" if side_word else ""
         lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
+
+    # Сверхкороткий практический блок в начале действий.
+    if ta.verdict == "SHORT":
+        trig = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else "триггера вниз"
+        stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
+        tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшей поддержки"
+        lines.append(f"🎯 <b>Конкретика сейчас:</b> SHORT только после 5m close ниже {trig} · стоп {stop} · TP1 {tp}")
+    elif ta.verdict == "LONG":
+        trig = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else "триггера вверх"
+        stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
+        tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшего сопротивления"
+        lines.append(f"🎯 <b>Конкретика сейчас:</b> LONG только после 5m close выше {trig} · стоп {stop} · TP1 {tp}")
+    else:
+        long_lvl = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else "уровня LONG"
+        short_lvl = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else "уровня SHORT"
+        lines.append(f"🎯 <b>Конкретика сейчас:</b> вне сделки; ждать 5m close выше {long_lvl} или ниже {short_lvl}")
+
     lines.append(_manual_now_action_html(ta))
 
     if ta.verdict == "LONG":
