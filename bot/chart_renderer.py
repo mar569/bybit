@@ -15,6 +15,7 @@ import matplotlib.dates as mdates
 from matplotlib.patches import Ellipse, Rectangle
 
 from .bybit_klines import BybitKlineCache, KlineBar
+from .bybit_cvd import get_taker_cvd_cache
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
@@ -1550,6 +1551,16 @@ async def render_annotated_chart(
         hist_hours = 48 if interval_minutes <= 15 else 72
         history_bars = await _fetch_bars(symbol, hist_hours, interval_minutes=interval_minutes)
 
+    taker_cvd = None
+    if symbol:
+        lookback_min = min(180.0, max(20.0, len(bars) * interval_minutes))
+        try:
+            taker_cvd = await get_taker_cvd_cache().get_cvd(
+                symbol, lookback_minutes=lookback_min,
+            )
+        except Exception:
+            logger.debug("Taker CVD fetch failed for %s", symbol, exc_info=True)
+
     is_long = side == "long"
     ta = run_ta_analysis(
         bars,
@@ -1564,6 +1575,7 @@ async def render_annotated_chart(
         liq_context=liq_context,
         interval_minutes=interval_minutes,
         history_bars=history_bars,
+        taker_cvd=taker_cvd,
     )
     if verdict_override:
         ta.verdict = verdict_override

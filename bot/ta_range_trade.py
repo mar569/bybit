@@ -30,6 +30,99 @@ class TaFactorContext:
 
 
 @dataclass(frozen=True)
+class LiqCascadeSignal:
+    """Каскад ликвидаций (как панель CoinGlass): лонги/шорты + CVD/OI."""
+    active: bool = False
+    side: str = ""
+    strength: int = 0
+    long_liq_usd: float = 0.0
+    short_liq_usd: float = 0.0
+    total_usd: float = 0.0
+    note: str = ""
+
+
+def merge_liq_stats_dict(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Объединить окна 5м+15м — не пропустить всплеск ликвидаций."""
+    if not a and not b:
+        return None
+    if not a:
+        return dict(b)
+    if not b:
+        return dict(a)
+    long_liq = max(float(a.get("long_liq_usd") or 0), float(b.get("long_liq_usd") or 0))
+    short_liq = max(float(a.get("short_liq_usd") or 0), float(b.get("short_liq_usd") or 0))
+    total = max(float(a.get("total_usd") or 0), long_liq + short_liq)
+    return {
+        "long_liq_usd": long_liq,
+        "short_liq_usd": short_liq,
+        "total_usd": total,
+        "window_minutes": min(int(a.get("window_minutes") or 99), int(b.get("window_minutes") or 99)),
+        "event_count": int(a.get("event_count") or 0) + int(b.get("event_count") or 0),
+    }
+
+
+def detect_liq_cascade_short(
+    *,
+    factors: TaFactorContext,
+    liq: dict[str, Any] | None,
+    momentum: str,
+    momentum_pct: float,
+    drawdown_pct: float,
+    oi_narrative: str,
+) -> LiqCascadeSignal:
+    """Смыв лонгов + агрессивные продажи (CVD) — режим каскадного short."""
+    if not liq:
+        return LiqCascadeSignal()
+    long_liq = float(liq.get("long_liq_usd") or 0)
+    short_liq = float(liq.get("short_liq_usd") or 0)
+    total = float(liq.get("total_usd") or 0) or (long_liq + short_liq)
+    if total < 20_000 or long_liq < 25_000:
+        return LiqCascadeSignal()
+
+    long_share = long_liq / total
+    strength = 0
+    if long_share >= 0.50:
+        strength += 2
+    if long_share >= 0.62:
+        strength += 2
+    if long_liq >= 80_000:
+        strength += 2
+    if long_liq >= 200_000:
+        strength += 2
+    if factors.cvd_ratio <= 0.40:
+        strength += 1
+    if momentum == "down" and momentum_pct <= -1.0:
+        strength += 1
+    if drawdown_pct >= 10:
+        strength += 1
+    if oi_narrative in {"aligned_short", "shorts_building", "long_unwind"}:
+        strength += 1
+
+    active = (
+        strength >= 5
+        and momentum == "down"
+        and long_share >= 0.50
+        and (factors.cvd_ratio <= 0.45 or momentum_pct <= -0.8)
+    )
+    if not active:
+        return LiqCascadeSignal()
+
+    note = (
+        f"💥 каскад ликвидаций лонгов ${long_liq / 1000:.0f}K ({long_share:.0%} объёма)"
+        f" · {factors.cvd_detail or 'CVD↓'}"
+    )
+    return LiqCascadeSignal(
+        active=True,
+        side="short",
+        strength=min(10, strength),
+        long_liq_usd=long_liq,
+        short_liq_usd=short_liq,
+        total_usd=total,
+        note=note,
+    )
+
+
+@dataclass(frozen=True)
 class MarketFlowScores:
     """Сводка потока рынка (OI + CVD + liq) — как матрица CoinGlass, под капотом."""
     continuation: int
@@ -176,20 +269,31 @@ def parse_liq_context(liq: dict[str, Any] | None) -> TaFactorContext:
     long_boost = 0
     short_boost = 0
     lines = [detail]
+    long_share = long_liq / total if total > 0 else 0
     if short_liq > long_liq * 1.4:
         long_boost = 1
         lines.append("шорты ликвидированы — топливо для отскока")
     elif long_liq > short_liq * 1.4:
         short_boost = 1
         lines.append("лонги ликвидированы — давление вниз")
+    elif long_share >= 0.55 and long_liq >= 40_000:
+        short_boost = 2
+        lines.append(f"каскад лонгов ${long_liq/1000:.0f}K — слив продолжается")
     return TaFactorContext(0.5, "", detail, long_boost, short_boost, lines)
 
 
 def build_factor_context(
     bars: list[KlineBar],
     liq: dict[str, Any] | None,
+    taker_cvd: object | None = None,
 ) -> TaFactorContext:
-    cvd_ratio, cvd_detail = compute_cvd_proxy(bars)
+    from .bybit_cvd import TakerCvdSnapshot
+
+    if isinstance(taker_cvd, TakerCvdSnapshot) and taker_cvd.trade_count > 0:
+        cvd_ratio = taker_cvd.ratio
+        cvd_detail = taker_cvd.detail
+    else:
+        cvd_ratio, cvd_detail = compute_cvd_proxy(bars)
     liq_ctx = parse_liq_context(liq)
     lines = []
     if cvd_detail:

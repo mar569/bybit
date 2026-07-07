@@ -19,7 +19,7 @@ from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
-from .analysis_outcome_tracker import AnalysisOutcomeTracker
+from .bybit_cvd import BybitTakerCvdLiveTracker, get_taker_cvd_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,6 +147,14 @@ async def main() -> None:
     def liquidation_binance_enabled() -> bool:
         return binance_enabled() and _liquidation_ws_enabled()
 
+    def cvd_ws_enabled() -> bool:
+        s = settings.settings
+        return bybit_enabled() and (
+            _liquidation_ws_enabled()
+            or s.signals_enabled
+            or config.manual_ta_chat_configured
+        )
+
     async def on_liquidation_event(event) -> None:
         await liquidation_alerts.on_liquidation(event)
 
@@ -163,6 +171,12 @@ async def main() -> None:
     scanner.attach_binance_liquidation_tracker(binance_liquidation_tracker)
     analysis_engine.attach_liquidation_tracker(liquidation_tracker)
     analysis_engine.attach_binance_liquidation_tracker(binance_liquidation_tracker)
+
+    cvd_live_tracker = BybitTakerCvdLiveTracker(
+        liquidation_symbols,
+        enabled=cvd_ws_enabled,
+    )
+    get_taker_cvd_cache().attach_live(cvd_live_tracker)
 
     async def run_scan() -> None:
         await asyncio.gather(
@@ -189,6 +203,7 @@ async def main() -> None:
     analysis_outcome_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
+    cvd_task: asyncio.Task | None = None
     anomaly_task: asyncio.Task | None = None
     analysis_heartbeat_task: asyncio.Task | None = None
     try:
@@ -239,6 +254,8 @@ async def main() -> None:
         )
         liq_task = asyncio.create_task(liquidation_tracker.run())
         binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())
+        if cvd_ws_enabled():
+            cvd_task = asyncio.create_task(cvd_live_tracker.run())
         scanner_task = asyncio.create_task(run_scan())
 
         if sys.platform == "win32":
@@ -255,6 +272,7 @@ async def main() -> None:
         bybit.stop()
         liquidation_tracker.stop()
         binance_liquidation_tracker.stop()
+        cvd_live_tracker.stop()
         await chart_capture_service.close()
         await telegram.stop()
         if scanner_task is not None:
@@ -273,6 +291,8 @@ async def main() -> None:
             liq_task.cancel()
         if binance_liq_task is not None:
             binance_liq_task.cancel()
+        if cvd_task is not None:
+            cvd_task.cancel()
         if anomaly_task is not None:
             anomaly_task.cancel()
         await asyncio.gather(
@@ -287,6 +307,7 @@ async def main() -> None:
                     analysis_outcome_task,
                     liq_task,
                     binance_liq_task,
+                    cvd_task,
                     anomaly_task,
                 )
                 if t is not None

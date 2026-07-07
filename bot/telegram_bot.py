@@ -63,11 +63,13 @@ from .manual_ta import (
     parse_mtcw_callback,
     parse_mtw_callback,
 )
+from .ta_range_trade import merge_liq_stats_dict
 from .ta_analysis import (
     detect_repeat_spike_dump_risk,
     format_scenario_update_html,
     evaluate_entry_readiness,
     ta_manual_detailed_html,
+    ta_analysis_chart_caption_html,
     ta_signal_caption_html,
     should_skip_noise_signal,
     ta_telegram_caption_html,
@@ -709,9 +711,13 @@ class TelegramBot:
                 except Exception:
                     oi_bars = None
                 try:
-                    stats = self.scanner._get_liquidation_stats(signal.exchange, signal.symbol, 15)
-                    if stats is not None:
-                        liq_context = stats.to_dict()
+                    ex = signal.exchange.lower()
+                    stats_5 = self.scanner._get_liquidation_stats(ex, signal.symbol, 5)
+                    stats_15 = self.scanner._get_liquidation_stats(ex, signal.symbol, 15)
+                    liq_context = merge_liq_stats_dict(
+                        stats_5.to_dict() if stats_5 else None,
+                        stats_15.to_dict() if stats_15 else None,
+                    )
                 except Exception:
                     liq_context = None
             png = None
@@ -973,9 +979,12 @@ class TelegramBot:
                 except Exception:
                     oi_bars = None
                 try:
-                    stats = self.scanner._get_liquidation_stats(result.exchange, result.symbol, 15)
-                    if stats is not None:
-                        liq_context = stats.to_dict()
+                    stats_5 = self.scanner._get_liquidation_stats(result.exchange, result.symbol, 5)
+                    stats_15 = self.scanner._get_liquidation_stats(result.exchange, result.symbol, 15)
+                    liq_context = merge_liq_stats_dict(
+                        stats_5.to_dict() if stats_5 else None,
+                        stats_15.to_dict() if stats_15 else None,
+                    )
                 except Exception:
                     liq_context = None
             png = None
@@ -1031,7 +1040,15 @@ class TelegramBot:
                     f"· {result.confidence:.0f}%"
                 )
                 if ta_result is not None:
-                    caption = f"{caption}\n\n{ta_telegram_caption_html(ta_result)}"
+                    caption = (
+                        f"{caption}\n\n"
+                        f"{ta_analysis_chart_caption_html(
+                            ta_result,
+                            analysis_direction=result.direction,
+                            post_dump_late=result.post_dump_late,
+                            liq_cascade_note=result.liq_cascade_note,
+                        )}"
+                    )
                 await self._send_chart(
                     chat_id, png, caption, is_priority=False,
                 )
@@ -1854,9 +1871,12 @@ class TelegramBot:
                 except Exception:
                     oi_bars = None
             try:
-                stats = self.scanner._get_liquidation_stats("bybit", symbol, 15)
-                if stats is not None:
-                    liq_context = stats.to_dict()
+                stats_5 = self.scanner._get_liquidation_stats("bybit", symbol, 5)
+                stats_15 = self.scanner._get_liquidation_stats("bybit", symbol, 15)
+                liq_context = merge_liq_stats_dict(
+                    stats_5.to_dict() if stats_5 else None,
+                    stats_15.to_dict() if stats_15 else None,
+                )
             except Exception:
                 liq_context = None
 
@@ -2013,12 +2033,15 @@ class TelegramBot:
                     oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
                 except Exception:
                     oi_bars = None
-            try:
-                stats = self.scanner._get_liquidation_stats("bybit", symbol, 15)
-                if stats is not None:
-                    liq_context = stats.to_dict()
-            except Exception:
-                liq_context = None
+                try:
+                    stats_5 = self.scanner._get_liquidation_stats("bybit", symbol, 5)
+                    stats_15 = self.scanner._get_liquidation_stats("bybit", symbol, 15)
+                    liq_context = merge_liq_stats_dict(
+                        stats_5.to_dict() if stats_5 else None,
+                        stats_15.to_dict() if stats_15 else None,
+                    )
+                except Exception:
+                    liq_context = None
 
         last = self._manual_ta_last.get((target_chat_id, symbol, interval_minutes), {})
         chart_source = (

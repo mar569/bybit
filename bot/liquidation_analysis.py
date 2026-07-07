@@ -11,6 +11,7 @@ from .bybit_klines import BybitKlineCache
 from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
 from .bybit_market_data import BybitAccountRatioCache
+from .bybit_cvd import get_taker_cvd_cache
 from .liquidation_alerts import (
     SIDE_LONG_LIQ,
     SIDE_SHORT_LIQ,
@@ -150,6 +151,69 @@ def _finalize_verdict(
     return verdict
 
 
+def refine_analysis_scenario(
+    ctx: object,
+    verdict: ScenarioVerdict,
+    cluster_side: str,
+    price_change_pct: float,
+    *,
+    long_liq_15: float,
+    short_liq_15: float,
+) -> tuple[ScenarioVerdict, str, bool]:
+    """После обвала / каскад лонгов — не давать «чистый шорт» на опоздании."""
+    total = long_liq_15 + short_liq_15
+    long_share = long_liq_15 / total if total > 0 else 0.0
+    cascade_note = ""
+    if total >= 80_000 and long_share >= 0.65 and long_liq_15 >= 50_000:
+        cascade_note = f"каскад лонгов ${long_liq_15 / 1000:.0f}K за 15м — давление вниз"
+
+    trend_quality = getattr(ctx, "trend_quality", "weak")
+    late_dump = trend_quality in {"strong_down", "moderate_down"} and price_change_pct <= -8.0
+    if not late_dump:
+        return verdict, cascade_note, False
+
+    if cluster_side == SIDE_SHORT_LIQ:
+        if long_share >= 0.6 and long_liq_15 >= 80_000:
+            return (
+                ScenarioVerdict(
+                    "wait",
+                    "⏸ после обвала",
+                    "каскад лонгов — падение уже отыграно, не гонись за шортом",
+                    continuation_up=False,
+                    continuation_down=False,
+                ),
+                cascade_note,
+                True,
+            )
+        if verdict.direction == "short":
+            return (
+                ScenarioVerdict(
+                    "wait",
+                    "⏸ после обвала",
+                    f"цена уже {price_change_pct:+.1f}% от кластера — поздно для шорта, жди отскок",
+                    continuation_up=False,
+                    continuation_down=False,
+                ),
+                cascade_note,
+                True,
+            )
+
+    if cluster_side == SIDE_LONG_LIQ and long_share >= 0.55:
+        return (
+            ScenarioVerdict(
+                "wait",
+                "⏸ после обвала",
+                "лонги ещё смывают — жди стабилизации перед отскоком",
+                continuation_up=False,
+                continuation_down=False,
+            ),
+            cascade_note,
+            True,
+        )
+
+    return verdict, cascade_note, late_dump
+
+
 FACTOR_WEIGHTS: dict[str, float] = {
     "cluster": 0.14,
     "liq_imbalance": 0.18,
@@ -195,6 +259,9 @@ class LiquidationAnalysisResult:
     trend_label: str = ""
     scenario_text: str = ""
     is_correction: bool = False
+    cvd_source: str = "proxy"
+    post_dump_late: bool = False
+    liq_cascade_note: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -586,11 +653,18 @@ class LiquidationAnalysisEngine:
         if not oi_bars:
             oi_bars = self._scanner.get_five_min_oi_bars(exchange, symbol)
 
+        taker_cvd = None
+        try:
+            taker_cvd = await get_taker_cvd_cache().get_cvd(symbol, lookback_minutes=60.0)
+        except Exception:
+            logger.debug("Taker CVD for analysis %s failed", symbol, exc_info=True)
+
         ctx = build_trend_liq_context(
             klines,
             oi_bars,
             cluster_side=cluster_side,
             price_change_since_cluster_pct=price_change_pct,
+            taker_cvd=taker_cvd,
         )
         if ctx is None:
             self._stats["skipped_trend"] += 1
@@ -627,24 +701,6 @@ class LiquidationAnalysisEngine:
         if verdict.direction == "wait":
             predict_long = cluster_side == SIDE_LONG_LIQ
 
-        factor_weights = dict(FACTOR_WEIGHTS)
-        if self._weights_getter is not None:
-            adaptive = await self._weights_getter()
-            if adaptive:
-                for key, weight in adaptive.items():
-                    if key in factor_weights:
-                        factor_weights[key] = weight
-                weight_total = sum(factor_weights.values())
-                if weight_total > 0:
-                    factor_weights = {k: v / weight_total for k, v in factor_weights.items()}
-
-        factors: list[AnalysisFactor] = []
-
-        cluster_score, cluster_detail = _score_cluster(total_usd, event_count, min_usd)
-        factors.append(
-            AnalysisFactor("cluster", "Кластер liq", cluster_score, factor_weights["cluster"], cluster_detail)
-        )
-
         long_liq_15 = 0.0
         short_liq_15 = 0.0
         liq_tracker = (
@@ -664,6 +720,35 @@ class LiquidationAnalysisEngine:
                 long_liq_15 = total_usd
             else:
                 short_liq_15 = total_usd
+
+        verdict, liq_cascade_note, post_dump_late = refine_analysis_scenario(
+            ctx,
+            verdict,
+            cluster_side,
+            price_change_pct,
+            long_liq_15=long_liq_15,
+            short_liq_15=short_liq_15,
+        )
+        if verdict.direction == "wait":
+            predict_long = cluster_side == SIDE_LONG_LIQ
+
+        factor_weights = dict(FACTOR_WEIGHTS)
+        if self._weights_getter is not None:
+            adaptive = await self._weights_getter()
+            if adaptive:
+                for key, weight in adaptive.items():
+                    if key in factor_weights:
+                        factor_weights[key] = weight
+                weight_total = sum(factor_weights.values())
+                if weight_total > 0:
+                    factor_weights = {k: v / weight_total for k, v in factor_weights.items()}
+
+        factors: list[AnalysisFactor] = []
+
+        cluster_score, cluster_detail = _score_cluster(total_usd, event_count, min_usd)
+        factors.append(
+            AnalysisFactor("cluster", "Кластер liq", cluster_score, factor_weights["cluster"], cluster_detail)
+        )
 
         liq_score, liq_detail = _liquidation_strength(
             long_liq_15,
@@ -748,6 +833,9 @@ class LiquidationAnalysisEngine:
             trend_label=ctx.trend_label,
             scenario_text=verdict.scenario_text,
             is_correction=ctx.is_correction,
+            cvd_source=ctx.cvd_source,
+            post_dump_late=post_dump_late,
+            liq_cascade_note=liq_cascade_note,
         )
 
 
@@ -785,10 +873,16 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
         "",
         f"📊 <b>Сценарий:</b> {result.direction_label} · <b>{result.confidence:.0f}%</b>",
         f"<i>{result.scenario_text}</i>",
+    ]
+    if result.liq_cascade_note:
+        lines.append(f"💥 <b>Ликвидации:</b> {result.liq_cascade_note}")
+    if result.post_dump_late:
+        lines.append("⚠️ <b>После обвала</b> — вход опоздал, не гонись за движением")
+    lines.extend([
         f"⏱ Окно наблюдения: {result.window_min}–{result.window_max} мин",
         "",
         "<b>Факторы (OI / CVD / liq):</b>",
-    ]
+    ])
 
     sorted_factors = sorted(result.factors, key=lambda f: f.score * f.weight, reverse=True)
     for factor in sorted_factors[:6]:
@@ -800,7 +894,10 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
     lines.append(f"⚠️ <b>Отмена:</b> {result.invalidation_label}")
 
     if result.direction == "wait":
-        lines.append("⏸ <i>Нет чёткого edge — не входи по этому разбору</i>")
+        if result.post_dump_late:
+            lines.append("⏸ <i>Жди отскок или новый пробой — сейчас не входи</i>")
+        else:
+            lines.append("⏸ <i>Нет чёткого edge — не входи по этому разбору</i>")
     elif result.continuation_risk:
         lines.append("⚠️ <i>Риск ложного сценария — только с подтверждением на графике</i>")
 

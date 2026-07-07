@@ -248,6 +248,36 @@ def test_signal_compact_wait_long() -> None:
     assert "ждём подтверждения" not in text.lower()
 
 
+def test_detect_liq_cascade_short() -> None:
+    from bot.ta_range_trade import TaFactorContext, detect_liq_cascade_short
+
+    factors = TaFactorContext(
+        cvd_ratio=0.32,
+        cvd_detail="CVD↓ продажи 68% объёма",
+        liq_detail="",
+        liq_long_boost=0,
+        liq_short_boost=2,
+        factor_lines=[],
+    )
+    liq = {
+        "long_liq_usd": 520_000.0,
+        "short_liq_usd": 12_000.0,
+        "total_usd": 532_000.0,
+        "window_minutes": 5,
+    }
+    sig = detect_liq_cascade_short(
+        factors=factors,
+        liq=liq,
+        momentum="down",
+        momentum_pct=-3.5,
+        drawdown_pct=28.0,
+        oi_narrative="aligned_short",
+    )
+    assert sig.active is True
+    assert sig.side == "short"
+    assert sig.strength >= 7
+
+
 def test_ta_manual_detailed_html() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)

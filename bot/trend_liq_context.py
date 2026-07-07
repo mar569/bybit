@@ -23,6 +23,7 @@ class TrendLiqContext:
     drawdown_from_high_pct: float
     is_correction: bool
     near_high: bool
+    cvd_source: str = "proxy"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ def build_trend_liq_context(
     *,
     cluster_side: str,
     price_change_since_cluster_pct: float,
+    taker_cvd: object | None = None,
 ) -> TrendLiqContext | None:
     if not klines:
         return None
@@ -118,7 +120,15 @@ def build_trend_liq_context(
     else:
         trend_label = f"боковик/слабый ход {t1h:+.1f}% (1ч)"
 
-    cvd_ratio, cvd_detail = _volume_cvd_proxy(klines)
+    from .bybit_cvd import TakerCvdSnapshot
+
+    if isinstance(taker_cvd, TakerCvdSnapshot) and taker_cvd.trade_count > 0:
+        cvd_ratio = taker_cvd.ratio
+        cvd_detail = taker_cvd.detail
+        cvd_source = str(getattr(taker_cvd, "source", "taker") or "taker")
+    else:
+        cvd_ratio, cvd_detail = _volume_cvd_proxy(klines)
+        cvd_source = "proxy"
 
     is_correction = False
     if t1h > 2.0 and -4.0 < price_change_since_cluster_pct < 0.3:
@@ -139,6 +149,7 @@ def build_trend_liq_context(
         phase_label=ms.phase_label,
         cvd_proxy=cvd_ratio,
         cvd_detail=cvd_detail,
+        cvd_source=cvd_source,
         oi_narrative=ms.oi_narrative,
         oi_narrative_label=ms.oi_narrative_label,
         drawdown_from_high_pct=ms.drawdown_from_high_pct,
@@ -353,9 +364,13 @@ def score_trend_liq_factors(
 
     corr_s = 0.68 if ctx.is_correction else 0.48
     corr_d = "коррекция после импульса" if ctx.is_correction else "без явной коррекции"
+    cvd_label = {
+        "live": "CVD (Bybit live)",
+        "taker": "CVD (Bybit taker)",
+    }.get(ctx.cvd_source, "CVD (прокси)")
     return [
         ("trend", "Тренд + liq", trend_s, trend_d),
-        ("cvd", "CVD (объём)", cvd_s, cvd_d),
+        ("cvd", cvd_label, cvd_s, cvd_d),
         ("oi_narrative", "Open Interest", oi_s, oi_d),
         ("correction", "Фаза", corr_s, f"{ctx.phase_label} · {corr_d}"),
     ]

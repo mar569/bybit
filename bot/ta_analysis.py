@@ -10,6 +10,7 @@ from .ta_range_trade import (
     MarketFlowScores,
     RangeTradeSetup,
     build_factor_context,
+    detect_liq_cascade_short,
     evaluate_market_flow,
     evaluate_range_trade,
 )
@@ -188,6 +189,10 @@ class TAAnalysisResult:
     narrative_plain: str = ""
     narrative_plan: str = ""
     narrative_basis: str = ""
+    liq_cascade_active: bool = False
+    liq_cascade_note: str = ""
+    cvd_source: str = "proxy"
+    cvd_delta: float | None = None
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -1914,6 +1919,7 @@ def run_ta_analysis(
     liq_context: dict | None = None,
     interval_minutes: int = 5,
     history_bars: list[KlineBar] | None = None,
+    taker_cvd: object | None = None,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -2001,7 +2007,7 @@ def run_ta_analysis(
         short_score=short_s,
     )
 
-    factors = build_factor_context(bars, liq_context)
+    factors = build_factor_context(bars, liq_context, taker_cvd=taker_cvd)
     repeat_spike_dump_risk, repeat_spike_dump_note = detect_repeat_spike_dump_risk(bars)
     if history_bars:
         hist_risk, hist_note = detect_repeat_spike_dump_risk(history_bars)
@@ -2088,6 +2094,30 @@ def run_ta_analysis(
                 else f"{reason} · риск слива по OI/CVD/ликвидациям"
             )
             action_priority = "short"
+
+    liq_cascade = detect_liq_cascade_short(
+        factors=factors,
+        liq=liq_context,
+        momentum=momentum,
+        momentum_pct=momentum_pct,
+        drawdown_pct=ms.drawdown_from_high_pct,
+        oi_narrative=ms.oi_narrative,
+    )
+    cascade_tight_stop: float | None = None
+    if liq_cascade.active and liq_cascade.side == "short" and bars:
+        lookback = bars[-min(6, len(bars)) :]
+        swing_high = max(b.high for b in lookback)
+        cascade_tight_stop = swing_high * 1.003
+        risk_pct = (cascade_tight_stop - current) / current * 100.0 if current > 0 else 99.0
+        if risk_pct <= 9.0:
+            verdict = "SHORT"
+            conf = max(conf, min(9, 6 + liq_cascade.strength // 2))
+            action_priority = "short"
+            reason = liq_cascade.note if not reason else f"{liq_cascade.note} · {reason}"
+            invalidation_price = cascade_tight_stop
+            if not breakdown:
+                breakdown = current * 0.999
+
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7 and range_trade is None:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
@@ -2124,25 +2154,42 @@ def run_ta_analysis(
             trade_is_long = True
 
     entry_mode = "range_edge" if range_trade else "breakout"
+    if liq_cascade.active and verdict == "SHORT":
+        entry_mode = "cascade"
     if range_trade and verdict in {"LONG", "SHORT"}:
         inv = range_trade.stop_price
         entry = (range_trade.entry_price * 0.999, range_trade.entry_price * 1.001)
         targets = list(range_trade.targets)
+    elif liq_cascade.active and verdict == "SHORT" and cascade_tight_stop is not None:
+        inv = cascade_tight_stop
+        entry = (current * 0.999, current * 1.001)
+        sups = sorted(
+            [lv.price for lv in levels if lv.kind == "support" and lv.price < current * 0.998],
+            reverse=True,
+        )
+        targets = sups[:3] if sups else [current * 0.985, current * 0.97, current * 0.955]
     else:
         inv, entry, targets = _trade_levels(
             bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
             bullish=bullish, bearish=bearish,
         )
+    cascade_override_rr = liq_cascade.active and liq_cascade.strength >= 5 and verdict == "SHORT"
     is_bad_trade, bad_trade_reason = _trade_quality_guard(
         verdict=verdict,
         current=current,
         stop=inv,
         targets=targets,
     )
-    if is_bad_trade:
+    if is_bad_trade and not cascade_override_rr:
         verdict = "WAIT"
         conf = min(conf, 7)
         reason = f"{reason} · {bad_trade_reason}" if reason else bad_trade_reason
+    elif is_bad_trade and cascade_override_rr:
+        reason = (
+            f"{reason} · агр. short по каскаду, стоп у лок. хая {fmt_price(inv)}"
+            if reason
+            else f"агр. short по каскаду, стоп {fmt_price(inv)}"
+        )
 
     supports = sorted([lv.price for lv in levels if lv.kind == "support"], reverse=True)
     trader_plan = build_trader_plan(
@@ -2337,6 +2384,15 @@ def run_ta_analysis(
         narrative_plain=narrative_plain,
         narrative_plan=narrative_plan,
         narrative_basis=narrative_basis,
+        liq_cascade_active=liq_cascade.active and verdict == "SHORT",
+        liq_cascade_note=liq_cascade.note if liq_cascade.active else "",
+        cvd_source=(
+            str(getattr(taker_cvd, "source", "proxy") or "proxy")
+            if taker_cvd is not None
+            and getattr(taker_cvd, "trade_count", 0) > 0
+            else "proxy"
+        ),
+        cvd_delta=getattr(taker_cvd, "delta", None) if taker_cvd is not None else None,
     )
 
 
@@ -2662,6 +2718,17 @@ def _effective_breakout_breakdown(ta: TAAnalysisResult) -> tuple[float | None, f
     return bo, bd
 
 
+def _is_late_dump_context(ta: TAAnalysisResult) -> bool:
+    """Цена уже сильно упала — шорт «в хвост» дампа опасен по R:R."""
+    if ta.drawdown_from_high_pct >= 12.0:
+        return True
+    if ta.phase in {"impulse_down", "post_crash_weak"}:
+        return True
+    if ta.momentum_pct <= -1.2 and "вниз" in (ta.momentum_label or "").lower():
+        return True
+    return False
+
+
 def _intent_cancel_level(ta: TAAnalysisResult, user_side: str) -> float | None:
     """Уровень отмены идеи: для SHORT — выше (слом сценария), для LONG — ниже."""
     bo, bd = _effective_breakout_breakdown(ta)
@@ -2695,9 +2762,20 @@ def _intent_entry_hint(ta: TAAnalysisResult, user_side: str) -> str:
     px = ta.current_price or 0.0
 
     if side == "short":
+        if ta.liq_cascade_active and ta.invalidation_price:
+            return (
+                f"агр. short по каскаду · стоп выше <b>{fmt_price(ta.invalidation_price)}</b> "
+                f"(локальный хай)"
+            )
         if bd and px > bd:
             d = (px - bd) / px * 100.0
             return f"закрепление 5m ≤<b>{fmt_price(bd)}</b> (ещё ~{d:.1f}%)"
+        if _is_late_dump_context(ta) and bo and px < bo * 0.995:
+            d = (bo - px) / px * 100.0
+            return (
+                f"<b>не шортить сейчас</b> — дамп уже прошёл (−{ta.drawdown_from_high_pct:.0f}% от хая). "
+                f"Ждать отскок к <b>{fmt_price(bo)}</b> (ещё ~{d:.1f}%), потом short при развороте вниз"
+            )
         if ta.correction_path and ta.flow_correction >= ta.flow_continuation:
             tgt = ta.correction_path.waypoints[-1] if ta.correction_path.waypoints else None
             if tgt and tgt < px:
@@ -2730,6 +2808,21 @@ def _intent_plain_line(ta: TAAnalysisResult, user_side: str) -> str:
     cont_wins = ta.flow_continuation > ta.flow_correction + 8
 
     if side == "short":
+        if ta.liq_cascade_active:
+            return (
+                f"📐 <b>Каскад ликвидаций</b> — short по импульсу вниз. "
+                f"Стоп выше <b>{fmt_price(ta.invalidation_price)}</b>. "
+                "Не держать без стопа — возможен отскок."
+            )
+        if _is_late_dump_context(ta) and not bd:
+            bo_eff, _ = bo, bd
+            bits = [
+                f"тренд <b>вниз</b> (уже −{ta.drawdown_from_high_pct:.0f}% от хая)",
+                "шортить <b>сейчас поздно</b> — стоп далеко, цель близко",
+            ]
+            if bo_eff and ta.current_price and bo_eff > ta.current_price:
+                bits.append(f"лучше short от отскока к <b>{fmt_price(bo_eff)}</b>")
+            return "📐 " + ". ".join(bits) + "."
         if ta.post_pump and corr_wins:
             bits = ["после пампа базовый сценарий — <b>откат</b>"]
             if ta.correction_path and ta.correction_path.waypoints:
@@ -3292,7 +3385,10 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
     label = "LONG" if side == "long" else "SHORT"
     emoji = "🔺" if side == "long" else "🔻"
     score = ta_display_score(ta)
-    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
+    rr_bad = (
+        "вход невыгоден" in (ta.verdict_reason or "").lower()
+        and not ta.liq_cascade_active
+    )
 
     corr = ta.correction_path
     cont = ta.continuation_path
@@ -3310,11 +3406,30 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
 
     lines = [f"{emoji} <b>Ваша идея:</b> открыть <b>{label}</b>"]
 
-    if rr_bad:
+    if ta.liq_cascade_active and side == "short":
         lines.append(
-            "⛔ <b>Оценка:</b> сейчас <b>NO TRADE</b> — R:R неудобный, "
-            "лучше дождаться лучшей точки."
+            "🟢 <b>Оценка:</b> <b>каскад ликвидаций лонгов</b> (как на CoinGlass) — "
+            "агрессивный SHORT по импульсу, стоп у локального хая."
         )
+        if ta.liq_cascade_note:
+            lines.append(f"💥 {ta.liq_cascade_note}")
+    elif rr_bad:
+        if side == "short" and _is_late_dump_context(ta):
+            lines.append(
+                "🟡 <b>Оценка:</b> направление <b>вниз — логично</b>, но сейчас <b>NO TRADE</b>: "
+                "цена уже в сильном дампе — шорт «в хвост» = большой стоп, маленькая цель."
+            )
+            bo_hint, _ = _effective_breakout_breakdown(ta)
+            if bo_hint and ta.current_price and bo_hint > ta.current_price:
+                lines.append(
+                    f"💡 <b>Когда шортить:</b> после отскока к <b>{fmt_price(bo_hint)}</b> "
+                    f"и разворота вниз (не по текущей цене)."
+                )
+        else:
+            lines.append(
+                "⛔ <b>Оценка:</b> сейчас <b>NO TRADE</b> — соотношение риск/прибыль плохое, "
+                "лучше дождаться лучшей точки."
+            )
     elif aligned_verdict:
         lines.append(
             f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
@@ -3588,6 +3703,14 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     if ta.forecast_summary:
         lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
 
+    for fl in ta.factor_lines:
+        if "CVD" in fl:
+            src = {"live": "Bybit live", "taker": "Bybit taker"}.get(
+                ta.cvd_source, "прокси по свечам",
+            )
+            lines.append(f"📈 <b>CVD ({src}):</b> {fl}")
+            break
+
     smc_brief = _manual_smc_brief_html(ta.smc) if ta.smc else ""
     if smc_brief:
         lines.append(smc_brief)
@@ -3601,6 +3724,47 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
     if ta.verdict_reason:
         note = ta.verdict_reason.split(" · ")[0][:60]
         lines.append(f"<i>{note}</i>")
+    return "\n".join(lines)
+
+
+def ta_analysis_chart_caption_html(
+    ta: TAAnalysisResult,
+    *,
+    analysis_direction: str,
+    post_dump_late: bool = False,
+    liq_cascade_note: str = "",
+) -> str:
+    """Подпись к графику в чате анализов — согласована с текстом разбора."""
+    side = analysis_direction.lower()
+    if side not in {"long", "short"}:
+        side = ta.action_priority if ta.action_priority in {"long", "short"} else "short"
+
+    lines: list[str] = []
+    if liq_cascade_note:
+        lines.append(f"💥 {liq_cascade_note}")
+    if post_dump_late or _is_late_dump_context(ta):
+        lines.append("⚠️ <b>После обвала</b> — не гонись за входом")
+
+    block = ta_signal_compact_block(
+        ta,
+        signal_side=side,
+        readiness=(False, "анализ"),
+    )
+    if block:
+        lines.append(block)
+    else:
+        lines.append(ta_action_summary_html(ta))
+
+    if ta.phase_label and ta.verdict == "WAIT":
+        lines.append(f"<i>{ta.phase_label}</i>")
+
+    for fl in ta.factor_lines:
+        if "CVD" in fl or "taker" in fl.lower() or "live" in fl.lower():
+            src = {"live": "live", "taker": "taker"}.get(ta.cvd_source, "")
+            if src:
+                lines.append(f"📈 {fl}")
+            break
+
     return "\n".join(lines)
 
 
