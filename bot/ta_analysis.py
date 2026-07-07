@@ -1291,18 +1291,24 @@ def build_ta_signal_narrative(
     # WAIT — сценарий из потока и реальных уровней, без входа
     if flow.correction > flow.continuation + 10 and correction_path:
         tgt = _path_target(correction_path, correction=True)
+        reason = correction_path.reason or ""
+        tgt_suffix = ""
+        if tgt and fmt_price(tgt) not in reason:
+            tgt_suffix = f" к ~<b>{fmt_price(tgt)}</b>"
         plain = (
             f"📐 <b>Простыми словами:</b> WAIT — поток за <b>откат</b> "
-            f"{correction_path.reason}"
-            f"{f' к ~<b>{fmt_price(tgt)}</b>' if tgt else ''}. "
+            f"{reason}{tgt_suffix}. "
             "Это не вход — ждём подтверждения уровня."
         )
     elif flow.continuation > flow.correction + 10 and continuation_path:
         tgt = _path_target(continuation_path, correction=False)
+        reason = continuation_path.reason or ""
+        tgt_suffix = ""
+        if tgt and fmt_price(tgt) not in reason:
+            tgt_suffix = f" к ~<b>{fmt_price(tgt)}</b>"
         plain = (
             f"📐 <b>Простыми словами:</b> WAIT — поток за <b>продолжение</b> "
-            f"{continuation_path.reason}"
-            f"{f' к ~<b>{fmt_price(tgt)}</b>' if tgt else ''}. "
+            f"{reason}{tgt_suffix}. "
             "Это не вход — ждём подтверждения уровня."
         )
     elif primary_scenario:
@@ -2251,8 +2257,8 @@ def run_ta_analysis(
         current=current,
         target_prices=targets,
         invalidation_price=inv,
-        breakout_level=breakout,
-        breakdown_level=breakdown,
+        breakout_level=breakout or (consolidation.top if consolidation else None) or nearest_resistance,
+        breakdown_level=breakdown or (consolidation.bottom if consolidation else None) or nearest_support,
         bullish=bullish,
         bearish=bearish,
         flow=flow,
@@ -2638,6 +2644,146 @@ def _level_dist_pct(current: float, level: float | None) -> float | None:
     if not level or current <= 0:
         return None
     return abs(level - current) / current * 100.0
+
+
+def _effective_breakout_breakdown(ta: TAAnalysisResult) -> tuple[float | None, float | None]:
+    """Рабочие уровни: триггеры TA или границы range / ближайшие swing."""
+    bo = ta.breakout_level
+    bd = ta.breakdown_level
+    if ta.consolidation:
+        if bo is None:
+            bo = ta.consolidation.top
+        if bd is None:
+            bd = ta.consolidation.bottom
+    if bo is None:
+        bo = ta.nearest_resistance
+    if bd is None:
+        bd = ta.nearest_support
+    return bo, bd
+
+
+def _intent_cancel_level(ta: TAAnalysisResult, user_side: str) -> float | None:
+    """Уровень отмены идеи: для SHORT — выше (слом сценария), для LONG — ниже."""
+    bo, bd = _effective_breakout_breakdown(ta)
+    side = user_side.lower()
+    if side == "short":
+        return bo or (ta.bullish_scenario.trigger_price if ta.bullish_scenario else None)
+    if side == "long":
+        return bd or (ta.bearish_scenario.trigger_price if ta.bearish_scenario else None)
+    return _display_invalidation(ta)
+
+
+def _display_invalidation(ta: TAAnalysisResult) -> float | None:
+    """Стоп/отмена для общего плана — не уводить на 50% от цены."""
+    inv = ta.invalidation_price
+    px = ta.current_price
+    if inv and px and px > 0:
+        if abs(inv - px) / px > 0.12:
+            bo, bd = _effective_breakout_breakdown(ta)
+            if ta.verdict == "SHORT" or ta.action_priority == "short":
+                return bo or inv
+            if ta.verdict == "LONG" or ta.action_priority == "long":
+                return bd or inv
+            return bo if ta.action_priority == "long" else bd or inv
+    return inv
+
+
+def _intent_entry_hint(ta: TAAnalysisResult, user_side: str) -> str:
+    """Человеческая подсказка «когда входить» для ручного TA."""
+    side = user_side.lower()
+    bo, bd = _effective_breakout_breakdown(ta)
+    px = ta.current_price or 0.0
+
+    if side == "short":
+        if bd and px > bd:
+            d = (px - bd) / px * 100.0
+            return f"закрепление 5m ≤<b>{fmt_price(bd)}</b> (ещё ~{d:.1f}%)"
+        if ta.correction_path and ta.flow_correction >= ta.flow_continuation:
+            tgt = ta.correction_path.waypoints[-1] if ta.correction_path.waypoints else None
+            if tgt and tgt < px:
+                return f"откат к <b>{fmt_price(tgt)}</b>, затем пробой вниз"
+        if ta.post_pump and bo and bo > px:
+            return (
+                f"после пампа: сначала откат/дожим к <b>{fmt_price(bo)}</b>, "
+                f"потом short при сломе поддержки"
+            )
+        return "пробой поддержки range на 5m — без уровня не входить"
+
+    if side == "long":
+        if bo and px < bo:
+            d = (bo - px) / px * 100.0
+            return f"закрепление 5m ≥<b>{fmt_price(bo)}</b> (ещё ~{d:.1f}%)"
+        if ta.post_pump:
+            return "после пампа LONG рискован — только при сильном пробое с объёмом"
+        return "пробой сопротивления range на 5m"
+
+    if bo and bd:
+        return f"выше <b>{fmt_price(bo)}</b> (long) или ниже <b>{fmt_price(bd)}</b> (short)"
+    return "сначала дождаться формирования range и уровней"
+
+
+def _intent_plain_line(ta: TAAnalysisResult, user_side: str) -> str:
+    """Короткий разбор под идею пользователя — без противоречия с LONG/SHORT."""
+    side = user_side.lower()
+    bo, bd = _effective_breakout_breakdown(ta)
+    corr_wins = ta.flow_correction > ta.flow_continuation + 8
+    cont_wins = ta.flow_continuation > ta.flow_correction + 8
+
+    if side == "short":
+        if ta.post_pump and corr_wins:
+            bits = ["после пампа базовый сценарий — <b>откат</b>"]
+            if ta.correction_path and ta.correction_path.waypoints:
+                bits.append(f"цель отката ~<b>{fmt_price(ta.correction_path.waypoints[-1])}</b>")
+            if bd:
+                bits.append(f"short по плану — только после ≤<b>{fmt_price(bd)}</b>")
+            bits.append("сейчас импульс вверх — <b>не шортить в лоб</b>")
+            return "📐 " + ". ".join(bits) + "."
+        if cont_wins and bo:
+            return (
+                f"📐 SHORT против текущего потока: цена тянет к <b>{fmt_price(bo)}</b>. "
+                f"Ждать отклонение от сопротивления или слом вниз."
+            )
+        return ta_plain_forecast_line(ta) or "📐 WAIT — подтвердите уровень перед short."
+
+    if side == "long":
+        if ta.post_pump:
+            return (
+                "📐 LONG после пампа — риск покупки на хайе. "
+                f"Имеет смысл только при пробое ≥<b>{fmt_price(bo)}</b> с объёмом."
+                if bo
+                else "📐 LONG после пампа — высокий риск, ждите откат."
+            )
+        return ta_plain_forecast_line(ta) or "📐 Ждём подтверждения для long."
+
+    return ta_plain_forecast_line(ta)
+
+
+def _manual_smc_brief_html(smc: SmcContext) -> str:
+    """1–2 строки SMC для ручного разбора — без полного чеклиста."""
+    if not smc:
+        return ""
+    ready = smc.reversal_ready or (
+        smc.structure_break
+        and smc.discount_retrace
+        and (smc.structure_expansion or smc.liquidity_sweep)
+    )
+    hits: list[str] = []
+    if smc.structure_break:
+        hits.append("BOS")
+    if smc.liquidity_sweep:
+        hits.append("sweep")
+    if smc.structure_expansion:
+        hits.append("expansion")
+    if smc.fvgs:
+        hits.append("FVG")
+    if smc.discount_retrace:
+        hits.append("зона дисконта/премии")
+    status = "готов к развороту" if ready else "не готов — ждём sweep/expansion"
+    if smc.summary:
+        return f"🧠 <b>SMC:</b> {smc.summary} · <i>{status}</i>"
+    if hits:
+        return f"🧠 <b>SMC:</b> есть {', '.join(hits)} · <i>{status}</i>"
+    return f"🧠 <b>SMC:</b> сигналов разворота нет · <i>{status}</i>"
 
 
 def ta_signal_scenario_line_html(
@@ -3075,44 +3221,30 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
     else:
         lines.append(f"⚪ <b>Оценка:</b> проверьте уровни перед входом в <b>{label}</b>.")
 
-    if side == "short" and ta.breakdown_level:
-        dist = ""
-        if ta.current_price > 0 and ta.breakdown_level < ta.current_price:
-            d = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
-            dist = f" (ещё ~{d:.1f}% до уровня)"
-        lines.append(
-            f"▶️ <b>Когда входить (подтверждение):</b> закрепление ≤<b>{fmt_price(ta.breakdown_level)}</b>{dist}."
-        )
-        if ta.post_pump:
-            resist = ta.breakout_level or ta.nearest_resistance
-            if resist and ta.current_price and resist > ta.current_price * 1.002:
+    bo, bd = _effective_breakout_breakdown(ta)
+    hint = _intent_entry_hint(ta, side)
+    prefix = "подтверждение" if side == "short" else "вход"
+    lines.append(f"▶️ <b>Когда входить ({prefix}):</b> {hint}.")
+
+    if side == "short" and ta.post_pump and bo and bd and ta.current_price:
+        if bo > ta.current_price * 1.002:
+            lines.append(
+                f"💡 <b>Агрессивно (выше риск):</b> short от отскока к "
+                f"<b>{fmt_price(bo)}</b> — стоп выше range, не ждать пробоя ≤{fmt_price(bd)}."
+            )
+        else:
+            mid = (bo + bd) / 2.0
+            if abs(ta.current_price - mid) / ta.current_price < 0.04:
                 lines.append(
-                    f"💡 <b>Агрессивно (выше риск):</b> short от отскока к "
-                    f"<b>{fmt_price(resist)}</b> — не ждать пробоя вниз, стоп выше range. "
-                    f"Бот по умолчанию так не входит: после пампа часто дожимают к верху range."
+                    f"💡 <b>Середина range</b> (~{fmt_price(mid)}): short без триггера — плохой R:R."
                 )
-            elif resist and ta.current_price:
-                mid = (resist + ta.breakdown_level) / 2.0
-                if abs(ta.current_price - mid) / ta.current_price < 0.04:
-                    lines.append(
-                        f"💡 <b>Сейчас середина range</b> (~{fmt_price(mid)}): short «по рынку» "
-                        f"без пробоя ≤{fmt_price(ta.breakdown_level)} — плохой R:R, TA ждёт край."
-                    )
-    elif side == "long" and ta.breakout_level:
-        dist = ""
-        if ta.current_price > 0 and ta.breakout_level > ta.current_price:
-            d = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
-            dist = f" (ещё ~{d:.1f}% до уровня)"
-        lines.append(
-            f"▶️ <b>Когда входить:</b> закрепление ≥<b>{fmt_price(ta.breakout_level)}</b>{dist}."
-        )
-    elif ta.verdict == "WAIT":
-        lines.append("▶️ <b>Когда входить:</b> дождаться пробоя ключевого уровня на TF.")
 
-    if ta.invalidation_price:
-        lines.append(f"🛑 <b>Отмена идеи:</b> при пробое <b>{fmt_price(ta.invalidation_price)}</b>.")
+    cancel = _intent_cancel_level(ta, side)
+    if cancel:
+        verb = "выше" if side == "short" else "ниже"
+        lines.append(f"🛑 <b>Отмена идеи:</b> при пробое {verb} <b>{fmt_price(cancel)}</b>.")
 
-    plain = ta_plain_forecast_line(ta)
+    plain = _intent_plain_line(ta, side)
     if plain:
         lines.append(plain)
     lines.append(
@@ -3271,9 +3403,11 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
     ]
 
-    long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "—"
-    short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "—"
-    stop_lvl = fmt_price(ta.invalidation_price) if ta.invalidation_price else "—"
+    bo_lvl, bd_lvl = _effective_breakout_breakdown(ta)
+    long_lvl = fmt_price(bo_lvl) if bo_lvl else "—"
+    short_lvl = fmt_price(bd_lvl) if bd_lvl else "—"
+    inv = _display_invalidation(ta)
+    stop_lvl = fmt_price(inv) if inv else "—"
     tp1 = fmt_price(ta.target_prices[0]) if ta.target_prices else "—"
 
     if rr_bad:
@@ -3288,16 +3422,16 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
             f"или ниже <b>{short_lvl}</b>."
         )
 
-    if ta.current_price > 0 and ta.breakdown_level and ta.breakdown_level < ta.current_price:
-        dist_short = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
+    if ta.current_price > 0 and bd_lvl and bd_lvl < ta.current_price:
+        dist_short = (ta.current_price - bd_lvl) / ta.current_price * 100.0
         lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> (до уровня ~{dist_short:.1f}%).")
-    elif ta.breakdown_level:
+    elif bd_lvl:
         lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> + ретест снизу.")
 
-    if ta.current_price > 0 and ta.breakout_level and ta.breakout_level > ta.current_price:
-        dist_long = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
+    if ta.current_price > 0 and bo_lvl and bo_lvl > ta.current_price:
+        dist_long = (bo_lvl - ta.current_price) / ta.current_price * 100.0
         lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> (до уровня ~{dist_long:.1f}%).")
-    elif ta.breakout_level:
+    elif bo_lvl:
         lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> + ретест сверху.")
 
     lines.append(f"🎯 <b>План:</b> вход по факту · отмена <b>{stop_lvl}</b> · TP1 <b>{tp1}</b>.")
@@ -3309,42 +3443,23 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         risk_bits.append("перегрев после пампа")
     if ta.repeat_spike_dump_risk:
         risk_bits.append("повторяемый spike→dump")
-    if ta.action_priority == "short":
+    if ta.post_pump and ta.flow_correction > ta.flow_continuation + 8:
+        risk_bits.append("базовый сценарий — откат")
+    elif ta.action_priority == "short":
         risk_bits.append("приоритет short")
-    if ta.action_priority == "long":
+    elif ta.action_priority == "long":
         risk_bits.append("приоритет long")
     if not risk_bits and ta.verdict_reason:
         risk_bits.append(ta.verdict_reason.split(" · ")[0])
     if risk_bits:
-        lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:2])}.")
+        lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:3])}.")
 
     if ta.forecast_summary:
         lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
 
-    if ta.smc:
-        fvg_near = False
-        if ta.smc.fvgs:
-            fvg_near = True
-            if ta.current_price > 0:
-                current = ta.current_price
-                for gap in ta.smc.fvgs[-3:]:
-                    if gap.bottom <= current <= gap.top:
-                        fvg_near = True
-                        break
-                    if abs(((gap.top + gap.bottom) / 2.0) - current) / current <= 0.02:
-                        fvg_near = True
-                        break
-        smc_lines = [
-            "🧠 <b>SMC / разворот</b>",
-            f"{'✅' if ta.smc.structure_break else '❌'} Слом структуры (BOS): {'да' if ta.smc.structure_break else 'нет'}",
-            f"{'✅' if ta.smc.discount_retrace else '❌'} Откат в зону дисконта/премии: {'да' if ta.smc.discount_retrace else 'нет'}",
-            f"{'✅' if ta.smc.structure_expansion else '❌'} Расширение структуры: {'да' if ta.smc.structure_expansion else 'нет'}",
-            f"{'✅' if ta.smc.liquidity_sweep else '❌'} Свип ликвидности: {'да' if ta.smc.liquidity_sweep else 'нет'}",
-            f"{'✅' if fvg_near else '❌'} Имбаланс (FVG) рядом: {'да' if fvg_near else 'нет'}",
-        ]
-        smc_ready = ta.smc.structure_break and ta.smc.discount_retrace and (ta.smc.structure_expansion or ta.smc.liquidity_sweep)
-        smc_lines.append(f"📌 <b>Статус SMC:</b> {'ГОТОВ' if smc_ready else 'НЕ ГОТОВ'} (ждём expansion/sweep).")
-        lines.extend(smc_lines)
+    smc_brief = _manual_smc_brief_html(ta.smc) if ta.smc else ""
+    if smc_brief:
+        lines.append(smc_brief)
 
     return "\n".join(lines)
 
