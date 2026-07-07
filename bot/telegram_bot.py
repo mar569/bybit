@@ -1526,7 +1526,10 @@ class TelegramBot:
                         breakout_level=watch.breakout_level,
                         ta=ta_fresh,
                     )
-                    caption = f"{message}\n\n{ta_signal_caption_html(ta_fresh, signal_side=watch.side)}"
+                    caption = (
+                        f"{message}\n\n"
+                        f"{ta_scenario_followup_caption_html(ta_fresh, upd.kind, watch.side)}"
+                    )
                 else:
                     caption = message
                 if png:

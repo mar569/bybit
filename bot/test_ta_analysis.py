@@ -16,9 +16,12 @@ from bot.ta_analysis import (
     run_ta_analysis,
     ta_display_score,
     ta_manual_detailed_html,
+    ta_scenario_followup_caption_html,
     ta_signal_caption_html,
+    ta_signal_scenario_line_html,
     ta_telegram_breakdown_html,
     ta_telegram_caption_html,
+    TAAnalysisResult,
 )
 
 
@@ -249,3 +252,35 @@ def test_ta_breakdown_html_sections() -> None:
     text = ta_telegram_breakdown_html(ta, symbol="VANRYUSDT", interval="15m")
     assert "WAIT" in text or "LONG" in text or "SHORT" in text
     assert ta_display_score(ta) >= 1
+
+
+def test_post_pump_long_signal_hides_far_short_priority() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="short",
+        current_price=1.6463,
+        breakdown_level=1.4822,
+        breakout_level=1.6520,
+        post_pump=True,
+        factor_lines=["CVD↑ покупки 73% объёма"],
+    )
+    line = ta_signal_scenario_line_html(ta, signal_side="long")
+    assert "приоритет SHORT" not in line
+    assert "LONG" in line
+
+
+def test_continuation_followup_omits_correction_forecast() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        verdict_confidence=9,
+        current_price=1.6463,
+        breakout_level=1.6520,
+        breakdown_level=1.4822,
+        post_pump=True,
+        factor_lines=["CVD↑ покупки 73% объёма"],
+        forecast_summary="коррекция после пампа",
+    )
+    text = ta_scenario_followup_caption_html(ta, "continuation_confirmed", "long")
+    assert "Простыми словами" not in text
+    assert "снят" in text.lower()
+    assert "LONG" in text

@@ -2385,6 +2385,12 @@ def ta_manual_compact_html(ta: TAAnalysisResult) -> str:
     return ta_action_summary_html(ta)
 
 
+def _level_dist_pct(current: float, level: float | None) -> float | None:
+    if not level or current <= 0:
+        return None
+    return abs(level - current) / current * 100.0
+
+
 def ta_signal_scenario_line_html(
     ta: TAAnalysisResult,
     *,
@@ -2434,9 +2440,11 @@ def ta_signal_scenario_line_html(
                     f" · <i>цена ближе LONG ≥{fmt_price(ta.breakout_level)}</i>"
                 )
             elif not is_short and ta.action_priority == "short" and ta.breakdown_level:
-                line += (
-                    f" · <i>цена ближе SHORT ≤{fmt_price(ta.breakdown_level)}</i>"
-                )
+                bd_dist = _level_dist_pct(ta.current_price, ta.breakdown_level)
+                if bd_dist is not None and bd_dist <= 6.0:
+                    line += (
+                        f" · <i>альт. SHORT ≤{fmt_price(ta.breakdown_level)}</i>"
+                    )
             return line
 
     if ta.action_priority == "long" and ta.breakout_level:
@@ -2445,6 +2453,14 @@ def ta_signal_scenario_line_html(
             f"<b>{fmt_price(ta.breakout_level)}</b>"
         )
     if ta.action_priority == "short" and ta.breakdown_level:
+        bd_dist = _level_dist_pct(ta.current_price, ta.breakdown_level)
+        if sig == "long" and ta.post_pump and bd_dist is not None and bd_dist > 6.0:
+            if ta.breakout_level:
+                return (
+                    f"▶️ <b>Не входить сейчас</b> · после пампа ждать LONG при ≥"
+                    f"<b>{fmt_price(ta.breakout_level)}</b>"
+                )
+            return "▶️ <b>Не входить сейчас</b> · после пампа, не ловить верх"
         return (
             f"▶️ <b>Не входить</b> · приоритет SHORT при ≤"
             f"<b>{fmt_price(ta.breakdown_level)}</b>"
@@ -2454,7 +2470,9 @@ def ta_signal_scenario_line_html(
     if ta.breakout_level:
         triggers.append(f"LONG ≥<b>{fmt_price(ta.breakout_level)}</b>")
     if ta.breakdown_level:
-        triggers.append(f"SHORT ≤<b>{fmt_price(ta.breakdown_level)}</b>")
+        bd_dist = _level_dist_pct(ta.current_price, ta.breakdown_level)
+        if bd_dist is None or bd_dist <= 8.0:
+            triggers.append(f"SHORT ≤<b>{fmt_price(ta.breakdown_level)}</b>")
     if triggers:
         return f"▶️ <b>Не входить</b> · ждать {' / '.join(triggers)}"
     return "▶️ <b>Не входить</b> · дождаться пробоя уровня"
@@ -2627,6 +2645,9 @@ def format_scenario_update_html(
             f"(хай <b>{fmt_price(reference_price)}</b>)."
         )
         body += "\nСценарий отката <b>отменён</b> — импульс сильнее."
+        body += (
+            "\n💡 <b>Итог:</b> не шортить только из-за первого алерта — цена пошла выше плана."
+        )
         if breakout_level:
             body += f"\n▶️ LONG при закреплении ≥<b>{fmt_price(breakout_level)}</b>."
     elif update_kind == "entry_short":
@@ -2648,6 +2669,43 @@ def format_scenario_update_html(
         score = ta_display_score(ta)
         body += f"\n📐 TA сейчас: <b>{ta.verdict}</b> {score}/10"
     return header + body
+
+
+def ta_scenario_followup_caption_html(
+    ta: TAAnalysisResult,
+    update_kind: str,
+    signal_side: str | None = None,
+) -> str:
+    """Короткая подпись к обновлению сценария — без противоречия с заголовком."""
+    score = ta_display_score(ta)
+    lines: list[str] = []
+
+    if update_kind == "continuation_confirmed":
+        lines.append(f"📐 TA: <b>WAIT</b> {score}/10 · импульс вверх держится")
+        if ta.breakout_level:
+            lines.append(
+                f"▶️ Следующий шаг: LONG при ≥<b>{fmt_price(ta.breakout_level)}</b>"
+            )
+        lines.append("❌ Прогноз отката — <b>снят</b> (цена выше плана)")
+        if ta.factor_lines:
+            lines.append(ta.factor_lines[0])
+        return "\n".join(lines)
+
+    if update_kind == "correction_started":
+        lines.append(f"📐 TA: <b>WAIT</b> {score}/10 · откат по плану")
+        plain = ta_plain_forecast_line(ta)
+        if plain:
+            lines.append(plain)
+        if ta.breakdown_level:
+            lines.append(f"▶️ SHORT при ≤<b>{fmt_price(ta.breakdown_level)}</b>")
+        if ta.factor_lines:
+            lines.append(ta.factor_lines[0])
+        return "\n".join(lines)
+
+    lines.append(ta_signal_scenario_line_html(ta, signal_side=signal_side))
+    if ta.factor_lines:
+        lines.append(ta.factor_lines[0])
+    return "\n".join(lines)
 
 
 def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
@@ -2787,7 +2845,11 @@ def ta_signal_caption_html(
         elif ta.action_priority == "long":
             extra = " · ближе LONG"
         elif ta.action_priority == "short":
-            extra = " · ближе SHORT"
+            bd_dist = _level_dist_pct(ta.current_price, ta.breakdown_level)
+            if sig == "long" and ta.post_pump and bd_dist is not None and bd_dist > 6.0:
+                extra = " · после пампа, ждём уровень"
+            else:
+                extra = " · ближе SHORT"
         else:
             extra = ""
         line = f"📐 TA · WAIT {score}/10{extra}"
