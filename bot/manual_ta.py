@@ -9,6 +9,7 @@ MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
 MTC_CALLBACK_PREFIX = "mtc|"
 MTCW_CALLBACK_PREFIX = "mtcw|"
+MTA_ALERT_CALLBACK_PREFIX = "mtaa|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
 MTA_WIZARD_KEY = "mta_wizard"
 
@@ -129,6 +130,40 @@ def parse_mtc_callback(data: str) -> tuple[str, int, str] | None:
 
 def parse_mtcw_callback(data: str) -> tuple[str, int, str] | None:
     return _parse_chart_callback(data, MTCW_CALLBACK_PREFIX)
+
+
+def build_mta_alert_callback(symbol: str, interval_minutes: int, side: str, mode: str = "breakout") -> str:
+    side_norm = "short" if str(side).lower() == "short" else "long"
+    mode_norm = str(mode).strip().lower()
+    if mode_norm not in {"breakout", "retest", "volume"}:
+        mode_norm = "breakout"
+    return f"{MTA_ALERT_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{side_norm}|{mode_norm}"
+
+
+def parse_mta_alert_callback(data: str) -> tuple[str, int, str, str] | None:
+    if not data.startswith(MTA_ALERT_CALLBACK_PREFIX):
+        return None
+    parts = data.split("|")
+    if len(parts) not in {4, 5} or parts[0] != MTA_ALERT_CALLBACK_PREFIX.rstrip("|"):
+        return None
+    symbol = normalize_symbol(parts[1])
+    if not symbol:
+        return None
+    try:
+        interval = int(parts[2])
+    except ValueError:
+        return None
+    if interval not in MANUAL_TA_TIMEFRAMES:
+        return None
+    side = parts[3].strip().lower()
+    if side not in {"long", "short"}:
+        return None
+    mode = "breakout"
+    if len(parts) == 5:
+        mode = parts[4].strip().lower()
+    if mode not in {"breakout", "retest", "volume"}:
+        return None
+    return symbol, interval, side, mode
 
 
 def manual_ta_help_text() -> str:

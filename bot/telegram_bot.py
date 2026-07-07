@@ -30,16 +30,19 @@ from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
 from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
 from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart
+from .bybit_klines import BybitKlineCache
 from .manual_ta import (
     MANUAL_TA_CHART_SOURCES,
     MANUAL_TA_TIMEFRAMES,
     MTA_CALLBACK_PREFIX,
+    MTA_ALERT_CALLBACK_PREFIX,
     MTA_WIZARD_KEY,
     MTC_CALLBACK_PREFIX,
     MTCW_CALLBACK_PREFIX,
     MTW_CALLBACK_PREFIX,
     MTW_CANCEL_CALLBACK,
     build_mta_callback,
+    build_mta_alert_callback,
     build_mtc_callback,
     build_mtcw_callback,
     build_mtw_callback,
@@ -48,11 +51,17 @@ from .manual_ta import (
     manual_ta_wizard_start_text,
     parse_manual_ta_input,
     parse_mta_callback,
+    parse_mta_alert_callback,
     parse_mtc_callback,
     parse_mtcw_callback,
     parse_mtw_callback,
 )
-from .ta_analysis import ta_manual_detailed_html, ta_signal_caption_html, ta_telegram_caption_html
+from .ta_analysis import (
+    detect_repeat_spike_dump_risk,
+    ta_manual_detailed_html,
+    ta_signal_caption_html,
+    ta_telegram_caption_html,
+)
 from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
@@ -99,6 +108,10 @@ class TelegramBot:
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
+        self._manual_ta_last: dict[tuple[int, str, int], dict[str, Any]] = {}
+        self._manual_ta_alerts: dict[tuple[int, str, int, str], dict[str, Any]] = {}
+        self._manual_ta_alert_task: asyncio.Task | None = None
+        self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
@@ -238,6 +251,8 @@ class TelegramBot:
                 )
 
         logger.info("Telegram bot started")
+        if self._manual_ta_alert_task is None or self._manual_ta_alert_task.done():
+            self._manual_ta_alert_task = asyncio.create_task(self._manual_ta_alert_loop())
 
     async def stop(self) -> None:
         if self.application is None:
@@ -245,6 +260,13 @@ class TelegramBot:
         await self.application.updater.stop_polling()
         await self.application.stop()
         await self.application.shutdown()
+        if self._manual_ta_alert_task is not None:
+            self._manual_ta_alert_task.cancel()
+            try:
+                await self._manual_ta_alert_task
+            except asyncio.CancelledError:
+                pass
+            self._manual_ta_alert_task = None
         if self.redis is not None:
             try:
                 await self.redis.close()
@@ -928,6 +950,96 @@ class TelegramBot:
             rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
         return InlineKeyboardMarkup(rows)
 
+    def _manual_ta_result_keyboard(self, symbol: str, interval_minutes: int, ta_result: Any | None) -> InlineKeyboardMarkup:
+        base = self._manual_ta_tf_keyboard(symbol, wizard=False).inline_keyboard
+        rows = [list(row) for row in base]
+        side = "long"
+        if ta_result is not None:
+            verdict = getattr(ta_result, "verdict", "")
+            priority = getattr(ta_result, "action_priority", "")
+            if verdict == "SHORT" or priority == "short":
+                side = "short"
+        rows.append([
+            InlineKeyboardButton(
+                "🔔 Пробой",
+                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "breakout"),
+            ),
+            InlineKeyboardButton(
+                "🔁 Ретест",
+                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "retest"),
+            ),
+            InlineKeyboardButton(
+                "📈 Объём",
+                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "volume"),
+            ),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    async def _manual_ta_alert_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(12.0)
+                if not self._manual_ta_alerts or self.application is None:
+                    continue
+                now = time.time()
+                for key, watcher in list(self._manual_ta_alerts.items()):
+                    chat_id, symbol, interval, mode = key
+                    expires_at = float(watcher.get("expires_at", 0))
+                    if expires_at and now >= expires_at:
+                        self._manual_ta_alerts.pop(key, None)
+                        continue
+                    trigger = float(watcher.get("trigger", 0) or 0)
+                    side = str(watcher.get("side", "short"))
+                    if trigger <= 0:
+                        self._manual_ta_alerts.pop(key, None)
+                        continue
+                    bars = await self._manual_alert_kline_cache.get_klines(symbol, limit=24, interval_minutes=interval)
+                    if not bars:
+                        continue
+                    price = bars[-1].close
+                    fired = False
+                    mode_title = "пробой"
+                    if mode == "breakout":
+                        fired = price <= trigger if side == "short" else price >= trigger
+                        mode_title = "пробой"
+                    elif mode == "retest":
+                        was_broken = bool(watcher.get("was_broken", False))
+                        tol = max(trigger * 0.004, 1e-9)
+                        near = abs(price - trigger) <= tol
+                        if not was_broken:
+                            was_broken = price <= trigger if side == "short" else price >= trigger
+                            watcher["was_broken"] = was_broken
+                        else:
+                            fired = near
+                        mode_title = "ретест"
+                    elif mode == "volume":
+                        if len(bars) >= 12:
+                            recent = bars[-1]
+                            base = bars[-11:-1]
+                            avg_vol = sum(b.volume for b in base) / max(len(base), 1)
+                            if avg_vol > 0:
+                                vol_mult = recent.volume / avg_vol
+                                dir_ok = (recent.close < recent.open) if side == "short" else (recent.close > recent.open)
+                                fired = vol_mult >= 2.2 and dir_ok
+                        mode_title = "ускорение объёма"
+                    if not fired:
+                        continue
+                    emoji = "🔻" if side == "short" else "🔺"
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"{emoji} <b>Алерт ручного TA</b> · {mode_title}\n"
+                            f"{symbol} {interval}m: цена <b>{price:.6g}</b>, уровень <b>{trigger:.6g}</b>.\n"
+                            f"Сигнал: {'вниз' if side == 'short' else 'вверх'} · проверьте свечу/контекст."
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                    self._manual_ta_alerts.pop(key, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Manual TA alert loop error")
+
     def _mta_wizard_state(self, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
         state = context.user_data.get(MTA_WIZARD_KEY)
         return state if isinstance(state, dict) else None
@@ -1268,7 +1380,30 @@ class TelegramBot:
             f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
             f"{ta_manual_detailed_html(ta)}"
         )
-        keyboard = self._manual_ta_tf_keyboard(symbol, wizard=False)
+        # Доп. глубина для ручного TA: 24-48ч истории по паттерну spike->dump.
+        extra_hours = 24 if interval_minutes <= 10 else 48
+        per_hour = max(1, 60 // interval_minutes)
+        extra_limit = max(48, min(extra_hours * per_hour, 200))
+        try:
+            extra_bars = await self._manual_alert_kline_cache.get_klines(
+                symbol,
+                limit=extra_limit,
+                interval_minutes=interval_minutes,
+            )
+            extra_repeat, extra_note = detect_repeat_spike_dump_risk(extra_bars)
+            if extra_repeat and extra_note:
+                caption += f"\n🧠 <b>Глубокая история {extra_hours}ч:</b> {extra_note}"
+        except Exception:
+            logger.exception("Failed extended repeat-pattern check for %s", symbol)
+        self._manual_ta_last[(target_chat_id, symbol, interval_minutes)] = {
+            "verdict": ta.verdict,
+            "priority": ta.action_priority,
+            "breakout": ta.breakout_level,
+            "breakdown": ta.breakdown_level,
+            "price": ta.current_price,
+            "updated_at": time.time(),
+        }
+        keyboard = self._manual_ta_result_keyboard(symbol, interval_minutes, ta)
         await self._send_chart(
             target_chat_id,
             png,
@@ -1880,6 +2015,52 @@ class TelegramBot:
                             wizard=False,
                         ),
                     )
+            return
+
+        if payload.startswith(MTA_ALERT_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mta_alert_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval, side, mode = parsed
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last = self._manual_ta_last.get((chat_id, symbol, interval), {})
+            trigger = 0.0
+            if side == "short":
+                trigger = float(last.get("breakdown") or 0)
+            else:
+                trigger = float(last.get("breakout") or 0)
+            if trigger <= 0 and mode in {"breakout", "retest"}:
+                await query.answer("Нет уровня для алерта в этом сетапе.", show_alert=True)
+                return
+            if trigger <= 0 and mode == "volume":
+                # Для объёмного алерта без явного уровня используем текущую цену как справочную.
+                trigger = float(last.get("price") or 0) or float(last.get("breakout") or last.get("breakdown") or 0)
+            self._manual_ta_alerts[(chat_id, symbol, interval, mode)] = {
+                "side": side,
+                "trigger": trigger,
+                "created_at": time.time(),
+                "expires_at": time.time() + 3 * 3600,
+                "mode": mode,
+            }
+            await query.answer("Алерт включён на 3 часа", show_alert=False)
+            if query.message:
+                try:
+                    mode_ru = {"breakout": "пробой", "retest": "ретест", "volume": "ускорение объёма"}.get(mode, mode)
+                    await query.message.reply_text(
+                        (
+                            f"🔔 Алерт активирован: <b>{symbol}</b> {interval}m\n"
+                            f"Тип: <b>{mode_ru}</b>\n"
+                            f"Уровень: <b>{trigger:.6g}</b> ({'ниже' if side == 'short' else 'выше'})\n"
+                            "Срок: 3 часа."
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    logger.exception("Failed to send manual TA alert confirmation")
             return
 
         if payload.startswith(MTC_CALLBACK_PREFIX):

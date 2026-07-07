@@ -161,6 +161,8 @@ class TAAnalysisResult:
     smc: SmcContext | None = None
     smc_score: int = 0
     smc_summary: str = ""
+    repeat_spike_dump_risk: bool = False
+    repeat_spike_dump_note: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -874,6 +876,50 @@ def _momentum_label_ru(momentum: str, pct: float) -> str:
     return "боковое движение"
 
 
+def detect_repeat_spike_dump_risk(
+    bars: list[KlineBar],
+    *,
+    spike_pct: float = 5.0,
+    retrace_ratio: float = 0.55,
+    lookahead_bars: int = 18,
+) -> tuple[bool, str]:
+    """
+    Ищет повторяемый паттерн: резкий памп -> заметный откат/слив вскоре после.
+    Возвращает флаг риска и короткую заметку для текста анализа.
+    """
+    n = len(bars)
+    if n < 30:
+        return False, ""
+
+    events: list[tuple[int, float, float]] = []
+    for i in range(6, n - 4):
+        base = bars[i - 6].close
+        if base <= 0:
+            continue
+        spike = (bars[i].high - base) / base * 100.0
+        if spike < spike_pct:
+            continue
+        peak = bars[i].high
+        end = min(n - 1, i + lookahead_bars)
+        post_low = min(b.low for b in bars[i + 1 : end + 1])
+        drop_from_peak = (peak - post_low) / peak
+        if drop_from_peak >= retrace_ratio:
+            events.append((i, spike, drop_from_peak * 100.0))
+
+    if not events:
+        return False, ""
+
+    # Если таких эпизодов >=2, считаем, что есть повторяемость поведения.
+    repeat = len(events) >= 2
+    last_i, last_spike, last_drop = events[-1]
+    age = max(0, n - 1 - last_i)
+    note = (
+        f"повторяемый spike→dump: {len(events)} эпиз., "
+        f"последний +{last_spike:.1f}% -> −{last_drop:.0f}% ({age} баров назад)"
+    )
+    return repeat, note
+
+
 def _resolve_verdict(
     *,
     is_long: bool,
@@ -1476,6 +1522,7 @@ def run_ta_analysis(
     )
 
     factors = build_factor_context(bars, liq_context)
+    repeat_spike_dump_risk, repeat_spike_dump_note = detect_repeat_spike_dump_risk(bars)
     range_trade = evaluate_range_trade(
         bars,
         consolidation=consolidation,
@@ -1535,6 +1582,7 @@ def run_ta_analysis(
             factors.liq_short_boost > 0
             or factors.cvd_ratio <= 0.40
             or ms.oi_narrative in {"aligned_short", "shorts_building"}
+            or repeat_spike_dump_risk
         )
     )
     if breakdown and current > 0 and downside_pressure:
@@ -1557,6 +1605,14 @@ def run_ta_analysis(
     if channel and channel.kind == "bear" and verdict == "LONG" and conf < 7 and range_trade is None:
         verdict = "WAIT"
         reason = (reason + " · канал ↓") if reason else "канал ↓ — ждать пробой"
+    if repeat_spike_dump_risk and verdict == "LONG" and conf <= 8:
+        verdict = "WAIT"
+        action_priority = "short" if momentum == "down" else action_priority
+        reason = (
+            f"{reason} · высокий риск повторного слива после пампа"
+            if reason
+            else "высокий риск повторного слива после пампа"
+        )
 
     trade_is_long = is_long
     if neutral:
@@ -1596,6 +1652,8 @@ def run_ta_analysis(
     )
     if factors.factor_lines:
         risk_notes.extend([f for f in factors.factor_lines if f and f not in risk_notes])
+    if repeat_spike_dump_note:
+        risk_notes.append(repeat_spike_dump_note)
     risk_notes = risk_notes[:6]
     professional_summary = _build_professional_summary(
         verdict=verdict,
@@ -1681,6 +1739,8 @@ def run_ta_analysis(
         smc=smc,
         smc_score=smc.smc_score,
         smc_summary=smc.summary,
+        repeat_spike_dump_risk=repeat_spike_dump_risk,
+        repeat_spike_dump_note=repeat_spike_dump_note,
     )
 
 
@@ -2012,6 +2072,8 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         lines.append(f"🧭 <b>Главный сценарий:</b> {ta.primary_scenario}")
     if ta.post_pump:
         lines.append("⚡ <b>Фаза:</b> консолидация после пампа")
+    if ta.repeat_spike_dump_note:
+        lines.append(f"🧪 <b>История монеты:</b> {ta.repeat_spike_dump_note}")
 
     if ta.breakout_level and (ta.dist_to_long_pct is None or ta.dist_to_long_pct <= 8.0):
         lines.append(
@@ -2051,38 +2113,38 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         else:
             lines.append(f"🎯 <b>Конкретика сейчас:</b> вход в SHORT только после нового подтверждения вниз · стоп {stop} · TP1 {tp}")
     elif ta.verdict == "LONG":
-        trig = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else "триггера вверх"
+        trig = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else None
         stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
         tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшего сопротивления"
-        lines.append(f"🎯 <b>Конкретика сейчас:</b> LONG только после 5m close выше {trig} · стоп {stop} · TP1 {tp}")
+        if trig:
+            lines.append(f"🎯 <b>Конкретика сейчас:</b> LONG только после 5m close выше {trig} · стоп {stop} · TP1 {tp}")
+        elif ta.entry_zone:
+            lo, hi = ta.entry_zone
+            lines.append(
+                f"🎯 <b>Конкретика сейчас:</b> ждать откат в <b>{fmt_price(lo)}–{fmt_price(hi)}</b> · "
+                f"вход в LONG только после сильной 5m свечи вверх · стоп {stop} · TP1 {tp}"
+            )
+        else:
+            lines.append(f"🎯 <b>Конкретика сейчас:</b> вход в LONG только после нового подтверждения вверх · стоп {stop} · TP1 {tp}")
     else:
         long_lvl = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else "уровня LONG"
         short_lvl = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else "уровня SHORT"
         lines.append(f"🎯 <b>Конкретика сейчас:</b> вне сделки; ждать 5m close выше {long_lvl} или ниже {short_lvl}")
 
-    lines.append(_manual_now_action_html(ta))
+    if ta.verdict == "WAIT":
+        lines.append(_manual_now_action_html(ta))
 
-    if ta.verdict == "LONG":
-        if ta.breakout_level:
-            lines.append(f"👉 <b>Действие:</b> LONG при закреплении выше <b>{fmt_price(ta.breakout_level)}</b>")
-        else:
-            lines.append("👉 <b>Действие:</b> LONG — ждать подтверждения роста")
-    elif ta.verdict == "SHORT":
-        if ta.breakdown_level:
-            lines.append(f"👉 <b>Действие:</b> SHORT при пробое ниже <b>{fmt_price(ta.breakdown_level)}</b>")
-        else:
-            lines.append("👉 <b>Действие:</b> SHORT — ждать подтверждения падения")
-    elif ta.action_priority == "short" and ta.breakdown_level:
+    if ta.verdict == "WAIT" and ta.action_priority == "short" and ta.breakdown_level:
         lines.append(
             f"👉 <b>Действие:</b> WAIT, но <b>приоритет SHORT</b> — "
             f"смотреть пробой <b>{fmt_price(ta.breakdown_level)}</b>"
         )
-    elif ta.action_priority == "long" and ta.breakout_level:
+    elif ta.verdict == "WAIT" and ta.action_priority == "long" and ta.breakout_level:
         lines.append(
             f"👉 <b>Действие:</b> WAIT, но <b>приоритет LONG</b> — "
             f"смотреть пробой <b>{fmt_price(ta.breakout_level)}</b>"
         )
-    else:
+    elif ta.verdict == "WAIT":
         long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "сопротивления"
         short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "поддержки"
         lines.append(
