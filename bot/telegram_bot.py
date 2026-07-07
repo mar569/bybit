@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -313,11 +314,14 @@ class TelegramBot:
         if self.application is None:
             return False
         async with self._send_lock:
+            # Telegram limits photo caption to 1024 chars; keep margin and avoid
+            # cutting HTML entities/tags in the middle by using plain-text fallback.
+            html_caption = (caption or "")[:1000]
             try:
                 await self.application.bot.send_photo(
                     chat_id=chat_id,
                     photo=png_bytes,
-                    caption=caption[:1024],
+                    caption=html_caption,
                     parse_mode=ParseMode.HTML,
                     disable_notification=not is_priority,
                     reply_markup=keyboard,
@@ -328,6 +332,22 @@ class TelegramBot:
                 logger.warning("Telegram chart flood chat %s, wait %ss", chat_id, exc.retry_after)
                 await asyncio.sleep(float(exc.retry_after) + 1.0)
                 return False
+            except BadRequest as exc:
+                logger.warning("Telegram chart BadRequest for chat %s: %s", chat_id, exc)
+                try:
+                    plain_caption = html.unescape((caption or "").replace("<", "").replace(">", ""))[:1000]
+                    await self.application.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=png_bytes,
+                        caption=plain_caption,
+                        disable_notification=not is_priority,
+                        reply_markup=keyboard,
+                    )
+                    self._last_send_time[chat_id] = time.time()
+                    return True
+                except Exception:
+                    logger.exception("Failed to send chart fallback to chat %s", chat_id)
+                    return False
             except Exception:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
