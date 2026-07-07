@@ -1895,6 +1895,106 @@ def _simple_manual_plan_line(ta: TAAnalysisResult) -> str:
     return "🧩 <b>План просто:</b> вне сделки, ждать понятный сигнал и не входить на эмоциях."
 
 
+def _manual_concrete_block(ta: TAAnalysisResult) -> list[str]:
+    """Жестко-практичный блок для ручного чата: вход / отмена / цель."""
+    lines: list[str] = []
+    price = ta.current_price if ta.current_price > 0 else 0.0
+    tp1 = ta.target_prices[0] if ta.target_prices else None
+    stop = ta.invalidation_price
+
+    if ta.verdict == "LONG":
+        if ta.breakout_level:
+            entry_line = f"вход после 5m close выше <b>{fmt_price(ta.breakout_level)}</b>"
+        elif ta.entry_zone:
+            lo, hi = ta.entry_zone
+            entry_line = f"вход от отката в <b>{fmt_price(lo)}–{fmt_price(hi)}</b> + бычья 5m свеча"
+        else:
+            entry_line = "вход только после нового подтверждения вверх"
+
+        bad_rr = False
+        if price > 0 and stop and tp1:
+            risk_pct = abs(price - stop) / price * 100.0
+            reward_pct = abs(tp1 - price) / price * 100.0
+            if risk_pct > 6.0 and reward_pct < 3.0:
+                bad_rr = True
+                lines.append(
+                    f"⛔ <b>СЕЙЧАС:</b> вход невыгоден (риск ~{risk_pct:.1f}% к TP1 ~{reward_pct:.1f}%). "
+                    "Лучше пропуск."
+                )
+        if not bad_rr:
+            lines.append(f"🎯 <b>СЕЙЧАС:</b> {entry_line}.")
+        if stop:
+            lines.append(f"🛑 <b>ОТМЕНА сценария:</b> ниже <b>{fmt_price(stop)}</b>.")
+        if tp1:
+            lines.append(f"✅ <b>БЛИЖНЯЯ ЦЕЛЬ:</b> <b>{fmt_price(tp1)}</b>.")
+        return lines
+
+    if ta.verdict == "SHORT":
+        if ta.breakdown_level:
+            entry_line = f"вход после 5m close ниже <b>{fmt_price(ta.breakdown_level)}</b>"
+        elif ta.entry_zone:
+            lo, hi = ta.entry_zone
+            entry_line = f"вход от отката в <b>{fmt_price(lo)}–{fmt_price(hi)}</b> + медвежья 5m свеча"
+        else:
+            entry_line = "вход только после нового подтверждения вниз"
+        lines.append(f"🎯 <b>СЕЙЧАС:</b> {entry_line}.")
+        if stop:
+            lines.append(f"🛑 <b>ОТМЕНА сценария:</b> выше <b>{fmt_price(stop)}</b>.")
+        if tp1:
+            lines.append(f"✅ <b>БЛИЖНЯЯ ЦЕЛЬ:</b> <b>{fmt_price(tp1)}</b>.")
+        return lines
+
+    long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "уровня long"
+    short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "уровня short"
+    lines.append(
+        f"🎯 <b>СЕЙЧАС:</b> вне сделки; ждать 5m close выше <b>{long_lvl}</b> или ниже <b>{short_lvl}</b>."
+    )
+    return lines
+
+
+def _manual_decision_block(ta: TAAnalysisResult) -> list[str]:
+    """Понятный блок решений без перегруза терминами."""
+    lines: list[str] = []
+    scenario = ta.primary_scenario or ("рост" if ta.verdict == "LONG" else "снижение" if ta.verdict == "SHORT" else "боковик/ожидание")
+    lines.append(f"🧭 <b>Вероятный сценарий 30–60м:</b> {scenario}.")
+
+    short_pressure = (
+        ta.action_priority == "short"
+        or any("давление вниз" in s for s in ta.factor_lines)
+        or ta.repeat_spike_dump_risk
+    )
+    if short_pressure and ta.momentum_pct <= -1.2:
+        risk = "высокий"
+    elif short_pressure:
+        risk = "средний"
+    else:
+        risk = "низкий"
+    why: list[str] = []
+    if ta.repeat_spike_dump_risk:
+        why.append("паттерн spike→dump")
+    if any("CVD↓" in s for s in ta.factor_lines):
+        why.append("CVD вниз")
+    if any("лонги ликвидированы" in s for s in ta.factor_lines):
+        why.append("смыв лонгов")
+    if ta.action_priority == "short":
+        why.append("приоритет short")
+    suffix = f" ({', '.join(why[:3])})" if why else ""
+    lines.append(f"📉 <b>Риск смыва лонгов:</b> {risk}{suffix}.")
+
+    if ta.verdict == "SHORT":
+        act = "искать short только после подтверждения свечой/ретеста уровня"
+        no_act = "не ловить long против импульса"
+    elif ta.verdict == "LONG":
+        act = "искать long только после подтверждения свечой и удержания уровня"
+        no_act = "не входить в long на пике без отката"
+    else:
+        act = "быть вне сделки до подтверждения уровня"
+        no_act = "не открывать позицию в середине движения"
+    lines.append(f"✅ <b>Что делать:</b> {act}.")
+    lines.append(f"⛔ <b>Что НЕ делать:</b> {no_act}.")
+    return lines
+
+
 def ta_action_summary_html(ta: TAAnalysisResult) -> str:
     """Короткий итог (3–5 строк)."""
     score = ta_display_score(ta)
@@ -2058,6 +2158,7 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         f"📍 <b>Сейчас:</b> {_situation_plain(ta)}",
         f"💡 <b>Смысл:</b> {_verdict_plain(ta)}",
     ]
+    lines.extend(_manual_decision_block(ta))
 
     dist_bits: list[str] = []
     if ta.dist_to_long_pct is not None:
@@ -2095,41 +2196,8 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         label = f" ({side_word})" if side_word else ""
         lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
 
+    lines.extend(_manual_concrete_block(ta))
     lines.append(_simple_manual_plan_line(ta))
-
-    # Сверхкороткий практический блок в начале действий.
-    if ta.verdict == "SHORT":
-        trig = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else None
-        stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
-        tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшей поддержки"
-        if trig:
-            lines.append(f"🎯 <b>Конкретика сейчас:</b> SHORT только после 5m close ниже {trig} · стоп {stop} · TP1 {tp}")
-        elif ta.entry_zone:
-            lo, hi = ta.entry_zone
-            lines.append(
-                f"🎯 <b>Конкретика сейчас:</b> ждать откат в <b>{fmt_price(lo)}–{fmt_price(hi)}</b> · "
-                f"вход в SHORT только после медвежьего 5m сигнала · стоп {stop} · TP1 {tp}"
-            )
-        else:
-            lines.append(f"🎯 <b>Конкретика сейчас:</b> вход в SHORT только после нового подтверждения вниз · стоп {stop} · TP1 {tp}")
-    elif ta.verdict == "LONG":
-        trig = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else None
-        stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
-        tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшего сопротивления"
-        if trig:
-            lines.append(f"🎯 <b>Конкретика сейчас:</b> LONG только после 5m close выше {trig} · стоп {stop} · TP1 {tp}")
-        elif ta.entry_zone:
-            lo, hi = ta.entry_zone
-            lines.append(
-                f"🎯 <b>Конкретика сейчас:</b> ждать откат в <b>{fmt_price(lo)}–{fmt_price(hi)}</b> · "
-                f"вход в LONG только после сильной 5m свечи вверх · стоп {stop} · TP1 {tp}"
-            )
-        else:
-            lines.append(f"🎯 <b>Конкретика сейчас:</b> вход в LONG только после нового подтверждения вверх · стоп {stop} · TP1 {tp}")
-    else:
-        long_lvl = f"<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else "уровня LONG"
-        short_lvl = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else "уровня SHORT"
-        lines.append(f"🎯 <b>Конкретика сейчас:</b> вне сделки; ждать 5m close выше {long_lvl} или ниже {short_lvl}")
 
     if ta.verdict == "WAIT":
         lines.append(_manual_now_action_html(ta))
