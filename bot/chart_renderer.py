@@ -597,6 +597,68 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
 
 def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     """PRO-версия: крупнее блоки и более явная структура."""
+    def _drop_dup_title(text: str, title: str) -> str:
+        if not text:
+            return ""
+        lines = text.splitlines()
+        if lines and lines[0].strip().upper() == title.strip().upper():
+            return "\n".join(lines[1:]).strip()
+        return text
+
+    def _pro_regime_label() -> str:
+        if ta.post_pump:
+            return "post-pump"
+        if ta.phase in {"impulse_up", "impulse_down"}:
+            return "trend"
+        if ta.phase in {"consolidation", "breakout_setup"}:
+            return "range"
+        if ta.phase == "post_crash_weak":
+            return "post-dump"
+        return ta.phase or "mixed"
+
+    def _pro_tradeability() -> str:
+        reason = (ta.verdict_reason or "").lower()
+        if "вход невыгоден" in reason:
+            return "NO TRADE"
+        if ta.verdict in {"LONG", "SHORT"}:
+            return "TRADE OK"
+        return "WAIT"
+
+    def _pro_multitf() -> str:
+        smc = ta.smc
+        if smc is None:
+            return "5m: local · 1h: n/a"
+        htf = smc.htf_structure_label or smc.htf_structure or "n/a"
+        align = "aligned" if smc.aligned_with_htf else "conflict"
+        return f"5m: {ta.market_bias} · 1h: {htf} ({align})"
+
+    def _pro_probabilities() -> tuple[int, int]:
+        base = max(50, min(90, int(ta.verdict_confidence * 10)))
+        if ta.verdict == "LONG":
+            long_p = base
+        elif ta.verdict == "SHORT":
+            long_p = 100 - base
+        elif ta.action_priority == "long":
+            long_p = max(52, min(70, 50 + ta.verdict_confidence))
+        elif ta.action_priority == "short":
+            long_p = max(30, min(48, 50 - ta.verdict_confidence))
+        else:
+            long_p = 50
+        short_p = 100 - long_p
+        return long_p, short_p
+
+    def _pro_poi() -> str:
+        if ta.entry_zone:
+            lo, hi = ta.entry_zone
+            return f"{fmt_price(lo)}–{fmt_price(hi)}"
+        if ta.breakout_level and ta.breakdown_level:
+            return f"{fmt_price(ta.breakdown_level)} / {fmt_price(ta.breakout_level)}"
+        if ta.breakout_level:
+            return fmt_price(ta.breakout_level)
+        if ta.breakdown_level:
+            return fmt_price(ta.breakdown_level)
+        return "n/a"
+
     left_x, right_x = 0.010, 0.990
     text_color = CHART_STYLE["text"]
     panel_fc = "#101828"
@@ -613,7 +675,10 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     fig.text(
         left_x,
         0.985,
-        "КЛЮЧЕВЫЕ УРОВНИ\n" + (ta_chart_key_levels_text(ta) or "уровни не определены"),
+        "КЛЮЧЕВЫЕ УРОВНИ\n" + (
+            _drop_dup_title(ta_chart_key_levels_text(ta), "КЛЮЧЕВЫЕ УРОВНИ")
+            or "уровни не определены"
+        ),
         ha="left",
         va="top",
         **base,
@@ -621,7 +686,10 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     fig.text(
         left_x,
         0.64,
-        "ПЛАН ДЕЙСТВИЙ\n" + (ta_chart_plan_text(ta) or "ожидать подтверждения"),
+        "ПЛАН ДЕЙСТВИЙ\n" + (
+            _drop_dup_title(ta_chart_plan_text(ta), "ПЛАН ДЕЙСТВИЙ")
+            or "ожидать подтверждения"
+        ),
         ha="left",
         va="top",
         **base,
@@ -629,7 +697,10 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     fig.text(
         left_x,
         0.30,
-        "КОНТЕКСТ\n" + (ta_chart_context_text(ta) or "контекст недоступен"),
+        "КОНТЕКСТ\n" + (
+            _drop_dup_title(ta_chart_context_text(ta), "КОНТЕКСТ")
+            or "контекст недоступен"
+        ),
         ha="left",
         va="top",
         fontsize=7.0,
@@ -642,10 +713,31 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     fig.text(
         right_x,
         0.985,
-        "ИТОГ\n" + ta_chart_panel_text(ta),
+        "ИТОГ\n" + _drop_dup_title(ta_chart_panel_text(ta), "ИТОГ"),
         ha="right",
         va="top",
         **base,
+    )
+    long_p, short_p = _pro_probabilities()
+    meta_lines = [
+        "PRO META",
+        f"Regime: {_pro_regime_label()}",
+        f"Tradeability: {_pro_tradeability()}",
+        f"Multi-TF: {_pro_multitf()}",
+        f"Probabilities: LONG {long_p}% / SHORT {short_p}%",
+        f"POI zone: {_pro_poi()}",
+    ]
+    fig.text(
+        right_x,
+        0.86,
+        "\n".join(meta_lines),
+        ha="right",
+        va="top",
+        fontsize=7.0,
+        color="#b3d4ff",
+        transform=fig.transFigure,
+        linespacing=1.28,
+        bbox=dict(boxstyle="round,pad=0.40", facecolor="#0f1a2b", edgecolor="#355c8a", alpha=0.97),
     )
     bull = ta.bullish_scenario
     if bull:
