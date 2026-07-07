@@ -66,6 +66,7 @@ from .manual_ta import (
 from .ta_analysis import (
     detect_repeat_spike_dump_risk,
     format_scenario_update_html,
+    evaluate_entry_readiness,
     ta_manual_detailed_html,
     ta_signal_caption_html,
     ta_telegram_caption_html,
@@ -280,6 +281,19 @@ class TelegramBot:
             reply_markup=self._notifications_keyboard(),
         )
         return True
+
+    def _eval_signal_readiness(self, ta: Any, signal: Signal) -> tuple[bool, str]:
+        s = self.settings_manager.settings
+        return evaluate_entry_readiness(
+            ta,
+            signal.side,
+            signal.signal_score,
+            min_ta_score=s.actionable_min_ta_score,
+            max_trigger_dist_pct=s.actionable_max_trigger_dist_pct,
+            min_timing_score=s.actionable_min_signal_score,
+            max_timing_score=s.actionable_max_signal_score,
+            require_smc=s.actionable_require_smc,
+        )
 
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
@@ -667,7 +681,12 @@ class TelegramBot:
 
         sent_any = False
         ta_result = None
-        if settings.signal_chart_enabled:
+        readiness: tuple[bool, str] | None = None
+        need_ta = settings.signal_chart_enabled or (
+            not skip_dedupe
+            and (settings.actionable_signals_only or settings.actionable_show_readiness_badge)
+        )
+        if need_ta:
             ms = signal.details.get("market_structure")
             warning = ""
             if isinstance(ms, dict):
@@ -688,34 +707,81 @@ class TelegramBot:
             png = None
             chart_source = ""
             chart_fail = ""
-            try:
-                png, chart_source, ta_result, chart_fail = await asyncio.wait_for(
-                    get_signal_chart_png(
+            if settings.signal_chart_enabled:
+                try:
+                    png, chart_source, ta_result, chart_fail = await asyncio.wait_for(
+                        get_signal_chart_png(
+                            signal.exchange,
+                            signal.symbol,
+                            chart_source=settings.signal_chart_source,
+                            chart_hours=settings.signal_chart_hours,
+                            chart_interval_minutes=settings.signal_chart_interval_minutes,
+                            side=signal.side,
+                            structure_warning=warning,
+                            probability_percent=float(
+                                signal.details.get("probability_percent", 0) or 0
+                            ),
+                            coinglass_url=signal.link,
+                            oi_bars=oi_bars,
+                            liq_context=liq_context,
+                        ),
+                        timeout=35.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Chart capture timeout for %s", signal.symbol)
+                    chart_fail = "общий timeout 35с"
+                except Exception:
+                    logger.exception("Chart capture failed for %s", signal.symbol)
+                    chart_fail = "исключение при построении"
+            else:
+                try:
+                    _, ta_result = await asyncio.wait_for(
+                        render_annotated_chart(
+                            signal.symbol,
+                            side=signal.side,
+                            hours=settings.signal_chart_hours,
+                            interval_minutes=settings.signal_chart_interval_minutes,
+                            oi_bars=oi_bars,
+                            liq_context=liq_context,
+                            neutral=True,
+                            chart_source=settings.signal_chart_source,
+                            exchange=signal.exchange.lower(),
+                        ),
+                        timeout=35.0,
+                    )
+                except Exception:
+                    logger.exception("TA-only fetch failed for %s", signal.symbol)
+
+            if ta_result is not None:
+                readiness = self._eval_signal_readiness(ta_result, signal)
+
+            if settings.actionable_signals_only and not skip_dedupe:
+                if ta_result is None:
+                    logger.info(
+                        "Telegram skip %s %s: actionable filter needs TA",
                         signal.exchange,
                         signal.symbol,
-                        chart_source=settings.signal_chart_source,
-                        chart_hours=settings.signal_chart_hours,
-                        chart_interval_minutes=settings.signal_chart_interval_minutes,
-                        side=signal.side,
-                        structure_warning=warning,
-                        probability_percent=float(
-                            signal.details.get("probability_percent", 0) or 0
-                        ),
-                        coinglass_url=signal.link,
-                        oi_bars=oi_bars,
-                        liq_context=liq_context,
-                    ),
-                    timeout=35.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Chart capture timeout for %s", signal.symbol)
-                chart_fail = "общий timeout 35с"
-            except Exception:
-                logger.exception("Chart capture failed for %s", signal.symbol)
-                chart_fail = "исключение при построении"
-            chart_caption = message
+                    )
+                    return
+                ready, reason = readiness or (False, "нет TA")
+                if not ready:
+                    logger.info(
+                        "Telegram skip %s %s: not actionable — %s",
+                        signal.exchange,
+                        signal.symbol,
+                        reason,
+                    )
+                    return
+
+            ta_caption = ""
             if ta_result is not None:
-                chart_caption = f"{message}\n\n{ta_signal_caption_html(ta_result, signal_side=signal.side)}"
+                ta_caption = ta_signal_caption_html(
+                    ta_result,
+                    signal_side=signal.side,
+                    readiness=readiness,
+                    show_readiness_badge=settings.actionable_show_readiness_badge,
+                )
+            chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
@@ -728,6 +794,10 @@ class TelegramBot:
                     chart_fail,
                     settings.signal_chart_source,
                     settings.signal_chart_enabled,
+                )
+            elif ta_caption and not settings.signal_chart_enabled:
+                sent_any = await self._send_to_chat(
+                    notify_chat_id, chart_caption, keyboard, is_priority,
                 )
 
         if not sent_any:
@@ -2495,6 +2565,9 @@ class TelegramBot:
             f"крупн. <b>${s.liquidation_min_usd:,.0f}</b> · окно <b>{int(s.liquidation_sliding_window_seconds)}с</b>)\n"
             f"🎯 Фильтр вероятности: <b>{'ON' if s.probability_filter_enabled else 'OFF'}</b> "
             f"(мин. <b>{s.min_probability_percent:.0f}%</b>)\n"
+            f"✅ Только готовые входы: <b>{'ON' if s.actionable_signals_only else 'OFF'}</b> "
+            f"(TA≥<b>{s.actionable_min_ta_score}</b>/10 · триггер ≤<b>{s.actionable_max_trigger_dist_pct:g}%</b> · "
+            f"⏱ <b>{s.actionable_min_signal_score}–{s.actionable_max_signal_score}</b>/10)\n"
             f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
             f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
@@ -2883,6 +2956,17 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._settings_keyboard(),
             )
+        elif payload == "toggle_actionable":
+            current = self.settings_manager.settings.actionable_signals_only
+            self.settings_manager.update(actionable_signals_only=not current)
+            state = "ON" if not current else "OFF"
+            await query.answer(f"✅ Готовый вход → {state}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
         elif payload == "refresh_settings":
             self.settings_manager.reload()
             await self._safe_edit_message_text(
@@ -3103,6 +3187,15 @@ class TelegramBot:
         )
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🎛 Каналы", callback_data="open_channels")],
+            [
+                InlineKeyboardButton(
+                    self._mark(
+                        f"Готовый вход {'ON' if s.actionable_signals_only else 'OFF'}",
+                        s.actionable_signals_only,
+                    ),
+                    callback_data="toggle_actionable",
+                ),
+            ],
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),

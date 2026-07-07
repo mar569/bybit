@@ -238,6 +238,16 @@ class ScannerSettings:
 
     min_probability_percent: float = 72.0
     probability_filter_enabled: bool = True
+
+    # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
+    actionable_signals_only: bool = False
+    actionable_min_ta_score: int = 7
+    actionable_max_trigger_dist_pct: float = 1.8
+    actionable_min_signal_score: int = 3
+    actionable_max_signal_score: int = 9
+    actionable_require_smc: bool = False
+    actionable_show_readiness_badge: bool = True
+
     outcome_tracking_enabled: bool = True
 
     # Фаза 2: watch после WAIT+прогноз, пуш при старте отката/продолжения
@@ -572,6 +582,13 @@ class ScannerSettings:
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
             min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
+            actionable_signals_only=bool(base.get("actionable_signals_only", False)),
+            actionable_min_ta_score=int(base.get("actionable_min_ta_score", 7)),
+            actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 1.8)),
+            actionable_min_signal_score=int(base.get("actionable_min_signal_score", 3)),
+            actionable_max_signal_score=int(base.get("actionable_max_signal_score", 9)),
+            actionable_require_smc=bool(base.get("actionable_require_smc", False)),
+            actionable_show_readiness_badge=bool(base.get("actionable_show_readiness_badge", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
             scenario_watch_enabled=bool(base.get("scenario_watch_enabled", True)),
             scenario_watch_minutes=int(base.get("scenario_watch_minutes", 45)),

@@ -2488,6 +2488,74 @@ def ta_scanner_conflict_line_html(ta: TAAnalysisResult, signal_side: str | None)
     return ""
 
 
+def evaluate_entry_readiness(
+    ta: TAAnalysisResult,
+    signal_side: str,
+    signal_score: int | float,
+    *,
+    min_ta_score: int = 7,
+    max_trigger_dist_pct: float = 1.8,
+    min_timing_score: int = 3,
+    max_timing_score: int = 9,
+    require_smc: bool = False,
+) -> tuple[bool, str]:
+    """Готов ли сигнал к входу: TA LONG/SHORT, триггер близко, без конфликтов."""
+    timing = int(round(float(signal_score)))
+    if timing < min_timing_score:
+        return False, f"рано для входа ({timing}/10)"
+    if timing > max_timing_score:
+        return False, f"поздно ({timing}/10)"
+
+    if "вход невыгоден" in (ta.verdict_reason or "").lower():
+        return False, "плохой R:R"
+
+    if ta_conflicts_with_signal(ta, signal_side):
+        return False, "сканер и TA в разные стороны"
+
+    if ta.verdict == "WAIT":
+        return False, "TA ждёт пробой уровня"
+
+    score = ta_display_score(ta)
+    if score < min_ta_score:
+        return False, f"TA {score}/10 — слабый сетап"
+
+    if ta.verdict == "LONG":
+        if not ta.breakout_level or ta.current_price <= 0:
+            return False, "нет уровня LONG"
+        dist = ta.dist_to_long_pct
+        if dist is None:
+            dist = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
+        if dist > max_trigger_dist_pct:
+            return False, f"LONG ещё далеко ({dist:.1f}%)"
+        if dist < -0.75:
+            return False, "цена уже выше входа — ждите ретест"
+    elif ta.verdict == "SHORT":
+        if not ta.breakdown_level or ta.current_price <= 0:
+            return False, "нет уровня SHORT"
+        dist = ta.dist_to_short_pct
+        if dist is None:
+            dist = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
+        if dist > max_trigger_dist_pct:
+            return False, f"SHORT ещё далеко ({dist:.1f}%)"
+        if dist < -0.75:
+            return False, "цена уже ниже входа — ждите ретест"
+    else:
+        return False, "нет направления TA"
+
+    if require_smc and ta.smc:
+        smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
+        if not smc_ok:
+            return False, "SMC не готов (нет expansion/sweep)"
+
+    return True, "TA подтверждает вход"
+
+
+def entry_readiness_line_html(ready: bool, reason: str) -> str:
+    if ready:
+        return "✅ <b>Готов к входу</b> — можно открывать по плану TA"
+    return f"⏳ <b>Рано / ждать</b> · {reason}"
+
+
 def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
     """Одна простая строка прогноза для сигналов: откат или продолжение."""
     corr = ta.correction_path
@@ -2692,10 +2760,16 @@ def ta_signal_caption_html(
     ta: TAAnalysisResult,
     *,
     signal_side: str | None = None,
+    readiness: tuple[bool, str] | None = None,
+    show_readiness_badge: bool = True,
 ) -> str:
     """Сигналы: TA + одна строка сценария (согласовано с направлением сигнала)."""
     score = ta_display_score(ta)
     sig = (signal_side or "").lower()
+
+    lines: list[str] = []
+    if readiness is not None and show_readiness_badge:
+        lines.append(entry_readiness_line_html(readiness[0], readiness[1]))
 
     if ta.verdict == "LONG":
         line = f"📐 TA · <b>LONG</b> {score}/10"
@@ -2736,7 +2810,9 @@ def ta_signal_caption_html(
     if smc_line:
         extra.append(smc_line)
     if extra:
-        return base + "\n" + "\n".join(extra)
+        base = base + "\n" + "\n".join(extra)
+    if lines:
+        return "\n".join(lines) + "\n" + base
     return base
 
 
