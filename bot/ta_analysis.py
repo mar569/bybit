@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from .bybit_klines import KlineBar
 from .market_structure import FiveMinOiBar, MarketStructureContext, analyze_market_structure
+from .smc_analysis import SmcContext, analyze_smc, format_smc_compact_html, smc_verdict_boost
 from .ta_range_trade import RangeTradeSetup, build_factor_context, evaluate_range_trade
 
 
@@ -157,6 +158,9 @@ class TAAnalysisResult:
     dist_to_short_pct: float | None = None
     post_pump: bool = False
     primary_scenario: str = ""
+    smc: SmcContext | None = None
+    smc_score: int = 0
+    smc_summary: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -879,6 +883,7 @@ def _resolve_verdict(
     btc_ctx: str,
     momentum: str = "flat",
     btc_spread: float | None = None,
+    smc: SmcContext | None = None,
 ) -> tuple[str, int, str]:
     score = 5
     reasons: list[str] = []
@@ -973,6 +978,15 @@ def _resolve_verdict(
     elif ms.range_position < 0.22:
         score -= 1 if is_long else 1
         reasons.append("у дна range")
+    if smc is not None:
+        boost = smc_verdict_boost(smc, is_long=is_long)
+        score += boost
+        if boost >= 2 and smc.reversal_ready:
+            reasons.append("паттерн разворота")
+        elif boost >= 1 and smc.structure_break:
+            reasons.append("слом структуры")
+        elif boost <= -2:
+            reasons.append("против HTF/SMC")
     score = int(_clamp(score, 1, 9))
     if score >= 7:
         verdict = "LONG" if is_long else "SHORT"
@@ -1220,6 +1234,7 @@ def _resolve_neutral_verdict(
     range_trade: RangeTradeSetup | None = None,
     factor_long_boost: int = 0,
     factor_short_boost: int = 0,
+    smc: SmcContext | None = None,
 ) -> tuple[str, int, str]:
     long_v, long_s, long_r = _resolve_verdict(
         is_long=True,
@@ -1229,6 +1244,7 @@ def _resolve_neutral_verdict(
         btc_ctx=btc_ctx,
         momentum=momentum,
         btc_spread=btc_spread,
+        smc=smc,
     )
     short_v, short_s, short_r = _resolve_verdict(
         is_long=False,
@@ -1238,6 +1254,7 @@ def _resolve_neutral_verdict(
         btc_ctx=btc_ctx,
         momentum=momentum,
         btc_spread=btc_spread,
+        smc=smc,
     )
 
     long_s = min(9, long_s + factor_long_boost)
@@ -1364,11 +1381,13 @@ def run_ta_analysis(
     is_long: bool = True,
     oi_bars: list[FiveMinOiBar] | None = None,
     btc_bars: list[KlineBar] | None = None,
+    htf_bars: list[KlineBar] | None = None,
     symbol: str = "",
     hours: int = 5,
     invalidation_price: float | None = None,
     neutral: bool = False,
     liq_context: dict | None = None,
+    interval_minutes: int = 5,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -1397,6 +1416,9 @@ def run_ta_analysis(
         bars, swings, max_dist_pct=12.0,
     )
     signal_markers = detect_signal_markers(bars, levels)
+    smc = analyze_smc(
+        bars, htf_bars=htf_bars, swings=swings, interval_minutes=interval_minutes,
+    )
     ms = analyze_market_structure(bars, oi_bars, is_long=is_long, hours=hours)
     btc_ctx = ""
     btc_spread: float | None = None
@@ -1431,6 +1453,7 @@ def run_ta_analysis(
         btc_ctx=btc_ctx,
         momentum=momentum,
         btc_spread=btc_spread,
+        smc=smc,
     )
     short_v, short_s, _ = _resolve_verdict(
         is_long=False,
@@ -1440,6 +1463,7 @@ def run_ta_analysis(
         btc_ctx=btc_ctx,
         momentum=momentum,
         btc_spread=btc_spread,
+        smc=smc,
     )
     action_priority = _action_priority(
         current=current,
@@ -1480,6 +1504,7 @@ def run_ta_analysis(
             range_trade=range_trade,
             factor_long_boost=factors.liq_long_boost + (1 if factors.cvd_ratio >= 0.62 else 0),
             factor_short_boost=factors.liq_short_boost + (1 if factors.cvd_ratio <= 0.38 else 0),
+            smc=smc,
         )
     else:
         verdict, conf, reason = _resolve_verdict(
@@ -1490,6 +1515,7 @@ def run_ta_analysis(
             btc_ctx=btc_ctx,
             momentum=momentum,
             btc_spread=btc_spread,
+            smc=smc,
         )
         verdict, conf, reason = _apply_signal_context_verdict(
             verdict=verdict,
@@ -1624,6 +1650,9 @@ def run_ta_analysis(
         dist_to_short_pct=dist_to_short_pct,
         post_pump=post_pump,
         primary_scenario=primary_scenario,
+        smc=smc,
+        smc_score=smc.smc_score,
+        smc_summary=smc.summary,
     )
 
 
@@ -1845,7 +1874,11 @@ def ta_signal_caption_html(
         else:
             extra = ""
         line = f"📐 TA · WAIT {score}/10{extra}"
-    return f"{line}\n{ta_signal_scenario_line_html(ta, signal_side=signal_side)}"
+    smc_line = format_smc_compact_html(ta.smc) if ta.smc and ta.smc.smc_score >= 4 else ""
+    base = f"{line}\n{ta_signal_scenario_line_html(ta, signal_side=signal_side)}"
+    if smc_line:
+        return f"{base}\n{smc_line}"
+    return base
 
 
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
@@ -1921,6 +1954,8 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
 
     if ta.verdict_reason:
         lines.append(f"<i>Примечание: {ta.verdict_reason[:120]}</i>")
+    if ta.smc and ta.smc.checklist:
+        lines.append(format_smc_compact_html(ta.smc))
     return "\n".join(lines)
 
 

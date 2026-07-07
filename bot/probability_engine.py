@@ -6,6 +6,7 @@ from typing import Any
 
 from .models import Signal
 from .settings import ExchangeThresholds, ScannerSettings
+from .smc_analysis import smc_strength_from_dict
 
 PROBABILITY_BYPASS_TYPES = frozenset({
     "vertical_pump",
@@ -29,11 +30,12 @@ FACTOR_WEIGHTS: dict[str, float] = {
     "rsi": 0.05,
     "funding": 0.04,
     "liquidity": 0.02,
-    "pattern": 0.07,
-    "timing": 0.04,
+    "pattern": 0.06,
+    "timing": 0.03,
     "btc": 0.06,
-    "market_phase": 0.06,
-    "htf_oi_context": 0.04,
+    "market_phase": 0.05,
+    "htf_oi_context": 0.03,
+    "smc_alignment": 0.04,
     "long_short": 0.05,
     "liquidations": 0.04,
 }
@@ -292,6 +294,7 @@ def assess_signal_probability(
     btc_change_percent: float | None = None,
     vol_spike: bool = False,
     market_structure: dict[str, object] | None = None,
+    smc: dict[str, object] | None = None,
     account_ratio: dict[str, object] | None = None,
     liquidations: dict[str, object] | None = None,
 ) -> ProbabilityAssessment:
@@ -374,6 +377,10 @@ def assess_signal_probability(
         btc_strength = _clamp(0.5 - btc_change_percent / 0.8, 0.0, 1.0)
 
     ms = market_structure or signal.details.get("market_structure")
+    smc_data = smc or signal.details.get("smc")
+    smc_strength = smc_strength_from_dict(
+        smc_data if isinstance(smc_data, dict) else None, is_long=is_long,
+    )
     if isinstance(ms, dict) and ms.get("phase"):
         phase_strength = float(ms.get("phase_strength", 0.5))
         oi_ctx_strength = float(ms.get("oi_context_strength", 0.5))
@@ -430,6 +437,7 @@ def assess_signal_probability(
         "btc": btc_strength,
         "market_phase": phase_strength,
         "htf_oi_context": oi_ctx_strength,
+        "smc_alignment": smc_strength,
         "long_short": long_short_strength,
         "liquidations": liquidation_strength,
     }
@@ -575,6 +583,17 @@ def assess_signal_probability(
             oi_label or str(ms.get("oi_narrative", "")),
         ))
 
+    if isinstance(smc_data, dict) and smc_data.get("smc_score", 0):
+        smc_detail = str(smc_data.get("summary", "")) or f"score {smc_data.get('smc_score', 0)}/10"
+        factors.append(ProbabilityFactor(
+            "smc_alignment",
+            "SMC / разворот",
+            smc_strength,
+            FACTOR_WEIGHTS["smc_alignment"],
+            smc_strength * FACTOR_WEIGHTS["smc_alignment"] * 72,
+            smc_detail[:80],
+        ))
+
     if isinstance(ar, dict) and ls_ratio is not None:
         factors.append(ProbabilityFactor(
             "long_short",
@@ -683,6 +702,7 @@ def format_probability_compact(
         "timing": "ранность",
         "rsi": "RSI",
         "pattern": "паттерн",
+        "smc_alignment": "SMC",
         "market_phase": "фаза",
         "structure_penalty": "структура",
         "liquidations": "ликв.",

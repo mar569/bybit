@@ -358,6 +358,73 @@ def _draw_signal_markers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         )
 
 
+def _draw_smc_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    smc = ta.smc
+    if smc is None or not bars:
+        return
+    x0 = mdates.date2num(_idx_to_date(bars, max(0, len(bars) - 50)))
+    x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    width = max(x1 - x0, 0.001)
+    smc_color = "#f0c040"
+
+    for gap in smc.fvgs[-3:]:
+        color = "#3ddc84" if gap.direction == "bullish" else "#ff6b6b"
+        rect = Rectangle(
+            (mdates.date2num(_idx_to_date(bars, gap.start_idx)), gap.bottom),
+            mdates.date2num(_idx_to_date(bars, gap.end_idx)) - mdates.date2num(_idx_to_date(bars, gap.start_idx)),
+            gap.top - gap.bottom,
+            facecolor=color, edgecolor=color, alpha=0.18, linewidth=0.8,
+        )
+        ax.add_patch(rect)
+
+    if smc.discount_zone:
+        lo, hi = smc.discount_zone
+        rect = Rectangle(
+            (x0, lo), width, hi - lo,
+            facecolor=smc_color, edgecolor=smc_color, alpha=0.12, linewidth=0.8, linestyle="--",
+        )
+        ax.add_patch(rect)
+        ax.text(x0, hi, "  зона дисконта", color=smc_color, fontsize=6.5, va="bottom")
+
+    if smc.premium_zone:
+        lo, hi = smc.premium_zone
+        rect = Rectangle(
+            (x0, lo), width, hi - lo,
+            facecolor="#ff8c42", edgecolor="#ff8c42", alpha=0.12, linewidth=0.8, linestyle="--",
+        )
+        ax.add_patch(rect)
+        ax.text(x0, hi, "  зона премии", color="#ff8c42", fontsize=6.5, va="bottom")
+
+    if smc.equilibrium_50:
+        ax.axhline(smc.equilibrium_50, color=smc_color, linestyle=":", linewidth=0.9, alpha=0.75)
+        ax.text(x1, smc.equilibrium_50, " 50%", color=smc_color, fontsize=6.5, va="center")
+
+    if smc.structure_break_level:
+        ax.axhline(
+            smc.structure_break_level, color=smc_color, linestyle="-.", linewidth=1.0, alpha=0.85,
+        )
+        ax.text(
+            x1, smc.structure_break_level, " BOS",
+            color=smc_color, fontsize=7, va="bottom",
+        )
+
+    for lv in smc.liquidity_levels[:4]:
+        ls = ":" if "daily" in lv.kind or "weekly" in lv.kind else "-"
+        color = "#8899aa"
+        ax.axhline(lv.price, color=color, linestyle=ls, linewidth=0.6, alpha=0.5)
+
+    for marker in smc.markers:
+        if marker.index >= len(bars):
+            continue
+        ts = _idx_to_date(bars, marker.index)
+        color = CHART_STYLE["accent_long"] if marker.direction == "long" else CHART_STYLE["accent_short"]
+        ax.plot(ts, marker.price, marker="*", color=color, markersize=9, linestyle="None")
+        ax.text(
+            mdates.date2num(ts), marker.price, f" {marker.label}",
+            color=color, fontsize=6.5, va="bottom",
+        )
+
+
 def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
@@ -365,6 +432,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     x_end = times[-1]
 
     _draw_zones(ax, bars, ta)
+    _draw_smc_annotations(ax, bars, ta)
     _draw_channel(ax, bars, ta)
     _draw_extended_trend_lines(ax, bars, ta)
     _draw_consolidation_box(ax, bars, ta)
@@ -918,8 +986,11 @@ async def render_annotated_chart(
         return None, None
 
     btc_bars: list[KlineBar] | None = None
+    htf_bars: list[KlineBar] | None = None
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_bars = await _fetch_bars("BTCUSDT", hours, interval_minutes=interval_minutes)
+    if interval_minutes <= 15:
+        htf_bars = await _fetch_bars(symbol, max(24, hours * 2), interval_minutes=60)
 
     is_long = side == "long"
     ta = run_ta_analysis(
@@ -927,11 +998,13 @@ async def render_annotated_chart(
         is_long=is_long,
         oi_bars=oi_bars,
         btc_bars=btc_bars,
+        htf_bars=htf_bars,
         symbol=symbol,
         hours=hours,
         invalidation_price=invalidation_price,
         neutral=neutral,
         liq_context=liq_context,
+        interval_minutes=interval_minutes,
     )
     if verdict_override:
         ta.verdict = verdict_override

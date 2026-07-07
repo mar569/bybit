@@ -13,6 +13,7 @@ from .bybit_klines import BybitKlineCache
 from .bybit_market_data import BybitAccountRatioCache
 from .bybit_liquidations import BybitLiquidationTracker
 from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_time
+from .smc_analysis import analyze_smc, smc_to_dict
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 from .symbol_tiers import TierThresholds, tier_thresholds
@@ -597,6 +598,7 @@ class SignalEngine:
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
 
             market_structure_dict = None
+            smc_dict = None
             account_ratio_dict = None
             liquidations_dict = None
             if "bybit" in exchange.lower():
@@ -610,6 +612,13 @@ class SignalEngine:
                         hours=settings.market_structure_hours,
                     )
                     market_structure_dict = ms_ctx.to_dict()
+                    htf_klines = await self._kline_cache.get_klines(
+                        symbol, limit=48, interval_minutes=60,
+                    )
+                    smc_ctx = analyze_smc(
+                        klines, htf_bars=htf_klines or None, interval_minutes=5,
+                    )
+                    smc_dict = smc_to_dict(smc_ctx)
 
                 ratio = await self._account_ratio_cache.get_ratio(symbol)
                 if ratio is not None:
@@ -671,6 +680,7 @@ class SignalEngine:
                     **(candidate.breakout_meta or {}),
                     **({"symbol_tier": tier.tier.value} if settings.tier_enabled else {}),
                     **({"market_structure": market_structure_dict} if market_structure_dict else {}),
+                    **({"smc": smc_dict} if smc_dict else {}),
                     **({"account_ratio": account_ratio_dict} if account_ratio_dict else {}),
                     **({"liquidations": liquidations_dict} if liquidations_dict else {}),
                 },
@@ -683,6 +693,7 @@ class SignalEngine:
                 btc_change_percent=self.get_btc_change_percent(5),
                 vol_spike=vol_spike,
                 market_structure=market_structure_dict,
+                smc=smc_dict,
                 account_ratio=account_ratio_dict,
                 liquidations=liquidations_dict,
             )

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15)
+MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 60)
 MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
@@ -32,9 +32,13 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
         return None, None
     cleaned = text.strip()
     interval: int | None = None
-    tf_match = re.search(r"\b(5|10|15)\s*m(?:in(?:ute)?s?)?\b", cleaned, flags=re.IGNORECASE)
+    tf_match = re.search(
+        r"\b(5|10|15|60)\s*m(?:in(?:ute)?s?)?\b|(?:^|\s)(1)\s*h(?:our)?s?\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     if tf_match:
-        interval = int(tf_match.group(1))
+        interval = 60 if tf_match.group(2) else int(tf_match.group(1))
         cleaned = cleaned[: tf_match.start()] + cleaned[tf_match.end() :]
     cleaned = cleaned.strip(" ,.;:")
     if not cleaned:
@@ -46,7 +50,7 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 
 def manual_ta_hours(interval_minutes: int) -> int:
-    return {5: 5, 10: 8, 15: 10}.get(interval_minutes, 5)
+    return {5: 5, 10: 8, 15: 10, 60: 48}.get(interval_minutes, 5)
 
 
 def bars_per_hour(interval_minutes: int) -> int:
