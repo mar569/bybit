@@ -1763,14 +1763,14 @@ def _manual_now_action_html(ta: TAAnalysisResult) -> str:
 
     if ta.verdict == "SHORT" and breakdown and current > 0 and current <= breakdown * 1.003:
         return (
-            "🚨 <b>Прямо сейчас:</b> слив активен — "
-            "лонг не ловить. Ищите short от отката к пробитой поддержке."
+            "🚨 <b>Прямо сейчас:</b> short-план активен. "
+            "Не ловить лонг, входить только после подтверждения и лучше от ретеста уровня."
         )
     if ta.verdict == "SHORT" and breakdown and current > 0:
         dist = max(0.0, (current - breakdown) / current * 100.0)
         return (
-            f"🚨 <b>Прямо сейчас:</b> приоритет SHORT. "
-            f"До триггера вниз ~<b>{dist:.1f}%</b>; вход только после закрытия 5m ниже <b>{fmt_price(breakdown)}</b>."
+            f"🚨 <b>Прямо сейчас:</b> short в приоритете, но не с рынка. "
+            f"Ждать 5m закрытие ниже <b>{fmt_price(breakdown)}</b> (до уровня ~<b>{dist:.1f}%</b>)."
         )
     if ta.verdict == "WAIT" and ta.action_priority == "short" and breakdown and current > 0 and current <= breakdown * 1.012:
         return (
@@ -1788,7 +1788,34 @@ def _manual_now_action_html(ta: TAAnalysisResult) -> str:
             f"🚨 <b>Прямо сейчас:</b> long-сетап активируется у <b>{fmt_price(breakout)}</b>. "
             "Не входить в середине свечи — лучше ретест/закрепление."
         )
-    return "🚨 <b>Прямо сейчас:</b> режим ожидания — вход только по триггерам и подтверждению свечой."
+    return "🚨 <b>Прямо сейчас:</b> вне сделки. Ждать подтверждение уровня и не входить в середине движения."
+
+
+def _simple_manual_plan_line(ta: TAAnalysisResult) -> str:
+    """Одна простая строка: что делать без терминов."""
+    long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else None
+    short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else None
+
+    if ta.verdict == "SHORT":
+        if short_lvl:
+            return (
+                f"🧩 <b>План просто:</b> сейчас не прыгать в сделку; "
+                f"ждать закрытие 5m ниже <b>{short_lvl}</b>, затем вход в short от ретеста."
+            )
+        return "🧩 <b>План просто:</b> short по тренду, но только после нового подтверждения вниз."
+    if ta.verdict == "LONG":
+        if long_lvl:
+            return (
+                f"🧩 <b>План просто:</b> ждать закрытие 5m выше <b>{long_lvl}</b>, "
+                "входить в long от отката к уровню."
+            )
+        return "🧩 <b>План просто:</b> long только после явного подтверждения роста."
+    if long_lvl and short_lvl:
+        return (
+            f"🧩 <b>План просто:</b> вне сделки. "
+            f"Long только выше <b>{long_lvl}</b>, short только ниже <b>{short_lvl}</b>."
+        )
+    return "🧩 <b>План просто:</b> вне сделки, ждать понятный сигнал и не входить на эмоциях."
 
 
 def ta_action_summary_html(ta: TAAnalysisResult) -> str:
@@ -1989,9 +2016,15 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         label = f" ({side_word})" if side_word else ""
         lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
 
+    lines.append(_simple_manual_plan_line(ta))
+
     # Сверхкороткий практический блок в начале действий.
     if ta.verdict == "SHORT":
-        trig = f"<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else "триггера вниз"
+        trig = (
+            f"<b>{fmt_price(ta.breakdown_level)}</b>"
+            if ta.breakdown_level
+            else (f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "подтверждения вниз")
+        )
         stop = f"<b>{fmt_price(ta.invalidation_price)}</b>" if ta.invalidation_price else "по инвалидации"
         tp = f"<b>{fmt_price(ta.target_prices[0])}</b>" if ta.target_prices else "ближайшей поддержки"
         lines.append(f"🎯 <b>Конкретика сейчас:</b> SHORT только после 5m close ниже {trig} · стоп {stop} · TP1 {tp}")
