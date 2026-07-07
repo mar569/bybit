@@ -2445,16 +2445,16 @@ def ta_chart_context_text(ta: TAAnalysisResult) -> str:
         lines.append(f"в range: {ta.range_position * 100:.0f}%")
     if ta.post_pump:
         lines.append("фаза: после пампа")
-    for fl in ta.factor_lines[:3]:
+    for fl in ta.factor_lines[:2]:
         lines.append(fl[:48])
-    return "\n".join(lines[:10])
+    return "\n".join(lines[:8])
 
 
 def ta_chart_plan_text(ta: TAAnalysisResult) -> str:
     if not ta.trader_plan:
         return ""
     lines = ["ПЛАН ДЕЙСТВИЙ"]
-    for i, step in enumerate(ta.trader_plan[:8], 1):
+    for i, step in enumerate(ta.trader_plan[:5], 1):
         lines.append(f"{i}. {step}")
     return "\n".join(lines)
 
@@ -2465,7 +2465,7 @@ def ta_chart_summary_text(ta: TAAnalysisResult) -> str:
     if ta.professional_summary:
         lines.append(ta.professional_summary[:200])
     if ta.verdict_reason:
-        lines.append(ta.verdict_reason[:100])
+        lines.append(ta.verdict_reason.split(" · ")[0][:80])
     return "\n".join(lines)
 
 
@@ -2489,10 +2489,10 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
         tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
         lines.append(f"цели: {tps}")
     if ta.primary_scenario:
-        lines.append(ta.primary_scenario[:70])
+        lines.append(ta.primary_scenario[:55])
     if ta.range_position:
         lines.append(f"range: {ta.range_position * 100:.0f}%")
-    return "\n".join(lines[:10])
+    return "\n".join(lines[:8])
 
 
 def ta_chart_legend_text() -> str:

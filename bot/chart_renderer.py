@@ -540,8 +540,8 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
     panel_style = dict(
         transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=6.8,
-        linespacing=1.28,
+        fontsize=6.6,
+        linespacing=1.24,
         bbox=base_bbox,
     )
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
@@ -647,6 +647,17 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         short_p = 100 - long_p
         return long_p, short_p
 
+    def _compact_alt_scenario() -> str:
+        if ta.action_priority == "short" and ta.bullish_scenario:
+            return f"ALT LONG ≥ {fmt_price(ta.bullish_scenario.trigger_price)}"
+        if ta.action_priority == "long" and ta.bearish_scenario:
+            return f"ALT SHORT ≤ {fmt_price(ta.bearish_scenario.trigger_price)}"
+        if ta.verdict == "SHORT" and ta.bullish_scenario:
+            return f"ALT LONG ≥ {fmt_price(ta.bullish_scenario.trigger_price)}"
+        if ta.verdict == "LONG" and ta.bearish_scenario:
+            return f"ALT SHORT ≤ {fmt_price(ta.bearish_scenario.trigger_price)}"
+        return ""
+
     def _pro_poi() -> str:
         if ta.entry_zone:
             lo, hi = ta.entry_zone
@@ -666,9 +677,9 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
 
     base = dict(
         transform=fig.transFigure,
-        fontsize=7.4,
+        fontsize=7.1,
         color=text_color,
-        linespacing=1.35,
+        linespacing=1.30,
         bbox=dict(boxstyle="round,pad=0.45", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
     )
 
@@ -727,6 +738,9 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         f"Probabilities: LONG {long_p}% / SHORT {short_p}%",
         f"POI zone: {_pro_poi()}",
     ]
+    alt_line = _compact_alt_scenario()
+    if alt_line:
+        meta_lines.append(alt_line)
     fig.text(
         right_x,
         0.86,
@@ -736,58 +750,45 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         fontsize=7.0,
         color="#b3d4ff",
         transform=fig.transFigure,
-        linespacing=1.28,
+            linespacing=1.24,
         bbox=dict(boxstyle="round,pad=0.40", facecolor="#0f1a2b", edgecolor="#355c8a", alpha=0.97),
     )
-    bull = ta.bullish_scenario
-    if bull:
+    # Показываем детально только приоритетный сценарий, альтернативу уносим в PRO META.
+    show_bull = (
+        ta.bullish_scenario is not None
+        and (ta.verdict == "LONG" or ta.action_priority == "long" or ta.bearish_scenario is None)
+    )
+    show_bear = (
+        ta.bearish_scenario is not None
+        and (ta.verdict == "SHORT" or ta.action_priority == "short" or ta.bullish_scenario is None)
+    )
+    if show_bull and ta.bullish_scenario:
+        bull = ta.bullish_scenario
         bull_lines = [
             "БЫЧИЙ СЦЕНАРИЙ",
-            "Условия:",
-            f"1) Закрепление выше {fmt_price(bull.trigger_price)}",
-            "2) Рост объёмов",
-            "3) Удержание трендовой",
-            "",
-            "Цели:",
+            f"Триггер: ≥ {fmt_price(bull.trigger_price)}",
+            f"TP1/TP2: {' / '.join(fmt_price(t) for t in bull.target_prices[:2])}",
+            f"SL: {fmt_price(bull.stop_price)}",
         ]
-        for i, tp in enumerate(bull.target_prices[:3], 1):
-            bull_lines.append(f"{i}. {fmt_price(tp)}")
         fig.text(
-            right_x,
-            0.66,
-            "\n".join(bull_lines),
-            ha="right",
-            va="top",
-            fontsize=7.2,
-            color=CHART_STYLE["accent_long"],
-            transform=fig.transFigure,
-            linespacing=1.32,
-            bbox=dict(boxstyle="round,pad=0.45", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
+            right_x, 0.66, "\n".join(bull_lines),
+            ha="right", va="top", fontsize=7.1, color=CHART_STYLE["accent_long"],
+            transform=fig.transFigure, linespacing=1.28,
+            bbox=dict(boxstyle="round,pad=0.42", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
         )
-    bear = ta.bearish_scenario
-    if bear:
+    if show_bear and ta.bearish_scenario:
+        bear = ta.bearish_scenario
         bear_lines = [
             "МЕДВЕЖИЙ СЦЕНАРИЙ",
-            "Условия:",
-            f"1) Отказ от {fmt_price(bear.trigger_price)}",
-            "2) Пробой поддержки",
-            "3) Давление объёмов",
-            "",
-            "Цели:",
+            f"Триггер: ≤ {fmt_price(bear.trigger_price)}",
+            f"TP1/TP2: {' / '.join(fmt_price(t) for t in bear.target_prices[:2])}",
+            f"SL: {fmt_price(bear.stop_price)}",
         ]
-        for i, tp in enumerate(bear.target_prices[:3], 1):
-            bear_lines.append(f"{i}. {fmt_price(tp)}")
         fig.text(
-            right_x,
-            0.34,
-            "\n".join(bear_lines),
-            ha="right",
-            va="top",
-            fontsize=7.2,
-            color=CHART_STYLE["accent_short"],
-            transform=fig.transFigure,
-            linespacing=1.32,
-            bbox=dict(boxstyle="round,pad=0.45", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
+            right_x, 0.34, "\n".join(bear_lines),
+            ha="right", va="top", fontsize=7.1, color=CHART_STYLE["accent_short"],
+            transform=fig.transFigure, linespacing=1.28,
+            bbox=dict(boxstyle="round,pad=0.42", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
         )
 
     summary = ta_chart_summary_text(ta)
