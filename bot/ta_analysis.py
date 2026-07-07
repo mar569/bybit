@@ -2460,6 +2460,34 @@ def ta_signal_scenario_line_html(
     return "▶️ <b>Не входить</b> · дождаться пробоя уровня"
 
 
+def ta_conflicts_with_signal(ta: TAAnalysisResult, signal_side: str | None) -> bool:
+    sig = (signal_side or "").lower()
+    if not sig or ta.verdict == "WAIT":
+        return False
+    return (sig == "long" and ta.verdict == "SHORT") or (sig == "short" and ta.verdict == "LONG")
+
+
+def ta_scanner_conflict_line_html(ta: TAAnalysisResult, signal_side: str | None) -> str:
+    """Когда сканер (импульс/разворот) не совпадает с вердиктом TA."""
+    if not ta_conflicts_with_signal(ta, signal_side):
+        return ""
+    sig = (signal_side or "").lower()
+    score = ta_display_score(ta)
+    if sig == "short" and ta.verdict == "LONG":
+        lvl = f" при ≥<b>{fmt_price(ta.breakout_level)}</b>" if ta.breakout_level else ""
+        return (
+            "⚠️ <b>Сканер поймал краткий откат</b> — это <b>не сигнал SHORT</b>.\n"
+            f"📐 TA <b>LONG {score}/10</b>: работать только по пробою{lvl}."
+        )
+    if sig == "long" and ta.verdict == "SHORT":
+        lvl = f" при ≤<b>{fmt_price(ta.breakdown_level)}</b>" if ta.breakdown_level else ""
+        return (
+            "⚠️ <b>Сканер поймал краткий отскок</b> — это <b>не сигнал LONG</b>.\n"
+            f"📐 TA <b>SHORT {score}/10</b>: работать только по пробою{lvl}."
+        )
+    return ""
+
+
 def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
     """Одна простая строка прогноза для сигналов: откат или продолжение."""
     corr = ta.correction_path
@@ -2689,8 +2717,11 @@ def ta_signal_caption_html(
         else:
             extra = ""
         line = f"📐 TA · WAIT {score}/10{extra}"
+    conflict = ta_scanner_conflict_line_html(ta, signal_side)
     smc_line = format_smc_compact_html(ta.smc) if ta.smc and ta.smc.smc_score >= 4 else ""
     base = f"{line}\n{ta_signal_scenario_line_html(ta, signal_side=signal_side)}"
+    if conflict:
+        base = f"{conflict}\n{base}"
     extra: list[str] = []
     plain = ta_plain_forecast_line(ta)
     if plain:

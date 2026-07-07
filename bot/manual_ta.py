@@ -11,6 +11,7 @@ MTC_CALLBACK_PREFIX = "mtc|"
 MTCW_CALLBACK_PREFIX = "mtcw|"
 MTA_ALERT_CALLBACK_PREFIX = "mtaa|"
 MTA_INTENT_CALLBACK_PREFIX = "mtai|"
+MTA_MUTE_CALLBACK_PREFIX = "mtam|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
 MTA_WIZARD_KEY = "mta_wizard"
 
@@ -193,6 +194,32 @@ def parse_mta_intent_callback(data: str) -> tuple[str, int, str] | None:
     return symbol, interval, side
 
 
+def build_mta_mute_callback(symbol: str, interval_minutes: int, action: str) -> str:
+    act = str(action).strip().lower()
+    if act not in {"mute", "stop", "unmute"}:
+        act = "mute"
+    return f"{MTA_MUTE_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{act}"
+
+
+def parse_mta_mute_callback(data: str) -> tuple[str, int, str] | None:
+    if not data.startswith(MTA_MUTE_CALLBACK_PREFIX):
+        return None
+    parts = data.split("|")
+    if len(parts) != 4 or parts[0] != MTA_MUTE_CALLBACK_PREFIX.rstrip("|"):
+        return None
+    symbol = normalize_symbol(parts[1])
+    if not symbol:
+        return None
+    try:
+        interval = int(parts[2])
+    except ValueError:
+        return None
+    action = parts[3].strip().lower()
+    if action not in {"mute", "stop", "unmute"}:
+        return None
+    return symbol, interval, action
+
+
 _INTENT_SHORT_RE = re.compile(
     r"(?:хочу|открыть|войти|беру|смотрю|мой|иду\s+в)\s*(?:в\s+)?"
     r"(?:шорт|short|sell|продаж)",
@@ -230,6 +257,9 @@ def manual_ta_help_text() -> str:
         "<b>5m</b> · <b>10m</b> · <b>15m</b>\n\n"
         "После разбора нажмите <b>«Мой SHORT / LONG»</b> или напишите:\n"
         "<code>хочу шорт</code> · <code>открыть long</code>\n\n"
+        "Алерты (пробой / ретест / объём): кнопки под графиком.\n"
+        "<b>🔕 Монета OFF</b> — не слать повторы по монете 24ч.\n"
+        "<b>⏹ Стоп алерты</b> — отменить активные алерты.\n\n"
         "Бот оценит вашу идею, покажет сценарий и пунктирный прогноз на графике."
     )
 

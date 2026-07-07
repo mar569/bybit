@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.manual_ta import parse_user_trade_intent
+from bot.manual_ta import parse_mta_mute_callback, parse_user_trade_intent
 
 
 def test_parse_user_trade_intent_short() -> None:
@@ -15,5 +15,8 @@ def test_parse_user_trade_intent_long() -> None:
     assert parse_user_trade_intent("long") == "long"
 
 
-def test_parse_user_trade_intent_none_for_ticker() -> None:
+def test_parse_mta_mute_callback() -> None:
+    assert parse_mta_mute_callback("mtam|BLURUSDT|10|mute") == ("BLURUSDT", 10, "mute")
+    assert parse_mta_mute_callback("mtam|BTC|5|stop") == ("BTCUSDT", 5, "stop")
+
     assert parse_user_trade_intent("GRASSUSDT 10m") is None

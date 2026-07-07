@@ -37,6 +37,7 @@ from .manual_ta import (
     MTA_CALLBACK_PREFIX,
     MTA_ALERT_CALLBACK_PREFIX,
     MTA_INTENT_CALLBACK_PREFIX,
+    MTA_MUTE_CALLBACK_PREFIX,
     MTA_WIZARD_KEY,
     MTC_CALLBACK_PREFIX,
     MTCW_CALLBACK_PREFIX,
@@ -45,6 +46,7 @@ from .manual_ta import (
     build_mta_callback,
     build_mta_alert_callback,
     build_mta_intent_callback,
+    build_mta_mute_callback,
     build_mtc_callback,
     build_mtcw_callback,
     build_mtw_callback,
@@ -56,6 +58,7 @@ from .manual_ta import (
     parse_mta_callback,
     parse_mta_alert_callback,
     parse_mta_intent_callback,
+    parse_mta_mute_callback,
     parse_mtc_callback,
     parse_mtcw_callback,
     parse_mtw_callback,
@@ -120,6 +123,7 @@ class TelegramBot:
         self._manual_ta_last: dict[tuple[int, str, int], dict[str, Any]] = {}
         self._manual_ta_last_by_chat: dict[int, dict[str, Any]] = {}
         self._manual_ta_alerts: dict[tuple[int, str, int, str], dict[str, Any]] = {}
+        self._manual_ta_muted: dict[tuple[int, str], float] = {}
         self._manual_ta_alert_task: asyncio.Task | None = None
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
         self.scenario_watcher = ScenarioWatcher()
@@ -1169,7 +1173,14 @@ class TelegramBot:
             rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
         return InlineKeyboardMarkup(rows)
 
-    def _manual_ta_result_keyboard(self, symbol: str, interval_minutes: int, ta_result: Any | None) -> InlineKeyboardMarkup:
+    def _manual_ta_result_keyboard(
+        self,
+        symbol: str,
+        interval_minutes: int,
+        ta_result: Any | None,
+        *,
+        chat_id: int | None = None,
+    ) -> InlineKeyboardMarkup:
         base = self._manual_ta_tf_keyboard(symbol, wizard=False).inline_keyboard
         rows = [list(row) for row in base]
         side = "long"
@@ -1178,31 +1189,101 @@ class TelegramBot:
             priority = getattr(ta_result, "action_priority", "")
             if verdict == "SHORT" or priority == "short":
                 side = "short"
-        rows.append([
-            InlineKeyboardButton(
-                "🔻 Мой SHORT",
-                callback_data=build_mta_intent_callback(symbol, interval_minutes, "short"),
-            ),
-            InlineKeyboardButton(
-                "🔺 Мой LONG",
-                callback_data=build_mta_intent_callback(symbol, interval_minutes, "long"),
-            ),
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                "🔔 Пробой",
-                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "breakout"),
-            ),
-            InlineKeyboardButton(
-                "🔁 Ретест",
-                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "retest"),
-            ),
-            InlineKeyboardButton(
-                "📈 Объём",
-                callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "volume"),
-            ),
-        ])
+
+        if chat_id is not None and self._is_manual_ta_muted(chat_id, symbol):
+            rows.append([
+                InlineKeyboardButton(
+                    f"🔔 Включить {symbol}",
+                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "unmute"),
+                ),
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(
+                    "🔻 Мой SHORT",
+                    callback_data=build_mta_intent_callback(symbol, interval_minutes, "short"),
+                ),
+                InlineKeyboardButton(
+                    "🔺 Мой LONG",
+                    callback_data=build_mta_intent_callback(symbol, interval_minutes, "long"),
+                ),
+            ])
+            rows.append([
+                InlineKeyboardButton(
+                    "🔔 Пробой",
+                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "breakout"),
+                ),
+                InlineKeyboardButton(
+                    "🔁 Ретест",
+                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "retest"),
+                ),
+                InlineKeyboardButton(
+                    "📈 Объём",
+                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "volume"),
+                ),
+            ])
+            active = self._active_manual_ta_alerts_count(chat_id, symbol) if chat_id else 0
+            stop_label = f"⏹ Стоп ({active})" if active else "⏹ Стоп алерты"
+            rows.append([
+                InlineKeyboardButton(
+                    stop_label,
+                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "stop"),
+                ),
+                InlineKeyboardButton(
+                    "🔕 Монета OFF",
+                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "mute"),
+                ),
+            ])
         return InlineKeyboardMarkup(rows)
+
+    def _is_manual_ta_muted(self, chat_id: int, symbol: str) -> bool:
+        key = (chat_id, symbol.upper())
+        expires_at = self._manual_ta_muted.get(key)
+        if expires_at is None:
+            return False
+        if time.time() >= expires_at:
+            self._manual_ta_muted.pop(key, None)
+            return False
+        return True
+
+    def _mute_manual_ta_symbol(self, chat_id: int, symbol: str, *, hours: float = 24.0) -> None:
+        self._manual_ta_muted[(chat_id, symbol.upper())] = time.time() + hours * 3600
+        self._stop_manual_ta_alerts_for_symbol(chat_id, symbol)
+
+    def _unmute_manual_ta_symbol(self, chat_id: int, symbol: str) -> None:
+        self._manual_ta_muted.pop((chat_id, symbol.upper()), None)
+
+    def _stop_manual_ta_alerts_for_symbol(self, chat_id: int, symbol: str) -> int:
+        sym = symbol.upper()
+        removed = 0
+        for key in list(self._manual_ta_alerts):
+            if key[0] == chat_id and key[1].upper() == sym:
+                self._manual_ta_alerts.pop(key, None)
+                removed += 1
+        return removed
+
+    def _active_manual_ta_alerts_count(self, chat_id: int | None, symbol: str) -> int:
+        if chat_id is None:
+            return 0
+        sym = symbol.upper()
+        return sum(
+            1 for key in self._manual_ta_alerts
+            if key[0] == chat_id and key[1].upper() == sym
+        )
+
+    def _manual_ta_alert_fired_keyboard(self, symbol: str, interval: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔕 Не слать по монете",
+                    callback_data=build_mta_mute_callback(symbol, interval, "mute"),
+                ),
+                InlineKeyboardButton(
+                    "⏹ Стоп алерты",
+                    callback_data=build_mta_mute_callback(symbol, interval, "stop"),
+                ),
+            ],
+        ])
 
     async def _manual_ta_alert_loop(self) -> None:
         while True:
@@ -1217,6 +1298,9 @@ class TelegramBot:
                 now = time.time()
                 for key, watcher in list(self._manual_ta_alerts.items()):
                     chat_id, symbol, interval, mode = key
+                    if self._is_manual_ta_muted(chat_id, symbol):
+                        self._stop_manual_ta_alerts_for_symbol(chat_id, symbol)
+                        continue
                     expires_at = float(watcher.get("expires_at", 0))
                     if expires_at and now >= expires_at:
                         self._manual_ta_alerts.pop(key, None)
@@ -1266,6 +1350,7 @@ class TelegramBot:
                             f"Сигнал: {'вниз' if side == 'short' else 'вверх'} · проверьте свечу/контекст."
                         ),
                         parse_mode=ParseMode.HTML,
+                        reply_markup=self._manual_ta_alert_fired_keyboard(symbol, interval),
                     )
                     self._manual_ta_alerts.pop(key, None)
             except asyncio.CancelledError:
@@ -1764,7 +1849,9 @@ class TelegramBot:
             "interval": interval_minutes,
             "chart_source": chart_source,
         }
-        keyboard = self._manual_ta_result_keyboard(symbol, interval_minutes, ta)
+        keyboard = self._manual_ta_result_keyboard(
+            symbol, interval_minutes, ta, chat_id=target_chat_id,
+        )
         await self._send_chart(
             target_chat_id,
             png,
@@ -1904,7 +1991,9 @@ class TelegramBot:
             "chart_source": chart_source,
         }
 
-        keyboard = self._manual_ta_result_keyboard(symbol, interval_minutes, ta)
+        keyboard = self._manual_ta_result_keyboard(
+            symbol, interval_minutes, ta, chat_id=target_chat_id,
+        )
         await self._send_chart(
             target_chat_id,
             png,
@@ -2581,6 +2670,45 @@ class TelegramBot:
             )
             return
 
+        if payload.startswith(MTA_MUTE_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mta_mute_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval, action = parsed
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if action == "mute":
+                self._mute_manual_ta_symbol(chat_id, symbol)
+                await query.answer(f"🔕 {symbol} — алерты выкл на 24ч", show_alert=False)
+                note = (
+                    f"🔕 <b>{symbol}</b> — алерты отключены на <b>24 часа</b>.\n"
+                    "Пробой / ретест / объём по этой монете не придут.\n"
+                    "Включить снова: кнопка под графиком или новый разбор."
+                )
+            elif action == "unmute":
+                self._unmute_manual_ta_symbol(chat_id, symbol)
+                await query.answer(f"🔔 {symbol} снова активна", show_alert=False)
+                note = f"🔔 <b>{symbol}</b> — алерты снова можно включать."
+            else:
+                removed = self._stop_manual_ta_alerts_for_symbol(chat_id, symbol)
+                await query.answer(
+                    f"⏹ Снято алертов: {removed}" if removed else "Алертов не было",
+                    show_alert=False,
+                )
+                note = (
+                    f"⏹ <b>{symbol}</b> — активные алерты сняты ({removed}).\n"
+                    "Можно поставить новые кнопками под графиком."
+                )
+            if query.message:
+                try:
+                    await query.message.reply_text(note, parse_mode=ParseMode.HTML)
+                except Exception:
+                    logger.exception("Failed to send manual TA mute confirmation")
+            return
+
         if payload.startswith(MTA_ALERT_CALLBACK_PREFIX):
             if not self._can_use_manual_ta(update):
                 await query.answer("Нет доступа.", show_alert=True)
@@ -2597,6 +2725,12 @@ class TelegramBot:
                 return
             symbol, interval, side, mode = parsed
             chat_id = update.effective_chat.id if update.effective_chat else 0
+            if self._is_manual_ta_muted(chat_id, symbol):
+                await query.answer(
+                    f"🔕 {symbol} на паузе 24ч — сначала включите монету",
+                    show_alert=True,
+                )
+                return
             last = self._manual_ta_last.get((chat_id, symbol, interval), {})
             trigger = 0.0
             if side == "short":
@@ -2625,7 +2759,8 @@ class TelegramBot:
                             f"🔔 Алерт активирован: <b>{symbol}</b> {interval}m\n"
                             f"Тип: <b>{mode_ru}</b>\n"
                             f"Уровень: <b>{trigger:.6g}</b> ({'ниже' if side == 'short' else 'выше'})\n"
-                            "Срок: 3 часа."
+                            "Срок: 3 часа.\n"
+                            "<i>Отмена: ⏹ Стоп алерты или 🔕 Монета OFF под графиком.</i>"
                         ),
                         parse_mode=ParseMode.HTML,
                     )
@@ -3278,6 +3413,19 @@ class TelegramBot:
         ])
 
     @staticmethod
+    def _scanner_direction_bits(signal: Signal) -> tuple[str, str]:
+        """Эмодзи + подпись направления сканера (не всегда = вход в сделку)."""
+        is_long = signal.side == "long"
+        st = signal.signal_type
+        if st in {"reversal_pump", "reversal_dump"}:
+            return "↩️", "разворот ↑" if is_long else "разворот ↓"
+        if st in {"impulse_pump", "impulse_dump"}:
+            return "⚡", "импульс ↑" if is_long else "импульс ↓"
+        if st in {"vertical_pump", "vertical_dump"}:
+            return "🚨", "вертикаль ↑" if is_long else "вертикаль ↓"
+        return ("🟢", "LONG") if is_long else ("🔴", "SHORT")
+
+    @staticmethod
     def _signal_type_header(signal: Signal, *, inline: bool = False) -> str:
         flash_tier = signal.details.get("flash_tier")
         labels = {
@@ -3427,9 +3575,7 @@ class TelegramBot:
     def _format_signal_message_compact(self, signal: Signal, *, is_priority: bool = False) -> str:
         exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
         exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
-        is_long = signal.side == "long"
-        side_emoji = "🟢" if is_long else "🔴"
-        side_label = "LONG" if is_long else "SHORT"
+        dir_emoji, dir_label = self._scanner_direction_bits(signal)
         price_pct = signal.price_change_percent or 0.0
         price_text = f"+{price_pct:.2f}%" if price_pct > 0 else f"{price_pct:.2f}%"
         oi_usd = format_oi_usd(signal.oi_change_usd)
@@ -3442,7 +3588,7 @@ class TelegramBot:
             header_bits.append(type_label)
         header_bits.append(
             f"{exchange_emoji} {exchange_name} {signal.oi_period_minutes}м · "
-            f"{side_emoji} {side_label}"
+            f"{dir_emoji} {dir_label}"
         )
 
         lines: list[str] = [" · ".join(header_bits)]
