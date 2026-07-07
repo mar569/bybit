@@ -595,6 +595,165 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult) -> None:
         )
 
 
+def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult) -> None:
+    """PRO-версия: крупнее блоки и более явная структура."""
+    left_x, right_x = 0.010, 0.990
+    text_color = CHART_STYLE["text"]
+    panel_fc = "#101828"
+    edge = CHART_STYLE["panel_border"]
+
+    base = dict(
+        transform=fig.transFigure,
+        fontsize=7.4,
+        color=text_color,
+        linespacing=1.35,
+        bbox=dict(boxstyle="round,pad=0.45", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
+    )
+
+    fig.text(
+        left_x,
+        0.985,
+        "КЛЮЧЕВЫЕ УРОВНИ\n" + (ta_chart_key_levels_text(ta) or "уровни не определены"),
+        ha="left",
+        va="top",
+        **base,
+    )
+    fig.text(
+        left_x,
+        0.64,
+        "ПЛАН ДЕЙСТВИЙ\n" + (ta_chart_plan_text(ta) or "ожидать подтверждения"),
+        ha="left",
+        va="top",
+        **base,
+    )
+    fig.text(
+        left_x,
+        0.30,
+        "КОНТЕКСТ\n" + (ta_chart_context_text(ta) or "контекст недоступен"),
+        ha="left",
+        va="top",
+        fontsize=7.0,
+        color=text_color,
+        transform=fig.transFigure,
+        linespacing=1.30,
+        bbox=dict(boxstyle="round,pad=0.42", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
+    )
+
+    fig.text(
+        right_x,
+        0.985,
+        "ИТОГ\n" + ta_chart_panel_text(ta),
+        ha="right",
+        va="top",
+        **base,
+    )
+    bull = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
+    if bull:
+        fig.text(
+            right_x,
+            0.66,
+            bull,
+            ha="right",
+            va="top",
+            fontsize=7.2,
+            color=CHART_STYLE["accent_long"],
+            transform=fig.transFigure,
+            linespacing=1.32,
+            bbox=dict(boxstyle="round,pad=0.45", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
+        )
+    bear = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
+    if bear:
+        fig.text(
+            right_x,
+            0.34,
+            bear,
+            ha="right",
+            va="top",
+            fontsize=7.2,
+            color=CHART_STYLE["accent_short"],
+            transform=fig.transFigure,
+            linespacing=1.32,
+            bbox=dict(boxstyle="round,pad=0.45", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
+        )
+
+    summary = ta_chart_summary_text(ta)
+    if summary:
+        fig.text(
+            0.50,
+            0.018,
+            "ИТОГ: " + summary,
+            ha="center",
+            va="bottom",
+            fontsize=7.2,
+            color=text_color,
+            transform=fig.transFigure,
+            bbox=dict(boxstyle="round,pad=0.45", facecolor="#181f2a", edgecolor=CHART_STYLE["warning"], alpha=0.97),
+        )
+
+
+def _draw_pro_market_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """PRO-зоны на самом графике: сопротивление/поддержка и ключевые уровни."""
+    if not bars:
+        return
+    x0 = _idx_to_date(bars, max(0, len(bars) - 70))
+    x1 = _idx_to_date(bars, len(bars) - 1)
+
+    # Сопротивления
+    resistances = [lv.price for lv in ta.levels if lv.kind == "resistance"][:2]
+    for i, price in enumerate(resistances, 1):
+        span = max(price * 0.0035, 1e-9)
+        ax.axhspan(price - span, price + span, xmin=0.07, xmax=0.98, color="#f85149", alpha=0.14, zorder=1)
+        ax.text(
+            mdates.date2num(x1), price + span, f" R{i} {fmt_price(price)}",
+            color="#ffb3ad", fontsize=7, va="bottom", ha="left",
+        )
+
+    # Поддержки
+    supports = [lv.price for lv in ta.levels if lv.kind == "support"][:2]
+    for i, price in enumerate(supports, 1):
+        span = max(price * 0.0035, 1e-9)
+        ax.axhspan(price - span, price + span, xmin=0.07, xmax=0.98, color="#3fb950", alpha=0.14, zorder=1)
+        ax.text(
+            mdates.date2num(x1), price - span, f" S{i} {fmt_price(price)}",
+            color="#b2f2bb", fontsize=7, va="top", ha="left",
+        )
+
+    # Явные триггеры
+    if ta.breakout_level:
+        ax.axhline(ta.breakout_level, color="#7ee787", linewidth=1.35, linestyle="-", alpha=0.9)
+    if ta.breakdown_level:
+        ax.axhline(ta.breakdown_level, color="#ff7b72", linewidth=1.35, linestyle="-", alpha=0.9)
+
+    # Подпись локального тренда
+    if ta.trend_lines:
+        tl = ta.trend_lines[0]
+        ax.text(
+            mdates.date2num(x0), tl.start_price,
+            " восходящий тренд" if tl.kind == "bull" else " нисходящий тренд",
+            color=CHART_STYLE["trend_bull"] if tl.kind == "bull" else CHART_STYLE["trend_bear"],
+            fontsize=7,
+            va="bottom" if tl.kind == "bull" else "top",
+        )
+
+
+def _draw_pro_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """Пунктирные пути бычьего/медвежьего сценария вправо."""
+    if not bars:
+        return
+    last_t = _idx_to_date(bars, len(bars) - 1)
+    t1 = mdates.num2date(mdates.date2num(last_t) + 0.018, tz=timezone.utc)
+    t2 = mdates.num2date(mdates.date2num(last_t) + 0.036, tz=timezone.utc)
+    p0 = bars[-1].close
+    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+        p1 = ta.bullish_scenario.target_prices[0]
+        p2 = ta.bullish_scenario.target_prices[min(1, len(ta.bullish_scenario.target_prices) - 1)]
+        ax.plot([last_t, t1, t2], [p0, p1, p2], color="#3fb950", linestyle="--", linewidth=1.4, alpha=0.75)
+    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        p1 = ta.bearish_scenario.target_prices[0]
+        p2 = ta.bearish_scenario.target_prices[min(1, len(ta.bearish_scenario.target_prices) - 1)]
+        ax.plot([last_t, t1, t2], [p0, p1, p2], color="#f85149", linestyle="--", linewidth=1.4, alpha=0.75)
+
+
 def _style_axes(ax: plt.Axes, bars: list[KlineBar]) -> None:
     ax.grid(True, color=CHART_STYLE["grid"], linewidth=0.4, alpha=0.7)
     ax.tick_params(colors=CHART_STYLE["text"], labelsize=8)
@@ -631,6 +790,9 @@ def _render_chart_figure(
 
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta)
+    if pro_mode:
+        _draw_pro_market_zones(ax, bars, ta)
+        _draw_pro_paths(ax, bars, ta)
 
     current = bars[-1].close
     ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
@@ -644,7 +806,14 @@ def _render_chart_figure(
         f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}",
         color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
     )
-    _draw_info_panels(fig, ta)
+    if pro_mode:
+        # Усиливаем визуальную разницу PRO-режима.
+        for lv in ta.levels[:6]:
+            c = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
+            ax.axhline(lv.price, color=c, linestyle="-", linewidth=1.15, alpha=0.42)
+        _draw_info_panels_pro(fig, ta)
+    else:
+        _draw_info_panels(fig, ta)
     _style_axes(ax, bars)
     fig.autofmt_xdate(rotation=0)
 
