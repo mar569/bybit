@@ -2211,57 +2211,47 @@ def ta_signal_caption_html(
 
 
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
-    """Ручной TA: полный разбор для новичка."""
+    """Ручной TA: компактно и с акцентом на решение."""
     score = ta_display_score(ta)
     lines = [
         f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10",
-        f"📍 <b>Сейчас:</b> {_situation_plain(ta)}",
-        f"💡 <b>Смысл:</b> {_verdict_plain(ta)}",
+        f"📍 <b>Сейчас:</b> цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст'}",
     ]
-    lines.extend(_manual_decision_block(ta))
 
-    dist_bits: list[str] = []
-    if ta.dist_to_long_pct is not None:
-        dist_bits.append(f"до LONG <b>{ta.dist_to_long_pct:.1f}%</b>")
-    if ta.dist_to_short_pct is not None:
-        dist_bits.append(f"до SHORT <b>{ta.dist_to_short_pct:.1f}%</b>")
-    if dist_bits:
-        lines.append("📏 " + " · ".join(dist_bits))
-    if ta.range_position:
-        lines.append(f"📊 В range: <b>{ta.range_position * 100:.0f}%</b> (0=дно, 100=верх)")
+    long_lvl = fmt_price(ta.breakout_level) if ta.breakout_level else "—"
+    short_lvl = fmt_price(ta.breakdown_level) if ta.breakdown_level else "—"
+    stop_lvl = fmt_price(ta.invalidation_price) if ta.invalidation_price else "—"
+    tp1 = fmt_price(ta.target_prices[0]) if ta.target_prices else "—"
+    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
+
+    if rr_bad:
+        lines.append("⛔ <b>Решение:</b> <b>NO TRADE</b> (пропуск до лучшей точки входа).")
+    elif ta.verdict == "LONG":
+        lines.append(f"✅ <b>Решение:</b> LONG только после подтверждения выше <b>{long_lvl}</b>.")
+    elif ta.verdict == "SHORT":
+        lines.append(f"✅ <b>Решение:</b> SHORT только после подтверждения ниже <b>{short_lvl}</b>.")
+    else:
+        lines.append(
+            f"⏳ <b>Решение:</b> WAIT. Ждать 5m close выше <b>{long_lvl}</b> "
+            f"или ниже <b>{short_lvl}</b>."
+        )
+
+    lines.append(f"🎯 <b>План:</b> вход по факту · отмена <b>{stop_lvl}</b> · TP1 <b>{tp1}</b>.")
+
+    risk_bits: list[str] = []
     if ta.post_pump:
-        lines.append("⚡ <b>Фаза:</b> консолидация после пампа")
-    if ta.repeat_spike_dump_note:
-        lines.append(f"🧪 <b>История монеты:</b> {ta.repeat_spike_dump_note}")
+        risk_bits.append("перегрев после пампа")
+    if ta.repeat_spike_dump_risk:
+        risk_bits.append("повторяемый spike→dump")
+    if ta.action_priority == "short":
+        risk_bits.append("приоритет short")
+    if ta.action_priority == "long":
+        risk_bits.append("приоритет long")
+    if not risk_bits and ta.verdict_reason:
+        risk_bits.append(ta.verdict_reason.split(" · ")[0])
+    if risk_bits:
+        lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:2])}.")
 
-    if ta.breakout_level and (ta.dist_to_long_pct is None or ta.dist_to_long_pct <= 8.0):
-        lines.append(
-            f"🟢 <b>LONG</b> — если цена закрепится <b>выше {fmt_price(ta.breakout_level)}</b> "
-            f"(лучше вход на откате к уровню)"
-        )
-    if ta.breakdown_level:
-        lines.append(
-            f"🔴 <b>SHORT</b> — если цена уйдёт <b>ниже {fmt_price(ta.breakdown_level)}</b> "
-            f"(закрытие свечи под уровнем)"
-        )
-    if ta.invalidation_price:
-        lines.append(f"🛑 <b>Стоп</b> (если пошли в сделку): <b>{fmt_price(ta.invalidation_price)}</b>")
-    if ta.target_prices:
-        tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
-        side_word = "SHORT" if ta.action_priority == "short" or ta.verdict == "SHORT" else (
-            "LONG" if ta.verdict == "LONG" or ta.action_priority == "long" else ""
-        )
-        label = f" ({side_word})" if side_word else ""
-        lines.append(f"🎯 <b>Цели</b>{label}: {tps}")
-
-    lines.extend(_manual_concrete_block(ta))
-    # Один финальный блок действия без дублей.
-    lines.append(_simple_manual_plan_line(ta))
-
-    if ta.verdict_reason:
-        lines.append(f"<i>Примечание: {ta.verdict_reason[:120]}</i>")
-    if ta.smc and ta.smc.checklist:
-        lines.append(format_smc_compact_html(ta.smc))
     return "\n".join(lines)
 
 
