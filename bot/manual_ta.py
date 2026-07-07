@@ -10,6 +10,7 @@ MTW_CALLBACK_PREFIX = "mtw|"
 MTC_CALLBACK_PREFIX = "mtc|"
 MTCW_CALLBACK_PREFIX = "mtcw|"
 MTA_ALERT_CALLBACK_PREFIX = "mtaa|"
+MTA_INTENT_CALLBACK_PREFIX = "mtai|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
 MTA_WIZARD_KEY = "mta_wizard"
 
@@ -166,6 +167,58 @@ def parse_mta_alert_callback(data: str) -> tuple[str, int, str, str] | None:
     return symbol, interval, side, mode
 
 
+def build_mta_intent_callback(symbol: str, interval_minutes: int, side: str) -> str:
+    side_norm = "short" if str(side).lower() == "short" else "long"
+    return f"{MTA_INTENT_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{side_norm}"
+
+
+def parse_mta_intent_callback(data: str) -> tuple[str, int, str] | None:
+    if not data.startswith(MTA_INTENT_CALLBACK_PREFIX):
+        return None
+    parts = data.split("|")
+    if len(parts) != 4 or parts[0] != MTA_INTENT_CALLBACK_PREFIX.rstrip("|"):
+        return None
+    symbol = normalize_symbol(parts[1])
+    if not symbol:
+        return None
+    try:
+        interval = int(parts[2])
+    except ValueError:
+        return None
+    if interval not in MANUAL_TA_TIMEFRAMES:
+        return None
+    side = parts[3].strip().lower()
+    if side not in {"long", "short"}:
+        return None
+    return symbol, interval, side
+
+
+_INTENT_SHORT_RE = re.compile(
+    r"(?:хочу|открыть|войти|беру|смотрю|мой|иду\s+в)\s*(?:в\s+)?"
+    r"(?:шорт|short|sell|продаж)",
+    re.IGNORECASE,
+)
+_INTENT_LONG_RE = re.compile(
+    r"(?:хочу|открыть|войти|беру|смотрю|мой|иду\s+в)\s*(?:в\s+)?"
+    r"(?:лонг|long|buy|покуп)",
+    re.IGNORECASE,
+)
+_INTENT_SHORT_BARE_RE = re.compile(r"^(?:шорт|short|sell)$", re.IGNORECASE)
+_INTENT_LONG_BARE_RE = re.compile(r"^(?:лонг|long|buy)$", re.IGNORECASE)
+
+
+def parse_user_trade_intent(text: str) -> str | None:
+    """Распознать намерение пользователя: long / short. None если не похоже на идею сделки."""
+    if not text:
+        return None
+    cleaned = text.strip()
+    if _INTENT_SHORT_RE.search(cleaned) or _INTENT_SHORT_BARE_RE.match(cleaned):
+        return "short"
+    if _INTENT_LONG_RE.search(cleaned) or _INTENT_LONG_BARE_RE.match(cleaned):
+        return "long"
+    return None
+
+
 def manual_ta_help_text() -> str:
     return (
         "<b>📐 Чат ручного TA-анализа</b>\n\n"
@@ -175,8 +228,9 @@ def manual_ta_help_text() -> str:
         "• <code>BTC 15m</code>\n\n"
         "Если таймфрейм не указан — выберите кнопку:\n"
         "<b>5m</b> · <b>10m</b> · <b>15m</b>\n\n"
-        "Бот построит график с уровнями, каналом, сценариями и планом "
-        "по живым данным Bybit."
+        "После разбора нажмите <b>«Мой SHORT / LONG»</b> или напишите:\n"
+        "<code>хочу шорт</code> · <code>открыть long</code>\n\n"
+        "Бот оценит вашу идею, покажет сценарий и пунктирный прогноз на графике."
     )
 
 
@@ -189,6 +243,9 @@ def manual_ta_wizard_start_text() -> str:
         "2️⃣ <b>Два шага</b> — сначала скрин, потом тикер текстом\n"
         "   (или наоборот: тикер → скрин)\n\n"
         "3️⃣ Если TF не указан — выберите кнопку <b>5m / 10m / 15m</b>\n\n"
+        "4️⃣ После графика — ваша идея сделки:\n"
+        "   кнопки <b>«Мой SHORT / LONG»</b> или текст <code>хочу шорт</code>\n"
+        "   Бот оценит вход, сценарий и нарисует пунктир (откат / продолжение).\n\n"
         "Готовый разбор с графиком уйдёт в <b>чат ручного TA</b>.\n"
         "На графике: уровни, тренд, боковик, стрелки пробоя, сценарии.\n\n"
         "Отмена: <code>/cancel</code>"

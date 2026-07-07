@@ -2554,6 +2554,112 @@ def format_scenario_update_html(
     return header + body
 
 
+def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
+    """Оценка идеи пользователя: хочу SHORT / LONG vs текущий TA и прогноз."""
+    side = user_side.lower()
+    if side not in {"long", "short"}:
+        return ""
+    label = "LONG" if side == "long" else "SHORT"
+    emoji = "🔺" if side == "long" else "🔻"
+    score = ta_display_score(ta)
+    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
+
+    corr = ta.correction_path
+    cont = ta.continuation_path
+    forecast_correction = bool(corr and (cont is None or corr.confidence >= cont.confidence))
+
+    aligned_verdict = (side == "long" and ta.verdict == "LONG") or (
+        side == "short" and ta.verdict == "SHORT"
+    )
+    opposed_verdict = (side == "long" and ta.verdict == "SHORT") or (
+        side == "short" and ta.verdict == "LONG"
+    )
+    aligned_priority = (side == "short" and ta.action_priority == "short") or (
+        side == "long" and ta.action_priority == "long"
+    )
+
+    lines = [f"{emoji} <b>Ваша идея:</b> открыть <b>{label}</b>"]
+
+    if rr_bad:
+        lines.append(
+            "⛔ <b>Оценка:</b> сейчас <b>NO TRADE</b> — R:R неудобный, "
+            "лучше дождаться лучшей точки."
+        )
+    elif aligned_verdict:
+        lines.append(
+            f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
+            "работаем по плану ниже."
+        )
+    elif opposed_verdict:
+        lines.append(
+            f"🔴 <b>Оценка:</b> ваш <b>{label}</b> против текущего TA "
+            f"(<b>{ta.verdict}</b> {score}/10) — высокий риск ошибки."
+        )
+    elif ta.verdict == "WAIT":
+        if side == "short" and forecast_correction:
+            lines.append(
+                "🟡 <b>Оценка:</b> направление <b>логичное</b> — базовый сценарий откат, "
+                "но TA ещё <b>WAIT</b>: не входить без триггера."
+            )
+        elif side == "long" and forecast_correction and ta.post_pump:
+            lines.append(
+                "🔴 <b>Оценка:</b> LONG <b>против</b> сценария отката после пампа — "
+                "риск покупки на хае."
+            )
+        elif side == "long" and not forecast_correction:
+            lines.append(
+                "🟢 <b>Оценка:</b> LONG совпадает с сценарием <b>продолжения</b> — "
+                "ждите подтверждения пробоя."
+            )
+        elif side == "short" and not forecast_correction:
+            lines.append(
+                "🔴 <b>Оценка:</b> SHORT против сценария <b>продолжения вверх</b> — "
+                "лучше не торопиться."
+            )
+        elif aligned_priority:
+            lines.append(
+                f"🟡 <b>Оценка:</b> ближе к вашему <b>{label}</b>, "
+                "но подтверждения на графике ещё нет."
+            )
+        else:
+            lines.append(
+                f"⚪ <b>Оценка:</b> TA нейтрален — <b>{label}</b> пока без подтверждения."
+            )
+    else:
+        lines.append(f"⚪ <b>Оценка:</b> проверьте уровни перед входом в <b>{label}</b>.")
+
+    if side == "short" and ta.breakdown_level:
+        dist = ""
+        if ta.current_price > 0 and ta.breakdown_level < ta.current_price:
+            d = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
+            dist = f" (ещё ~{d:.1f}% до уровня)"
+        lines.append(
+            f"▶️ <b>Когда входить:</b> закрепление ≤<b>{fmt_price(ta.breakdown_level)}</b>{dist}."
+        )
+    elif side == "long" and ta.breakout_level:
+        dist = ""
+        if ta.current_price > 0 and ta.breakout_level > ta.current_price:
+            d = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
+            dist = f" (ещё ~{d:.1f}% до уровня)"
+        lines.append(
+            f"▶️ <b>Когда входить:</b> закрепление ≥<b>{fmt_price(ta.breakout_level)}</b>{dist}."
+        )
+    elif ta.verdict == "WAIT":
+        lines.append("▶️ <b>Когда входить:</b> дождаться пробоя ключевого уровня на TF.")
+
+    if ta.invalidation_price:
+        lines.append(f"🛑 <b>Отмена идеи:</b> при пробое <b>{fmt_price(ta.invalidation_price)}</b>.")
+
+    plain = ta_plain_forecast_line(ta)
+    if plain:
+        lines.append(plain)
+    lines.append(
+        "📈 <b>На графике:</b> пунктир — <i>коррекция ↓</i> (оранж.) / "
+        "<i>продолжение ↑</i> (зел.), ярче — вероятнее."
+    )
+    return "\n".join(lines)
+
+
 def ta_signal_caption_html(
     ta: TAAnalysisResult,
     *,

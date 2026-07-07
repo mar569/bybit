@@ -36,6 +36,7 @@ from .manual_ta import (
     MANUAL_TA_TIMEFRAMES,
     MTA_CALLBACK_PREFIX,
     MTA_ALERT_CALLBACK_PREFIX,
+    MTA_INTENT_CALLBACK_PREFIX,
     MTA_WIZARD_KEY,
     MTC_CALLBACK_PREFIX,
     MTCW_CALLBACK_PREFIX,
@@ -43,6 +44,7 @@ from .manual_ta import (
     MTW_CANCEL_CALLBACK,
     build_mta_callback,
     build_mta_alert_callback,
+    build_mta_intent_callback,
     build_mtc_callback,
     build_mtcw_callback,
     build_mtw_callback,
@@ -50,8 +52,10 @@ from .manual_ta import (
     manual_ta_hours,
     manual_ta_wizard_start_text,
     parse_manual_ta_input,
+    parse_user_trade_intent,
     parse_mta_callback,
     parse_mta_alert_callback,
+    parse_mta_intent_callback,
     parse_mtc_callback,
     parse_mtcw_callback,
     parse_mtw_callback,
@@ -62,6 +66,9 @@ from .ta_analysis import (
     ta_manual_detailed_html,
     ta_signal_caption_html,
     ta_telegram_caption_html,
+    ta_user_intent_html,
+    ta_display_score,
+    fmt_price,
 )
 from .scenario_watcher import ScenarioUpdate, ScenarioWatcher
 from .test_signals import build_test_signals
@@ -111,6 +118,7 @@ class TelegramBot:
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
         self._manual_ta_last: dict[tuple[int, str, int], dict[str, Any]] = {}
+        self._manual_ta_last_by_chat: dict[int, dict[str, Any]] = {}
         self._manual_ta_alerts: dict[tuple[int, str, int, str], dict[str, Any]] = {}
         self._manual_ta_alert_task: asyncio.Task | None = None
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
@@ -1011,6 +1019,16 @@ class TelegramBot:
                 side = "short"
         rows.append([
             InlineKeyboardButton(
+                "🔻 Мой SHORT",
+                callback_data=build_mta_intent_callback(symbol, interval_minutes, "short"),
+            ),
+            InlineKeyboardButton(
+                "🔺 Мой LONG",
+                callback_data=build_mta_intent_callback(symbol, interval_minutes, "long"),
+            ),
+        ])
+        rows.append([
+            InlineKeyboardButton(
                 "🔔 Пробой",
                 callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "breakout"),
             ),
@@ -1571,6 +1589,12 @@ class TelegramBot:
             "breakdown": ta.breakdown_level,
             "price": ta.current_price,
             "updated_at": time.time(),
+            "chart_source": chart_source,
+        }
+        self._manual_ta_last_by_chat[target_chat_id] = {
+            "symbol": symbol,
+            "interval": interval_minutes,
+            "chart_source": chart_source,
         }
         keyboard = self._manual_ta_result_keyboard(symbol, interval_minutes, ta)
         await self._send_chart(
@@ -1595,6 +1619,131 @@ class TelegramBot:
                     )
                 except Exception:
                     logger.exception("Failed to notify admin about manual TA delivery")
+
+    async def _process_manual_ta_intent(
+        self,
+        update: Update,
+        symbol: str,
+        interval_minutes: int,
+        user_side: str,
+        *,
+        query: CallbackQuery | None = None,
+        chart_source: str | None = None,
+        deliver_chat_id: int | None = None,
+    ) -> None:
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        target_chat_id = deliver_chat_id if deliver_chat_id is not None else chat.id
+        side_label = "SHORT" if user_side == "short" else "LONG"
+        hours = manual_ta_hours(interval_minutes)
+        progress = (
+            f"⏳ Оцениваю ваш <b>{side_label}</b>: <b>{symbol}</b> · {interval_minutes}m…"
+        )
+
+        if query:
+            await query.answer(f"Ваш {side_label}")
+            try:
+                await query.edit_message_text(progress, parse_mode=ParseMode.HTML)
+            except BadRequest:
+                pass
+        elif update.message:
+            await update.message.reply_text(progress, parse_mode=ParseMode.HTML)
+
+        oi_bars = None
+        liq_context = None
+        if self.scanner is not None:
+            if interval_minutes == 5:
+                try:
+                    oi_bars = self.scanner.get_five_min_oi_bars("bybit", symbol)
+                except Exception:
+                    oi_bars = None
+            try:
+                stats = self.scanner._get_liquidation_stats("bybit", symbol, 15)
+                if stats is not None:
+                    liq_context = stats.to_dict()
+            except Exception:
+                liq_context = None
+
+        last = self._manual_ta_last.get((target_chat_id, symbol, interval_minutes), {})
+        chart_source = (
+            chart_source
+            or last.get("chart_source")
+            or self.settings_manager.settings.manual_ta_chart_source
+        )
+
+        try:
+            png, ta = await asyncio.wait_for(
+                render_annotated_chart(
+                    symbol,
+                    side=user_side,
+                    hours=hours,
+                    interval_minutes=interval_minutes,
+                    oi_bars=oi_bars,
+                    neutral=True,
+                    chart_source=chart_source,
+                    exchange="bybit",
+                    liq_context=liq_context,
+                ),
+                timeout=50.0,
+            )
+        except asyncio.TimeoutError:
+            err = f"Таймаут загрузки свечей для {symbol} ({interval_minutes}m)."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+        except Exception:
+            logger.exception("Manual TA intent failed for %s %sm %s", symbol, interval_minutes, user_side)
+            err = f"Ошибка построения графика {symbol}."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+
+        if not png or ta is None:
+            err = f"Нет данных Bybit для {symbol} ({interval_minutes}m)."
+            if query and query.message:
+                await query.message.reply_text(err)
+            elif update.message:
+                await update.message.reply_text(err)
+            return
+
+        score = ta_display_score(ta)
+        caption = (
+            f"<b>{symbol}</b> · Bybit {interval_minutes}m · ваш <b>{side_label}</b>\n"
+            f"{ta_user_intent_html(ta, user_side)}\n\n"
+            f"📐 TA сейчас: <b>{ta.verdict}</b> {score}/10 · "
+            f"цена <b>{fmt_price(ta.current_price)}</b>"
+        )
+
+        self._manual_ta_last[(target_chat_id, symbol, interval_minutes)] = {
+            "verdict": ta.verdict,
+            "priority": ta.action_priority,
+            "breakout": ta.breakout_level,
+            "breakdown": ta.breakdown_level,
+            "price": ta.current_price,
+            "updated_at": time.time(),
+            "chart_source": chart_source,
+            "user_side": user_side,
+        }
+        self._manual_ta_last_by_chat[target_chat_id] = {
+            "symbol": symbol,
+            "interval": interval_minutes,
+            "chart_source": chart_source,
+        }
+
+        keyboard = self._manual_ta_result_keyboard(symbol, interval_minutes, ta)
+        await self._send_chart(
+            target_chat_id,
+            png,
+            caption,
+            is_priority=False,
+            keyboard=keyboard,
+        )
 
     async def on_manual_ta_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -1634,6 +1783,26 @@ class TelegramBot:
         if text.lower() in {"/ta", "/help", "/start", "help", "помощь", "команды"}:
             await update.message.reply_text(
                 manual_ta_help_text(),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        intent = parse_user_trade_intent(text)
+        if intent:
+            chat_id = update.effective_chat.id
+            last = self._manual_ta_last_by_chat.get(chat_id)
+            if last:
+                await self._process_manual_ta_intent(
+                    update,
+                    last["symbol"],
+                    int(last["interval"]),
+                    intent,
+                    chart_source=last.get("chart_source"),
+                )
+                return
+            await update.message.reply_text(
+                "Сначала запросите разбор монеты, затем напишите "
+                "<code>хочу шорт</code> или <code>хочу long</code>.",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -2184,6 +2353,27 @@ class TelegramBot:
                             wizard=False,
                         ),
                     )
+            return
+
+        if payload.startswith(MTA_INTENT_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mta_intent_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval, user_side = parsed
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last = self._manual_ta_last.get((chat_id, symbol, interval), {})
+            await self._process_manual_ta_intent(
+                update,
+                symbol,
+                interval,
+                user_side,
+                query=query,
+                chart_source=last.get("chart_source"),
+            )
             return
 
         if payload.startswith(MTA_ALERT_CALLBACK_PREFIX):
