@@ -16,12 +16,15 @@ from bot.ta_analysis import (
     run_ta_analysis,
     ta_display_score,
     ta_manual_detailed_html,
+    ta_plain_forecast_line,
     ta_scenario_followup_caption_html,
+    ta_signal_forecast_summary_line,
     ta_signal_caption_html,
     ta_signal_scenario_line_html,
     ta_telegram_breakdown_html,
     ta_telegram_caption_html,
     TAAnalysisResult,
+    ForecastPath,
 )
 
 
@@ -292,18 +295,40 @@ def test_readiness_badge_ignores_scanner_timing_for_reversal() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",
         verdict_confidence=9,
-        current_price=0.00625,
-        breakdown_level=0.006238333,
-        dist_to_short_pct=0.2,
+        current_price=0.34740,
+        breakdown_level=0.34760,
+        dist_to_short_pct=0.06,
     )
     ready, reason = evaluate_entry_readiness(
         ta,
-        "short",
+        "long",
         1,
         check_scanner_timing=False,
-        signal_type="reversal_dump",
+        signal_type="reversal_pump",
     )
     assert ready, reason
+
+
+def test_reversal_pump_short_not_ready_when_price_above_trigger() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=0.3570,
+        breakdown_level=0.34760,
+        momentum_pct=1.5,
+        momentum_label="импульс вверх",
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "long",
+        2,
+        check_scanner_timing=False,
+        signal_type="reversal_pump",
+    )
+    assert not ready
+    assert "отскок" in reason or "пробой" in reason or "выше" in reason
     assert "рано для входа" not in reason
 
 
@@ -313,9 +338,9 @@ def test_readiness_filter_still_checks_scanner_timing() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",
         verdict_confidence=9,
-        current_price=0.00625,
-        breakdown_level=0.006238333,
-        dist_to_short_pct=0.2,
+        current_price=0.34740,
+        breakdown_level=0.34760,
+        dist_to_short_pct=0.06,
     )
     ready, reason = evaluate_entry_readiness(
         ta,
@@ -326,3 +351,55 @@ def test_readiness_filter_still_checks_scanner_timing() -> None:
     )
     assert not ready
     assert "рано для входа" in reason
+
+
+def test_plain_forecast_aligns_with_short_verdict() -> None:
+    from bot.ta_range_trade import MarketFlowScores
+    from bot.ta_analysis import build_ta_signal_narrative
+
+    flow = MarketFlowScores(
+        continuation=55,
+        correction=48,
+        convergence="weak",
+        notes=["CVD: нейтрально", "OI: aligned_short"],
+    )
+    plain, plan, basis = build_ta_signal_narrative(
+        verdict="SHORT",
+        current=3.75,
+        target_prices=[3.58],
+        invalidation_price=3.9436,
+        breakout_level=None,
+        breakdown_level=3.706,
+        bullish=None,
+        bearish=None,
+        flow=flow,
+        correction_path=ForecastPath(
+            kind="correction",
+            label="коррекция ↓",
+            waypoints=[3.75, 3.74, 3.60, 3.58],
+            confidence=6,
+            reason="откат к 3.60",
+        ),
+        continuation_path=ForecastPath(
+            kind="continuation",
+            label="продолжение ↑",
+            waypoints=[3.75, 3.74, 3.76, 3.924],
+            confidence=7,
+            reason="рост к 3.924",
+        ),
+        factor_lines=["CVD нейтр. (48% buy)"],
+        phase_label="коррекция",
+        structure_label="LH + LL (медв.)",
+        momentum_label="импульс вниз",
+        oi_narrative_label="шорты набираются",
+        market_bias="медвежий",
+        range_trade_label="SHORT от сопротивления range",
+        primary_scenario="снижение к 3.58",
+        verdict_reason="медвежья структура + пробой",
+    )
+    assert "SHORT" in plain
+    assert "3.58" in plain
+    assert "продолжение вверх" not in plain.lower()
+    assert "SHORT" in plan
+    assert "CVD" in basis or "OI" in basis
+    assert "поток" in basis

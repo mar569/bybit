@@ -14,6 +14,13 @@ import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 
 from .bybit_klines import BybitKlineCache, KlineBar
+from .chart_pro_layers import (
+    draw_buy_flat_sell_zones,
+    draw_htf_inset,
+    draw_pro_chart_layers,
+    draw_rsi_panel,
+    draw_volume_panel,
+)
 from .chart_screenshot import chart_capture_service
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
@@ -498,6 +505,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     times = _bar_times(bars)
     x_end = times[-1]
 
+    draw_buy_flat_sell_zones(ax, bars, ta)
     _draw_zones(ax, bars, ta)
     _draw_smc_annotations(ax, bars, ta)
     _draw_channel(ax, bars, ta)
@@ -559,14 +567,22 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
 
     direction = primary_forecast_direction(ta)
-    if not _draw_market_forecast_paths(ax, bars, ta):
-        if direction == "long":
-            _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-        elif direction == "short":
-            _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-        else:
-            _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-            _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+    path_kind = draw_pro_chart_layers(ax, bars, ta)
+    if path_kind == "default":
+        if not _draw_market_forecast_paths(ax, bars, ta):
+            if direction == "long":
+                _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+            elif direction == "short":
+                _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+            else:
+                _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
+                _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
+    elif path_kind == "bounce_short" and ta.continuation_path:
+        _draw_zigzag_forecast_path(
+            ax, bars, ta.continuation_path.waypoints,
+            color=CHART_STYLE["accent_long"], label=ta.continuation_path.label,
+            alpha=0.35, lw=1.0,
+        )
 
     _draw_signal_markers(ax, bars, ta)
 
@@ -995,18 +1011,40 @@ def _render_chart_figure(
     accent_color: str,
     interval_minutes: int = 5,
     pro_mode: bool = False,
+    htf_bars: list[KlineBar] | None = None,
+    enhanced: bool = True,
 ) -> bytes:
-    fig_size = (19.2, 10.2) if pro_mode else (17, 8.5)
-    fig, ax = plt.subplots(figsize=fig_size, dpi=120)
-    fig.patch.set_facecolor(CHART_STYLE["bg"])
-    ax.set_facecolor(CHART_STYLE["bg"])
-    if pro_mode:
-        fig.subplots_adjust(left=0.14, right=0.86, top=0.93, bottom=0.09)
+    use_enhanced = enhanced
+    if use_enhanced:
+        fig = plt.figure(figsize=(17, 10.8), dpi=120)
+        gs = fig.add_gridspec(3, 1, height_ratios=[4.2, 1.0, 0.9], hspace=0.04)
+        ax = fig.add_subplot(gs[0])
+        ax_vol = fig.add_subplot(gs[1], sharex=ax)
+        ax_rsi = fig.add_subplot(gs[2], sharex=ax)
+        fig.patch.set_facecolor(CHART_STYLE["bg"])
+        fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.08)
     else:
-        fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
+        fig_size = (19.2, 10.2) if pro_mode else (17, 8.5)
+        fig, ax = plt.subplots(figsize=fig_size, dpi=120)
+        ax_vol = None
+        ax_rsi = None
+        fig.patch.set_facecolor(CHART_STYLE["bg"])
+        ax.set_facecolor(CHART_STYLE["bg"])
+        if pro_mode:
+            fig.subplots_adjust(left=0.14, right=0.86, top=0.93, bottom=0.09)
+        else:
+            fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
 
+    ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta)
+    if use_enhanced and ax_vol is not None and ax_rsi is not None:
+        draw_volume_panel(ax_vol, bars)
+        draw_rsi_panel(ax_rsi, bars)
+        plt.setp(ax.get_xticklabels(), visible=False)
+        plt.setp(ax_vol.get_xticklabels(), visible=False)
+    if use_enhanced and htf_bars:
+        draw_htf_inset(fig, htf_bars, ta, interval_label="2h")
     if pro_mode:
         _draw_pro_market_zones(ax, bars, ta)
         _draw_pro_paths(ax, bars, ta)
@@ -1476,11 +1514,16 @@ async def render_annotated_chart(
 
     btc_bars: list[KlineBar] | None = None
     htf_bars: list[KlineBar] | None = None
+    htf_2h_bars: list[KlineBar] | None = None
     history_bars: list[KlineBar] | None = None
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_bars = await _fetch_bars("BTCUSDT", hours, interval_minutes=interval_minutes)
     if interval_minutes <= 15:
         htf_bars = await _fetch_bars(symbol, max(24, hours * 2), interval_minutes=60)
+    try:
+        htf_2h_bars = await _fetch_bars(symbol, 96, interval_minutes=120)
+    except Exception:
+        htf_2h_bars = htf_bars
     # Для ручного TA (neutral=True) подтягиваем более глубокую историю паттернов.
     if neutral:
         hist_hours = 48 if interval_minutes <= 15 else 72
@@ -1538,6 +1581,8 @@ async def render_annotated_chart(
         accent_color=accent,
         interval_minutes=interval_minutes,
         pro_mode=pro_mode,
+        htf_bars=htf_2h_bars or htf_bars,
+        enhanced=source in {"annotated", "annotated_pro"},
     )
     return png, ta
 

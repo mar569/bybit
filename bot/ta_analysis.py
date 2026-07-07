@@ -6,7 +6,13 @@ from dataclasses import dataclass, field
 from .bybit_klines import KlineBar
 from .market_structure import FiveMinOiBar, MarketStructureContext, analyze_market_structure
 from .smc_analysis import SmcContext, analyze_smc, format_smc_compact_html, smc_verdict_boost
-from .ta_range_trade import RangeTradeSetup, build_factor_context, evaluate_market_flow, evaluate_range_trade
+from .ta_range_trade import (
+    MarketFlowScores,
+    RangeTradeSetup,
+    build_factor_context,
+    evaluate_market_flow,
+    evaluate_range_trade,
+)
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,12 @@ class TAAnalysisResult:
     correction_path: ForecastPath | None = None
     continuation_path: ForecastPath | None = None
     forecast_summary: str = ""
+    flow_continuation: int = 0
+    flow_correction: int = 0
+    flow_notes: list[str] = field(default_factory=list)
+    narrative_plain: str = ""
+    narrative_plan: str = ""
+    narrative_basis: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -977,6 +989,7 @@ def build_market_forecast_paths(
     repeat_spike_dump_risk: bool,
     verdict: str,
     rulers: list[RulerMeasurement],
+    flow: MarketFlowScores | None = None,
 ) -> tuple[ForecastPath | None, ForecastPath | None, str]:
     """
     Прогноз «коррекция vs продолжение» после импульса/смыва шортов.
@@ -1008,32 +1021,31 @@ def build_market_forecast_paths(
         cont_candidates.append(breakout)
     if nearest_resistance and nearest_resistance > current * 1.001:
         cont_candidates.append(nearest_resistance)
-    cont_tp = min(cont_candidates) if cont_candidates else current * 1.012
+    cont_tp = min(cont_candidates) if cont_candidates else None
 
-    corr_score = 0
-    cont_score = 0
-    factors_ru: list[str] = []
+    if flow is None:
+        flow = evaluate_market_flow(
+            momentum=momentum,
+            momentum_pct=momentum_pct,
+            phase=phase,
+            oi_narrative=oi_narrative,
+            oi_context_strength=oi_context_strength,
+            cvd_ratio=cvd_ratio,
+            liq_long_boost=liq_long_boost,
+            liq_short_boost=liq_short_boost,
+            range_position=range_position,
+            post_pump=post_pump,
+            drawdown_from_high_pct=drawdown_from_high_pct,
+        )
 
-    flow = evaluate_market_flow(
-        momentum=momentum,
-        momentum_pct=momentum_pct,
-        phase=phase,
-        oi_narrative=oi_narrative,
-        oi_context_strength=oi_context_strength,
-        cvd_ratio=cvd_ratio,
-        liq_long_boost=liq_long_boost,
-        liq_short_boost=liq_short_boost,
-        range_position=range_position,
-        post_pump=post_pump,
-        drawdown_from_high_pct=drawdown_from_high_pct,
-    )
-    corr_score += flow.correction // 4
-    cont_score += flow.continuation // 4
-    factors_ru.extend(flow.notes[:4])
+    corr_score = flow.correction // 4
+    cont_score = flow.continuation // 4
+    factors_ru: list[str] = list(flow.notes[:4])
 
     if post_pump:
         corr_score += 24
-        factors_ru.append("после пампа")
+        if "после пампа" not in factors_ru:
+            factors_ru.append("после пампа")
     if phase == "impulse_up" and range_position > 0.75:
         corr_score += 18
     if repeat_spike_dump_risk:
@@ -1042,13 +1054,6 @@ def build_market_forecast_paths(
     if drawdown_from_high_pct < 2.5 and range_position > 0.82:
         corr_score += 14
         factors_ru.append("у верха range")
-    if any("CVD↓" in line for line in factor_lines):
-        corr_score += 16
-        factors_ru.append("CVD продажи")
-    if any("лонги ликвидированы" in line for line in factor_lines):
-        corr_score += 14
-    if verdict == "SHORT":
-        corr_score += 12
     if phase == "correction_down":
         corr_score += 10
 
@@ -1058,8 +1063,6 @@ def build_market_forecast_paths(
         cont_score += 8
     if phase == "impulse_up":
         cont_score += 6
-    if verdict == "LONG":
-        cont_score += 12
 
     corr_conf = int(_clamp(4 + corr_score / 8, 4, 9))
     cont_conf = int(_clamp(4 + cont_score / 8, 4, 9))
@@ -1078,7 +1081,7 @@ def build_market_forecast_paths(
             reason=f"откат к {fmt_price(pullback)} (−{pb_pct:.1f}%)",
         )
 
-    if cont_tp > current * 1.003:
+    if cont_tp is not None and cont_tp > current * 1.003:
         shallow_dip = current * (0.992 if post_pump else 0.996)
         continuation_path = ForecastPath(
             kind="continuation",
@@ -1090,6 +1093,9 @@ def build_market_forecast_paths(
 
     if correction_path is None and continuation_path is None:
         return None, None, ""
+
+    corr_conf = correction_path.confidence if correction_path else 0
+    cont_conf = continuation_path.confidence if continuation_path else 0
 
     primary = "коррекция" if corr_conf >= cont_conf else "продолжение"
     if correction_path and continuation_path:
@@ -1104,6 +1110,219 @@ def build_market_forecast_paths(
         summary = f"Ожидается продолжение. {continuation_path.reason if continuation_path else ''}."
 
     return correction_path, continuation_path, summary
+
+
+def _narrative_basis_parts(
+    *,
+    phase_label: str,
+    structure_label: str,
+    momentum_label: str,
+    oi_narrative_label: str,
+    market_bias: str,
+    flow: MarketFlowScores,
+    factor_lines: list[str],
+    verdict_reason: str,
+) -> list[str]:
+    parts: list[str] = []
+    if phase_label and phase_label != "Без явной фазы":
+        parts.append(f"фаза: {phase_label}")
+    if structure_label:
+        parts.append(f"структура: {structure_label}")
+    if momentum_label:
+        parts.append(momentum_label)
+    if market_bias:
+        parts.append(f"уклон: {market_bias}")
+    if oi_narrative_label and oi_narrative_label != "Мало данных OI":
+        parts.append(f"OI: {oi_narrative_label}")
+    for note in flow.notes:
+        if note not in parts:
+            parts.append(note)
+    for line in factor_lines:
+        if line and line not in " · ".join(parts):
+            parts.append(line)
+    if verdict_reason and verdict_reason not in " · ".join(parts):
+        parts.append(verdict_reason[:80])
+    return parts[:7]
+
+
+def build_ta_signal_narrative(
+    *,
+    verdict: str,
+    current: float,
+    target_prices: list[float],
+    invalidation_price: float | None,
+    breakout_level: float | None,
+    breakdown_level: float | None,
+    bullish: TradeScenario | None,
+    bearish: TradeScenario | None,
+    flow: MarketFlowScores,
+    correction_path: ForecastPath | None,
+    continuation_path: ForecastPath | None,
+    factor_lines: list[str],
+    phase_label: str,
+    structure_label: str,
+    momentum_label: str,
+    oi_narrative_label: str,
+    market_bias: str,
+    range_trade_label: str,
+    primary_scenario: str,
+    verdict_reason: str,
+) -> tuple[str, str, str]:
+    """
+    Единый текст для сигналов: plain / plan / basis.
+    Строится только из собранного анализа (flow, уровни, сценарии, OI/CVD/liq).
+    """
+    basis_list = _narrative_basis_parts(
+        phase_label=phase_label,
+        structure_label=structure_label,
+        momentum_label=momentum_label,
+        oi_narrative_label=oi_narrative_label,
+        market_bias=market_bias,
+        flow=flow,
+        factor_lines=factor_lines,
+        verdict_reason=verdict_reason,
+    )
+    flow_tag = f"поток corr {flow.correction} / cont {flow.continuation}"
+    basis = f"📊 <b>На чём основано:</b> {' · '.join(basis_list)} · {flow_tag}"
+
+    def _path_target(path: ForecastPath | None, *, correction: bool) -> float | None:
+        if path is None or not path.waypoints:
+            return None
+        if correction and len(path.waypoints) >= 3:
+            return path.waypoints[2]
+        return path.waypoints[-1]
+
+    if verdict == "SHORT":
+        scenario = bearish
+        tp = (
+            target_prices[0]
+            if target_prices
+            else (scenario.target_prices[0] if scenario and scenario.target_prices else None)
+        )
+        if tp is None:
+            tp = _path_target(correction_path, correction=True) or breakdown_level
+        trigger = breakdown_level or (scenario.trigger_price if scenario else None)
+        stop = invalidation_price or (scenario.stop_price if scenario else None)
+        path_reason = correction_path.reason if correction_path else primary_scenario
+        if tp:
+            plain = (
+                f"📉 <b>Простыми словами:</b> TA <b>SHORT</b> — цель снижения "
+                f"<b>{fmt_price(tp)}</b>"
+                f"{f' ({path_reason})' if path_reason else ''}."
+            )
+        else:
+            plain = (
+                f"📉 <b>Простыми словами:</b> TA <b>SHORT</b>"
+                f"{f' — {path_reason}' if path_reason else ''}."
+            )
+        if breakdown_level and current > breakdown_level * 1.002:
+            bounce_to = breakout_level or _path_target(continuation_path, correction=False)
+            if bounce_to and bounce_to > current:
+                plain += (
+                    f" Сейчас отскок — возможен дожим к <b>{fmt_price(bounce_to)}</b>, "
+                    f"затем short при ≤<b>{fmt_price(breakdown_level)}</b>."
+                )
+            else:
+                plain += (
+                    f" Сейчас цена выше триггера — short <b>не по рынку</b>, "
+                    f"только после ≤<b>{fmt_price(breakdown_level)}</b>."
+                )
+        if continuation_path and flow.continuation >= flow.correction - 12:
+            alt = _path_target(continuation_path, correction=False)
+            if alt and alt > current:
+                plain += (
+                    f" Риск отмены: поток допускает отскок к <b>{fmt_price(alt)}</b> "
+                    f"(cont {flow.continuation} vs corr {flow.correction})."
+                )
+        plan_bits: list[str] = []
+        if range_trade_label:
+            plan_bits.append(range_trade_label)
+        if trigger:
+            plan_bits.append(f"вход ≤<b>{fmt_price(trigger)}</b>")
+        if tp:
+            plan_bits.append(f"цель <b>{fmt_price(tp)}</b>")
+        if stop:
+            plan_bits.append(f"стоп <b>{fmt_price(stop)}</b>")
+        plan = f"👉 <b>План:</b> SHORT · {' · '.join(plan_bits)}." if plan_bits else ""
+        return plain, plan, basis
+
+    if verdict == "LONG":
+        scenario = bullish
+        tp = (
+            target_prices[0]
+            if target_prices
+            else (scenario.target_prices[0] if scenario and scenario.target_prices else None)
+        )
+        if tp is None:
+            tp = _path_target(continuation_path, correction=False) or breakout_level
+        trigger = breakout_level or (scenario.trigger_price if scenario else None)
+        stop = invalidation_price or (scenario.stop_price if scenario else None)
+        path_reason = continuation_path.reason if continuation_path else primary_scenario
+        if tp:
+            plain = (
+                f"📈 <b>Простыми словами:</b> TA <b>LONG</b> — цель роста "
+                f"<b>{fmt_price(tp)}</b>"
+                f"{f' ({path_reason})' if path_reason else ''}."
+            )
+        else:
+            plain = (
+                f"📈 <b>Простыми словами:</b> TA <b>LONG</b>"
+                f"{f' — {path_reason}' if path_reason else ''}."
+            )
+        if correction_path and flow.correction >= flow.continuation - 12:
+            alt = _path_target(correction_path, correction=True)
+            if alt and alt < current:
+                plain += (
+                    f" Риск отмены: откат к <b>{fmt_price(alt)}</b> "
+                    f"(corr {flow.correction} vs cont {flow.continuation})."
+                )
+        plan_bits = []
+        if range_trade_label:
+            plan_bits.append(range_trade_label)
+        if trigger:
+            plan_bits.append(f"вход ≥<b>{fmt_price(trigger)}</b>")
+        if tp:
+            plan_bits.append(f"цель <b>{fmt_price(tp)}</b>")
+        if stop:
+            plan_bits.append(f"стоп <b>{fmt_price(stop)}</b>")
+        plan = f"👉 <b>План:</b> LONG · {' · '.join(plan_bits)}." if plan_bits else ""
+        return plain, plan, basis
+
+    # WAIT — сценарий из потока и реальных уровней, без входа
+    if flow.correction > flow.continuation + 10 and correction_path:
+        tgt = _path_target(correction_path, correction=True)
+        plain = (
+            f"📐 <b>Простыми словами:</b> WAIT — поток за <b>откат</b> "
+            f"{correction_path.reason}"
+            f"{f' к ~<b>{fmt_price(tgt)}</b>' if tgt else ''}. "
+            "Это не вход — ждём подтверждения уровня."
+        )
+    elif flow.continuation > flow.correction + 10 and continuation_path:
+        tgt = _path_target(continuation_path, correction=False)
+        plain = (
+            f"📐 <b>Простыми словами:</b> WAIT — поток за <b>продолжение</b> "
+            f"{continuation_path.reason}"
+            f"{f' к ~<b>{fmt_price(tgt)}</b>' if tgt else ''}. "
+            "Это не вход — ждём подтверждения уровня."
+        )
+    elif primary_scenario:
+        plain = (
+            f"📐 <b>Простыми словами:</b> WAIT — {primary_scenario}. "
+            "Это не вход — ждём подтверждения."
+        )
+    else:
+        plain = (
+            "📐 <b>Простыми словами:</b> WAIT — нет подтверждённого направления. "
+            "Ждём пробой уровня."
+        )
+
+    long_lvl = fmt_price(breakout_level) if breakout_level else "—"
+    short_lvl = fmt_price(breakdown_level) if breakdown_level else "—"
+    plan = (
+        f"👉 <b>План:</b> вне сделки · LONG выше <b>{long_lvl}</b> · "
+        f"SHORT ниже <b>{short_lvl}</b>."
+    )
+    return plain, plan, basis
 
 
 def detect_repeat_spike_dump_risk(
@@ -2024,6 +2243,30 @@ def run_ta_analysis(
         repeat_spike_dump_risk=repeat_spike_dump_risk,
         verdict=verdict,
         rulers=rulers,
+        flow=flow,
+    )
+
+    narrative_plain, narrative_plan, narrative_basis = build_ta_signal_narrative(
+        verdict=verdict,
+        current=current,
+        target_prices=targets,
+        invalidation_price=inv,
+        breakout_level=breakout,
+        breakdown_level=breakdown,
+        bullish=bullish,
+        bearish=bearish,
+        flow=flow,
+        correction_path=correction_path,
+        continuation_path=continuation_path,
+        factor_lines=factors.factor_lines,
+        phase_label=ms.phase_label,
+        structure_label=structure,
+        momentum_label=momentum_label,
+        oi_narrative_label=ms.oi_narrative_label,
+        market_bias=market_bias,
+        range_trade_label=range_trade.label if range_trade else "",
+        primary_scenario=primary_scenario,
+        verdict_reason=reason,
     )
 
     return TAAnalysisResult(
@@ -2082,6 +2325,12 @@ def run_ta_analysis(
         correction_path=correction_path,
         continuation_path=continuation_path,
         forecast_summary=forecast_summary,
+        flow_continuation=flow.continuation,
+        flow_correction=flow.correction,
+        flow_notes=list(flow.notes),
+        narrative_plain=narrative_plain,
+        narrative_plan=narrative_plan,
+        narrative_basis=narrative_basis,
     )
 
 
@@ -2400,9 +2649,15 @@ def ta_signal_scenario_line_html(
     sig = (signal_side or "").lower()
 
     if ta.verdict == "LONG":
-        head = "▶️ <b>Открывать LONG</b>"
+        state, _ = _long_trigger_state(ta)
+        if state == "ready":
+            head = "▶️ <b>Открывать LONG</b>"
+        else:
+            head = "▶️ <b>LONG по плану</b> · <b>не сейчас</b>"
         if ta.entry_mode == "range_edge" and ta.range_trade_label:
-            head = f"▶️ <b>LONG</b> · {ta.range_trade_label}"
+            head = f"▶️ <b>LONG</b> · {ta.range_trade_label}" + (
+                "" if state == "ready" else " · не сейчас"
+            )
         parts = [head]
         if ta.breakout_level:
             parts.append(f"вход ≥<b>{fmt_price(ta.breakout_level)}</b>")
@@ -2413,9 +2668,15 @@ def ta_signal_scenario_line_html(
         return " · ".join(parts)
 
     if ta.verdict == "SHORT":
-        head = "▶️ <b>Открывать SHORT</b>"
+        state, _ = _short_trigger_state(ta)
+        if state == "ready":
+            head = "▶️ <b>Открывать SHORT</b>"
+        else:
+            head = "▶️ <b>SHORT по плану</b> · <b>не сейчас</b>"
         if ta.entry_mode == "range_edge" and ta.range_trade_label:
-            head = f"▶️ <b>SHORT</b> · {ta.range_trade_label}"
+            head = f"▶️ <b>SHORT</b> · {ta.range_trade_label}" + (
+                "" if state == "ready" else " · не сейчас"
+            )
         parts = [head]
         if ta.breakdown_level:
             parts.append(f"вход ≤<b>{fmt_price(ta.breakdown_level)}</b>")
@@ -2506,6 +2767,41 @@ def ta_scanner_conflict_line_html(ta: TAAnalysisResult, signal_side: str | None)
     return ""
 
 
+def _short_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
+    """
+    Состояние триггера SHORT: ready / armed / far / past.
+    Вход ≤breakdown — готов только когда цена у уровня или ниже (с допуском).
+    """
+    if not ta.breakdown_level or ta.current_price <= 0:
+        return "far", "нет уровня SHORT"
+    bd = ta.breakdown_level
+    px = ta.current_price
+    if px <= bd * 1.0015:
+        if px >= bd * 0.992:
+            return "ready", "цена у триггера SHORT"
+        return "past", "цена ниже входа — ждите ретест снизу"
+    dist_pct = (px - bd) / px * 100.0
+    if dist_pct <= 3.0:
+        return "armed", f"ждать пробой ≤{fmt_price(bd)} (цена выше на {dist_pct:.1f}%)"
+    return "far", f"SHORT далеко ({dist_pct:.1f}% до уровня)"
+
+
+def _long_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
+    """Состояние триггера LONG: ready / armed / far / past."""
+    if not ta.breakout_level or ta.current_price <= 0:
+        return "far", "нет уровня LONG"
+    bo = ta.breakout_level
+    px = ta.current_price
+    if px >= bo * 0.9985:
+        if px <= bo * 1.008:
+            return "ready", "цена у триггера LONG"
+        return "past", "цена выше входа — ждите ретест сверху"
+    dist_pct = (bo - px) / px * 100.0
+    if dist_pct <= 3.0:
+        return "armed", f"ждать пробой ≥{fmt_price(bo)} (цена ниже на {dist_pct:.1f}%)"
+    return "far", f"LONG далеко ({dist_pct:.1f}% до уровня)"
+
+
 def evaluate_entry_readiness(
     ta: TAAnalysisResult,
     signal_side: str,
@@ -2542,78 +2838,71 @@ def evaluate_entry_readiness(
         return False, f"TA {score}/10 — слабый сетап"
 
     if ta.verdict == "LONG":
-        if not ta.breakout_level or ta.current_price <= 0:
-            return False, "нет уровня LONG"
-        dist = ta.dist_to_long_pct
-        if dist is None:
-            dist = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
-        if dist > max_trigger_dist_pct:
-            return False, f"LONG ещё далеко ({dist:.1f}%)"
-        if dist < -0.75:
-            return False, "цена уже выше входа — ждите ретест"
-    elif ta.verdict == "SHORT":
-        if not ta.breakdown_level or ta.current_price <= 0:
-            return False, "нет уровня SHORT"
-        dist = ta.dist_to_short_pct
-        if dist is None:
-            dist = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
-        if dist > max_trigger_dist_pct:
-            return False, f"SHORT ещё далеко ({dist:.1f}%)"
-        if dist < -0.75:
-            return False, "цена уже ниже входа — ждите ретест"
-    else:
-        return False, "нет направления TA"
-
-    if require_smc and ta.smc:
-        smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
-        if not smc_ok:
-            return False, "SMC не готов (нет expansion/sweep)"
-
-    return True, "TA подтверждает вход"
+        state, reason = _long_trigger_state(ta)
+        if signal_type == "reversal_dump" and state != "ready":
+            return False, f"откат вниз — {reason}"
+        if ta.momentum_label and "вниз" in ta.momentum_label and ta.momentum_pct <= -0.8 and state != "ready":
+            return False, f"импульс вниз — {reason}"
+        if state != "ready":
+            return False, reason
+        if require_smc and ta.smc:
+            smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
+            if not smc_ok:
+                return False, "SMC не готов (нет expansion/sweep)"
+        return True, "триггер LONG подтверждён"
+    if ta.verdict == "SHORT":
+        state, reason = _short_trigger_state(ta)
+        if signal_type == "reversal_pump" and state != "ready":
+            return False, f"отскок вверх — {reason}"
+        if ta.momentum_pct >= 0.8 and state != "ready":
+            mom = ta.momentum_label or "рост"
+            return False, f"{mom} — {reason}"
+        if state != "ready":
+            return False, reason
+        if require_smc and ta.smc:
+            smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
+            if not smc_ok:
+                return False, "SMC не готов (нет expansion/sweep)"
+        return True, "триггер SHORT подтверждён"
+    return False, "нет направления TA"
 
 
 def entry_readiness_line_html(ready: bool, reason: str) -> str:
     if ready:
-        return "✅ <b>Готов к входу</b> — можно открывать по плану TA"
+        return "✅ <b>Готов к входу</b> — триггер сработал, можно по плану TA"
+    low = reason.lower()
+    if any(x in low for x in ("отскок", "откат", "ждать пробой", "цена выше", "цена ниже на")):
+        return f"🔶 <b>Сетап активен — не входить сейчас</b> · {reason}"
     if "TA ждёт" in reason:
         return f"⏳ <b>Ждать уровень</b> · {reason}"
     return f"⏳ <b>Рано / ждать</b> · {reason}"
 
 
 def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
-    """Одна простая строка прогноза для сигналов: откат или продолжение."""
-    corr = ta.correction_path
-    cont = ta.continuation_path
-    if corr is None and cont is None:
+    """Простой прогноз — из единого narrative (run_ta_analysis)."""
+    if ta.narrative_plain:
+        return ta.narrative_plain
+    if not ta.forecast_summary:
         return ""
+    return f"📐 {ta.forecast_summary[:180]}"
 
-    def _target(path: ForecastPath, *, correction: bool) -> float:
-        if len(path.waypoints) >= 3 and correction:
-            return path.waypoints[2]
-        return path.waypoints[-1]
 
-    wait_note = ""
-    if ta.verdict == "WAIT":
-        wait_note = " · это не вход в сделку, ждём подтверждения"
+def ta_signal_forecast_summary_line(ta: TAAnalysisResult) -> str:
+    """Блок «на чём основано» — из единого narrative."""
+    if ta.narrative_basis:
+        return ta.narrative_basis
+    if ta.forecast_summary:
+        return f"🔮 {ta.forecast_summary[:150]}"
+    return ""
 
-    if corr and cont:
-        if corr.confidence >= cont.confidence:
-            return (
-                f"📉 <b>Простыми словами:</b> намечается откат вниз к ~<b>{fmt_price(_target(corr, correction=True))}</b>"
-                f" (альтернатива — рост){wait_note}."
-            )
-        return (
-            f"📈 <b>Простыми словами:</b> возможно продолжение вверх к ~<b>{fmt_price(_target(cont, correction=False))}</b>"
-            f" (альтернатива — откат){wait_note}."
-        )
-    if corr:
-        return (
-            f"📉 <b>Простыми словами:</b> намечается откат вниз к ~<b>{fmt_price(_target(corr, correction=True))}</b>{wait_note}."
-        )
-    if cont:
-        return (
-            f"📈 <b>Простыми словами:</b> возможно продолжение вверх к ~<b>{fmt_price(_target(cont, correction=False))}</b>{wait_note}."
-        )
+
+def ta_what_to_do_line(ta: TAAnalysisResult, *, ready: bool = False) -> str:
+    """План действий — из единого narrative."""
+    if ta.narrative_plan:
+        if ta.verdict in {"LONG", "SHORT"} and ready:
+            return ta.narrative_plan
+        if ta.verdict == "WAIT":
+            return ta.narrative_plan
     return ""
 
 
@@ -2834,6 +3123,11 @@ def ta_signal_caption_html(
     lines: list[str] = []
     if readiness is not None and show_readiness_badge:
         lines.append(entry_readiness_line_html(readiness[0], readiness[1]))
+        action_line = ta_what_to_do_line(ta, ready=readiness[0])
+        if not action_line and ta.narrative_plan:
+            action_line = ta.narrative_plan
+        if action_line:
+            lines.append(action_line)
 
     if ta.verdict == "LONG":
         line = f"📐 TA · <b>LONG</b> {score}/10"
@@ -2868,13 +3162,15 @@ def ta_signal_caption_html(
     plain = ta_plain_forecast_line(ta)
     if plain:
         extra.append(plain)
-    if ta.forecast_summary:
-        extra.append(f"🔮 {ta.forecast_summary[:150]}")
-    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
-        extra.append(f"OI: {ta.oi_narrative_label}")
-    for fl in ta.factor_lines[:2]:
-        if fl and fl not in " ".join(extra):
-            extra.append(fl)
+    forecast_line = ta_signal_forecast_summary_line(ta)
+    if forecast_line:
+        extra.append(forecast_line)
+    if not ta.narrative_basis:
+        if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
+            extra.append(f"OI: {ta.oi_narrative_label}")
+        for fl in ta.factor_lines[:2]:
+            if fl and fl not in " ".join(extra):
+                extra.append(fl)
     if smc_line:
         extra.append(smc_line)
     if extra:
@@ -3158,6 +3454,6 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
 
 def ta_chart_legend_text() -> str:
     return (
-        "█ зелёная зона = поддержка | █ красная = сопротивление | "
-        "фиолет. = канал | STOP = стоп | TP = цель"
+        "█ BUY/flat/SELL | пунктир = сценарий | sweep ○ | Vol/RSI | HTF inset | "
+        "STOP/TP | коррекция/продолжение"
     )
