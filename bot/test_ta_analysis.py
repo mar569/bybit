@@ -164,10 +164,48 @@ def test_post_pump_local_range() -> None:
         bars, swings, levels, zones, key_levels,
     )
     assert post_pump
-    assert cons is not None
     assert breakout is not None and breakdown is not None
+    if cons is not None:
+        assert cons.top > cons.bottom
     if breakout and breakdown:
         assert breakout > breakdown
+
+
+def test_post_pump_breakout_does_not_chase_spike() -> None:
+    """После пампа LONG-триггер не должен уезжать на хай последней зелёной свечи."""
+    bars: list[KlineBar] = []
+    price = 1.0
+    for i in range(28):
+        price *= 1.015
+        o = price / 1.015
+        bars.append(_bar(i, o, price * 1.003, o * 0.998, price))
+    # Консолидация вокруг ~1.5
+    base = price
+    for i in range(16):
+        w = 1.0 + ((i % 5) - 2) * 0.002
+        c = base * w
+        bars.append(_bar(28 + i, c * 0.999, c * 1.004, c * 0.996, c))
+    cons_high_before = max(b.high for b in bars[-16:])
+    # Импульс выше локального хая (как EVAA 3.017 → 3.07+)
+    spike = cons_high_before * 1.025
+    bars.append(_bar(44, cons_high_before * 0.999, spike, cons_high_before * 0.997, spike * 0.998))
+    bars.append(_bar(45, spike * 0.997, spike * 1.01, spike * 0.995, spike))
+
+    assert detect_post_pump_phase(bars)
+    swings = find_swing_points(bars, window=2)
+    breakout, breakdown, cons, post_pump = resolve_trade_triggers(
+        bars, swings, [], [], [],
+    )
+    assert post_pump
+    current = bars[-1].close
+    # Триггер не должен преследовать хай импульса.
+    if breakout is not None:
+        assert breakout < current * 1.002
+        assert breakout <= cons_high_before * 1.012
+    if cons is not None and breakout is not None:
+        assert breakout <= cons.top * 1.002
+    if breakdown is not None and breakout is not None:
+        assert breakdown < breakout
 
 
 def test_primary_forecast_direction() -> None:

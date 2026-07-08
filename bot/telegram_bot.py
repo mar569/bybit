@@ -1956,6 +1956,7 @@ class TelegramBot:
             "verdict": ta.verdict,
             "priority": ta.action_priority,
             "breakout": ta.breakout_level,
+            "plan_breakout": ta.breakout_level,
             "breakdown": ta.breakdown_level,
             "price": ta.current_price,
             "updated_at": time.time(),
@@ -2088,17 +2089,37 @@ class TelegramBot:
             return
 
         score = ta_display_score(ta)
+        sticky_breakout = last.get("plan_breakout") or last.get("breakout")
+        score_label = "ясность" if ta.verdict == "WAIT" else "уверенность"
         caption = (
             f"<b>{symbol}</b> · Bybit {interval_minutes}m · ваш <b>{side_label}</b>\n"
-            f"{ta_user_intent_html(ta, user_side)}\n\n"
-            f"📐 TA сейчас: <b>{ta.verdict}</b> {score}/10 · "
+            f"{ta_user_intent_html(ta, user_side, sticky_breakout=sticky_breakout)}\n\n"
+            f"📐 TA сейчас: <b>{ta.verdict}</b> · {score_label} {score}/10 · "
             f"цена <b>{fmt_price(ta.current_price)}</b>"
         )
+
+        plan_breakout = ta.breakout_level
+        # Анти-chase: если раньше дали LONG-триггер и цена его взяла / почти взяла —
+        # не перезаписываем план более высоким «скользящим» хаем.
+        if (
+            sticky_breakout
+            and ta.breakout_level
+            and ta.current_price
+            and float(sticky_breakout) > 0
+        ):
+            sticky_f = float(sticky_breakout)
+            fresh_f = float(ta.breakout_level)
+            px = float(ta.current_price)
+            if fresh_f > sticky_f * 1.002 and px >= sticky_f * 0.997:
+                plan_breakout = sticky_f
+            elif px < sticky_f * 0.96:
+                plan_breakout = fresh_f
 
         self._manual_ta_last[(target_chat_id, symbol, interval_minutes)] = {
             "verdict": ta.verdict,
             "priority": ta.action_priority,
             "breakout": ta.breakout_level,
+            "plan_breakout": plan_breakout,
             "breakdown": ta.breakdown_level,
             "price": ta.current_price,
             "updated_at": time.time(),

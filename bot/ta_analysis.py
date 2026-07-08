@@ -537,9 +537,23 @@ def resolve_trade_triggers(
     if breakdown and (_distance_pct(current, breakdown) or 999) > max_dist:
         breakdown = local_s or (local_cons.bottom if local_cons else breakdown)
 
+    near_res = sorted([p for p in resistances if p > current * 1.0002])
+    near_sup = sorted([p for p in supports if p < current * 0.9998], reverse=True)
+
     if post_pump and local_cons:
-        breakout = local_cons.top
+        # Низ range после пампа — стабильный SHORT-триггер.
         breakdown = local_cons.bottom
+        # ВАЖНО: не ставить LONG-триггер = скользящий max(high) окна.
+        # Иначе при каждом апдейте «закрепление ≥X» убегает вверх вместе с ценой
+        # (пользователь видит «цена уже выше», а бот снова пишет WAIT + новый X).
+        breakout = _post_pump_stable_breakout(
+            current=current,
+            structural=breakout,
+            local_r=local_r,
+            cons_top=local_cons.top,
+            near_resistances=near_res,
+            bars=bars,
+        )
     elif local_cons and not breakout and not breakdown:
         breakout = local_cons.top
         breakdown = local_cons.bottom
@@ -552,8 +566,6 @@ def resolve_trade_triggers(
     # Анти-аномалия: не уводить триггер слишком далеко от текущей цены.
     # Если ближайший валидный уровень далеко, лучше оставить триггер пустым и ждать
     # нового формирования структуры, чем предлагать "short ниже всего графика".
-    near_res = sorted([p for p in resistances if p > current * 1.0002])
-    near_sup = sorted([p for p in supports if p < current * 0.9998], reverse=True)
     hard_cap = 12.0 if post_pump else 16.0
 
     if breakout and current > 0:
@@ -569,6 +581,76 @@ def resolve_trade_triggers(
 
     cons = local_cons if post_pump and local_cons else None
     return breakout, breakdown, cons, post_pump
+
+
+def _post_pump_stable_breakout(
+    *,
+    current: float,
+    structural: float | None,
+    local_r: float | None,
+    cons_top: float,
+    near_resistances: list[float],
+    bars: list[KlineBar],
+) -> float | None:
+    """Триггер LONG после пампа без «преследования» ценового хая.
+
+    Верх range берём по окну *без* последних 2–3 свечей — иначе текущий
+    импульсный хай постоянно переопределяет «закрепление ≥X».
+    """
+    if current <= 0:
+        return structural
+
+    stable_top = _stable_consolidation_top(bars, lookback=32, exclude_recent=3)
+    if stable_top is None:
+        stable_top = cons_top
+
+    # 1) Структурное сопротивление ещё выше цены — оставляем.
+    if structural and structural > current * 1.002:
+        return structural
+
+    # 2) Ближайший swing-high / resistance выше цены.
+    if local_r and local_r > current * 1.002:
+        return local_r
+    if near_resistances:
+        nxt = near_resistances[0]
+        if nxt > current * 1.002:
+            return nxt
+
+    # 3) Стабильный верх боковика (до текущего импульса).
+    if stable_top > current * 1.0015:
+        return stable_top
+
+    # 4) Цена уже взяла стабильный верх — не поднимаем триггер к max(high).
+    #    Следующий ориентир = хай пампа в окне, если ещё есть запас.
+    lookback = min(30, len(bars))
+    if lookback >= 5:
+        pump_peak = max(b.high for b in bars[-lookback:])
+        if pump_peak > current * 1.006 and pump_peak > stable_top * 1.004:
+            return pump_peak
+
+    # Возвращаем пробитый уровень — для intent «уровень уже взят», не новый хай.
+    return stable_top if stable_top > 0 else (cons_top if cons_top > 0 else structural)
+
+
+def _stable_consolidation_top(
+    bars: list[KlineBar],
+    *,
+    lookback: int = 32,
+    exclude_recent: int = 3,
+) -> float | None:
+    """Верх локального range без хвоста текущего импульса."""
+    if len(bars) < 10:
+        return None
+    lb = min(lookback, len(bars))
+    end = len(bars) - max(0, exclude_recent)
+    start = max(0, len(bars) - lb)
+    if end - start < 5:
+        segment = bars[-lb:]
+    else:
+        segment = bars[start:end]
+    if not segment:
+        return None
+    return max(b.high for b in segment)
 
 
 def build_key_levels(
@@ -2755,10 +2837,33 @@ def _display_invalidation(ta: TAAnalysisResult) -> float | None:
     return inv
 
 
-def _intent_entry_hint(ta: TAAnalysisResult, user_side: str) -> str:
+def _resolve_intent_breakout(
+    ta: TAAnalysisResult,
+    sticky_breakout: float | None = None,
+) -> float | None:
+    """Рабочий LONG-триггер: sticky с прошлого разбора, если ещё актуален."""
+    bo, _ = _effective_breakout_breakdown(ta)
+    px = ta.current_price or 0.0
+    sticky = float(sticky_breakout) if sticky_breakout else None
+    if sticky and sticky > 0 and px > 0:
+        # Липкий уровень: не поднимаем триггер выше без новой структуры.
+        # Если цена уже взяла sticky — оставляем его (ниже), чтобы сказать «уровень взят».
+        # Если ещё ниже sticky — держим тот же план, даже если fresh TA чуть сдвинул уровень.
+        if sticky <= px * 1.001 or (bo is None) or sticky <= (bo or sticky) * 1.012:
+            return sticky
+    return bo
+
+
+def _intent_entry_hint(
+    ta: TAAnalysisResult,
+    user_side: str,
+    *,
+    sticky_breakout: float | None = None,
+) -> str:
     """Человеческая подсказка «когда входить» для ручного TA."""
     side = user_side.lower()
-    bo, bd = _effective_breakout_breakdown(ta)
+    bo = _resolve_intent_breakout(ta, sticky_breakout)
+    _, bd = _effective_breakout_breakdown(ta)
     px = ta.current_price or 0.0
 
     if side == "short":
@@ -2788,6 +2893,34 @@ def _intent_entry_hint(ta: TAAnalysisResult, user_side: str) -> str:
         return "пробой поддержки range на 5m — без уровня не входить"
 
     if side == "long":
+        if bo and px >= bo * 0.999:
+            above_pct = (px - bo) / px * 100.0 if px > 0 else 0.0
+            next_r = None
+            fresh_bo, _ = _effective_breakout_breakdown(ta)
+            if fresh_bo and fresh_bo > px * 1.004:
+                next_r = fresh_bo
+            elif ta.nearest_resistance and ta.nearest_resistance > px * 1.004:
+                next_r = ta.nearest_resistance
+            bits = [
+                f"<b>уровень ≥{fmt_price(bo)} уже взят</b> "
+                f"(цена выше на ~{above_pct:.1f}%)"
+            ]
+            if ta.post_pump:
+                bits.append("после пампа лучше не лонг вдогонку")
+                if next_r:
+                    bits.append(
+                        f"либо ретест <b>{fmt_price(bo)}</b> как поддержки, "
+                        f"либо дожим к <b>{fmt_price(next_r)}</b> с объёмом"
+                    )
+                else:
+                    bits.append(
+                        f"ждать ретест <b>{fmt_price(bo)}</b> или отказ от хая"
+                    )
+            elif next_r:
+                bits.append(f"следующий ориентир <b>{fmt_price(next_r)}</b>")
+            else:
+                bits.append("можно рассмотреть long от ретеста, не в рынок «вдогонку»")
+            return " · ".join(bits)
         if bo and px < bo:
             d = (bo - px) / px * 100.0
             return f"закрепление 5m ≥<b>{fmt_price(bo)}</b> (ещё ~{d:.1f}%)"
@@ -2800,12 +2933,20 @@ def _intent_entry_hint(ta: TAAnalysisResult, user_side: str) -> str:
     return "сначала дождаться формирования range и уровней"
 
 
-def _intent_plain_line(ta: TAAnalysisResult, user_side: str) -> str:
+def _intent_plain_line(
+    ta: TAAnalysisResult,
+    user_side: str,
+    *,
+    sticky_breakout: float | None = None,
+) -> str:
     """Короткий разбор под идею пользователя — без противоречия с LONG/SHORT."""
     side = user_side.lower()
-    bo, bd = _effective_breakout_breakdown(ta)
+    bo = _resolve_intent_breakout(ta, sticky_breakout)
+    _, bd = _effective_breakout_breakdown(ta)
+    px = ta.current_price or 0.0
     corr_wins = ta.flow_correction > ta.flow_continuation + 8
     cont_wins = ta.flow_continuation > ta.flow_correction + 8
+    level_taken = bool(bo and px >= bo * 0.999)
 
     if side == "short":
         if ta.liq_cascade_active:
@@ -2839,12 +2980,24 @@ def _intent_plain_line(ta: TAAnalysisResult, user_side: str) -> str:
         return ta_plain_forecast_line(ta) or "📐 WAIT — подтвердите уровень перед short."
 
     if side == "long":
+        if ta.post_pump and level_taken:
+            return (
+                f"📐 Триггер ≥<b>{fmt_price(bo)}</b> <b>уже пройден</b> — импульс есть, "
+                "но после пампа вход вдогонку слабый. "
+                f"Проф. вариант: long от ретеста <b>{fmt_price(bo)}</b> "
+                "или ждать следующий resistance; рынок «сейчас» = высокий риск."
+            )
         if ta.post_pump:
             return (
                 "📐 LONG после пампа — риск покупки на хайе. "
                 f"Имеет смысл только при пробое ≥<b>{fmt_price(bo)}</b> с объёмом."
                 if bo
                 else "📐 LONG после пампа — высокий риск, ждите откат."
+            )
+        if level_taken:
+            return (
+                f"📐 Уровень ≥<b>{fmt_price(bo)}</b> взят — "
+                "оценка: long возможен от ретеста, а не по рынку вдогонку."
             )
         return ta_plain_forecast_line(ta) or "📐 Ждём подтверждения для long."
 
@@ -3463,7 +3616,12 @@ def ta_scenario_followup_caption_html(
     return ta_signal_scenario_line_html(ta, signal_side=signal_side)
 
 
-def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
+def ta_user_intent_html(
+    ta: TAAnalysisResult,
+    user_side: str,
+    *,
+    sticky_breakout: float | None = None,
+) -> str:
     """Оценка идеи пользователя: хочу SHORT / LONG vs текущий TA и прогноз."""
     side = user_side.lower()
     if side not in {"long", "short"}:
@@ -3490,6 +3648,11 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
         side == "long" and ta.action_priority == "long"
     )
 
+    bo = _resolve_intent_breakout(ta, sticky_breakout)
+    _, bd = _effective_breakout_breakdown(ta)
+    px = ta.current_price or 0.0
+    long_level_taken = bool(side == "long" and bo and px >= bo * 0.999)
+
     lines = [f"{emoji} <b>Ваша идея:</b> открыть <b>{label}</b>"]
 
     if ta.liq_cascade_active and side == "short":
@@ -3505,7 +3668,7 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
                 "🟡 <b>Оценка:</b> направление <b>вниз — логично</b>, но сейчас <b>NO TRADE</b>: "
                 "цена уже в сильном дампе — шорт «в хвост» = большой стоп, маленькая цель."
             )
-            bo_hint, _ = _effective_breakout_breakdown(ta)
+            bo_hint = bo
             if bo_hint and ta.current_price and bo_hint > ta.current_price:
                 lines.append(
                     f"💡 <b>Когда шортить:</b> после отскока к <b>{fmt_price(bo_hint)}</b> "
@@ -3527,7 +3690,18 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
             f"(<b>{ta.verdict}</b> {score}/10) — высокий риск ошибки."
         )
     elif ta.verdict == "WAIT":
-        if side == "short" and forecast_correction:
+        if side == "long" and long_level_taken and ta.post_pump:
+            lines.append(
+                "🟡 <b>Оценка:</b> триггер LONG <b>уже пройден</b> — импульс вверх есть, "
+                "но после пампа <b>лонг вдогонку</b> = риск покупки на хае. "
+                "Лучше ретест или следующий resistance."
+            )
+        elif side == "long" and long_level_taken:
+            lines.append(
+                "🟢 <b>Оценка:</b> уровень входа <b>уже взят</b> — идея живая, "
+                "но предпочтительнее вход от ретеста, не market chase."
+            )
+        elif side == "short" and forecast_correction:
             lines.append(
                 "🟡 <b>Оценка:</b> направление <b>логичное</b> — базовый сценарий откат, "
                 "но TA ещё <b>WAIT</b>: не входить без триггера."
@@ -3559,8 +3733,7 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
     else:
         lines.append(f"⚪ <b>Оценка:</b> проверьте уровни перед входом в <b>{label}</b>.")
 
-    bo, bd = _effective_breakout_breakdown(ta)
-    hint = _intent_entry_hint(ta, side)
+    hint = _intent_entry_hint(ta, side, sticky_breakout=sticky_breakout)
     prefix = "подтверждение" if side == "short" else "вход"
     lines.append(f"▶️ <b>Когда входить ({prefix}):</b> {hint}.")
 
@@ -3582,7 +3755,7 @@ def ta_user_intent_html(ta: TAAnalysisResult, user_side: str) -> str:
         verb = "выше" if side == "short" else "ниже"
         lines.append(f"🛑 <b>Отмена идеи:</b> при пробое {verb} <b>{fmt_price(cancel)}</b>.")
 
-    plain = _intent_plain_line(ta, side)
+    plain = _intent_plain_line(ta, side, sticky_breakout=sticky_breakout)
     if plain:
         lines.append(plain)
     lines.append(
