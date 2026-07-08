@@ -2883,19 +2883,22 @@ def ta_signal_scenario_line_html(
     ta: TAAnalysisResult,
     *,
     signal_side: str | None = None,
+    signal_type: str | None = None,
 ) -> str:
     """Одна строка сценария для обычных сигналов."""
     sig = (signal_side or "").lower()
 
     if ta.verdict == "LONG":
         state, _ = _long_trigger_state(ta)
-        if state == "ready":
+        near_ready, _, _ = _near_trigger_ready(ta, "long", signal_type=signal_type)
+        armed_aggressive_pump = state == "armed" and _is_aggressive_pump_signal(signal_type)
+        if state == "ready" or armed_aggressive_pump or near_ready:
             head = "▶️ <b>Открывать LONG</b>"
         else:
             head = "▶️ <b>LONG по плану</b> · <b>не сейчас</b>"
         if ta.entry_mode == "range_edge" and ta.range_trade_label:
             head = f"▶️ <b>LONG</b> · {ta.range_trade_label}" + (
-                "" if state == "ready" else " · не сейчас"
+                "" if state == "ready" or armed_aggressive_pump or near_ready else " · не сейчас"
             )
         parts = [head]
         if ta.breakout_level:
@@ -2908,13 +2911,15 @@ def ta_signal_scenario_line_html(
 
     if ta.verdict == "SHORT":
         state, _ = _short_trigger_state(ta)
-        if state == "ready":
+        near_ready, _, _ = _near_trigger_ready(ta, "short", signal_type=signal_type)
+        armed_aggressive_dump = state == "armed" and _is_aggressive_dump_signal(signal_type)
+        if state == "ready" or armed_aggressive_dump or near_ready:
             head = "▶️ <b>Открывать SHORT</b>"
         else:
             head = "▶️ <b>SHORT по плану</b> · <b>не сейчас</b>"
         if ta.entry_mode == "range_edge" and ta.range_trade_label:
             head = f"▶️ <b>SHORT</b> · {ta.range_trade_label}" + (
-                "" if state == "ready" else " · не сейчас"
+                "" if state == "ready" or armed_aggressive_dump or near_ready else " · не сейчас"
             )
         parts = [head]
         if ta.breakdown_level:
@@ -3031,6 +3036,64 @@ def _short_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
     return "far", f"SHORT далеко ({dist_pct:.1f}% до уровня)"
 
 
+def _is_aggressive_dump_signal(signal_type: str | None) -> bool:
+    """Сильный dump: допускаем шорт в armed, без ожидания точного тика пробоя."""
+    return (signal_type or "").lower() in {"mega_dump", "vertical_dump", "liq_cascade_dump"}
+
+
+def _is_aggressive_pump_signal(signal_type: str | None) -> bool:
+    """Сильный pump: допускаем лонг в armed, без ожидания точного тика пробоя."""
+    return (signal_type or "").lower() in {"mega_pump", "vertical_pump", "liq_cascade_pump"}
+
+
+def _near_entry_tolerance_pct(signal_type: str | None, *, momentum_pct: float = 0.0) -> float:
+    """
+    Умный допуск near-entry: 0.1%..0.8%.
+    В сильном импульсе допускаем чуть более ранний вход, чтобы не пропускать движение.
+    """
+    st = (signal_type or "").lower()
+    if st in {"mega_dump", "mega_pump", "vertical_dump", "vertical_pump"}:
+        base = 0.75
+    elif st in {"liq_cascade_dump", "liq_cascade_pump"}:
+        base = 0.65
+    elif st in {"impulse_dump", "impulse_pump"}:
+        base = 0.55
+    elif st in {"reversal_dump", "reversal_pump"}:
+        base = 0.35
+    else:
+        base = 0.25
+    impulse_bonus = min(abs(float(momentum_pct)) * 0.05, 0.15)
+    return _clamp(base + impulse_bonus, 0.1, 0.8)
+
+
+def _near_trigger_ready(
+    ta: TAAnalysisResult,
+    side: str,
+    *,
+    signal_type: str | None = None,
+) -> tuple[bool, float | None, float]:
+    """
+    True, если цена в «умной» зоне входа рядом с триггером.
+    Возвращает: (near, dist_pct, tolerance_pct).
+    """
+    if ta.current_price <= 0:
+        return False, None, _near_entry_tolerance_pct(signal_type, momentum_pct=ta.momentum_pct)
+
+    tol_pct = _near_entry_tolerance_pct(signal_type, momentum_pct=ta.momentum_pct)
+    side_low = side.lower()
+    if side_low == "short" and ta.breakdown_level:
+        if ta.current_price <= ta.breakdown_level:
+            return True, 0.0, tol_pct
+        dist = (ta.current_price - ta.breakdown_level) / ta.current_price * 100.0
+        return dist <= tol_pct, dist, tol_pct
+    if side_low == "long" and ta.breakout_level:
+        if ta.current_price >= ta.breakout_level:
+            return True, 0.0, tol_pct
+        dist = (ta.breakout_level - ta.current_price) / ta.current_price * 100.0
+        return dist <= tol_pct, dist, tol_pct
+    return False, None, tol_pct
+
+
 def _long_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
     """Состояние триггера LONG: ready / armed / far / past."""
     if not ta.breakout_level or ta.current_price <= 0:
@@ -3096,6 +3159,9 @@ def should_skip_noise_signal(
     trigger = bo if sig == "long" else bd
     if trigger and ta.current_price and ta.current_price > 0:
         dist = abs(trigger - ta.current_price) / ta.current_price * 100.0
+        near_ready, _, _ = _near_trigger_ready(ta, sig, signal_type=signal_type)
+        if near_ready:
+            return False, ""
         is_reversal = signal_type in {"reversal_pump", "reversal_dump"}
         if dist > 5.5 and not is_reversal:
             return True, f"триггер далеко ({dist:.1f}%)"
@@ -3121,7 +3187,11 @@ def ta_signal_compact_block(
     op = "≥" if sig == "long" else "≤"
 
     if ready:
-        scenario = ta_signal_scenario_line_html(ta, signal_side=signal_side)
+        scenario = ta_signal_scenario_line_html(
+            ta,
+            signal_side=signal_side,
+            signal_type=signal_type,
+        )
         if scenario:
             return f"✅ <b>Готов</b>\n{scenario}"
         return "✅ <b>Готов к входу</b> по плану TA"
@@ -3151,7 +3221,11 @@ def ta_signal_compact_block(
         return f"🚫 <b>Не по алерту</b> · {label} не совпадает с графиком"
 
     if ta.verdict in {"LONG", "SHORT"}:
-        scenario = ta_signal_scenario_line_html(ta, signal_side=signal_side)
+        scenario = ta_signal_scenario_line_html(
+            ta,
+            signal_side=signal_side,
+            signal_type=signal_type,
+        )
         if scenario:
             return scenario
         return f"🔶 <b>{ta.verdict}</b> · {wait_reason}" if wait_reason else f"🔶 <b>{ta.verdict}</b> по плану"
@@ -3229,14 +3303,20 @@ def evaluate_entry_readiness(
 
     if ta.verdict == "LONG":
         state, reason = _long_trigger_state(ta)
+        near_ready, near_dist, near_tol = _near_trigger_ready(ta, "long", signal_type=signal_type)
+        aggressive_pump = _is_aggressive_pump_signal(signal_type)
         if signal_type == "reversal_dump" and state not in {"ready", "armed"}:
             return False, f"откат вниз — {reason}"
         if ta.momentum_label and "вниз" in ta.momentum_label and ta.momentum_pct <= -0.8 and state != "ready":
             return False, f"импульс вниз — {reason}"
         if state == "ready":
             pass
-        elif state == "armed" and accept_armed:
+        elif state == "armed" and (accept_armed or aggressive_pump or near_ready):
             return True, reason
+        elif near_ready:
+            if near_dist is not None:
+                return True, f"цена у LONG-триггера ({near_dist:.2f}% до входа, допуск {near_tol:.2f}%)"
+            return True, "цена у LONG-триггера"
         else:
             return False, reason
         if require_smc and ta.smc:
@@ -3246,6 +3326,8 @@ def evaluate_entry_readiness(
         return True, "триггер LONG подтверждён"
     if ta.verdict == "SHORT":
         state, reason = _short_trigger_state(ta)
+        near_ready, near_dist, near_tol = _near_trigger_ready(ta, "short", signal_type=signal_type)
+        aggressive_dump = _is_aggressive_dump_signal(signal_type)
         if signal_type == "reversal_pump" and state not in {"ready", "armed"}:
             return False, f"отскок вверх — {reason}"
         if ta.momentum_pct >= 0.8 and state != "ready":
@@ -3253,8 +3335,12 @@ def evaluate_entry_readiness(
             return False, f"{mom} — {reason}"
         if state == "ready":
             pass
-        elif state == "armed" and accept_armed:
+        elif state == "armed" and (accept_armed or aggressive_dump or near_ready):
             return True, reason
+        elif near_ready:
+            if near_dist is not None:
+                return True, f"цена у SHORT-триггера ({near_dist:.2f}% до входа, допуск {near_tol:.2f}%)"
+            return True, "цена у SHORT-триггера"
         else:
             return False, reason
         if require_smc and ta.smc:

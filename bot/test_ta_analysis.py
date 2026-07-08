@@ -432,6 +432,83 @@ def test_readiness_filter_still_checks_scanner_timing() -> None:
     assert "рано для входа" in reason
 
 
+def test_megadump_short_can_be_ready_on_armed_trigger() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=3.0640,
+        breakdown_level=3.0490,
+        momentum_pct=-1.2,
+        momentum_label="импульс вниз",
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "short",
+        3,
+        check_scanner_timing=False,
+        signal_type="mega_dump",
+    )
+    assert ready, reason
+
+
+def test_megadump_short_scenario_hides_not_now_when_armed() -> None:
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=3.0640,
+        breakdown_level=3.0490,
+        invalidation_price=3.4743,
+        target_prices=[2.6890],
+    )
+    line = ta_signal_scenario_line_html(ta, signal_side="short", signal_type="mega_dump")
+    assert "не сейчас" not in line
+    assert "Открывать SHORT" in line
+
+
+def test_regular_short_near_trigger_is_ready_even_before_exact_touch() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=8,
+        current_price=3.0550,
+        breakdown_level=3.0490,
+        momentum_pct=-0.4,
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "short",
+        4,
+        check_scanner_timing=False,
+        signal_type="dump",
+    )
+    assert ready, reason
+    assert "SHORT-триггера" in reason or "пробой" in reason or "цена у триггера" in reason
+
+
+def test_regular_long_near_trigger_is_ready_even_before_exact_touch() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        verdict_confidence=8,
+        current_price=3.0430,
+        breakout_level=3.0490,
+        momentum_pct=0.3,
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "long",
+        4,
+        check_scanner_timing=False,
+        signal_type="pump",
+    )
+    assert ready, reason
+    assert "LONG-триггера" in reason or "пробой" in reason or "цена у триггера" in reason
+
+
 def test_plain_forecast_aligns_with_short_verdict() -> None:
     from bot.ta_range_trade import MarketFlowScores
     from bot.ta_analysis import build_ta_signal_narrative
