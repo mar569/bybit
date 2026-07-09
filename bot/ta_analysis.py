@@ -167,6 +167,7 @@ class TAAnalysisResult:
     btc_alt_spread: float | None = None
     action_priority: str = "neutral"
     range_trade_label: str = ""
+    range_trade_direction: str = ""
     entry_mode: str = "breakout"
     factor_lines: list[str] = field(default_factory=list)
     nearest_support: float | None = None
@@ -207,6 +208,29 @@ def fmt_price(price: float) -> str:
     if price >= 0.01:
         return f"{price:.5f}"
     return f"{price:.7g}"
+
+
+def _verdict_to_side(verdict: str) -> str | None:
+    if verdict == "LONG":
+        return "long"
+    if verdict == "SHORT":
+        return "short"
+    return None
+
+
+def _range_trade_matches_verdict(verdict: str, range_trade: RangeTradeSetup | None) -> bool:
+    side = _verdict_to_side(verdict)
+    if not side or range_trade is None:
+        return False
+    return range_trade.direction == side
+
+
+def ta_range_trade_opposes_verdict(ta: TAAnalysisResult) -> bool:
+    """Range-сетап (край боковика) противоречит вердикту LONG/SHORT."""
+    if ta.verdict not in {"LONG", "SHORT"} or not ta.range_trade_direction:
+        return False
+    want = _verdict_to_side(ta.verdict)
+    return bool(want and ta.range_trade_direction != want)
 
 
 def find_swing_points(bars: list[KlineBar], *, window: int = 2) -> list[SwingPoint]:
@@ -1935,6 +1959,16 @@ def _trade_quality_guard(
     if verdict not in {"LONG", "SHORT"} or current <= 0 or not stop or not targets:
         return False, ""
     tp1 = targets[0]
+    if verdict == "LONG":
+        if stop >= current * 0.999:
+            return True, "стоп выше цены — LONG некорректен"
+        if tp1 <= current * 0.999:
+            return True, "цель ниже цены — LONG некорректен"
+    elif verdict == "SHORT":
+        if stop <= current * 1.001:
+            return True, "стоп ниже цены — SHORT некорректен"
+        if tp1 >= current * 1.001:
+            return True, "цель выше цены — SHORT некорректен"
     risk_pct = abs(current - stop) / current * 100.0
     reward_pct = abs(tp1 - current) / current * 100.0
     if risk_pct <= 0:
@@ -2228,6 +2262,30 @@ def run_ta_analysis(
             else "перегретый пик после пампа, высокий риск коррекции"
         )
 
+    if (
+        range_trade is not None
+        and verdict in {"LONG", "SHORT"}
+        and not _range_trade_matches_verdict(verdict, range_trade)
+    ):
+        if verdict == "LONG" and range_trade.direction == "short":
+            verdict = "WAIT"
+            action_priority = "short"
+            conf = min(conf, 7)
+            reason = (
+                f"{reason} · {range_trade.label} — не лонг у сопротивления"
+                if reason
+                else f"{range_trade.label} — ждать отказ или пробой"
+            )
+        elif verdict == "SHORT" and range_trade.direction == "long":
+            verdict = "WAIT"
+            action_priority = "long"
+            conf = min(conf, 7)
+            reason = (
+                f"{reason} · {range_trade.label} — не шорт у поддержки"
+                if reason
+                else f"{range_trade.label} — ждать отскок или пробой"
+            )
+
     trade_is_long = is_long
     if neutral:
         if verdict == "SHORT" or action_priority == "short":
@@ -2235,10 +2293,11 @@ def run_ta_analysis(
         elif verdict == "LONG" or action_priority == "long":
             trade_is_long = True
 
-    entry_mode = "range_edge" if range_trade else "breakout"
+    range_aligned = _range_trade_matches_verdict(verdict, range_trade)
+    entry_mode = "range_edge" if range_aligned else "breakout"
     if liq_cascade.active and verdict == "SHORT":
         entry_mode = "cascade"
-    if range_trade and verdict in {"LONG", "SHORT"}:
+    if range_aligned and range_trade and verdict in {"LONG", "SHORT"}:
         inv = range_trade.stop_price
         entry = (range_trade.entry_price * 0.999, range_trade.entry_price * 1.001)
         targets = list(range_trade.targets)
@@ -2399,7 +2458,7 @@ def run_ta_analysis(
         momentum_label=momentum_label,
         oi_narrative_label=ms.oi_narrative_label,
         market_bias=market_bias,
-        range_trade_label=range_trade.label if range_trade else "",
+        range_trade_label=range_trade.label if range_aligned else "",
         primary_scenario=primary_scenario,
         verdict_reason=reason,
     )
@@ -2443,7 +2502,8 @@ def run_ta_analysis(
         momentum_pct=momentum_pct,
         btc_alt_spread=btc_spread,
         action_priority=action_priority,
-        range_trade_label=range_trade.label if range_trade else "",
+        range_trade_label=range_trade.label if range_aligned else "",
+        range_trade_direction=range_trade.direction if range_trade else "",
         entry_mode=entry_mode,
         factor_lines=factors.factor_lines,
         nearest_support=nearest_support,
@@ -3049,7 +3109,7 @@ def ta_signal_scenario_line_html(
             head = "▶️ <b>Открывать LONG</b>"
         else:
             head = "▶️ <b>LONG по плану</b> · <b>не сейчас</b>"
-        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+        if ta.entry_mode == "range_edge" and ta.range_trade_label and not ta_range_trade_opposes_verdict(ta):
             head = f"▶️ <b>LONG</b> · {ta.range_trade_label}" + (
                 "" if state == "ready" or armed_aggressive_pump or near_ready else " · не сейчас"
             )
@@ -3070,7 +3130,7 @@ def ta_signal_scenario_line_html(
             head = "▶️ <b>Открывать SHORT</b>"
         else:
             head = "▶️ <b>SHORT по плану</b> · <b>не сейчас</b>"
-        if ta.entry_mode == "range_edge" and ta.range_trade_label:
+        if ta.entry_mode == "range_edge" and ta.range_trade_label and not ta_range_trade_opposes_verdict(ta):
             head = f"▶️ <b>SHORT</b> · {ta.range_trade_label}" + (
                 "" if state == "ready" or armed_aggressive_dump or near_ready else " · не сейчас"
             )
@@ -3339,6 +3399,20 @@ def ta_signal_compact_block(
     trig = bo if sig == "long" else bd
     op = "≥" if sig == "long" else "≤"
 
+    if ta.range_trade_direction and (
+        (sig == "long" and ta.range_trade_direction == "short")
+        or (sig == "short" and ta.range_trade_direction == "long")
+    ):
+        alt = "шорт" if ta.range_trade_direction == "short" else "лонг"
+        alt_trig = bd if ta.range_trade_direction == "short" else bo
+        alt_op = "≤" if ta.range_trade_direction == "short" else "≥"
+        bits = [f"⚠️ <b>Не по графику</b> · алерт на <b>{label}</b>"]
+        if ta.range_trade_label:
+            bits.append(ta.range_trade_label)
+        if alt_trig:
+            bits.append(f"ближе <b>{alt}</b> при {alt_op}<b>{fmt_price(alt_trig)}</b>")
+        return " · ".join(bits)
+
     if ready:
         scenario = ta_signal_scenario_line_html(
             ta,
@@ -3442,6 +3516,9 @@ def evaluate_entry_readiness(
 
     if "вход невыгоден" in (ta.verdict_reason or "").lower():
         return False, "плохой R:R"
+
+    if ta_range_trade_opposes_verdict(ta):
+        return False, "range-сетап против вердикта TA"
 
     is_reversal = signal_type in {"reversal_pump", "reversal_dump"}
     if ta_conflicts_with_signal(ta, signal_side) and not is_reversal:

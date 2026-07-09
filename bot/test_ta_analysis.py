@@ -597,3 +597,72 @@ def test_plain_forecast_aligns_with_short_verdict() -> None:
     assert "SHORT" in plan
     assert "CVD" in basis or "OI" in basis
     assert "поток" in basis
+
+
+def test_long_verdict_not_mixed_with_short_range_label() -> None:
+    from bot.ta_analysis import (
+        evaluate_entry_readiness,
+        ta_range_trade_opposes_verdict,
+        ta_signal_compact_block,
+        ta_signal_scenario_line_html,
+    )
+
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        verdict_confidence=7,
+        current_price=0.07245,
+        breakout_level=0.07256,
+        breakdown_level=0.07149,
+        invalidation_price=0.07113,
+        target_prices=[0.07332],
+        entry_mode="breakout",
+        range_trade_label="",
+        range_trade_direction="",
+        momentum_pct=1.0,
+    )
+    assert ta_range_trade_opposes_verdict(ta) is False
+    ta_conflict = TAAnalysisResult(
+        verdict="LONG",
+        verdict_confidence=7,
+        current_price=0.07245,
+        breakout_level=0.07256,
+        invalidation_price=0.07361,
+        target_prices=[0.06900],
+        entry_mode="range_edge",
+        range_trade_label="SHORT от сопротивления range",
+        range_trade_direction="short",
+        momentum_pct=1.0,
+    )
+    assert ta_range_trade_opposes_verdict(ta_conflict)
+    line = ta_signal_scenario_line_html(ta_conflict, signal_side="long", signal_type="reversal_pump")
+    assert "SHORT от сопротивления" not in line
+    compact = ta_signal_compact_block(
+        ta_conflict,
+        signal_side="long",
+        readiness=(False, "range-сетап против вердикта TA"),
+        signal_type="reversal_pump",
+    )
+    assert "Не по графику" in compact
+    assert "SHORT от сопротивления range" in compact
+    ready, reason = evaluate_entry_readiness(
+        ta_conflict,
+        "long",
+        2,
+        check_scanner_timing=False,
+        signal_type="reversal_pump",
+    )
+    assert not ready
+    assert "range" in reason.lower()
+
+
+def test_trade_quality_guard_rejects_inverted_long_levels() -> None:
+    from bot.ta_analysis import _trade_quality_guard
+
+    bad, reason = _trade_quality_guard(
+        verdict="LONG",
+        current=0.07245,
+        stop=0.07361,
+        targets=[0.06900],
+    )
+    assert bad
+    assert "некорректен" in reason.lower() or "ниже" in reason.lower()
