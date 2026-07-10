@@ -1,6 +1,7 @@
 """Компактный торговый план (Hot) и полный разбор (Pro) для сигналов."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -174,6 +175,28 @@ def format_playbook_html(
     return "\n".join(lines)
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain_text(text: str) -> str:
+    return _HTML_TAG_RE.sub("", text or "").strip()
+
+
+def _already_covered(line: str, body: str, *, min_len: int = 28) -> bool:
+    plain = _plain_text(line)
+    if len(plain) < min_len:
+        return False
+    return plain in _plain_text(body)
+
+
+def _append_unique(lines: list[str], body: str, block: str) -> str:
+    block = (block or "").strip()
+    if not block or _already_covered(block, body):
+        return body
+    lines.append(block)
+    return f"{body}\n{block}" if body else block
+
+
 def build_hot_caption(
     signal: Signal,
     ta: TAAnalysisResult,
@@ -213,34 +236,39 @@ def build_pro_detail_html(
         f"Тип: <code>{signal.signal_type}</code> · TA {score}/10 · "
         f"OI {signal.oi_change_percent:+.2f}% · цена {signal.price_change_percent or 0:+.2f}%",
     ]
-    conflict = ta_scanner_conflict_line_html(ta, signal.side)
-    if conflict:
-        lines.append(conflict)
+    body = "\n".join(lines)
     pb = resolve_trade_playbook(signal, ta)
+
     if pb:
-        lines.append(format_playbook_html(pb, readiness=readiness))
-    verbose = ta_signal_caption_html(
-        ta,
-        signal_side=signal.side,
-        readiness=readiness,
-        show_readiness_badge=True,
-        compact=False,
-        signal_type=signal.signal_type,
-    )
-    if verbose and verbose not in "\n".join(lines):
-        lines.append(verbose)
-    plain = ta_plain_forecast_line(ta)
-    if plain:
-        lines.append(plain)
-    forecast = ta_signal_forecast_summary_line(ta)
-    if forecast:
-        lines.append(forecast)
-    if ta.narrative_basis:
-        lines.append(ta.narrative_basis[:400])
-    if ta.smc and ta.smc.smc_score >= 4:
-        smc = format_smc_compact_html(ta.smc)
-        if smc:
-            lines.append(smc)
+        conflict = ta_scanner_conflict_line_html(ta, signal.side)
+        body = _append_unique(lines, body, conflict)
+        body = _append_unique(lines, body, format_playbook_html(pb, readiness=readiness))
+
+        scenario = ta_signal_scenario_line_html(
+            ta, signal_side=signal.side, signal_type=signal.signal_type,
+        )
+        body = _append_unique(lines, body, scenario)
+
+        plain = ta_plain_forecast_line(ta)
+        body = _append_unique(lines, body, plain)
+
+        basis = ta_signal_forecast_summary_line(ta)
+        body = _append_unique(lines, body, basis)
+
+        if ta.smc and ta.smc.smc_score >= 4:
+            smc = format_smc_compact_html(ta.smc)
+            body = _append_unique(lines, body, smc or "")
+    else:
+        verbose = ta_signal_caption_html(
+            ta,
+            signal_side=signal.side,
+            readiness=readiness,
+            show_readiness_badge=True,
+            compact=False,
+            signal_type=signal.signal_type,
+        )
+        body = _append_unique(lines, body, verbose)
+
     prob = signal.details.get("probability_percent")
     if prob:
         lines.append(f"🎯 Вероятность сканера: <b>{float(prob):.0f}%</b>")

@@ -81,11 +81,61 @@ def test_hot_caption_has_playbook_and_hint() -> None:
     assert "Подробнее" in text
 
 
-def test_pro_detail_includes_verbose_sections() -> None:
-    text = build_pro_detail_html(_signal_trend_dump(), _ta_short_verdict())
-    assert "Подробный разбор" in text
-    assert "SENTUSDT" in text
-    assert "График" in text
+def test_pro_detail_no_major_duplicates() -> None:
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=9,
+        current_price=542.80,
+        breakdown_level=536.30,
+        invalidation_price=557.33,
+        target_prices=[530.94, 525.57, 517.53],
+        action_priority="short",
+        primary_scenario="снижение к 530.94",
+        narrative_plain=(
+            "📉 Простыми словами: TA SHORT — цель снижения 530.94. "
+            "Сейчас отскок — затем short при ≤536.30."
+        ),
+        narrative_basis=(
+            "📊 На чём основано: структура боковая · CVD продажи · слом структуры"
+        ),
+    )
+    signal = Signal(
+        exchange="Bybit",
+        symbol="KORUUSDT",
+        signal_type="reversal_pump",
+        oi_period_minutes=5,
+        oi_change_percent=0.0,
+        oi_change_value=0,
+        oi_change_usd=0,
+        oi_direction="up",
+        signals_today=1,
+        price_change_percent=1.42,
+        price_change_value=None,
+        price_direction="up",
+        volume_change_percent=0,
+        trade_count=None,
+        spread=None,
+        funding_rate=None,
+        liquidation_estimate=None,
+        vwap=None,
+        atr=None,
+        rsi=None,
+        ema_short=None,
+        ema_long=None,
+        volume_24h=None,
+        volume_speed=None,
+        signal_score=1,
+        side="long",
+        current_price=542.80,
+        current_open_interest=1_000_000,
+        link="https://example.com",
+        details={"probability_percent": 79},
+    )
+    text = build_pro_detail_html(signal, ta, readiness=(False, "ждать пробой ≤536.30"))
+    assert text.count("Сканер поймал краткий отскок") <= 1
+    assert text.count("На чём основано") <= 1
+    assert text.count("Простыми словами") <= 1
+    assert text.count("536.30") >= 1
 
 
 def test_format_playbook_targets() -> None:
