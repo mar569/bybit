@@ -21,7 +21,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Config
@@ -128,6 +128,7 @@ class TelegramBot:
         self._last_signal_analysis_time: dict[str, float] = {}
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
+        self._unreachable_chats: set[int] = set()
         self._send_lock = asyncio.Lock()
         self._last_symbol_signal_time: dict[str, float] = {}
         self.application: Application | None = None
@@ -485,6 +486,46 @@ class TelegramBot:
             except Exception:
                 pass
 
+    def _chat_env_hint(self, chat_id: int) -> str:
+        if chat_id == self.config.notification_chat_id:
+            return "TELEGRAM_ALERT_CHAT_ID"
+        if self.config.telegram_analysis_chat_id == chat_id:
+            return "TELEGRAM_ANALYSIS_CHAT_ID"
+        if self.config.telegram_anomaly_chat_id == chat_id:
+            return "TELEGRAM_ANOMALY_CHAT_ID"
+        if self.config.anomaly_chat_id == chat_id:
+            if self.config.telegram_anomaly_chat_id is None:
+                return "TELEGRAM_ANALYSIS_CHAT_ID (аномалии)"
+            return "TELEGRAM_ANOMALY_CHAT_ID"
+        if self.config.telegram_manual_ta_chat_id == chat_id:
+            return "TELEGRAM_MANUAL_TA_CHAT_ID"
+        return f"chat_id={chat_id}"
+
+    def _mark_chat_unreachable(self, chat_id: int, reason: str) -> None:
+        if chat_id in self._unreachable_chats:
+            return
+        self._unreachable_chats.add(chat_id)
+        logger.warning(
+            "Telegram чат %s недоступен (%s) — проверьте %s или отключите канал",
+            chat_id,
+            reason,
+            self._chat_env_hint(chat_id),
+        )
+
+    def _handle_send_error(self, chat_id: int, exc: Exception) -> bool:
+        """Log Telegram send errors; return True if chat should be treated as dead."""
+        if isinstance(exc, Forbidden):
+            self._mark_chat_unreachable(chat_id, str(exc))
+            return True
+        if isinstance(exc, BadRequest):
+            msg = str(exc)
+            if "Chat not found" in msg or "group chat was deleted" in msg:
+                self._mark_chat_unreachable(chat_id, msg)
+                return True
+            logger.error("Telegram BadRequest for chat %s: %s", chat_id, exc)
+            return False
+        return False
+
     async def _send_to_chat(
         self,
         chat_id: int,
@@ -493,6 +534,8 @@ class TelegramBot:
         is_priority: bool,
     ) -> bool:
         if self.application is None:
+            return False
+        if chat_id in self._unreachable_chats:
             return False
 
         settings = self.settings_manager.settings
@@ -536,14 +579,8 @@ class TelegramBot:
                         continue
                     logger.warning("Telegram flood control chat %s, message dropped", chat_id)
                     return False
-                except BadRequest as exc:
-                    if "Chat not found" in str(exc):
-                        logger.warning(
-                            "Chat not found for id %s — проверьте TELEGRAM_ALERT_CHAT_ID",
-                            chat_id,
-                        )
-                    else:
-                        logger.error("Telegram BadRequest for chat %s: %s", chat_id, exc)
+                except (Forbidden, BadRequest) as exc:
+                    self._handle_send_error(chat_id, exc)
                     return False
                 except Exception:
                     logger.exception("Failed to send signal to chat %s", chat_id)
@@ -560,6 +597,8 @@ class TelegramBot:
         keyboard: InlineKeyboardMarkup | None = None,
     ) -> bool:
         if self.application is None:
+            return False
+        if chat_id in self._unreachable_chats:
             return False
         async with self._send_lock:
             raw_caption = caption or ""
@@ -580,6 +619,9 @@ class TelegramBot:
                     logger.warning("Telegram chart flood chat %s, wait %ss", chat_id, exc.retry_after)
                     await asyncio.sleep(float(exc.retry_after) + 1.0)
                     return False
+                except (Forbidden, BadRequest) as exc:
+                    self._handle_send_error(chat_id, exc)
+                    return False
                 except Exception:
                     logger.exception("Failed to send long chart caption to chat %s", chat_id)
                     return False
@@ -599,7 +641,9 @@ class TelegramBot:
                 logger.warning("Telegram chart flood chat %s, wait %ss", chat_id, exc.retry_after)
                 await asyncio.sleep(float(exc.retry_after) + 1.0)
                 return False
-            except BadRequest as exc:
+            except (Forbidden, BadRequest) as exc:
+                if self._handle_send_error(chat_id, exc):
+                    return False
                 logger.warning("Telegram chart BadRequest for chat %s: %s", chat_id, exc)
                 try:
                     plain_caption = _plain_caption(raw_caption)[:1000]
@@ -1060,17 +1104,17 @@ class TelegramBot:
                 event_count,
             )
 
-    async def dispatch_anomaly(self, event: AnomalyEvent) -> None:
+    async def dispatch_anomaly(self, event: AnomalyEvent) -> bool:
         if self.application is None:
-            return
+            return False
         settings = self.settings_manager.settings
         if self._bot_notifications_blocked():
-            return
+            return False
         if not settings.anomaly_enabled:
-            return
+            return False
         chat_id = self.config.anomaly_chat_id
         if chat_id is None:
-            return
+            return False
 
         message = format_anomaly_alert(event)
         keyboard = InlineKeyboardMarkup([
@@ -1084,6 +1128,7 @@ class TelegramBot:
                 event.symbol,
                 event.anomaly_type,
             )
+        return sent
 
     async def dispatch_trend_risk(
         self,

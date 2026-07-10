@@ -421,8 +421,12 @@ class AnomalyBatcher:
             }
 
         symbol_cd = int(getattr(settings, "anomaly_symbol_cooldown_seconds", 1800))
+        sent_count = 0
         for event in to_send:
-            await self._on_dispatch(event)
+            ok = await self._on_dispatch(event)
+            if not ok:
+                continue
+            sent_count += 1
             async with self._lock:
                 ts = time.time()
                 self._dispatch_times.append(ts)
@@ -435,7 +439,7 @@ class AnomalyBatcher:
                 event.importance,
             )
 
-        return len(to_send)
+        return sent_count
 
 
 ANOMALY_LABELS: dict[str, str] = {
