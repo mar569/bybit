@@ -25,6 +25,43 @@ OI_BAR_MAX_COUNT = 72  # 6 часов по 5 минут
 
 logger = logging.getLogger(__name__)
 
+_OI_FLOW_BYPASS_TYPES = frozenset({
+    "mega_pump", "mega_dump", "vertical_pump", "vertical_dump",
+    "reversal_pump", "reversal_dump", "liq_cascade_pump", "liq_cascade_dump",
+    "impulse_pump", "impulse_dump", "price_pump", "price_dump",
+})
+
+
+def _evaluate_oi_flow(
+    *,
+    oi_change_usd: float | None,
+    price_change_percent: float,
+    tier: TierThresholds,
+    settings: ScannerSettings,
+    signal_type: str,
+) -> tuple[bool, bool]:
+    """
+    Приток OI: полный порог tier или мягкий диапазон при сильном % движении.
+    Returns: (passes, weak_flow).
+    """
+    if signal_type in _OI_FLOW_BYPASS_TYPES:
+        return True, False
+    if oi_change_usd is None:
+        return True, False
+    oi_flow = abs(oi_change_usd)
+    min_flow = tier.min_oi_change_usd
+    if oi_flow >= min_flow:
+        return True, False
+    soft_floor = float(getattr(settings, "min_oi_change_soft_usd", 0.0))
+    if soft_floor <= 0 or oi_flow < soft_floor:
+        return False, False
+    price_pct = abs(price_change_percent)
+    price_thr = tier.price_rise_percent if price_change_percent >= 0 else tier.price_drop_percent
+    strong_mult = float(getattr(settings, "min_oi_change_strong_price_mult", 1.35))
+    if price_pct >= price_thr * strong_mult:
+        return True, True
+    return False, False
+
 
 @dataclass
 class SignalCandidate:
@@ -485,17 +522,23 @@ class SignalEngine:
                 return
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
+            weak_oi_flow = False
             if (
                 not is_mega
                 and not is_breakout
                 and not is_reversal
                 and not is_liq_cascade
                 and not is_impulse
-                and changes.oi_change_usd is not None
             ):
-                if abs(changes.oi_change_usd) < tier.min_oi_change_usd:
-                    if candidate.signal_type not in {"price_pump", "price_dump"}:
-                        return
+                flow_ok, weak_oi_flow = _evaluate_oi_flow(
+                    oi_change_usd=changes.oi_change_usd,
+                    price_change_percent=changes.price_change_percent,
+                    tier=tier,
+                    settings=settings,
+                    signal_type=candidate.signal_type,
+                )
+                if not flow_ok:
+                    return
 
             now = time.time()
             symbol_cd_key = self._symbol_cooldown_key(symbol)
@@ -548,6 +591,8 @@ class SignalEngine:
                 if settings.tier_enabled
                 else settings.min_signal_score
             )
+            if weak_oi_flow:
+                min_score += 1.0
             if (
                 not is_breakout
                 and not is_reversal
@@ -677,6 +722,7 @@ class SignalEngine:
                     "flash_tier": candidate.flash_tier,
                     "urgency": candidate.urgency,
                     "oi_usd_formatted": format_oi_usd(changes.oi_change_usd),
+                    "weak_oi_flow": weak_oi_flow,
                     **(candidate.breakout_meta or {}),
                     **({"symbol_tier": tier.tier.value} if settings.tier_enabled else {}),
                     **({"market_structure": market_structure_dict} if market_structure_dict else {}),

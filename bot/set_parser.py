@@ -17,8 +17,9 @@ SET_HELP = (
     "/set pulse_period 5 — ранний пульс (мин)\n"
     "/set pulse_oi 1 — OI% для пульса\n"
     "/set pulse_price 0.5 — цена% для пульса\n"
-    "/set min_oi 100000 — мин. OI в USD\n"
-    "/set min_oi_change 15000 — мин. приток OI в USD\n"
+    "/set min_oi 80000 — мин. OI в USD (ликвидность монеты)\n"
+    "/set min_oi_change 45000 — полный порог притока OI в USD\n"
+    "/set min_oi_soft 20000 — мягкий приток (при сильном % движении)\n"
     "/set min_volume 0\n"
     "/set top 50 — топ монет по объёму (0 = все)\n"
     "/set cooldown 60\n"
@@ -84,6 +85,7 @@ GLOBAL_ALIASES: dict[str, str] = {
     "pulse_price_drop": "pulse_price_drop_percent",
     "min_oi": "min_open_interest",
     "min_oi_change": "min_oi_change_usd",
+    "min_oi_soft": "min_oi_change_soft_usd",
     "min_volume": "min_volume",
     "top": "top_n_symbols",
     "topn": "top_n_symbols",
@@ -173,6 +175,8 @@ FLOAT_FIELDS = {
     "pulse_price_drop_percent",
     "min_open_interest",
     "min_oi_change_usd",
+    "min_oi_change_soft_usd",
+    "min_oi_change_strong_price_mult",
     "min_volume",
     "min_signal_score",
     "binance_oi_rise_percent",

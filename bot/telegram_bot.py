@@ -2611,7 +2611,9 @@ class TelegramBot:
             f"(от <b>{mega_label}</b>)\n"
             f"📈 Рост OI: <b>≥ {s.oi_rise_percent}%</b> | 📉 Падение: <b>≥ {s.oi_drop_percent}%</b>\n"
             f"🟢 LONG цена: <b>≥ {s.price_rise_percent}%</b> | 🔴 SHORT: <b>≥ {s.price_drop_percent}%</b>\n"
-            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток OI: <b>{s.min_oi_change_usd:,.0f} $</b>\n"
+            f"💰 Мин. OI: <b>{s.min_open_interest:,.0f}</b> | Приток: <b>{s.min_oi_change_soft_usd:,.0f}–{s.min_oi_change_usd:,.0f} $</b>\n"
+            f"📊 Tier OI: мейджор <b>${s.major_min_open_interest:,.0f}</b> | "
+            f"топ <b>${s.min_open_interest:,.0f}</b> | альт <b>${s.alt_min_open_interest:,.0f}</b>\n"
             f"🏆 Топ монет: <b>{top_label}</b> | Tier: <b>{'ON' if s.tier_enabled else 'OFF'}</b> "
             f"(мейджор≤<b>{s.major_min_signal_score:.0f}</b> / стандарт≤<b>{s.standard_min_signal_score:.0f}</b> / альт≤<b>{s.alt_min_signal_score:.0f}</b>)\n"
             f"🔥 Приоритет: ≤<b>{s.priority_score_max}</b>/10 | CD: <b>{s.signal_cooldown_seconds}с</b>\n"
@@ -2945,6 +2947,7 @@ class TelegramBot:
             "set_price_rise:": ("price_rise_percent", float, "Рост цены"),
             "set_price_drop:": ("price_drop_percent", float, "Падение цены"),
             "set_min_oi:": ("min_open_interest", float, "Мин. OI"),
+            "set_min_oi_change:": ("min_oi_change_usd", float, "Приток OI"),
             "set_min_volume:": ("min_volume", float, "Мин. объём"),
             "set_min_score:": ("min_signal_score", float, "Мин. сигнал"),
             "set_cooldown:": ("signal_cooldown_seconds", int, "Cooldown"),
@@ -3305,9 +3308,14 @@ class TelegramBot:
                 InlineKeyboardButton(self._mark("-5%", s.price_drop_percent == 5.0), callback_data="set_price_drop:5.0"),
             ],
             [
-                InlineKeyboardButton(self._mark("OI 50k", s.min_open_interest == 50000), callback_data="set_min_oi:50000"),
-                InlineKeyboardButton(self._mark("100k", s.min_open_interest == 100000), callback_data="set_min_oi:100000"),
-                InlineKeyboardButton(self._mark("500k", s.min_open_interest == 500000), callback_data="set_min_oi:500000"),
+                InlineKeyboardButton(self._mark("OI 80k", s.min_open_interest == 80000), callback_data="set_min_oi:80000"),
+                InlineKeyboardButton(self._mark("150k", s.min_open_interest == 150000), callback_data="set_min_oi:150000"),
+                InlineKeyboardButton(self._mark("300k", s.min_open_interest == 300000), callback_data="set_min_oi:300000"),
+            ],
+            [
+                InlineKeyboardButton(self._mark("Приток 25k", s.min_oi_change_usd == 25000), callback_data="set_min_oi_change:25000"),
+                InlineKeyboardButton(self._mark("45k", s.min_oi_change_usd == 45000), callback_data="set_min_oi_change:45000"),
+                InlineKeyboardButton(self._mark("100k", s.min_oi_change_usd == 100000), callback_data="set_min_oi_change:100000"),
             ],
             [
                 InlineKeyboardButton(self._mark("Score≥1", s.min_signal_score == 1), callback_data="set_min_score:1"),

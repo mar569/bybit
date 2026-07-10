@@ -461,6 +461,9 @@ def assess_signal_probability(
     if structure_penalty > 0:
         percent -= structure_penalty
 
+    if signal.details.get("weak_oi_flow"):
+        percent -= 6.0
+
     percent = _clamp(percent, 11.0, 89.0)
 
     if signal.signal_type in PROBABILITY_BYPASS_TYPES:

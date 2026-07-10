@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 26
+SETTINGS_VERSION = 27
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -115,13 +115,13 @@ class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
     # Основной LONG/SHORT-профиль (база для tier: мейджоры ниже, альты выше)
-    oi_period_minutes: int = 10
-    long_period_minutes: int = 10
-    short_period_minutes: int = 10
-    oi_rise_percent: float = 2.0
-    oi_drop_percent: float = 2.0
-    price_rise_percent: float = 1.0
-    price_drop_percent: float = 1.0
+    oi_period_minutes: int = 5
+    long_period_minutes: int = 5
+    short_period_minutes: int = 5
+    oi_rise_percent: float = 2.5
+    oi_drop_percent: float = 2.5
+    price_rise_percent: float = 1.5
+    price_drop_percent: float = 1.5
 
     # Ранний пульс — чувствительнее основного (respect_global_floors=False)
     pulse_period_minutes: int = 5
@@ -139,7 +139,9 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 15.0
 
     # Качество сигнала: деньги в OI, не просто цена
-    min_oi_change_usd: float = 100_000.0
+    min_oi_change_usd: float = 45_000.0
+    min_oi_change_soft_usd: float = 20_000.0
+    min_oi_change_strong_price_mult: float = 1.35
     short_squeeze_min_price: float = 3.5
     short_squeeze_max_oi_change: float = -0.8
     require_oi_for_price_only: bool = True
@@ -156,7 +158,7 @@ class ScannerSettings:
     breakout_min_spike_percent: float = 1.0
     breakout_min_dump_percent: float = 1.0
     breakout_velocity_multiplier: float = 2.8
-    breakout_min_liquidity_oi_usd: float = 500_000.0
+    breakout_min_liquidity_oi_usd: float = 280_000.0
     breakout_cooldown_seconds: int = 150
 
     # Резкий разворот: памп → слив (или дамп → отскок)
@@ -167,7 +169,7 @@ class ScannerSettings:
     reversal_peak_max_age_minutes: int = 6
     reversal_min_prior_move_pct: float = 1.2
     reversal_min_reversal_pct: float = 0.85
-    reversal_min_liquidity_oi_usd: float = 400_000.0
+    reversal_min_liquidity_oi_usd: float = 220_000.0
     reversal_cooldown_seconds: int = 120
     reversal_block_long_after_dump: bool = True
     reversal_block_dump_window_minutes: int = 30
@@ -178,7 +180,7 @@ class ScannerSettings:
     impulse_bypass_top_n: bool = True
     impulse_window_minutes: tuple[int, ...] = (15, 30)
     impulse_price_tiers: tuple[float, ...] = (5.0, 8.0, 12.0)
-    impulse_min_liquidity_oi_usd: float = 250_000.0
+    impulse_min_liquidity_oi_usd: float = 140_000.0
     impulse_cooldown_seconds: int = 120
     major_impulse_price_multiplier: float = 0.6
     alt_impulse_price_multiplier: float = 1.2
@@ -199,12 +201,12 @@ class ScannerSettings:
     major_breakout_min_dump_percent: float = 0.55
     major_reversal_min_prior_pct: float = 0.9
     major_reversal_min_leg_pct: float = 0.65
-    alt_price_multiplier: float = 1.25
-    alt_oi_multiplier: float = 1.15
-    alt_min_open_interest: float = 750_000.0
-    alt_min_oi_change_usd: float = 120_000.0
-    alt_min_probability_percent: float = 76.0
-    alt_min_signal_score: float = 3.0
+    alt_price_multiplier: float = 1.15
+    alt_oi_multiplier: float = 1.1
+    alt_min_open_interest: float = 180_000.0
+    alt_min_oi_change_usd: float = 40_000.0
+    alt_min_probability_percent: float = 66.0
+    alt_min_signal_score: float = 2.0
     standard_min_signal_score: float = 2.0
 
     # Liq-cascade: крупные ликвидации + движение цены (ловит ETH −0.7% + $194K liq)
@@ -217,26 +219,26 @@ class ScannerSettings:
     major_liq_cascade_min_price_percent: float = 0.35
     liq_cascade_cooldown_seconds: int = 120
 
-    min_open_interest: float = 500_000.0
+    min_open_interest: float = 80_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 180
+    signal_cooldown_seconds: int = 120
     volume_spike_multiplier: float = 4.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
     min_signal_score: float = 1.0
-    top_n_symbols: int | None = None
-    priority_score_max: int = 5
+    top_n_symbols: int | None = 150
+    priority_score_max: int = 3
     signals_enabled: bool = True
     bot_paused: bool = False
     price_only_min_percent: float = 3.0
     telegram_max_per_minute: int = 10
     telegram_min_interval_seconds: float = 2.0
 
-    min_probability_percent: float = 72.0
+    min_probability_percent: float = 66.0
     probability_filter_enabled: bool = True
 
     # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
@@ -324,8 +326,8 @@ class ScannerSettings:
     analysis_major_min_liq_usd: float = 10_000.0
     analysis_alt_min_liq_usd: float = 10_000.0
     analysis_skip_alt_tier: bool = False
-    analysis_min_oi_usd: float = 500_000.0
-    analysis_min_price_move_pct: float = 2.0
+    analysis_min_oi_usd: float = 120_000.0
+    analysis_min_price_move_pct: float = 1.5
     analysis_min_trend_pct: float = 2.0
     analysis_require_trend: bool = True
     analysis_force_liq_usd: float = 25_000.0
@@ -482,6 +484,10 @@ class ScannerSettings:
             flash_min_oi_drop_percent=float(base["flash_min_oi_drop_percent"]),
             flash_bypass_oi_tier_pct=float(base["flash_bypass_oi_tier_pct"]),
             min_oi_change_usd=float(base["min_oi_change_usd"]),
+            min_oi_change_soft_usd=float(base.get("min_oi_change_soft_usd", 20_000.0)),
+            min_oi_change_strong_price_mult=float(
+                base.get("min_oi_change_strong_price_mult", 1.35)
+            ),
             short_squeeze_min_price=float(base["short_squeeze_min_price"]),
             short_squeeze_max_oi_change=float(base["short_squeeze_max_oi_change"]),
             require_oi_for_price_only=bool(base.get("require_oi_for_price_only", True)),
@@ -906,6 +912,36 @@ class SettingsManager:
                 merged["analysis_min_oi_usd"] = 500_000.0
                 merged["analysis_min_price_move_pct"] = 2.0
                 merged["analysis_min_trend_pct"] = 2.0
+            # v27: Trend Hunter — % тренды, мягкий приток OI, шире альты
+            if version < 27:
+                merged["oi_period_minutes"] = 5
+                merged["long_period_minutes"] = 5
+                merged["short_period_minutes"] = 5
+                merged["oi_rise_percent"] = 2.5
+                merged["oi_drop_percent"] = 2.5
+                merged["price_rise_percent"] = 1.5
+                merged["price_drop_percent"] = 1.5
+                merged["min_open_interest"] = 80_000.0
+                merged["min_oi_change_usd"] = 45_000.0
+                merged["min_oi_change_soft_usd"] = 20_000.0
+                merged["min_oi_change_strong_price_mult"] = 1.35
+                merged["min_probability_percent"] = 66.0
+                merged["alt_min_open_interest"] = 180_000.0
+                merged["alt_min_oi_change_usd"] = 40_000.0
+                merged["alt_min_probability_percent"] = 66.0
+                merged["alt_min_signal_score"] = 2.0
+                merged["alt_price_multiplier"] = 1.15
+                merged["alt_oi_multiplier"] = 1.1
+                merged["top_n_symbols"] = 150
+                merged["signal_cooldown_seconds"] = 120
+                merged["priority_score_max"] = 3
+                merged["breakout_min_liquidity_oi_usd"] = 280_000.0
+                merged["reversal_min_liquidity_oi_usd"] = 220_000.0
+                merged["impulse_min_liquidity_oi_usd"] = 140_000.0
+                merged["analysis_min_oi_usd"] = 120_000.0
+                merged["analysis_min_price_move_pct"] = 1.5
+                for override_key in EXCHANGE_OVERRIDE_KEYS:
+                    merged[override_key] = None
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -913,7 +949,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v26: liq/analysis $10k + OI≥500k + price≥2%%; preserved: %s)",
+                "Settings migrated v%d → v%d (v27: Trend Hunter — 5m/1.5%% цена/2.5%% OI, мягкий приток, альты 180k; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
