@@ -1,5 +1,5 @@
 {
-  "settings_version": 27,
+  "settings_version": 28,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -159,5 +159,9 @@
   "signal_chart_hours": 5,
   "signal_chart_interval_minutes": 5,
   "manual_ta_chart_source": "tv_annotated",
-  "signal_message_compact": true
+  "signal_message_compact": true,
+
+  "signal_playbook_enabled": true,
+  "signal_pro_to_analysis_chat": true,
+  "target_watcher_enabled": true
 }

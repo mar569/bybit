@@ -20,6 +20,7 @@ from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_
 from .chart_screenshot import chart_capture_service
 from .outcome_tracker import OutcomeTracker
 from .analysis_outcome_tracker import AnalysisOutcomeTracker
+from .target_watcher import TargetWatcher
 from .bybit_cvd import BybitTakerCvdLiveTracker, get_taker_cvd_cache
 
 logging.basicConfig(
@@ -206,6 +207,7 @@ async def main() -> None:
     heartbeat_task: asyncio.Task | None = None
     outcome_task: asyncio.Task | None = None
     analysis_outcome_task: asyncio.Task | None = None
+    target_task: asyncio.Task | None = None
     liq_task: asyncio.Task | None = None
     binance_liq_task: asyncio.Task | None = None
     cvd_task: asyncio.Task | None = None
@@ -251,6 +253,12 @@ async def main() -> None:
             outcome_task = asyncio.create_task(telegram.outcome_tracker.run_loop())
             telegram.analysis_outcome_tracker = AnalysisOutcomeTracker(telegram.redis, scanner)
             analysis_outcome_task = asyncio.create_task(telegram.analysis_outcome_tracker.run_loop())
+            telegram.target_watcher = TargetWatcher(
+                telegram.redis,
+                scanner,
+                notify=telegram.dispatch_target_notification,
+            )
+            target_task = asyncio.create_task(telegram.target_watcher.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
@@ -292,6 +300,8 @@ async def main() -> None:
             outcome_task.cancel()
         if analysis_outcome_task is not None:
             analysis_outcome_task.cancel()
+        if target_task is not None:
+            target_task.cancel()
         if liq_task is not None:
             liq_task.cancel()
         if binance_liq_task is not None:
@@ -310,6 +320,7 @@ async def main() -> None:
                     analysis_heartbeat_task,
                     outcome_task,
                     analysis_outcome_task,
+                    target_task,
                     liq_task,
                     binance_liq_task,
                     cvd_task,

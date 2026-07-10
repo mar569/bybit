@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-import time
+import uuid
 from dataclasses import asdict
 from typing import Any
 
@@ -92,7 +92,11 @@ from .liquidation_analysis import (
 )
 from .analysis_outcome_tracker import AnalysisOutcomeSummary
 from .anomaly_alerts import AnomalyEvent, format_anomaly_alert
-from .trend_exhaustion import TrendExhaustionRisk
+from .trade_playbook import (
+    build_hot_caption,
+    build_pro_detail_html,
+    resolve_trade_playbook,
+)
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
@@ -118,6 +122,9 @@ class TelegramBot:
         self.analysis_engine: Any | None = None
         self.outcome_tracker: Any | None = None
         self.analysis_outcome_tracker: Any | None = None
+        self.target_watcher: Any | None = None
+        self._signal_pro_cache: dict[str, str] = {}
+        self._last_signal_analysis_time: dict[str, float] = {}
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
         self._send_lock = asyncio.Lock()
@@ -611,6 +618,80 @@ class TelegramBot:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
 
+    def _signal_keyboard(self, signal: Signal, pro_token: str = "") -> InlineKeyboardMarkup:
+        rows = [[InlineKeyboardButton("📊 CoinGlass", url=signal.link)]]
+        if pro_token:
+            rows.append([InlineKeyboardButton("📖 Подробнее", callback_data=f"sigpro:{pro_token}")])
+        return InlineKeyboardMarkup(rows)
+
+    async def _store_signal_pro(self, text: str) -> str:
+        token = uuid.uuid4().hex[:10]
+        if self.redis is not None:
+            try:
+                await self.redis.setex(f"sigpro:{token}", 86400, text)
+            except Exception:
+                logger.exception("Failed to cache signal pro text")
+        self._signal_pro_cache[token] = text
+        return token
+
+    async def _load_signal_pro(self, token: str) -> str:
+        if self.redis is not None:
+            try:
+                raw = await self.redis.get(f"sigpro:{token}")
+                if raw:
+                    return raw.decode() if isinstance(raw, bytes) else str(raw)
+            except Exception:
+                logger.exception("Failed to load signal pro text")
+        return self._signal_pro_cache.get(token, "")
+
+    async def dispatch_target_notification(self, text: str) -> None:
+        if self.application is None or self._bot_notifications_blocked():
+            return
+        await self._send_to_chat(
+            self.config.notification_chat_id,
+            text,
+            None,
+            is_priority=True,
+        )
+
+    async def _dispatch_signal_pro_analysis(
+        self,
+        signal: Signal,
+        ta_result: Any,
+        png: bytes | None,
+        *,
+        readiness: tuple[bool, str] | None,
+        pro_text: str,
+    ) -> None:
+        settings = self.settings_manager.settings
+        chat_id = self.config.telegram_analysis_chat_id
+        if chat_id is None or not settings.analysis_enabled:
+            return
+        if not settings.signal_pro_to_analysis_chat:
+            return
+        sym_key = signal.symbol.upper()
+        cd = max(120, int(settings.signal_cooldown_seconds))
+        now = time.time()
+        if now - self._last_signal_analysis_time.get(sym_key, 0.0) < cd:
+            return
+        body = pro_text or build_pro_detail_html(
+            signal, ta_result, readiness=readiness,
+        )
+        caption = f"🧠 <b>Разбор сигнала</b> · <b>{sym_key}</b>\n\n{body}"
+        if len(caption) > 1020:
+            caption = caption[:1017] + "…"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
+        ])
+        sent = False
+        if png:
+            sent = await self._send_chart(chat_id, png, caption, is_priority=False, keyboard=keyboard)
+        if not sent:
+            sent = await self._send_to_chat(chat_id, caption, keyboard, is_priority=False)
+        if sent:
+            self._last_signal_analysis_time[sym_key] = now
+            logger.info("Signal pro analysis %s %s → chat %s", signal.exchange, sym_key, chat_id)
+
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
@@ -646,9 +727,7 @@ class TelegramBot:
                 is_priority=is_priority,
                 compact=self.settings_manager.settings.signal_message_compact,
             )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
-        ])
+        keyboard = self._signal_keyboard(signal)
         notify_chat_id = self.config.notification_chat_id
 
         cooldown = (
@@ -697,9 +776,15 @@ class TelegramBot:
         sent_any = False
         ta_result = None
         readiness: tuple[bool, str] | None = None
-        need_ta = settings.signal_chart_enabled or (
-            not skip_dedupe
-            and (settings.actionable_signals_only or settings.actionable_show_readiness_badge)
+        png: bytes | None = None
+        pro_text = ""
+        need_ta = (
+            settings.signal_chart_enabled
+            or settings.signal_playbook_enabled
+            or (
+                not skip_dedupe
+                and (settings.actionable_signals_only or settings.actionable_show_readiness_badge)
+            )
         )
         if need_ta:
             ms = signal.details.get("market_structure")
@@ -726,7 +811,8 @@ class TelegramBot:
             png = None
             chart_source = ""
             chart_fail = ""
-            if settings.signal_chart_enabled:
+            want_chart = settings.signal_chart_enabled or settings.signal_playbook_enabled
+            if want_chart:
                 try:
                     png, chart_source, ta_result, chart_fail = await asyncio.wait_for(
                         get_signal_chart_png(
@@ -809,16 +895,31 @@ class TelegramBot:
                     return
 
             ta_caption = ""
-            if ta_result is not None:
-                ta_caption = ta_signal_caption_html(
+            pro_text = ""
+            pro_token = ""
+            if ta_result is not None and settings.signal_playbook_enabled:
+                chart_caption = build_hot_caption(
+                    signal,
                     ta_result,
-                    signal_side=signal.side,
+                    header=message,
                     readiness=readiness,
-                    show_readiness_badge=settings.actionable_show_readiness_badge,
-                    compact=settings.signal_ta_compact,
-                    signal_type=signal.signal_type,
                 )
-            chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
+                pro_text = build_pro_detail_html(
+                    signal, ta_result, readiness=readiness,
+                )
+                pro_token = await self._store_signal_pro(pro_text)
+                keyboard = self._signal_keyboard(signal, pro_token)
+            else:
+                if ta_result is not None:
+                    ta_caption = ta_signal_caption_html(
+                        ta_result,
+                        signal_side=signal.side,
+                        readiness=readiness,
+                        show_readiness_badge=settings.actionable_show_readiness_badge,
+                        compact=settings.signal_ta_compact,
+                        signal_type=signal.signal_type,
+                    )
+                chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
@@ -830,18 +931,60 @@ class TelegramBot:
                     signal.symbol,
                     chart_fail,
                     settings.signal_chart_source,
-                    settings.signal_chart_enabled,
+                    want_chart,
                 )
-            elif ta_caption and not settings.signal_chart_enabled:
+                if chart_caption:
+                    sent_any = await self._send_to_chat(
+                        notify_chat_id, chart_caption, keyboard, is_priority,
+                    )
+            elif ta_caption and not want_chart:
                 sent_any = await self._send_to_chat(
                     notify_chat_id, chart_caption, keyboard, is_priority,
                 )
 
         if not sent_any:
-            sent_any = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority)
+            fallback = chart_caption if need_ta and chart_caption else message
+            sent_any = await self._send_to_chat(notify_chat_id, fallback, keyboard, is_priority)
 
         if not sent_any:
             return
+
+        if (
+            sent_any
+            and ta_result is not None
+            and settings.signal_pro_to_analysis_chat
+            and not skip_dedupe
+        ):
+            try:
+                await self._dispatch_signal_pro_analysis(
+                    signal,
+                    ta_result,
+                    png,
+                    readiness=readiness,
+                    pro_text=pro_text,
+                )
+            except Exception:
+                logger.exception("Signal pro analysis failed for %s", signal.symbol)
+
+        if (
+            sent_any
+            and ta_result is not None
+            and settings.target_watcher_enabled
+            and self.target_watcher is not None
+            and not skip_dedupe
+        ):
+            try:
+                pb = resolve_trade_playbook(signal, ta_result)
+                if pb and pb.target_prices:
+                    await self.target_watcher.schedule(
+                        exchange=signal.exchange,
+                        symbol=signal.symbol,
+                        playbook=pb,
+                        signal_type=signal.signal_type,
+                        entry_price=signal.current_price,
+                    )
+            except Exception:
+                logger.exception("TargetWatcher schedule failed for %s", signal.symbol)
 
         if sent_any and self.outcome_tracker is not None and self.settings_manager.settings.outcome_tracking_enabled:
             try:
@@ -2691,6 +2834,9 @@ class TelegramBot:
             f"(по TA, без ⏱ ранности сканера)\n"
             f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
             f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч\n"
+            f"📋 Playbook (Hot): <b>{'ON' if s.signal_playbook_enabled else 'OFF'}</b> · "
+            f"Pro → анализ: <b>{'ON' if s.signal_pro_to_analysis_chat else 'OFF'}</b> · "
+            f"Цели ✅: <b>{'ON' if s.target_watcher_enabled else 'OFF'}</b>\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
             f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "
@@ -2765,6 +2911,25 @@ class TelegramBot:
             return
 
         payload = query.data or ""
+        if payload.startswith("sigpro:"):
+            token = payload.split(":", 1)[1]
+            pro_text = await self._load_signal_pro(token)
+            if pro_text and query.message:
+                await query.answer("Полный разбор")
+                try:
+                    await query.message.reply_text(
+                        pro_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except BadRequest:
+                    await query.message.reply_text(
+                        _plain_caption(pro_text),
+                        disable_web_page_preview=True,
+                    )
+            else:
+                await query.answer("Разбор устарел — дождитесь нового сигнала", show_alert=True)
+            return
         if await self._handle_channels_callback(update, query, payload):
             return
         if payload == MTW_CANCEL_CALLBACK:

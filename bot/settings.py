@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 27
+SETTINGS_VERSION = 28
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -303,6 +303,11 @@ class ScannerSettings:
 
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
+
+    # Hot playbook + Pro в чат анализов / кнопка «Подробнее»
+    signal_playbook_enabled: bool = True
+    signal_pro_to_analysis_chat: bool = True
+    target_watcher_enabled: bool = True
 
       # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
     liquidation_alerts_enabled: bool = True
@@ -677,6 +682,9 @@ class ScannerSettings:
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
+            signal_playbook_enabled=bool(base.get("signal_playbook_enabled", True)),
+            signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", True)),
+            target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
@@ -996,6 +1004,10 @@ class SettingsManager:
                 merged["analysis_min_price_move_pct"] = 1.5
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
                     merged[override_key] = None
+            if version < 28:
+                merged["signal_playbook_enabled"] = True
+                merged["signal_pro_to_analysis_chat"] = True
+                merged["target_watcher_enabled"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1003,7 +1015,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v27: Trend Hunter — 5m/1.5%% цена/2.5%% OI, мягкий приток, альты 180k; preserved: %s)",
+                "Settings migrated v%d → v%d (v28: Hot playbook + Pro анализ + target watcher; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
