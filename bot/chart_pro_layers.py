@@ -53,11 +53,12 @@ def _draw_zigzag_path(
     label: str,
     alpha: float = 0.88,
     lw: float = 1.35,
+    linestyle: str = "--",
 ) -> None:
     if not bars or len(waypoints) < 2:
         return
     xs = _forecast_path_xs(bars, len(waypoints))
-    ax.plot(xs, waypoints, color=color, linestyle="--", linewidth=lw, alpha=alpha, zorder=4)
+    ax.plot(xs, waypoints, color=color, linestyle=linestyle, linewidth=lw, alpha=alpha, zorder=4)
     ax.annotate(
         "",
         xy=(xs[-1], waypoints[-1]),
@@ -139,6 +140,57 @@ def draw_buy_flat_sell_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisR
     _band(buy_lo, buy_hi, "#3fb950", "BUY")
     _band(flat_lo, flat_hi, "#8b949e", "flat")
     _band(sell_lo, sell_hi, "#f85149", "SELL")
+
+
+def draw_trend_dump_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
+    """Активный слив после тренда: OI/liq/momentum → яркий путь вниз."""
+    if not bars or ta.momentum_pct > -0.8:
+        return False
+    if not (ta.post_pump or ta.repeat_spike_dump_risk or ta.drawdown_from_high_pct >= 2.5):
+        return False
+    corr = ta.correction_path
+    cont = ta.continuation_path
+    corr_wins = bool(
+        corr and (cont is None or corr.confidence >= cont.confidence or ta.momentum_pct <= -1.2)
+    )
+    if not corr_wins:
+        return False
+    if corr and len(corr.waypoints) >= 3:
+        _draw_zigzag_path(
+            ax, bars, corr.waypoints,
+            color="#ff7b72", label=corr.label or "слив ↓", lw=1.65, alpha=0.95,
+        )
+        return True
+    px = bars[-1].close
+    tgt = ta.nearest_support or ta.breakdown_level or px * 0.94
+    if tgt >= px * 0.998:
+        tgt = px * 0.96
+    waypoints = [px, px * 0.992, px * 0.978, tgt]
+    _draw_zigzag_path(ax, bars, waypoints, color="#ff7b72", label="слив ↓", lw=1.65, alpha=0.95)
+    return True
+
+
+def draw_trend_dump_risk_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
+    """Превентивный путь: перегрев у хая, слив ещё не подтверждён."""
+    if not bars:
+        return False
+    if not (ta.post_pump or ta.repeat_spike_dump_risk):
+        return False
+    if ta.drawdown_from_high_pct >= 2.5 or ta.momentum_pct <= -0.8:
+        return False
+    if ta.drawdown_from_high_pct > 1.8 and ta.momentum_pct < -0.3:
+        return False
+
+    px = bars[-1].close
+    tgt = ta.nearest_support or ta.breakdown_level or px * 0.94
+    if tgt >= px * 0.998:
+        tgt = px * 0.965
+    waypoints = [px, px * 0.997, px * 0.988, px * 0.978, tgt]
+    _draw_zigzag_path(
+        ax, bars, waypoints,
+        color="#ffa657", label="риск слива ↓", lw=1.15, alpha=0.62, linestyle=":",
+    )
+    return True
 
 
 def draw_bounce_short_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
@@ -329,6 +381,10 @@ def draw_pro_chart_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     """
     draw_swing_liquidity_marks(ax, bars, ta)
     draw_sweep_circles(ax, bars, ta)
+    if draw_trend_dump_path(ax, bars, ta):
+        return "trend_dump"
+    if draw_trend_dump_risk_path(ax, bars, ta):
+        return "trend_dump_risk"
     if draw_bounce_short_path(ax, bars, ta):
         return "bounce_short"
     if draw_flat_breakout_path(ax, bars, ta):

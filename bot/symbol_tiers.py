@@ -43,6 +43,10 @@ class TierThresholds:
     liq_cascade_min_price_percent: float
     min_signal_score: float
     impulse_price_tiers: tuple[float, ...]
+    trend_exhaustion_min_prior_pct: float = 6.0
+    trend_exhaustion_min_dump_pct: float = 2.0
+    trend_exhaustion_peak_max_age_minutes: float = 18.0
+    reversal_peak_max_age_minutes: float = 10.0
 
 
 def _major_symbols(settings: ScannerSettings) -> frozenset[str]:
@@ -106,6 +110,18 @@ def tier_thresholds(
             impulse_price_tiers=_impulse_tiers(
                 settings, float(getattr(settings, "major_impulse_price_multiplier", 0.6))
             ),
+            trend_exhaustion_min_prior_pct=float(
+                getattr(settings, "trend_exhaustion_min_prior_trend_pct", 6.0) * 0.75
+            ),
+            trend_exhaustion_min_dump_pct=float(
+                getattr(settings, "trend_exhaustion_min_dump_pct", 2.0) * 0.85
+            ),
+            trend_exhaustion_peak_max_age_minutes=float(
+                getattr(settings, "trend_exhaustion_peak_max_age_minutes", 18.0) * 0.85
+            ),
+            reversal_peak_max_age_minutes=float(
+                getattr(settings, "reversal_peak_max_age_minutes", 10.0) * 0.9
+            ),
         )
 
     if tier == SymbolTier.ALT:
@@ -124,13 +140,25 @@ def tier_thresholds(
             breakout_min_dump_percent=settings.breakout_min_dump_percent * 1.15,
             reversal_min_prior_move_pct=settings.reversal_min_prior_move_pct * 1.1,
             reversal_min_reversal_pct=settings.reversal_min_reversal_pct * 1.1,
-            liq_cascade_min_usd=float(getattr(settings, "liq_cascade_min_usd", 100_000.0)),
+            liq_cascade_min_usd=float(getattr(settings, "liq_cascade_min_usd", 80_000.0) * 0.55),
             liq_cascade_min_price_percent=float(
-                getattr(settings, "liq_cascade_min_price_percent", 0.55)
+                getattr(settings, "liq_cascade_min_price_percent", 0.45) * 0.85
             ),
             min_signal_score=float(getattr(settings, "alt_min_signal_score", 3.0)),
             impulse_price_tiers=_impulse_tiers(
-                settings, float(getattr(settings, "alt_impulse_price_multiplier", 1.2))
+                settings, float(getattr(settings, "alt_impulse_price_multiplier", 1.05))
+            ),
+            trend_exhaustion_min_prior_pct=float(
+                getattr(settings, "trend_exhaustion_min_prior_trend_pct", 6.0) * 1.05
+            ),
+            trend_exhaustion_min_dump_pct=float(
+                getattr(settings, "trend_exhaustion_min_dump_pct", 2.0) * 0.9
+            ),
+            trend_exhaustion_peak_max_age_minutes=float(
+                getattr(settings, "trend_exhaustion_peak_max_age_minutes", 18.0) * 1.35
+            ),
+            reversal_peak_max_age_minutes=float(
+                getattr(settings, "reversal_peak_max_age_minutes", 10.0) * 1.6
             ),
         )
 
@@ -153,6 +181,18 @@ def tier_thresholds(
         ),
         min_signal_score=float(getattr(settings, "standard_min_signal_score", 2.0)),
         impulse_price_tiers=_impulse_tiers(settings, 1.0),
+        trend_exhaustion_min_prior_pct=float(
+            getattr(settings, "trend_exhaustion_min_prior_trend_pct", 6.0)
+        ),
+        trend_exhaustion_min_dump_pct=float(
+            getattr(settings, "trend_exhaustion_min_dump_pct", 2.0)
+        ),
+        trend_exhaustion_peak_max_age_minutes=float(
+            getattr(settings, "trend_exhaustion_peak_max_age_minutes", 18.0)
+        ),
+        reversal_peak_max_age_minutes=float(
+            getattr(settings, "reversal_peak_max_age_minutes", 10.0)
+        ),
     )
 
 

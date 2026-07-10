@@ -17,6 +17,7 @@ from .smc_analysis import analyze_smc, smc_to_dict
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 from .symbol_tiers import TierThresholds, tier_thresholds
+from .trend_exhaustion import TrendExhaustionRisk, detect_trend_exhaustion, detect_trend_exhaustion_risk
 from .anomaly_alerts import AnomalyBatcher, detect_anomaly_for_symbol
 
 HISTORY_MAX_POINTS = 3600
@@ -29,6 +30,7 @@ _OI_FLOW_BYPASS_TYPES = frozenset({
     "mega_pump", "mega_dump", "vertical_pump", "vertical_dump",
     "reversal_pump", "reversal_dump", "liq_cascade_pump", "liq_cascade_dump",
     "impulse_pump", "impulse_dump", "price_pump", "price_dump",
+    "trend_dump", "trend_pump",
 })
 
 
@@ -102,15 +104,18 @@ class SignalEngine:
         settings: SettingsManager,
         on_signal: Callable[[Signal], Awaitable[None]],
         *,
+        on_trend_risk: Callable[[TrendExhaustionRisk, str, str], Awaitable[None]] | None = None,
         liquidation_tracker: BybitLiquidationTracker | None = None,
         binance_liquidation_tracker: object | None = None,
     ) -> None:
         self.settings = settings
         self.on_signal = on_signal
+        self.on_trend_risk = on_trend_risk
         self._liquidation_tracker = liquidation_tracker
         self._binance_liquidation_tracker = binance_liquidation_tracker
         self.history: dict[str, deque[SnapshotPoint]] = {}
         self.last_signal_time: dict[str, float] = {}
+        self._last_trend_risk_time: dict[str, float] = {}
         self.daily_signal_counts: dict[str, int] = {}
         self._daily_reset_key: str | None = None
         self._volumes: dict[str, float] = {}
@@ -450,6 +455,9 @@ class SignalEngine:
             tier = tier_thresholds(symbol, settings, thresholds, in_top_n=in_top)
 
         await self._maybe_dispatch_anomaly(exchange, symbol, history, current, settings, tier)
+        await self._maybe_dispatch_trend_risk(
+            exchange, symbol, history, current, settings, tier,
+        )
 
         if not settings.signals_enabled:
             return
@@ -508,6 +516,7 @@ class SignalEngine:
             is_reversal = candidate.signal_type in {"reversal_pump", "reversal_dump"}
             is_liq_cascade = candidate.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
             is_impulse = candidate.signal_type in {"impulse_pump", "impulse_dump"}
+            is_trend_ex = candidate.signal_type in {"trend_dump", "trend_pump"}
             min_liquidity = tier.min_open_interest_usd
             if is_breakout:
                 min_liquidity = max(min_liquidity, settings.breakout_min_liquidity_oi_usd)
@@ -515,6 +524,11 @@ class SignalEngine:
                 min_liquidity = max(min_liquidity, settings.reversal_min_liquidity_oi_usd)
             elif is_impulse:
                 min_liquidity = max(min_liquidity, settings.impulse_min_liquidity_oi_usd)
+            elif is_trend_ex:
+                min_liquidity = max(
+                    min_liquidity,
+                    float(getattr(settings, "trend_exhaustion_min_liquidity_oi_usd", 120_000.0)),
+                )
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 return
 
@@ -529,6 +543,7 @@ class SignalEngine:
                 and not is_reversal
                 and not is_liq_cascade
                 and not is_impulse
+                and not is_trend_ex
             ):
                 flow_ok, weak_oi_flow = _evaluate_oi_flow(
                     oi_change_usd=changes.oi_change_usd,
@@ -559,6 +574,9 @@ class SignalEngine:
             elif is_impulse:
                 cooldown_key = f"{key}:impulse"
                 cooldown = settings.impulse_cooldown_seconds
+            elif is_trend_ex:
+                cooldown_key = f"{key}:trend_exhaustion"
+                cooldown = int(getattr(settings, "trend_exhaustion_cooldown_seconds", 180))
             elif is_mega:
                 cooldown_key = f"{key}:mega"
                 cooldown = settings.mega_cooldown_seconds
@@ -569,10 +587,14 @@ class SignalEngine:
             if now - last_time < cooldown:
                 return
 
-            if is_breakout or is_reversal or is_liq_cascade or is_impulse:
+            if is_breakout or is_reversal or is_liq_cascade or is_impulse or is_trend_ex:
                 if is_impulse:
                     tier_hit = float((candidate.breakout_meta or {}).get("impulse_tier_pct", 0))
                     score = 1 if tier_hit >= 10 else 2
+                elif is_trend_ex:
+                    te_score = float((candidate.breakout_meta or {}).get("trend_exhaustion_score", 0))
+                    leg = abs(float((candidate.breakout_meta or {}).get("trend_leg_pct", 0)))
+                    score = 1 if leg >= 8.0 or te_score >= 2.5 else 2
                 else:
                     score = 1 if (is_breakout or is_liq_cascade) else (
                         1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
@@ -598,6 +620,7 @@ class SignalEngine:
                 and not is_reversal
                 and not is_liq_cascade
                 and not is_impulse
+                and not is_trend_ex
                 and min_score
                 and score < min_score
             ):
@@ -942,7 +965,9 @@ class SignalEngine:
         spike_pct = self._percent_change(spike_earlier.price, current.price)
         min_rev = tier.reversal_min_reversal_pct
         min_prior = tier.reversal_min_prior_move_pct
-        max_peak_age = settings.reversal_peak_max_age_minutes * 60.0
+        max_peak_age = float(
+            getattr(tier, "reversal_peak_max_age_minutes", settings.reversal_peak_max_age_minutes)
+        ) * 60.0
         oi_pct = self._oi_percent_change(spike_earlier, current)
 
         peak_point = max(window_points, key=lambda p: p.price or 0.0)
@@ -1109,6 +1134,56 @@ class SignalEngine:
             return
         await self._anomaly_batcher.offer(event, settings)
 
+    async def _maybe_dispatch_trend_risk(
+        self,
+        exchange: str,
+        symbol: str,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> None:
+        if not getattr(settings, "trend_exhaustion_risk_enabled", True):
+            return
+        if not settings.signals_enabled or self.on_trend_risk is None:
+            return
+        if self._detect_trend_exhaustion_candidate(
+            exchange, symbol, history, current, settings, tier,
+        ) is not None:
+            return
+
+        liq_long = 0.0
+        liq_short = 0.0
+        window = int(getattr(settings, "trend_exhaustion_spike_minutes", 5))
+        stats = self._get_liquidation_stats(exchange, symbol, max(window, 5))
+        if stats is not None:
+            liq_long = float(stats.long_liq_usd or 0.0)
+            liq_short = float(stats.short_liq_usd or 0.0)
+
+        risk = detect_trend_exhaustion_risk(
+            history,
+            current,
+            settings=settings,
+            tier=tier,
+            liq_long_usd=liq_long,
+            liq_short_usd=liq_short,
+        )
+        if risk is None:
+            return
+
+        now = time.time()
+        risk_key = f"{exchange}:{symbol}:{risk.kind}"
+        cooldown = int(getattr(settings, "trend_exhaustion_risk_cooldown_seconds", 600))
+        last = self._last_trend_risk_time.get(risk_key, 0.0)
+        if now - last < cooldown:
+            return
+        self._last_trend_risk_time[risk_key] = now
+
+        try:
+            await self.on_trend_risk(risk, exchange, symbol)
+        except Exception:
+            logger.exception("Trend risk dispatch failed %s %s", exchange, symbol)
+
     async def run_anomaly_flush_loop(self, interval: float = 15.0) -> None:
         while True:
             await asyncio.sleep(interval)
@@ -1181,6 +1256,43 @@ class SignalEngine:
 
         return None
 
+    def _detect_trend_exhaustion_candidate(
+        self,
+        exchange: str,
+        symbol: str,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> SignalCandidate | None:
+        liq_long = 0.0
+        liq_short = 0.0
+        window = int(getattr(settings, "trend_exhaustion_spike_minutes", 5))
+        stats = self._get_liquidation_stats(exchange, symbol, max(window, 5))
+        if stats is not None:
+            liq_long = float(stats.long_liq_usd or 0.0)
+            liq_short = float(stats.short_liq_usd or 0.0)
+
+        hit = detect_trend_exhaustion(
+            history,
+            current,
+            settings=settings,
+            tier=tier,
+            liq_long_usd=liq_long,
+            liq_short_usd=liq_short,
+        )
+        if hit is None:
+            return None
+        return SignalCandidate(
+            signal_type=hit.signal_type,
+            period_minutes=hit.period_minutes,
+            oi_change_percent=hit.oi_change_percent,
+            price_change_percent=hit.price_change_percent,
+            earlier=hit.earlier,
+            urgency=0,
+            breakout_meta=hit.meta,
+        )
+
     def _pick_best_candidate(
         self,
         history: deque[SnapshotPoint],
@@ -1196,6 +1308,12 @@ class SignalEngine:
         )
         if liq_cascade is not None:
             return liq_cascade
+
+        trend_ex = self._detect_trend_exhaustion_candidate(
+            exchange, symbol, history, current, settings, tier,
+        )
+        if trend_ex is not None:
+            return trend_ex
 
         impulse = self._detect_sustained_impulse(history, current, settings, tier)
         if impulse is not None:
@@ -1488,7 +1606,7 @@ class SignalEngine:
             return "short" if price_change_percent < 0 else "long"
         short_types = {
             "dump", "oi_dump", "price_dump", "mega_dump", "pulse_dump", "vertical_dump",
-            "reversal_dump", "liq_cascade_dump", "impulse_dump",
+            "reversal_dump", "liq_cascade_dump", "impulse_dump", "trend_dump",
         }
         if signal_type in short_types:
             return "short"
@@ -1514,6 +1632,14 @@ class SignalEngine:
 
         if signal_type in {"reversal_pump", "reversal_dump"}:
             return 1
+
+        if signal_type in {"trend_dump", "trend_pump"}:
+            leg = flash_tier or abs(price_change_percent)
+            if leg >= 10:
+                return 1
+            if leg >= 5:
+                return 2
+            return 2
 
         if signal_type in {"impulse_pump", "impulse_dump"}:
             tier = flash_tier or abs(price_change_percent)

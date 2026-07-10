@@ -39,6 +39,8 @@ OI_BAR_MAX_COUNT = 72
 ANALYSIS_SIGNAL_TYPES = frozenset({
     "impulse_pump",
     "impulse_dump",
+    "trend_pump",
+    "trend_dump",
     "reversal_pump",
     "reversal_dump",
     "liq_cascade_pump",

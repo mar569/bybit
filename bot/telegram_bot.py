@@ -92,6 +92,7 @@ from .liquidation_analysis import (
 )
 from .analysis_outcome_tracker import AnalysisOutcomeSummary
 from .anomaly_alerts import AnomalyEvent, format_anomaly_alert
+from .trend_exhaustion import TrendExhaustionRisk
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
@@ -622,18 +623,20 @@ class TelegramBot:
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_impulse = signal.signal_type in {"impulse_pump", "impulse_dump"}
+        is_trend = signal.signal_type in {"trend_pump", "trend_dump"}
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_liq_cascade = signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
         is_priority = (
             is_vertical
             or is_impulse
+            or is_trend
             or is_reversal
             or is_liq_cascade
             or prob >= 75
             or signal.signal_score <= priority_max
             or signal.signal_type in {"mega_pump", "mega_dump", "short_squeeze"}
         )
-        if is_vertical or is_impulse:
+        if is_vertical or is_impulse or is_trend:
             message = self._format_vertical_breakout_message(
                 signal, compact=self.settings_manager.settings.signal_message_compact,
             )
@@ -937,6 +940,46 @@ class TelegramBot:
                 event.symbol,
                 event.anomaly_type,
             )
+
+    async def dispatch_trend_risk(
+        self,
+        risk: TrendExhaustionRisk,
+        exchange: str,
+        symbol: str,
+    ) -> None:
+        if self.application is None or self._bot_notifications_blocked():
+            return
+        settings = self.settings_manager.settings
+        if not settings.signals_enabled:
+            return
+        if not getattr(settings, "trend_exhaustion_risk_enabled", True):
+            return
+
+        sym = symbol.upper()
+        link = coinglass_url(sym, exchange)
+        if risk.kind == "dump_risk":
+            title = "⚠️ WATCH · риск слива"
+            hint = "Не лонг у хая. Ждите trend_dump или пробой вниз."
+        else:
+            title = "⚠️ WATCH · риск отскока"
+            hint = "Не шорт у дна. Ждите trend_pump или пробой вверх."
+
+        score = int(risk.meta.get("risk_score", 0))
+        message = (
+            f"<b>{title}</b>\n"
+            f"<a href=\"{link}\"><b>{sym}</b></a> · {exchange}\n"
+            f"📊 {html.escape(risk.detail)}\n"
+            f"🔢 факторов: {score}\n"
+            f"💡 {hint}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 CoinGlass", url=link)],
+        ])
+        sent = await self._send_to_chat(
+            self.config.notification_chat_id, message, keyboard, is_priority=False,
+        )
+        if sent:
+            logger.info("Trend risk %s %s %s", exchange, sym, risk.kind)
 
     async def get_analysis_adaptive_weights(self) -> dict[str, float] | None:
         if self.analysis_outcome_tracker is None:
@@ -2016,7 +2059,10 @@ class TelegramBot:
         )
 
         if query:
-            await query.answer(f"Ваш {side_label}")
+            try:
+                await query.answer(f"Ваш {side_label}")
+            except BadRequest:
+                pass
             try:
                 await query.edit_message_text(progress, parse_mode=ParseMode.HTML)
             except BadRequest:
@@ -3595,6 +3641,8 @@ class TelegramBot:
             return "↩️", "разворот ↑" if is_long else "разворот ↓"
         if st in {"impulse_pump", "impulse_dump"}:
             return "⚡", "импульс ↑" if is_long else "импульс ↓"
+        if st in {"trend_pump", "trend_dump"}:
+            return "📊", "тренд ↑" if is_long else "тренд ↓"
         if st in {"vertical_pump", "vertical_dump"}:
             return "🚨", "вертикаль ↑" if is_long else "вертикаль ↓"
         return ("🟢", "LONG") if is_long else ("🔴", "SHORT")
@@ -3611,6 +3659,8 @@ class TelegramBot:
             "reversal_dump": "↩️ РАЗВОРОТ ВНИЗ",
             "impulse_pump": "📈 ИМПУЛЬС ВВЕРХ",
             "impulse_dump": "📉 ИМПУЛЬС ВНИЗ",
+            "trend_pump": "📈 ТРЕНД → ОТСКОК",
+            "trend_dump": "📉 ТРЕНД → СЛИВ",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -3651,6 +3701,9 @@ class TelegramBot:
             if signal.signal_type in {"impulse_pump", "impulse_dump"}:
                 win = signal.details.get("impulse_window_min", signal.oi_period_minutes)
                 title = f"📈 ИМПУЛЬС {win}м" if is_long else f"📉 ИМПУЛЬС {win}м"
+            elif signal.signal_type in {"trend_pump", "trend_dump"}:
+                prior = signal.details.get("trend_prior_pct", "—")
+                title = f"📈 ТРЕНД→отскок ({prior}%)" if is_long else f"📉 ТРЕНД→слив ({prior}%)"
             return (
                 f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
                 f"{side_emoji} {self._symbol_link_and_copy(signal)}\n"
@@ -3681,9 +3734,25 @@ class TelegramBot:
         if signal.signal_type in {"impulse_pump", "impulse_dump"}:
             win = signal.details.get("impulse_window_min", signal.oi_period_minutes)
             title = f"📈 <b>ИМПУЛЬС ВВЕРХ ({win}м)</b>" if is_long else f"📉 <b>ИМПУЛЬС ВНИЗ ({win}м)</b>"
+        elif signal.signal_type in {"trend_pump", "trend_dump"}:
+            prior = signal.details.get("trend_prior_pct", "—")
+            leg = signal.details.get("trend_leg_pct", spike_pct)
+            title = (
+                f"📈 <b>ТРЕНД → ОТСКОК</b> (ход {prior}%)"
+                if is_long
+                else f"📉 <b>ТРЕНД → СЛИВ</b> (тренд +{prior}% → {leg}%)"
+            )
+        subtitle = "⚡ <b>Выход из проторговки</b> (вне порогов)"
+        if signal.signal_type in {"trend_pump", "trend_dump"}:
+            bits = ["тренд → перегрев → импульс"]
+            if signal.details.get("oi_unwind"):
+                bits.append("OI↓ unwind")
+            if signal.details.get("liq_long_usd", 0) >= 1:
+                bits.append(f"liq ${float(signal.details.get('liq_long_usd', 0)):,.0f}")
+            subtitle = "📊 <b>" + " · ".join(bits) + "</b>"
         return (
             f"{title}\n"
-            f"⚡ <b>Выход из проторговки</b> (вне порогов)\n"
+            f"{subtitle}\n"
             f"{exchange_emoji} <b>{exchange_name} – {spike_min}м</b>\n"
             f"{side_emoji} <b>{side_label}</b>\n"
             f"{self._symbol_link_and_copy(signal)}\n\n"

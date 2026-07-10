@@ -21,6 +21,8 @@ UpdateKind = Literal[
 IMPULSE_SIGNAL_TYPES = frozenset({
     "impulse_pump",
     "impulse_dump",
+    "trend_pump",
+    "trend_dump",
     "vertical_pump",
     "vertical_dump",
     "mega_pump",

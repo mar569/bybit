@@ -166,7 +166,7 @@ class ScannerSettings:
     reversal_bypass_top_n: bool = True
     reversal_window_minutes: int = 10
     reversal_spike_minutes: int = 3
-    reversal_peak_max_age_minutes: int = 6
+    reversal_peak_max_age_minutes: int = 10
     reversal_min_prior_move_pct: float = 1.2
     reversal_min_reversal_pct: float = 0.85
     reversal_min_liquidity_oi_usd: float = 220_000.0
@@ -183,7 +183,7 @@ class ScannerSettings:
     impulse_min_liquidity_oi_usd: float = 140_000.0
     impulse_cooldown_seconds: int = 120
     major_impulse_price_multiplier: float = 0.6
-    alt_impulse_price_multiplier: float = 1.2
+    alt_impulse_price_multiplier: float = 1.05
 
     # Tier: мейджоры / топ / альты — разные пороги из одной базы
     tier_enabled: bool = True
@@ -218,6 +218,24 @@ class ScannerSettings:
     major_liq_cascade_min_usd: float = 120_000.0
     major_liq_cascade_min_price_percent: float = 0.35
     liq_cascade_cooldown_seconds: int = 120
+
+    # Тренд → перегрев → слив (VELVET-паттерн на альтах)
+    trend_exhaustion_enabled: bool = True
+    trend_exhaustion_bypass_top_n: bool = True
+    trend_exhaustion_trend_window_minutes: int = 60
+    trend_exhaustion_spike_minutes: int = 5
+    trend_exhaustion_peak_max_age_minutes: int = 18
+    trend_exhaustion_min_prior_trend_pct: float = 6.0
+    trend_exhaustion_min_dump_pct: float = 2.0
+    trend_exhaustion_min_spike_pct: float = 0.9
+    trend_exhaustion_min_liquidity_oi_usd: float = 120_000.0
+    trend_exhaustion_liq_boost_usd: float = 22_000.0
+    trend_exhaustion_cooldown_seconds: int = 180
+    trend_exhaustion_risk_enabled: bool = True
+    trend_exhaustion_risk_min_range_position: float = 0.76
+    trend_exhaustion_risk_max_pullback_pct: float = 1.8
+    trend_exhaustion_risk_min_confluence: int = 2
+    trend_exhaustion_risk_cooldown_seconds: int = 600
 
     min_open_interest: float = 80_000.0
     min_volume: float = 0.0
@@ -575,6 +593,42 @@ class ScannerSettings:
                 base.get("major_liq_cascade_min_price_percent", 0.35)
             ),
             liq_cascade_cooldown_seconds=int(base.get("liq_cascade_cooldown_seconds", 120)),
+            trend_exhaustion_enabled=bool(base.get("trend_exhaustion_enabled", True)),
+            trend_exhaustion_bypass_top_n=bool(base.get("trend_exhaustion_bypass_top_n", True)),
+            trend_exhaustion_trend_window_minutes=int(
+                base.get("trend_exhaustion_trend_window_minutes", 60)
+            ),
+            trend_exhaustion_spike_minutes=int(base.get("trend_exhaustion_spike_minutes", 5)),
+            trend_exhaustion_peak_max_age_minutes=int(
+                base.get("trend_exhaustion_peak_max_age_minutes", 18)
+            ),
+            trend_exhaustion_min_prior_trend_pct=float(
+                base.get("trend_exhaustion_min_prior_trend_pct", 6.0)
+            ),
+            trend_exhaustion_min_dump_pct=float(base.get("trend_exhaustion_min_dump_pct", 2.0)),
+            trend_exhaustion_min_spike_pct=float(base.get("trend_exhaustion_min_spike_pct", 0.9)),
+            trend_exhaustion_min_liquidity_oi_usd=float(
+                base.get("trend_exhaustion_min_liquidity_oi_usd", 120_000.0)
+            ),
+            trend_exhaustion_liq_boost_usd=float(
+                base.get("trend_exhaustion_liq_boost_usd", 22_000.0)
+            ),
+            trend_exhaustion_cooldown_seconds=int(
+                base.get("trend_exhaustion_cooldown_seconds", 180)
+            ),
+            trend_exhaustion_risk_enabled=bool(base.get("trend_exhaustion_risk_enabled", True)),
+            trend_exhaustion_risk_min_range_position=float(
+                base.get("trend_exhaustion_risk_min_range_position", 0.76)
+            ),
+            trend_exhaustion_risk_max_pullback_pct=float(
+                base.get("trend_exhaustion_risk_max_pullback_pct", 1.8)
+            ),
+            trend_exhaustion_risk_min_confluence=int(
+                base.get("trend_exhaustion_risk_min_confluence", 2)
+            ),
+            trend_exhaustion_risk_cooldown_seconds=int(
+                base.get("trend_exhaustion_risk_cooldown_seconds", 600)
+            ),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),

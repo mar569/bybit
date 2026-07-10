@@ -1157,6 +1157,18 @@ def build_market_forecast_paths(
         corr_score += 24
         if "после пампа" not in factors_ru:
             factors_ru.append("после пампа")
+    if momentum == "down" and momentum_pct <= -1.0 and (
+        post_pump or drawdown_from_high_pct >= 2.5 or repeat_spike_dump_risk
+    ):
+        corr_score += 22
+        if "импульс вниз" not in factors_ru:
+            factors_ru.append(f"импульс вниз {momentum_pct:+.1f}%")
+        if liq_long_boost > 0:
+            corr_score += 14
+            factors_ru.append("liq long ↑")
+        if oi_narrative in {"long_unwind", "aligned_short", "capitulation"}:
+            corr_score += 10
+            factors_ru.append(f"OI: {oi_narrative}")
     if phase == "impulse_up" and range_position > 0.75:
         corr_score += 18
     if repeat_spike_dump_risk:
@@ -1184,12 +1196,16 @@ def build_market_forecast_paths(
     if pullback:
         pb_pct = (current - pullback) / current * 100.0
         dip = current * 0.996
+        deep = pullback
+        if momentum == "down" and momentum_pct <= -1.5 and (post_pump or drawdown_from_high_pct >= 3):
+            deep = min(pullback, current * (0.97 if post_pump else 0.985))
+            pb_pct = (current - deep) / current * 100.0
         correction_path = ForecastPath(
             kind="correction",
-            label="коррекция ↓",
-            waypoints=[current, dip, pullback, pullback * 1.004],
+            label="слив ↓" if momentum == "down" and pb_pct >= 4 else "коррекция ↓",
+            waypoints=[current, dip, deep, deep * (0.996 if momentum == "down" else 1.004)],
             confidence=corr_conf,
-            reason=f"откат к {fmt_price(pullback)} (−{pb_pct:.1f}%)",
+            reason=f"откат к {fmt_price(deep)} (−{pb_pct:.1f}%)",
         )
 
     if cont_tp is not None and cont_tp > current * 1.003:
@@ -3269,7 +3285,7 @@ def _near_entry_tolerance_pct(signal_type: str | None, *, momentum_pct: float = 
         base = 0.75
     elif st in {"liq_cascade_dump", "liq_cascade_pump"}:
         base = 0.65
-    elif st in {"impulse_dump", "impulse_pump"}:
+    elif st in {"impulse_dump", "impulse_pump", "trend_dump", "trend_pump"}:
         base = 0.55
     elif st in {"reversal_dump", "reversal_pump"}:
         base = 0.35

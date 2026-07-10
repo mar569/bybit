@@ -75,7 +75,11 @@ async def main() -> None:
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
     anomaly_batcher = AnomalyBatcher(telegram.dispatch_anomaly)
-    scanner = SignalEngine(settings, telegram.dispatch_signal)
+    scanner = SignalEngine(
+        settings,
+        telegram.dispatch_signal,
+        on_trend_risk=telegram.dispatch_trend_risk,
+    )
     scanner.attach_anomaly_batcher(anomaly_batcher)
     telegram.scanner = scanner
 
