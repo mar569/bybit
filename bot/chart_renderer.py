@@ -1045,7 +1045,28 @@ def _price_to_axis_y(price: float, y_min: float, y_max: float) -> float:
     if y_max <= y_min:
         return (TV_CHART_Y_BOTTOM + TV_CHART_Y_TOP) / 2
     ratio = (price - y_min) / (y_max - y_min)
+    ratio = max(0.0, min(1.0, ratio))
     return TV_CHART_Y_BOTTOM + (1.0 - ratio) * (TV_CHART_Y_TOP - TV_CHART_Y_BOTTOM)
+
+
+def _tv_nearby_levels(ta: TAAnalysisResult) -> list[float]:
+    levels: list[float] = []
+    for p in (ta.breakout_level, ta.breakdown_level, ta.invalidation_price):
+        if p:
+            levels.append(float(p))
+    for p in (ta.target_prices or [])[:3]:
+        levels.append(float(p))
+    for p in (ta.nearest_support, ta.nearest_resistance):
+        if p:
+            levels.append(float(p))
+    for sc in (ta.bullish_scenario, ta.bearish_scenario):
+        if sc is None:
+            continue
+        if sc.trigger_price:
+            levels.append(float(sc.trigger_price))
+        for p in (sc.target_prices or [])[:2]:
+            levels.append(float(p))
+    return levels
 
 
 def _tv_visible_price_range(bars: list[KlineBar], ta: TAAnalysisResult) -> tuple[float, float]:
@@ -1058,23 +1079,35 @@ def _tv_visible_price_range(bars: list[KlineBar], ta: TAAnalysisResult) -> tuple
         prices.extend([b.low, b.high])
     if ta.current_price:
         prices.append(ta.current_price)
-    for p in (ta.breakout_level, ta.breakdown_level, ta.invalidation_price):
-        if p:
-            prices.append(p)
     for lv in ta.levels[:4]:
         prices.append(lv.price)
     if ta.consolidation:
         prices.extend([ta.consolidation.top, ta.consolidation.bottom])
-    if ta.nearest_support:
-        prices.append(ta.nearest_support)
-    if ta.nearest_resistance:
-        prices.append(ta.nearest_resistance)
     if not prices:
         return 0.0, 1.0
+    core_min, core_max = min(prices), max(prices)
+    core_span = max(core_max - core_min, core_min * 0.0005)
+    max_span = core_span * 1.42
+    mid = ta.current_price or (core_min + core_max) / 2.0
+
+    for p in _tv_nearby_levels(ta):
+        if core_min - core_span * 0.38 <= p <= core_max + core_span * 0.38:
+            prices.append(p)
+
     y_min, y_max = min(prices), max(prices)
-    span = max(y_max - y_min, y_min * 0.0005)
-    pad = span * 0.035
+    span = y_max - y_min
+    if span > max_span:
+        y_min = mid - max_span / 2.0
+        y_max = mid + max_span / 2.0
+    pad = max(span, core_span) * 0.035
     return y_min - pad, y_max + pad
+
+
+def _tv_level_in_range(price: float | None, y_min: float, y_max: float) -> bool:
+    if price is None:
+        return False
+    margin = max((y_max - y_min) * 0.06, price * 0.0004)
+    return (y_min - margin) <= price <= (y_max + margin)
 
 
 def _bar_x_norm(idx: int, n: int, *, x_start: float = 0.06, x_end: float = 0.88) -> float:
@@ -1307,6 +1340,8 @@ def _draw_tv_bounce_short_path(
     *,
     x0: float,
     span: float,
+    y_min: float | None = None,
+    y_max: float | None = None,
 ) -> bool:
     if ta.verdict != "SHORT" or not ta.breakdown_level or not bars:
         return False
@@ -1321,6 +1356,8 @@ def _draw_tv_bounce_short_path(
     if not resist or resist <= px * 1.0005:
         resist = px * 1.006
     tp = ta.target_prices[0] if ta.target_prices else bd * 0.992
+    if y_min is not None and y_max is not None and not _tv_level_in_range(tp, y_min, y_max):
+        tp = bd
     mid_pull = (px + resist) / 2.0
     waypoints = [px, mid_pull, resist, bd, tp]
     _draw_tv_zigzag(
@@ -1347,6 +1384,9 @@ def _draw_tv_forecast_paths(
     bars: list[KlineBar],
     current: float,
     y_at: Any,
+    *,
+    y_min: float | None = None,
+    y_max: float | None = None,
 ) -> None:
     """Коррекция / продолжение пунктиром вправо от последней свечи."""
     n = len(bars)
@@ -1355,7 +1395,9 @@ def _draw_tv_forecast_paths(
     y0 = y_at(current)
     ax.plot(x0, y0, "o", color="white", markersize=4, zorder=5)
 
-    if _draw_tv_bounce_short_path(ax, ta, bars, current, y_at, x0=x0, span=span):
+    if _draw_tv_bounce_short_path(
+        ax, ta, bars, current, y_at, x0=x0, span=span, y_min=y_min, y_max=y_max,
+    ):
         return
 
     def _draw_zigzag_tv(waypoints: list[float], *, color: str, label: str, alpha: float) -> None:
@@ -1478,12 +1520,14 @@ def _overlay_ta_on_tradingview(
         ax.text(x_lbl, y, f" SL {fmt_price(ta.invalidation_price)}", color=CHART_STYLE["inv"], fontsize=6.8, va="center")
 
     for j, tp in enumerate(ta.target_prices[:2]):
+        if not _tv_level_in_range(tp, y_min, y_max):
+            continue
         y = y_at(tp)
         ax.axhline(y, xmin=x_line_lo, xmax=x_line_hi, color=CHART_STYLE["target"], linewidth=0.85, alpha=0.65, linestyle="--", zorder=2)
-        ax.text(x_lbl, y, f" TP{j + 1} {fmt_price(tp)}", color=CHART_STYLE["target"], fontsize=6.8, va="center")
+        ax.text(x_lbl, y, f" TP{j + 1} {fmt_price(tp)}", color=CHART_STYLE["target"], fontsize=6.8, va="center", clip_on=True)
 
     current = bars[-1].close
-    _draw_tv_forecast_paths(ax, ta, bars, current, y_at)
+    _draw_tv_forecast_paths(ax, ta, bars, current, y_at, y_min=y_min, y_max=y_max)
 
     header = f"{symbol} · {ta.verdict} {ta_display_score(ta)}/10 · {interval_minutes}m"
     if ta.dist_to_long_pct is not None or ta.dist_to_short_pct is not None:
@@ -1513,8 +1557,18 @@ def _overlay_ta_on_tradingview(
         linespacing=1.24,
     )
 
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=dpi, facecolor=fig.get_facecolor(), pad_inches=0)
+    fig.savefig(
+        buffer,
+        format="png",
+        dpi=dpi,
+        facecolor=fig.get_facecolor(),
+        pad_inches=0,
+        bbox_inches=None,
+    )
     plt.close(fig)
     buffer.seek(0)
     return buffer.getvalue()
