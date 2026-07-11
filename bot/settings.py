@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 28
+SETTINGS_VERSION = 30
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -260,7 +260,7 @@ class ScannerSettings:
     probability_filter_enabled: bool = True
 
     # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
-    actionable_signals_only: bool = False
+    actionable_signals_only: bool = True
     actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 2.5
     actionable_min_signal_score: int = 2
@@ -308,6 +308,24 @@ class ScannerSettings:
     signal_playbook_enabled: bool = True
     signal_pro_to_analysis_chat: bool = True
     target_watcher_enabled: bool = True
+
+    # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
+    signal_quality_gate_enabled: bool = True
+    signal_cvd_gate_enabled: bool = True
+    signal_sweep_guard_enabled: bool = True
+    signal_cvd_short_max_ratio: float = 0.42
+    signal_cvd_long_min_ratio: float = 0.58
+    signal_cvd_lookback_minutes: float = 10.0
+    signal_watch_mode_enabled: bool = True
+    signal_btc_regime_filter_enabled: bool = True
+    signal_btc_block_pct: float = 0.35
+    signal_flow_matrix_enabled: bool = True
+    probability_bypass_weaken: bool = True
+    signal_htf_gate_enabled: bool = True
+    signal_funding_squeeze_enabled: bool = True
+    signal_outcome_feedback_enabled: bool = True
+    signal_outcome_min_samples: int = 12
+    signal_outcome_min_winrate: float = 35.0
 
       # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
     liquidation_alerts_enabled: bool = True
@@ -685,6 +703,24 @@ class ScannerSettings:
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", True)),
             signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", True)),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
+            signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
+            signal_cvd_gate_enabled=bool(base.get("signal_cvd_gate_enabled", True)),
+            signal_sweep_guard_enabled=bool(base.get("signal_sweep_guard_enabled", True)),
+            signal_cvd_short_max_ratio=float(base.get("signal_cvd_short_max_ratio", 0.42)),
+            signal_cvd_long_min_ratio=float(base.get("signal_cvd_long_min_ratio", 0.58)),
+            signal_cvd_lookback_minutes=float(base.get("signal_cvd_lookback_minutes", 10.0)),
+            signal_watch_mode_enabled=bool(base.get("signal_watch_mode_enabled", True)),
+            signal_btc_regime_filter_enabled=bool(
+                base.get("signal_btc_regime_filter_enabled", True)
+            ),
+            signal_btc_block_pct=float(base.get("signal_btc_block_pct", 0.35)),
+            signal_flow_matrix_enabled=bool(base.get("signal_flow_matrix_enabled", True)),
+            probability_bypass_weaken=bool(base.get("probability_bypass_weaken", True)),
+            signal_htf_gate_enabled=bool(base.get("signal_htf_gate_enabled", True)),
+            signal_funding_squeeze_enabled=bool(base.get("signal_funding_squeeze_enabled", True)),
+            signal_outcome_feedback_enabled=bool(base.get("signal_outcome_feedback_enabled", True)),
+            signal_outcome_min_samples=int(base.get("signal_outcome_min_samples", 12)),
+            signal_outcome_min_winrate=float(base.get("signal_outcome_min_winrate", 35.0)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
             signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
@@ -1008,6 +1044,25 @@ class SettingsManager:
                 merged["signal_playbook_enabled"] = True
                 merged["signal_pro_to_analysis_chat"] = True
                 merged["target_watcher_enabled"] = True
+            if version < 29:
+                merged["actionable_signals_only"] = True
+                merged["signal_quality_gate_enabled"] = True
+                merged["signal_cvd_gate_enabled"] = True
+                merged["signal_sweep_guard_enabled"] = True
+                merged["signal_cvd_short_max_ratio"] = 0.42
+                merged["signal_cvd_long_min_ratio"] = 0.58
+                merged["signal_cvd_lookback_minutes"] = 10.0
+                merged["signal_watch_mode_enabled"] = True
+                merged["signal_btc_regime_filter_enabled"] = True
+                merged["signal_btc_block_pct"] = 0.35
+                merged["signal_flow_matrix_enabled"] = True
+                merged["probability_bypass_weaken"] = True
+            if version < 30:
+                merged["signal_htf_gate_enabled"] = True
+                merged["signal_funding_squeeze_enabled"] = True
+                merged["signal_outcome_feedback_enabled"] = True
+                merged["signal_outcome_min_samples"] = 12
+                merged["signal_outcome_min_winrate"] = 35.0
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1015,7 +1070,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v28: Hot playbook + Pro анализ + target watcher; preserved: %s)",
+                "Settings migrated v%d → v%d (v30: HTF + funding squeeze + trigger watch + outcome feedback; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

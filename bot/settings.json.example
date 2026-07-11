@@ -1,5 +1,5 @@
 {
-  "settings_version": 28,
+  "settings_version": 30,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -163,5 +163,15 @@
 
   "signal_playbook_enabled": true,
   "signal_pro_to_analysis_chat": true,
-  "target_watcher_enabled": true
+  "target_watcher_enabled": true,
+
+  "actionable_signals_only": true,
+  "signal_quality_gate_enabled": true,
+  "signal_cvd_gate_enabled": true,
+  "signal_sweep_guard_enabled": true,
+  "signal_watch_mode_enabled": true,
+  "probability_bypass_weaken": true,
+  "signal_htf_gate_enabled": true,
+  "signal_funding_squeeze_enabled": true,
+  "signal_outcome_feedback_enabled": true
 }

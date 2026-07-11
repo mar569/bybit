@@ -203,9 +203,12 @@ def build_hot_caption(
     *,
     header: str,
     readiness: tuple[bool, str] | None = None,
+    quality_html: str = "",
 ) -> str:
     pb = resolve_trade_playbook(signal, ta)
     parts = [header.strip()]
+    if quality_html:
+        parts.append(quality_html.strip())
     if pb:
         parts.append(format_playbook_html(pb, readiness=readiness))
     else:
@@ -226,6 +229,7 @@ def build_pro_detail_html(
     ta: TAAnalysisResult,
     *,
     readiness: tuple[bool, str] | None = None,
+    quality_html: str = "",
 ) -> str:
     """Полный разбор для чата анализов и кнопки «Подробнее»."""
     exchange = signal.exchange
@@ -237,6 +241,8 @@ def build_pro_detail_html(
         f"OI {signal.oi_change_percent:+.2f}% · цена {signal.price_change_percent or 0:+.2f}%",
     ]
     body = "\n".join(lines)
+    if quality_html:
+        body = _append_unique(lines, body, quality_html)
     pb = resolve_trade_playbook(signal, ta)
 
     if pb:

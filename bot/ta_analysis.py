@@ -3359,6 +3359,9 @@ def should_skip_noise_signal(
     signal_score: float,
     *,
     signal_type: str | None = None,
+    cvd_ratio: float | None = None,
+    cvd_short_max: float = 0.42,
+    cvd_long_min: float = 0.58,
 ) -> tuple[bool, str]:
     """Отсечь слабые WAIT-сигналы, чтобы не забивать чат."""
     sig = signal_side.lower()
@@ -3368,6 +3371,19 @@ def should_skip_noise_signal(
 
     if "вход невыгоден" in reason_low or "плохой r:r" in reason_low:
         return True, "плохой R:R"
+
+    sig = signal_side.lower()
+    if cvd_ratio is not None:
+        if sig == "short" and cvd_ratio >= cvd_long_min:
+            return True, f"CVD {cvd_ratio:.0%} buy против SHORT"
+        if sig == "long" and cvd_ratio <= cvd_short_max:
+            return True, f"CVD {cvd_ratio:.0%} buy против LONG"
+
+    if ta.smc and ta.smc.liquidity_sweep:
+        if sig == "short" and ta.smc.sweep_direction == "long":
+            return True, "sweep лоев — ждать подтверждения SHORT"
+        if sig == "long" and ta.smc.sweep_direction == "short":
+            return True, "sweep хаев — ждать подтверждения LONG"
 
     if ta.verdict != "WAIT":
         return False, ""
@@ -3521,6 +3537,9 @@ def evaluate_entry_readiness(
     check_scanner_timing: bool = True,
     signal_type: str | None = None,
     accept_armed: bool = False,
+    cvd_ratio: float | None = None,
+    cvd_short_max: float = 0.42,
+    cvd_long_min: float = 0.58,
 ) -> tuple[bool, str]:
     """Готов ли сигнал к входу: TA LONG/SHORT, триггер близко, без конфликтов."""
     if check_scanner_timing:
@@ -3535,6 +3554,20 @@ def evaluate_entry_readiness(
 
     if ta_range_trade_opposes_verdict(ta):
         return False, "range-сетап против вердикта TA"
+
+    sig = (signal_side or "").lower()
+    if cvd_ratio is not None:
+        if sig == "short" and cvd_ratio >= cvd_long_min:
+            return False, f"CVD {cvd_ratio:.0%} buy — поток против SHORT"
+        if sig == "long" and cvd_ratio <= cvd_short_max:
+            return False, f"CVD {cvd_ratio:.0%} buy — поток против LONG"
+
+    if ta.smc and ta.smc.liquidity_sweep:
+        if sig == "short" and ta.smc.sweep_direction == "long":
+            if ta.smc.reversal_ready and ta.smc.reversal_direction == "long":
+                return False, "sweep лоев + reversal LONG"
+            if signal_type in {"reversal_dump", "impulse_dump", "trend_dump", "vertical_dump"}:
+                return False, "sweep лоев — short после снятия ликвидности рано"
 
     is_reversal = signal_type in {"reversal_pump", "reversal_dump"}
     if ta_conflicts_with_signal(ta, signal_side) and not is_reversal:

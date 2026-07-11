@@ -126,3 +126,33 @@ class OutcomeTracker:
             change_pct,
             record.get("success_flags", {}).get("60"),
         )
+
+    async def fade_type_stats(self, signal_type: str, *, limit: int = 200) -> tuple[int, float] | None:
+        """Winrate по типу сигнала (60m checkpoint) для feedback loop."""
+        if self.redis is None or signal_type not in {
+            "reversal_dump", "impulse_dump", "trend_dump", "vertical_dump",
+            "reversal_pump", "impulse_pump", "trend_pump", "vertical_pump",
+        }:
+            return None
+        try:
+            raw_list = await self.redis.lrange(OUTCOMES_KEY, -limit, -1)
+        except Exception:
+            return None
+        wins = 0
+        total = 0
+        for raw in raw_list:
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            if rec.get("signal_type") != signal_type:
+                continue
+            flags = rec.get("success_flags") or {}
+            if "60" not in flags:
+                continue
+            total += 1
+            if flags.get("60"):
+                wins += 1
+        if total == 0:
+            return None
+        return total, wins / total * 100.0

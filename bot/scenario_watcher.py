@@ -59,6 +59,7 @@ class ScenarioWatch:
     continuation_fired: bool = False
     entry_fired: bool = False
     enroll_high: float = 0.0
+    trigger_only: bool = False
 
     def __post_init__(self) -> None:
         if self.enroll_high <= 0:
@@ -180,6 +181,70 @@ class ScenarioWatcher:
         )
         return True
 
+    def try_enroll_quality_watch(
+        self,
+        signal: Signal,
+        ta: TAAnalysisResult,
+        settings: Any,
+        *,
+        quality_tier: str,
+    ) -> bool:
+        """WATCH-сигнал: следим за пробоем уровня → TRIGGER ENTRY."""
+        if quality_tier != "watch":
+            return False
+        if not getattr(settings, "scenario_watch_enabled", True):
+            return False
+        side = (signal.side or "").lower()
+        if side == "short" and not ta.breakdown_level:
+            return False
+        if side == "long" and not ta.breakout_level:
+            return False
+
+        key = (signal.exchange.lower(), signal.symbol.upper())
+        now = time.time()
+        enroll_cd = int(getattr(settings, "scenario_watch_enroll_cooldown_seconds", 600))
+        last = self._last_enroll_at.get(key, 0.0)
+        if now - last < enroll_cd and key not in self._watches:
+            return False
+
+        price = ta.current_price or signal.current_price
+        if price <= 0:
+            return False
+
+        watch_minutes = int(getattr(settings, "scenario_watch_minutes", 45))
+        watch = ScenarioWatch(
+            exchange=signal.exchange,
+            symbol=signal.symbol,
+            side=signal.side,
+            signal_type=signal.signal_type,
+            primary="correction" if side == "short" else "continuation",
+            enroll_price=price,
+            local_high=price,
+            local_low=price,
+            correction_target=ta.target_prices[0] if ta.target_prices else None,
+            continuation_target=ta.target_prices[0] if ta.target_prices else None,
+            breakdown_level=ta.breakdown_level,
+            breakout_level=ta.breakout_level,
+            initial_verdict=ta.verdict,
+            coinglass_url=signal.link,
+            started_at=now,
+            expires_at=now + watch_minutes * 60,
+            enroll_high=price,
+            trigger_only=True,
+            correction_fired=True,
+        )
+        self._watches[key] = watch
+        self._last_enroll_at[key] = now
+        lvl = ta.breakdown_level if side == "short" else ta.breakout_level
+        logger.info(
+            "Trigger watch %s %s %s @ %s",
+            signal.exchange,
+            signal.symbol,
+            side.upper(),
+            fmt_price(lvl) if lvl else "-",
+        )
+        return True
+
     def tick(self, scanner: Any, settings: Any) -> list[ScenarioUpdate]:
         if not getattr(settings, "scenario_watch_enabled", True):
             return []
@@ -205,6 +270,17 @@ class ScenarioWatcher:
             watch.local_high = max(watch.local_high, price)
             watch.local_low = min(watch.local_low, price)
             age = now - watch.started_at
+
+            if watch.trigger_only:
+                if age < MIN_AGE_BEFORE_FIRE_SEC:
+                    continue
+                batch = self._check_entry_ready(watch, price)
+                updates.extend(batch)
+                for upd in batch:
+                    if upd.kind in {"entry_short", "entry_long"}:
+                        self._watches.pop(key, None)
+                        break
+                continue
 
             if watch.primary == "correction":
                 batch = self._check_correction_primary(

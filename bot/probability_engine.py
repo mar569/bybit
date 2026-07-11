@@ -93,6 +93,18 @@ def _verdict(percent: float) -> str:
     return "НИЗКАЯ"
 
 
+def _classify_flow_for_penalty(oi_pct: float, price_pct: float) -> tuple[str, str]:
+    oi = float(oi_pct or 0)
+    px = float(price_pct or 0)
+    if oi < -0.4 and px > 0.35:
+        return "squeeze_risk", ""
+    if oi > 0.4 and px < -0.35:
+        return "long_unwind", ""
+    if oi < -0.4 and px < -0.35:
+        return "capitulation", ""
+    return "mixed", ""
+
+
 def _ratio_strength(value: float, threshold: float, cap: float = 2.5) -> float:
     if threshold <= 0:
         return 0.0
@@ -471,7 +483,35 @@ def assess_signal_probability(
     percent = _clamp(percent, 11.0, 89.0)
 
     if signal.signal_type in PROBABILITY_BYPASS_TYPES:
-        percent = max(percent, 68.0 + pattern_strength * 12.0)
+        floor = 68.0 + pattern_strength * 12.0
+        if getattr(settings, "probability_bypass_weaken", True):
+            if structure_penalty >= 10:
+                floor -= min(14.0, structure_penalty * 0.4)
+            if not oi_aligned:
+                floor -= 8.0
+            try:
+                cvd_r = float(signal.details.get("cvd_ratio"))
+                if is_long and cvd_r <= 0.40:
+                    floor -= 10.0
+                elif not is_long and cvd_r >= 0.55:
+                    floor -= 10.0
+            except (TypeError, ValueError):
+                pass
+            smc_data = smc or signal.details.get("smc")
+            if isinstance(smc_data, dict) and smc_data.get("liquidity_sweep"):
+                sweep_dir = str(smc_data.get("sweep_direction", ""))
+                if (is_long and sweep_dir == "short") or (not is_long and sweep_dir == "long"):
+                    floor -= 8.0
+                if smc_data.get("reversal_ready"):
+                    rev_dir = str(smc_data.get("reversal_direction", ""))
+                    if (is_long and rev_dir == "short") or (not is_long and rev_dir == "long"):
+                        floor -= 12.0
+            if isinstance(ms, dict):
+                flow_key, _ = _classify_flow_for_penalty(oi, price)
+                if (is_long and flow_key == "long_unwind") or (not is_long and flow_key == "capitulation"):
+                    floor -= 6.0
+            floor = max(52.0, floor)
+        percent = max(percent, floor)
 
     factors: list[ProbabilityFactor] = [
         ProbabilityFactor(

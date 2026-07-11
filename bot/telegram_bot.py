@@ -98,6 +98,13 @@ from .trade_playbook import (
     build_pro_detail_html,
     resolve_trade_playbook,
 )
+from .signal_quality_gate import (
+    assess_signal_quality,
+    attach_cvd_to_signal_details,
+    format_manual_ta_flow_html,
+    format_quality_warnings_html,
+)
+from .bybit_cvd import get_taker_cvd_cache
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager
 
@@ -303,6 +310,12 @@ class TelegramBot:
         for_filter: bool = False,
     ) -> tuple[bool, str]:
         s = self.settings_manager.settings
+        cvd_ratio = None
+        try:
+            raw = signal.details.get("cvd_ratio")
+            cvd_ratio = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            cvd_ratio = None
         return evaluate_entry_readiness(
             ta,
             signal.side,
@@ -315,6 +328,9 @@ class TelegramBot:
             check_scanner_timing=for_filter,
             signal_type=signal.signal_type,
             accept_armed=for_filter and s.actionable_accept_armed,
+            cvd_ratio=cvd_ratio,
+            cvd_short_max=s.signal_cvd_short_max_ratio,
+            cvd_long_min=s.signal_cvd_long_min_ratio,
         )
 
     async def start(self) -> None:
@@ -903,14 +919,64 @@ class TelegramBot:
                     logger.exception("TA-only fetch failed for %s", signal.symbol)
 
             if ta_result is not None:
+                if (
+                    settings.signal_cvd_gate_enabled
+                    and signal.details.get("cvd_ratio") is None
+                    and "bybit" in signal.exchange.lower()
+                ):
+                    try:
+                        lookback = float(settings.signal_cvd_lookback_minutes)
+                        cvd_snap = await get_taker_cvd_cache().get_cvd(
+                            signal.symbol, lookback_minutes=lookback,
+                        )
+                        if cvd_snap is not None:
+                            attach_cvd_to_signal_details(signal.details, cvd_snap)
+                    except Exception:
+                        logger.debug("CVD fetch failed for %s", signal.symbol)
+
                 readiness = self._eval_signal_readiness(ta_result, signal, for_filter=False)
 
-                if settings.signal_skip_noise and not skip_dedupe and not settings.actionable_signals_only:
+                outcome_stats = None
+                if (
+                    settings.signal_outcome_feedback_enabled
+                    and self.outcome_tracker is not None
+                ):
+                    try:
+                        outcome_stats = await self.outcome_tracker.fade_type_stats(
+                            signal.signal_type,
+                        )
+                    except Exception:
+                        outcome_stats = None
+
+                quality = assess_signal_quality(
+                    signal,
+                    ta=ta_result,
+                    btc_change_pct=self.scanner.get_btc_change_percent(5)
+                    if self.scanner is not None else None,
+                    settings=settings,
+                    readiness=readiness,
+                    outcome_stats=outcome_stats,
+                )
+                signal.details["quality_tier"] = quality.tier
+                signal.details["quality_block"] = quality.block_reason
+
+                if quality.tier == "skip" and not skip_dedupe:
+                    logger.info(
+                        "Telegram skip %s %s: quality — %s",
+                        signal.exchange, signal.symbol, quality.block_reason,
+                    )
+                    return
+
+                cvd_ratio = quality.cvd_ratio
+                if settings.signal_skip_noise and not skip_dedupe:
                     skip, noise_reason = should_skip_noise_signal(
                         ta_result,
                         signal.side,
                         signal.signal_score,
                         signal_type=signal.signal_type,
+                        cvd_ratio=cvd_ratio,
+                        cvd_short_max=settings.signal_cvd_short_max_ratio,
+                        cvd_long_min=settings.signal_cvd_long_min_ratio,
                     )
                     if skip:
                         logger.info(
@@ -919,25 +985,40 @@ class TelegramBot:
                         )
                         return
 
-            if settings.actionable_signals_only and not skip_dedupe:
-                if ta_result is None:
+                if settings.actionable_signals_only and not skip_dedupe:
+                    if quality.tier == "watch" and not settings.signal_watch_mode_enabled:
+                        logger.info(
+                            "Telegram skip %s %s: watch-only mode off — %s",
+                            signal.exchange, signal.symbol, quality.block_reason,
+                        )
+                        return
+                    if quality.tier != "entry" and not settings.signal_watch_mode_enabled:
+                        ready, reason = self._eval_signal_readiness(
+                            ta_result, signal, for_filter=True,
+                        )
+                        if not ready:
+                            logger.info(
+                                "Telegram skip %s %s: not actionable — %s",
+                                signal.exchange, signal.symbol, reason,
+                            )
+                            return
+            else:
+                quality = None
+                if settings.actionable_signals_only and not skip_dedupe:
                     logger.info(
                         "Telegram skip %s %s: actionable filter needs TA",
                         signal.exchange,
                         signal.symbol,
                     )
                     return
-                ready, reason = self._eval_signal_readiness(
-                    ta_result, signal, for_filter=True,
-                )
-                if not ready:
-                    logger.info(
-                        "Telegram skip %s %s: not actionable — %s",
-                        signal.exchange,
-                        signal.symbol,
-                        reason,
-                    )
-                    return
+
+            quality_html = format_quality_warnings_html(quality) if quality else ""
+            tier_prefix = ""
+            if quality and quality.tier == "entry":
+                tier_prefix = "🎯 <b>ENTRY</b> · "
+            elif quality and quality.tier == "watch":
+                tier_prefix = "👀 <b>WATCH</b> · "
+            signal_header = f"{tier_prefix}{message}"
 
             ta_caption = ""
             pro_text = ""
@@ -946,11 +1027,12 @@ class TelegramBot:
                 chart_caption = build_hot_caption(
                     signal,
                     ta_result,
-                    header=message,
+                    header=signal_header,
                     readiness=readiness,
+                    quality_html=quality_html,
                 )
                 pro_text = build_pro_detail_html(
-                    signal, ta_result, readiness=readiness,
+                    signal, ta_result, readiness=readiness, quality_html=quality_html,
                 )
                 pro_token = await self._store_signal_pro(pro_text)
                 keyboard = self._signal_keyboard(signal, pro_token)
@@ -964,7 +1046,7 @@ class TelegramBot:
                         compact=settings.signal_ta_compact,
                         signal_type=signal.signal_type,
                     )
-                chart_caption = f"{message}\n\n{ta_caption}" if ta_caption else message
+                chart_caption = f"{signal_header}\n\n{ta_caption}" if ta_caption else signal_header
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
@@ -1017,6 +1099,7 @@ class TelegramBot:
             and settings.target_watcher_enabled
             and self.target_watcher is not None
             and not skip_dedupe
+            and signal.details.get("quality_tier") == "entry"
         ):
             try:
                 pb = resolve_trade_playbook(signal, ta_result)
@@ -1058,7 +1141,13 @@ class TelegramBot:
             and not skip_dedupe
         ):
             try:
-                self.scenario_watcher.try_enroll(signal, ta_result, settings)
+                if signal.details.get("quality_tier") == "watch":
+                    self.scenario_watcher.try_enroll_quality_watch(
+                        signal, ta_result, settings,
+                        quality_tier="watch",
+                    )
+                else:
+                    self.scenario_watcher.try_enroll(signal, ta_result, settings)
             except Exception:
                 logger.exception("Scenario watch enroll failed for %s", signal.symbol)
 
@@ -1768,6 +1857,12 @@ class TelegramBot:
             breakout_level=watch.breakout_level,
             ta=ta_fresh,
         )
+        if upd.kind in {"entry_short", "entry_long"}:
+            label = "SHORT" if upd.kind == "entry_short" else "LONG"
+            message = (
+                f"🎯 <b>TRIGGER · ENTRY</b> · <b>{watch.symbol}</b> · {label}\n"
+                f"{message}"
+            )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 CoinGlass", url=watch.coinglass_url)],
         ])
@@ -2169,6 +2264,23 @@ class TelegramBot:
             f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
             f"{ta_manual_detailed_html(ta)}"
         )
+        try:
+            cvd_snap = await get_taker_cvd_cache().get_cvd(
+                symbol,
+                lookback_minutes=float(
+                    self.settings_manager.settings.signal_cvd_lookback_minutes
+                ) * 1.5,
+            )
+            flow_html = format_manual_ta_flow_html(
+                ta,
+                cvd_snap=cvd_snap,
+                cvd_short_max=self.settings_manager.settings.signal_cvd_short_max_ratio,
+                cvd_long_min=self.settings_manager.settings.signal_cvd_long_min_ratio,
+            )
+            if flow_html:
+                caption += f"\n\n<b>📊 Поток рынка</b>\n{flow_html}"
+        except Exception:
+            logger.debug("Manual TA CVD fetch failed for %s", symbol)
         # Доп. глубина для ручного TA: 24-48ч истории по паттерну spike->dump.
         extra_hours = 24 if interval_minutes <= 10 else 48
         per_hour = max(1, 60 // interval_minutes)
@@ -2883,6 +2995,10 @@ class TelegramBot:
             f"📋 Playbook (Hot): <b>{'ON' if s.signal_playbook_enabled else 'OFF'}</b> · "
             f"Pro → анализ: <b>{'ON' if s.signal_pro_to_analysis_chat else 'OFF'}</b> · "
             f"Цели ✅: <b>{'ON' if s.target_watcher_enabled else 'OFF'}</b>\n"
+            f"🛡 Quality gate: <b>{'ON' if s.signal_quality_gate_enabled else 'OFF'}</b> · "
+            f"CVD: <b>{'ON' if s.signal_cvd_gate_enabled else 'OFF'}</b> · "
+            f"HTF: <b>{'ON' if s.signal_htf_gate_enabled else 'OFF'}</b> · "
+            f"WATCH→TRIGGER: <b>{'ON' if s.scenario_watch_enabled else 'OFF'}</b>\n"
             f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
             f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "

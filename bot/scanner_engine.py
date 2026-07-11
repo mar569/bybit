@@ -15,6 +15,8 @@ from .bybit_liquidations import BybitLiquidationTracker
 from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_time
 from .smc_analysis import analyze_smc, smc_to_dict
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
+from .bybit_cvd import get_taker_cvd_cache
+from .signal_quality_gate import assess_signal_quality, attach_cvd_to_signal_details
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
 from .symbol_tiers import TierThresholds, tier_thresholds
 from .trend_exhaustion import TrendExhaustionRisk, detect_trend_exhaustion, detect_trend_exhaustion_risk
@@ -703,6 +705,16 @@ class SignalEngine:
                     liq_stats = self._liquidation_tracker.get_stats(symbol, window_minutes=15)
                     liquidations_dict = liq_stats.to_dict()
 
+            cvd_snap = None
+            if "bybit" in exchange.lower() and getattr(settings, "signal_cvd_gate_enabled", True):
+                try:
+                    lookback = float(getattr(settings, "signal_cvd_lookback_minutes", 10.0))
+                    cvd_snap = await get_taker_cvd_cache().get_cvd(
+                        symbol, lookback_minutes=lookback,
+                    )
+                except Exception:
+                    cvd_snap = None
+
             liq_estimate = None
             if liquidations_dict:
                 liq_estimate = float(liquidations_dict.get("total_usd", 0) or 0)
@@ -754,6 +766,8 @@ class SignalEngine:
                     **({"liquidations": liquidations_dict} if liquidations_dict else {}),
                 },
             )
+            if cvd_snap is not None:
+                attach_cvd_to_signal_details(signal.details, cvd_snap)
 
             assessment = assess_signal_probability(
                 signal,
@@ -775,7 +789,15 @@ class SignalEngine:
             if settings.probability_filter_enabled:
                 bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
                 min_prob = tier.min_probability_percent if settings.tier_enabled else settings.min_probability_percent
-                if not bypass and assessment.percent < min_prob:
+                if bypass and getattr(settings, "probability_bypass_weaken", True):
+                    floor_prob = max(52.0, min_prob - 8.0)
+                    if assessment.percent < floor_prob:
+                        logger.info(
+                            "Signal filtered %s %s: weakened bypass prob %.0f%% < %.0f%%",
+                            exchange, symbol, assessment.percent, floor_prob,
+                        )
+                        return
+                elif not bypass and assessment.percent < min_prob:
                     logger.info(
                         "Signal filtered %s %s: probability %.0f%% < %.0f%% (tier %s)",
                         exchange,
@@ -783,6 +805,21 @@ class SignalEngine:
                         assessment.percent,
                         min_prob,
                         tier.tier.value,
+                    )
+                    return
+
+            if getattr(settings, "signal_quality_gate_enabled", True):
+                q = assess_signal_quality(
+                    signal,
+                    btc_change_pct=self.get_btc_change_percent(5),
+                    settings=settings,
+                )
+                signal.details["quality_tier"] = q.tier
+                signal.details["quality_block"] = q.block_reason
+                if q.tier == "skip" and q.block_reason:
+                    logger.info(
+                        "Signal quality skip %s %s: %s",
+                        exchange, symbol, q.block_reason,
                     )
                     return
 
