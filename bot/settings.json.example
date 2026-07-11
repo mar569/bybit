@@ -165,8 +165,9 @@
   "signal_pro_to_analysis_chat": true,
   "target_watcher_enabled": true,
 
-  "actionable_signals_only": true,
+  "actionable_signals_only": false,
   "signal_quality_gate_enabled": true,
+  "signal_quality_scanner_skip_enabled": false,
   "signal_cvd_gate_enabled": true,
   "signal_sweep_guard_enabled": true,
   "signal_watch_mode_enabled": true,

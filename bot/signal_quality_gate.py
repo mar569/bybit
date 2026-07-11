@@ -333,8 +333,9 @@ def assess_signal_quality(
 
 def format_quality_warnings_html(result: SignalQualityResult) -> str:
     lines: list[str] = []
-    if result.flow_label and "aligned" not in result.flow_label.lower():
-        lines.append(f"💧 <b>Поток:</b> {result.flow_label}")
+    if result.flow_label:
+        icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
+        lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
     if result.cvd_detail:
         lines.append(f"📈 {result.cvd_detail}")
     elif result.cvd_ratio is not None:

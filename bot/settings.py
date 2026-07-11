@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 30
+SETTINGS_VERSION = 32
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -260,7 +260,7 @@ class ScannerSettings:
     probability_filter_enabled: bool = True
 
     # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
-    actionable_signals_only: bool = True
+    actionable_signals_only: bool = False
     actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 2.5
     actionable_min_signal_score: int = 2
@@ -311,6 +311,8 @@ class ScannerSettings:
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
     signal_quality_gate_enabled: bool = True
+    # v32: на сканере только пометки — финальный skip в Telegram с TA
+    signal_quality_scanner_skip_enabled: bool = False
     signal_cvd_gate_enabled: bool = True
     signal_sweep_guard_enabled: bool = True
     signal_cvd_short_max_ratio: float = 0.42
@@ -704,6 +706,9 @@ class ScannerSettings:
             signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", True)),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
+            signal_quality_scanner_skip_enabled=bool(
+                base.get("signal_quality_scanner_skip_enabled", False)
+            ),
             signal_cvd_gate_enabled=bool(base.get("signal_cvd_gate_enabled", True)),
             signal_sweep_guard_enabled=bool(base.get("signal_sweep_guard_enabled", True)),
             signal_cvd_short_max_ratio=float(base.get("signal_cvd_short_max_ratio", 0.42)),
@@ -1063,6 +1068,13 @@ class SettingsManager:
                 merged["signal_outcome_feedback_enabled"] = True
                 merged["signal_outcome_min_samples"] = 12
                 merged["signal_outcome_min_winrate"] = 35.0
+            if version < 31:
+                merged["signal_quality_scanner_skip_enabled"] = False
+                merged.pop("signal_quality_hard_skip_enabled", None)
+            if version < 32:
+                merged["signal_quality_scanner_skip_enabled"] = False
+                merged["probability_bypass_weaken"] = True
+                merged.pop("signal_quality_hard_skip_enabled", None)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1070,7 +1082,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v30: HTF + funding squeeze + trigger watch + outcome feedback; preserved: %s)",
+                "Settings migrated v%d → v%d (v32: strict quality в Telegram; сканер не режет без TA; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

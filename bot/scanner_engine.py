@@ -816,7 +816,11 @@ class SignalEngine:
                 )
                 signal.details["quality_tier"] = q.tier
                 signal.details["quality_block"] = q.block_reason
-                if q.tier == "skip" and q.block_reason:
+                if (
+                    getattr(settings, "signal_quality_scanner_skip_enabled", False)
+                    and q.tier == "skip"
+                    and q.block_reason
+                ):
                     logger.info(
                         "Signal quality skip %s %s: %s",
                         exchange, symbol, q.block_reason,

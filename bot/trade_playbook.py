@@ -9,6 +9,7 @@ from .ta_analysis import (
     TAAnalysisResult,
     fmt_price,
     ta_display_score,
+    ta_hot_analysis_block_html,
     ta_plain_forecast_line,
     ta_scanner_conflict_line_html,
     ta_signal_caption_html,
@@ -209,6 +210,9 @@ def build_hot_caption(
     parts = [header.strip()]
     if quality_html:
         parts.append(quality_html.strip())
+    analysis = ta_hot_analysis_block_html(ta, signal_side=signal.side)
+    if analysis:
+        parts.append(analysis)
     if pb:
         parts.append(format_playbook_html(pb, readiness=readiness))
     else:

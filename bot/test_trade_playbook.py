@@ -138,6 +138,28 @@ def test_pro_detail_no_major_duplicates() -> None:
     assert text.count("536.30") >= 1
 
 
+def test_hot_caption_includes_narrative_forecast() -> None:
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=8,
+        current_price=1800.0,
+        breakdown_level=1795.99,
+        target_prices=[1778.03],
+        narrative_plain="📉 TA SHORT — цель 1778.03",
+        flow_continuation=38,
+        flow_correction=58,
+        phase_label="боковик",
+        oi_narrative_label="закрытие лонгов",
+    )
+    text = build_hot_caption(
+        _signal_trend_dump(),
+        ta,
+        header="🚨 ТЕСТ",
+    )
+    assert "1778.03" in text
+    assert "коррекции" in text.lower() or "corr" in text.lower()
+
+
 def test_format_playbook_targets() -> None:
     pb = TradePlaybook(
         side="short",

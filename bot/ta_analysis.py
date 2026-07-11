@@ -1309,7 +1309,12 @@ def build_ta_signal_narrative(
         factor_lines=factor_lines,
         verdict_reason=verdict_reason,
     )
-    flow_tag = f"поток corr {flow.correction} / cont {flow.continuation}"
+    flow_human = "факторы смешаны — ждать уровень"
+    if flow.continuation - flow.correction >= 12:
+        flow_human = "скорее продолжение импульса"
+    elif flow.correction - flow.continuation >= 12:
+        flow_human = "скорее коррекция / откат"
+    flow_tag = f"🧭 {flow_human} (cont {flow.continuation} / corr {flow.correction})"
     basis = f"📊 <b>На чём основано:</b> {' · '.join(basis_list)} · {flow_tag}"
 
     def _path_target(path: ForecastPath | None, *, correction: bool) -> float | None:
@@ -1601,11 +1606,19 @@ def _resolve_verdict(
     elif ms.drawdown_from_high_pct > 15 and is_long:
         score -= 1
     if ms.range_position > 0.78:
-        score -= 1 if is_long else 1
-        reasons.append("у верха range")
+        if is_long:
+            score -= 1
+            reasons.append("у верха range — long рискован")
+        else:
+            score += 1
+            reasons.append("у верха range — short ближе")
     elif ms.range_position < 0.22:
-        score -= 1 if is_long else 1
-        reasons.append("у дна range")
+        if is_long:
+            score += 1
+            reasons.append("у дна range — long ближе")
+        else:
+            score -= 1
+            reasons.append("у дна range — short рискован")
     if smc is not None:
         boost = smc_verdict_boost(smc, is_long=is_long)
         score += boost
@@ -3372,7 +3385,6 @@ def should_skip_noise_signal(
     if "вход невыгоден" in reason_low or "плохой r:r" in reason_low:
         return True, "плохой R:R"
 
-    sig = signal_side.lower()
     if cvd_ratio is not None:
         if sig == "short" and cvd_ratio >= cvd_long_min:
             return True, f"CVD {cvd_ratio:.0%} buy против SHORT"
@@ -3639,6 +3651,61 @@ def entry_readiness_line_html(ready: bool, reason: str) -> str:
     if "TA ждёт" in reason:
         return f"⏳ <b>Ждать уровень</b> · {reason}"
     return f"⏳ <b>Ждать</b> · {reason}"
+
+
+def format_flow_direction_label(ta: TAAnalysisResult) -> str:
+    """Человекочитаемый вывод матрицы OI+CVD+liq → коррекция vs продолжение."""
+    cont = int(ta.flow_continuation or 0)
+    corr = int(ta.flow_correction or 0)
+    if cont <= 0 and corr <= 0:
+        return ""
+    diff = cont - corr
+    if diff >= 15:
+        return f"факторы склоняются к <b>продолжению</b> (cont {cont} / corr {corr})"
+    if diff <= -15:
+        return f"факторы склоняются к <b>коррекции</b> (cont {cont} / corr {corr})"
+    return f"факторы <b>смешаны</b> — нужен пробой уровня (cont {cont} / corr {corr})"
+
+
+def ta_hot_analysis_block_html(
+    ta: TAAnalysisResult,
+    *,
+    signal_side: str | None = None,
+) -> str:
+    """Единый блок Hot: куда цена, конфликт со сканером, ключевые факторы."""
+    parts: list[str] = []
+
+    conflict = ta_scanner_conflict_line_html(ta, signal_side)
+    if conflict:
+        parts.append(conflict)
+
+    if ta.narrative_plain:
+        parts.append(ta.narrative_plain)
+    elif ta.forecast_summary:
+        parts.append(f"🔮 {ta.forecast_summary[:220]}")
+
+    flow_line = format_flow_direction_label(ta)
+    if flow_line:
+        parts.append(f"🧭 {flow_line}")
+
+    factors: list[str] = []
+    if ta.phase_label and ta.phase_label != "Без явной фазы":
+        factors.append(ta.phase_label)
+    if ta.structure_label:
+        factors.append(ta.structure_label[:48])
+    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
+        factors.append(f"OI: {ta.oi_narrative_label}")
+    if ta.smc and ta.smc.htf_structure:
+        factors.append(f"HTF {ta.smc.htf_structure}")
+    if ta.momentum_label:
+        factors.append(ta.momentum_label)
+    for note in (ta.flow_notes or [])[:2]:
+        if note and note not in " · ".join(factors):
+            factors.append(note[:56])
+    if factors:
+        parts.append("📊 " + " · ".join(list(dict.fromkeys(factors))[:5]))
+
+    return "\n".join(parts)
 
 
 def ta_plain_forecast_line(ta: TAAnalysisResult) -> str:
@@ -4033,6 +4100,21 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         f"🧭 <b>Статус:</b> {signal_status}.",
         f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
     ]
+
+    if ta.narrative_plain:
+        lines.append(ta.narrative_plain)
+    flow_dir = format_flow_direction_label(ta)
+    if flow_dir:
+        lines.append(f"🧭 {flow_dir}")
+    factor_bits: list[str] = []
+    if ta.phase_label and ta.phase_label != "Без явной фазы":
+        factor_bits.append(ta.phase_label)
+    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
+        factor_bits.append(f"OI: {ta.oi_narrative_label}")
+    if ta.smc and ta.smc.htf_structure:
+        factor_bits.append(f"HTF {ta.smc.htf_structure}")
+    if factor_bits:
+        lines.append("📊 " + " · ".join(factor_bits[:4]))
 
     bo_lvl, bd_lvl = _effective_breakout_breakdown(ta)
     long_lvl = fmt_price(bo_lvl) if bo_lvl else "—"

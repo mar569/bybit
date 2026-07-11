@@ -8,7 +8,7 @@ from bot.signal_quality_gate import (
     format_manual_ta_flow_html,
 )
 from bot.ta_analysis import TAAnalysisResult
-from bot.bybit_cvd import TakerCvdSnapshot, summarize_taker_cvd
+from bot.bybit_cvd import summarize_taker_cvd
 
 
 def _settings() -> ScannerSettings:
@@ -84,8 +84,8 @@ def test_capitulation_blocks_fade_short() -> None:
     signal = _short_dump_signal()
     signal.details["cvd_ratio"] = 0.35
     signal.details["smc"] = {}
-    signal.details["oi_change_percent"] = -2.0
-    signal.details["price_change_percent"] = -2.5
+    signal.oi_change_percent = -2.0
+    signal.price_change_percent = -2.5
     result = assess_signal_quality(signal, settings=_settings())
     assert result.tier == "skip"
 
@@ -117,6 +117,10 @@ def test_outcome_feedback_blocks_weak_type() -> None:
     assert result.tier == "skip"
     joined = result.block_reason + " " + " ".join(result.warnings)
     assert "winrate" in joined or "edge" in joined
+
+
+def test_scanner_skip_disabled_by_default() -> None:
+    assert _settings().signal_quality_scanner_skip_enabled is False
 
 
 def test_manual_ta_flow_warns_on_sweep() -> None:
