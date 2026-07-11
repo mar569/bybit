@@ -332,7 +332,7 @@ def assess_signal_quality(
             cvd_detail=cvd_detail,
         )
 
-    if ready and len(warnings) <= 1:
+    if ready and len(warnings) <= (2 if aggressive else 1):
         return SignalQualityResult(
             tier="entry",
             warnings=tuple(warnings),
@@ -366,32 +366,42 @@ def format_quality_warnings_html(result: SignalQualityResult) -> str:
 
 
 def format_quality_hot_html(result: SignalQualityResult) -> str:
-    """Компактный блок для Hot-caption: без дубля WATCH/ENTRY (уже в шапке)."""
-    return _format_quality_lines(result, hot=True)
+    """Минимум для Hot: поток + CVD в одну строку, одно предупреждение."""
+    bits: list[str] = []
+    if result.flow_label:
+        icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
+        bits.append(f"{icon} {result.flow_label}")
+    if result.cvd_ratio is not None:
+        bits.append(f"CVD {result.cvd_ratio:.0%} buy")
+    lines: list[str] = []
+    if bits:
+        lines.append(" · ".join(bits))
+    if result.tier == "skip" and result.block_reason:
+        lines.insert(0, f"🚫 <b>Блок:</b> {result.block_reason}")
+    elif result.warnings:
+        lines.append(f"⚠️ {result.warnings[0]}")
+    return "\n".join(lines)
 
 
 def _format_quality_lines(result: SignalQualityResult, *, hot: bool) -> str:
+    if hot:
+        return format_quality_hot_html(result)
     lines: list[str] = []
     if result.flow_label:
         icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
-        if hot:
-            lines.append(f"{icon} {result.flow_label}")
-        else:
-            lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
+        lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
     if result.cvd_detail:
         lines.append(f"📈 {result.cvd_detail}")
     elif result.cvd_ratio is not None:
         lines.append(f"📈 CVD: {result.cvd_ratio:.0%} buy")
-    max_w = 2 if hot else 3
-    for w in result.warnings[:max_w]:
+    for w in result.warnings[:3]:
         lines.append(f"⚠️ {w}")
     if result.tier == "skip" and result.block_reason:
         lines.insert(0, f"🚫 <b>Блок:</b> {result.block_reason}")
-    elif not hot:
-        if result.tier == "watch" and result.block_reason:
-            lines.insert(0, f"👀 <b>WATCH</b> · {result.block_reason}")
-        elif result.tier == "entry":
-            lines.insert(0, "🎯 <b>ENTRY</b> · триггер по плану")
+    elif result.tier == "watch" and result.block_reason:
+        lines.insert(0, f"👀 <b>WATCH</b> · {result.block_reason}")
+    elif result.tier == "entry":
+        lines.insert(0, "🎯 <b>ENTRY</b> · триггер по плану")
     return "\n".join(lines)
 
 

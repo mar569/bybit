@@ -89,6 +89,40 @@ def test_hot_caption_has_playbook_no_footer() -> None:
     assert "Подробнее" not in text
 
 
+def test_hot_caption_minimal_no_ta_wall() -> None:
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        verdict_confidence=6,
+        current_price=0.797,
+        breakout_level=0.79700,
+        invalidation_price=0.76516,
+        target_prices=[0.81400],
+        action_priority="long",
+        narrative_plain=(
+            "📐 Простыми словами: WAIT — консолидация после пампа — пробой границ локального range."
+        ),
+        flow_continuation=42,
+        flow_correction=42,
+        phase_label="боковик",
+        structure_label="HH + HL",
+        momentum_label="импульс вверх +1.9%",
+    )
+    quality = "✅ OI↑ цена↑ — aligned long · CVD 52% buy\n⚠️ HTF bearish"
+    text = build_hot_caption(
+        _signal_trend_dump(),
+        ta,
+        header="👀 <b>WATCH</b> · 🔥 тест",
+        readiness=(False, "TA ждёт пробой уровня"),
+        quality_html=quality,
+        quality_tier="watch",
+    )
+    assert "Простыми словами" not in text
+    assert "факторы смешаны" not in text
+    assert "📐 пробой" not in text
+    assert "0.797" in text
+    assert "0.814" in text
+
+
 def test_hot_caption_watch_no_duplicate_tier_line() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",
@@ -113,8 +147,8 @@ def test_hot_caption_watch_no_duplicate_tier_line() -> None:
     )
     assert text.count("👀") == 1
     assert text.count("WATCH") == 1
-    assert "Простыми словами" in text or "0.06639" in text
-    assert "ждать пробой ≤0.06695" in text
+    assert "Простыми словами" not in text
+    assert "0.06695" in text
 
 
 def test_pro_detail_no_major_duplicates() -> None:
@@ -174,7 +208,7 @@ def test_pro_detail_no_major_duplicates() -> None:
     assert text.count("536.30") >= 1
 
 
-def test_hot_caption_includes_narrative_forecast() -> None:
+def test_hot_narrative_only_in_pro_detail() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",
         verdict_confidence=8,
@@ -187,14 +221,11 @@ def test_hot_caption_includes_narrative_forecast() -> None:
         phase_label="боковик",
         oi_narrative_label="закрытие лонгов",
     )
-    text = build_hot_caption(
-        _signal_trend_dump(),
-        ta,
-        header="🚨 ТЕСТ",
-        quality_tier="skip",
-    )
-    assert "1778.03" in text
-    assert "коррекции" in text.lower() or "corr" in text.lower()
+    hot = build_hot_caption(_signal_trend_dump(), ta, header="🚨 ТЕСТ")
+    pro = build_pro_detail_html(_signal_trend_dump(), ta)
+    assert "1778.03" in hot
+    assert "коррекции" not in hot.lower()
+    assert "1778.03" in pro or "коррекции" in pro.lower()
 
 
 def test_format_playbook_targets() -> None:

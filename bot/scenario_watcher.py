@@ -35,6 +35,7 @@ IMPULSE_SIGNAL_TYPES = frozenset({
 })
 
 MIN_AGE_BEFORE_FIRE_SEC = 90.0
+TRIGGER_WATCH_DEFAULT_MIN_AGE_SEC = 12.0
 
 
 @dataclass
@@ -272,7 +273,14 @@ class ScenarioWatcher:
             age = now - watch.started_at
 
             if watch.trigger_only:
-                if age < MIN_AGE_BEFORE_FIRE_SEC:
+                min_age = float(
+                    getattr(
+                        settings,
+                        "scenario_watch_trigger_min_age_seconds",
+                        TRIGGER_WATCH_DEFAULT_MIN_AGE_SEC,
+                    )
+                )
+                if age < min_age:
                     continue
                 batch = self._check_entry_ready(watch, price)
                 updates.extend(batch)

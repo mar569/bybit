@@ -340,7 +340,7 @@ class TelegramBot:
             require_smc=s.actionable_require_smc,
             check_scanner_timing=for_filter,
             signal_type=signal.signal_type,
-            accept_armed=for_filter and s.actionable_accept_armed,
+            accept_armed=s.actionable_accept_armed,
             cvd_ratio=cvd_ratio,
             cvd_short_max=s.signal_cvd_short_max_ratio,
             cvd_long_min=s.signal_cvd_long_min_ratio,

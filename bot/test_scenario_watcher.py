@@ -145,6 +145,36 @@ def test_entry_short_after_breakdown() -> None:
     assert any(u.kind == "entry_short" for u in updates)
 
 
+def test_trigger_watch_fires_after_short_min_age() -> None:
+    from bot.models import Signal
+    from bot.ta_analysis import TAAnalysisResult
+
+    watcher = ScenarioWatcher()
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="long",
+        current_price=0.79,
+        breakout_level=0.797,
+        breakdown_level=0.765,
+        target_prices=[0.814],
+    )
+    signal = _signal(side="long", signal_type="pulse_pump", current_price=0.79)
+    settings = _settings(
+        scenario_watch_trigger_min_age_seconds=12.0,
+        scenario_watch_enroll_cooldown_seconds=0,
+    )
+    watcher.try_enroll_quality_watch(signal, ta, settings, quality_tier="watch")
+    key = ("bybit", "BLURUSDT")
+    watch = watcher._watches[key]
+    watch.started_at = time.time() - 15.0
+
+    scanner = MagicMock()
+    scanner.get_snapshot_for.return_value = SimpleNamespace(price=0.798)
+
+    updates = watcher.tick(scanner, settings)
+    assert any(u.kind == "entry_long" for u in updates)
+
+
 def test_run_ta_still_has_forecast_paths() -> None:
     bars = [
         KlineBar(

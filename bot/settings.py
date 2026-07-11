@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 34
+SETTINGS_VERSION = 35
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -137,15 +137,15 @@ class ScannerSettings:
 
     # Ранний пульс — чувствительнее основного (respect_global_floors=False)
     pulse_period_minutes: int = 5
-    pulse_oi_rise_percent: float = 1.2
-    pulse_oi_drop_percent: float = 1.2
-    pulse_price_rise_percent: float = 0.55
-    pulse_price_drop_percent: float = 0.55
+    pulse_oi_rise_percent: float = 1.0
+    pulse_oi_drop_percent: float = 1.0
+    pulse_price_rise_percent: float = 0.45
+    pulse_price_drop_percent: float = 0.45
 
-    # Мега-пампы: 5–100% за 5–10 минут
+    # Мега-пампы: 3–30% за 3–10 минут
     flash_enabled: bool = True
-    flash_window_minutes: tuple[int, ...] = (5, 10)
-    flash_price_tiers: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0)
+    flash_window_minutes: tuple[int, ...] = (3, 5, 10)
+    flash_price_tiers: tuple[float, ...] = (3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0)
     flash_min_oi_rise_percent: float = 1.0
     flash_min_oi_drop_percent: float = 1.0
     flash_bypass_oi_tier_pct: float = 10.0
@@ -254,7 +254,7 @@ class ScannerSettings:
     enabled_binance: bool = True
     enabled_bybit: bool = True
     scan_interval_seconds: int = 1
-    signal_cooldown_seconds: int = 120
+    signal_cooldown_seconds: int = 90
     volume_spike_multiplier: float = 4.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
@@ -274,7 +274,7 @@ class ScannerSettings:
     # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
     actionable_signals_only: bool = False
     actionable_min_ta_score: int = 7
-    actionable_max_trigger_dist_pct: float = 2.5
+    actionable_max_trigger_dist_pct: float = 3.0
     actionable_min_signal_score: int = 2
     actionable_max_signal_score: int = 9
     actionable_require_smc: bool = False
@@ -293,8 +293,9 @@ class ScannerSettings:
     scenario_watch_pullback_pct: float = 3.0
     scenario_watch_continuation_pct: float = 1.5
     scenario_watch_zone_pct: float = 0.45
-    scenario_watch_tick_seconds: float = 12.0
-    scenario_watch_enroll_cooldown_seconds: int = 600
+    scenario_watch_tick_seconds: float = 5.0
+    scenario_watch_trigger_min_age_seconds: float = 12.0
+    scenario_watch_enroll_cooldown_seconds: int = 180
     scenario_watch_chart_enabled: bool = True
 
     # Алерты ручного TA (пробой / ретест / объём)
@@ -529,11 +530,11 @@ class ScannerSettings:
             pulse_price_drop_percent=float(base["pulse_price_drop_percent"]),
             flash_enabled=bool(base.get("flash_enabled", True)),
             flash_window_minutes=cls._parse_int_tuple(
-                base.get("flash_window_minutes"), (5, 10)
+                base.get("flash_window_minutes"), (3, 5, 10)
             ),
             flash_price_tiers=cls._parse_float_tuple(
                 base.get("flash_price_tiers"),
-                (5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0),
+                (3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0),
             ),
             flash_min_oi_rise_percent=float(base["flash_min_oi_rise_percent"]),
             flash_min_oi_drop_percent=float(base["flash_min_oi_drop_percent"]),
@@ -700,9 +701,12 @@ class ScannerSettings:
             scenario_watch_pullback_pct=float(base.get("scenario_watch_pullback_pct", 3.0)),
             scenario_watch_continuation_pct=float(base.get("scenario_watch_continuation_pct", 1.5)),
             scenario_watch_zone_pct=float(base.get("scenario_watch_zone_pct", 0.45)),
-            scenario_watch_tick_seconds=float(base.get("scenario_watch_tick_seconds", 12.0)),
+            scenario_watch_tick_seconds=float(base.get("scenario_watch_tick_seconds", 5.0)),
+            scenario_watch_trigger_min_age_seconds=float(
+                base.get("scenario_watch_trigger_min_age_seconds", 12.0)
+            ),
             scenario_watch_enroll_cooldown_seconds=int(
-                base.get("scenario_watch_enroll_cooldown_seconds", 600)
+                base.get("scenario_watch_enroll_cooldown_seconds", 180)
             ),
             scenario_watch_chart_enabled=bool(base.get("scenario_watch_chart_enabled", True)),
             manual_ta_alerts_enabled=bool(base.get("manual_ta_alerts_enabled", True)),
@@ -1095,6 +1099,11 @@ class SettingsManager:
                 merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
                     merged.get("signal_cooldown_seconds"), default=120,
                 )
+            if version < 35:
+                merged["probability_filter_enabled"] = True
+                merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
+                    merged.get("signal_cooldown_seconds"), default=90,
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1102,7 +1111,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v33: flash mega раньше + bypass OI при −10%%; preserved: %s)",
+                "Settings migrated v%d → v%d (v35: идеальный пресет входов — ранний flash/pulse, быстрый TRIGGER; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

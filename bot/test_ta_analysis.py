@@ -682,6 +682,31 @@ def test_long_verdict_not_mixed_with_short_range_label() -> None:
     assert "range" in reason.lower()
 
 
+def test_pulse_wait_allows_armed_long_readiness() -> None:
+    from bot.ta_analysis import evaluate_entry_readiness
+
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        verdict_confidence=7,
+        action_priority="long",
+        current_price=0.795,
+        breakout_level=0.797,
+        invalidation_price=0.765,
+        post_pump=True,
+        momentum_pct=1.9,
+        momentum_label="импульс вверх +1.9%",
+    )
+    ready, reason = evaluate_entry_readiness(
+        ta,
+        "long",
+        2,
+        check_scanner_timing=False,
+        signal_type="pulse_pump",
+        accept_armed=True,
+    )
+    assert ready, reason
+
+
 def test_trade_quality_guard_rejects_inverted_long_levels() -> None:
     from bot.ta_analysis import _trade_quality_guard
 

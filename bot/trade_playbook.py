@@ -9,7 +9,6 @@ from .ta_analysis import (
     TAAnalysisResult,
     fmt_price,
     ta_display_score,
-    ta_hot_analysis_block_html,
     ta_plain_forecast_line,
     ta_scanner_conflict_line_html,
     ta_signal_caption_html,
@@ -151,6 +150,7 @@ def format_playbook_html(
     pb: TradePlaybook,
     *,
     readiness: tuple[bool, str] | None = None,
+    minimal: bool = False,
 ) -> str:
     label = "LONG" if pb.side == "long" else "SHORT"
     emoji = "🟢" if pb.side == "long" else "🔴"
@@ -158,7 +158,12 @@ def format_playbook_html(
     if readiness and readiness[0]:
         lines.append("✅ <b>Готов</b> по плану")
     elif readiness and not readiness[0] and readiness[1]:
-        lines.append(f"🔶 <b>Ждать</b> · {readiness[1][:70]}")
+        if minimal and pb.entry_price:
+            lines.append(
+                f"🔶 <b>Ждать</b> · {pb.entry_op} <b>{fmt_price(pb.entry_price)}</b>"
+            )
+        else:
+            lines.append(f"🔶 <b>Ждать</b> · {readiness[1][:70]}")
     elif not pb.aligned:
         lines.append("⚠️ <b>Подтвердите</b> уровень на графике")
 
@@ -171,7 +176,7 @@ def format_playbook_html(
     if pb.target_prices:
         tps = " / ".join(fmt_price(t) for t in pb.target_prices[:3])
         lines.append(f"🎯 Цели: <b>{tps}</b>")
-    if pb.logic:
+    if pb.logic and not minimal:
         lines.append(f"📐 {pb.logic}")
     return "\n".join(lines)
 
@@ -207,18 +212,17 @@ def build_hot_caption(
     quality_html: str = "",
     quality_tier: str | None = None,
 ) -> str:
+    """Короткий caption под график; полный разбор — в «Подробнее»."""
     pb = resolve_trade_playbook(signal, ta)
     parts = [header.strip()]
     if quality_html:
         parts.append(quality_html.strip())
-    analysis = ta_hot_analysis_block_html(ta, signal_side=signal.side)
-    if analysis:
-        parts.append(analysis)
     if pb:
         parts.append(
             format_playbook_html(
                 pb,
                 readiness=readiness,
+                minimal=True,
             )
         )
     else:

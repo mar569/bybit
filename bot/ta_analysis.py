@@ -3295,12 +3295,26 @@ def _short_trigger_state(ta: TAAnalysisResult) -> tuple[str, str]:
 
 def _is_aggressive_dump_signal(signal_type: str | None) -> bool:
     """Сильный dump: допускаем шорт в armed, без ожидания точного тика пробоя."""
-    return (signal_type or "").lower() in {"mega_dump", "vertical_dump", "liq_cascade_dump"}
+    return (signal_type or "").lower() in {
+        "mega_dump", "vertical_dump", "liq_cascade_dump",
+        "pulse_dump", "impulse_dump",
+    }
 
 
 def _is_aggressive_pump_signal(signal_type: str | None) -> bool:
     """Сильный pump: допускаем лонг в armed, без ожидания точного тика пробоя."""
-    return (signal_type or "").lower() in {"mega_pump", "vertical_pump", "liq_cascade_pump"}
+    return (signal_type or "").lower() in {
+        "mega_pump", "vertical_pump", "liq_cascade_pump",
+        "pulse_pump", "impulse_pump", "short_squeeze",
+    }
+
+
+_EARLY_TRIGGER_SIGNAL_TYPES = frozenset({
+    "pulse_pump", "pulse_dump", "impulse_pump", "impulse_dump",
+    "mega_pump", "mega_dump", "vertical_pump", "vertical_dump",
+    "short_squeeze", "liq_cascade_pump", "liq_cascade_dump",
+    "reversal_pump", "reversal_dump", "trend_pump", "trend_dump",
+})
 
 
 def _near_entry_tolerance_pct(signal_type: str | None, *, momentum_pct: float = 0.0) -> float:
@@ -3614,14 +3628,25 @@ def evaluate_entry_readiness(
     if ta_conflicts_with_signal(ta, signal_side) and not is_reversal:
         return False, "сканер и TA в разные стороны"
 
+    st = (signal_type or "").lower()
+    effective_verdict = ta.verdict
     if ta.verdict == "WAIT":
-        return False, "TA ждёт пробой уровня"
+        early_trigger = (
+            st in _EARLY_TRIGGER_SIGNAL_TYPES
+            and (
+                (sig == "long" and ta.action_priority == "long")
+                or (sig == "short" and ta.action_priority == "short")
+            )
+        )
+        if not early_trigger:
+            return False, "TA ждёт пробой уровня"
+        effective_verdict = "LONG" if ta.action_priority == "long" else "SHORT"
 
     score = ta_display_score(ta)
     if score < min_ta_score:
         return False, f"TA {score}/10 — слабый сетап"
 
-    if ta.verdict == "LONG":
+    if effective_verdict == "LONG":
         state, reason = _long_trigger_state(ta)
         near_ready, near_dist, near_tol = _near_trigger_ready(ta, "long", signal_type=signal_type)
         aggressive_pump = _is_aggressive_pump_signal(signal_type)
@@ -3644,7 +3669,7 @@ def evaluate_entry_readiness(
             if not smc_ok:
                 return False, "SMC не готов (нет expansion/sweep)"
         return True, "триггер LONG подтверждён"
-    if ta.verdict == "SHORT":
+    if effective_verdict == "SHORT":
         state, reason = _short_trigger_state(ta)
         near_ready, near_dist, near_tol = _near_trigger_ready(ta, "short", signal_type=signal_type)
         aggressive_dump = _is_aggressive_dump_signal(signal_type)
