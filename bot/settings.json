@@ -134,7 +134,7 @@
   "enabled_binance": true,
   "enabled_bybit": true,
   "scan_interval_seconds": 1,
-  "signal_cooldown_seconds": 0,
+  "signal_cooldown_seconds": 120,
   "volume_spike_multiplier": 4.0,
   "price_pump_threshold_pct": 8.0,
   "price_pump_window_minutes": 5,

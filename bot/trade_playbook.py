@@ -151,7 +151,6 @@ def format_playbook_html(
     pb: TradePlaybook,
     *,
     readiness: tuple[bool, str] | None = None,
-    compact: bool = False,
 ) -> str:
     label = "LONG" if pb.side == "long" else "SHORT"
     emoji = "🟢" if pb.side == "long" else "🔴"
@@ -172,7 +171,7 @@ def format_playbook_html(
     if pb.target_prices:
         tps = " / ".join(fmt_price(t) for t in pb.target_prices[:3])
         lines.append(f"🎯 Цели: <b>{tps}</b>")
-    if pb.logic and not compact:
+    if pb.logic:
         lines.append(f"📐 {pb.logic}")
     return "\n".join(lines)
 
@@ -212,28 +211,14 @@ def build_hot_caption(
     parts = [header.strip()]
     if quality_html:
         parts.append(quality_html.strip())
-
-    tier = (quality_tier or "").lower()
-    if tier == "watch" and pb:
-        conflict = ta_scanner_conflict_line_html(ta, signal.side)
-        if conflict:
-            parts.append(conflict)
-    elif tier == "entry" and pb:
-        plain = ta_plain_forecast_line(ta)
-        body_so_far = "\n".join(parts)
-        if plain and not _already_covered(plain, body_so_far, min_len=20):
-            parts.append(plain[:160])
-    else:
-        analysis = ta_hot_analysis_block_html(ta, signal_side=signal.side)
-        if analysis:
-            parts.append(analysis)
-
+    analysis = ta_hot_analysis_block_html(ta, signal_side=signal.side)
+    if analysis:
+        parts.append(analysis)
     if pb:
         parts.append(
             format_playbook_html(
                 pb,
                 readiness=readiness,
-                compact=tier in {"watch", "entry"},
             )
         )
     else:

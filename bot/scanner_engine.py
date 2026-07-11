@@ -17,7 +17,7 @@ from .smc_analysis import analyze_smc, smc_to_dict
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .bybit_cvd import get_taker_cvd_cache
 from .signal_quality_gate import assess_signal_quality, attach_cvd_to_signal_details
-from .settings import ExchangeThresholds, ScannerSettings, SettingsManager
+from .settings import ExchangeThresholds, ScannerSettings, SettingsManager, clamp_cooldown_seconds
 from .symbol_tiers import TierThresholds, tier_thresholds
 from .trend_exhaustion import TrendExhaustionRisk, detect_trend_exhaustion, detect_trend_exhaustion_risk
 from .anomaly_alerts import AnomalyBatcher, detect_anomaly_for_symbol
@@ -571,7 +571,7 @@ class SignalEngine:
 
             now = time.time()
             symbol_cd_key = self._symbol_cooldown_key(symbol)
-            symbol_cd = settings.signal_cooldown_seconds
+            symbol_cd = clamp_cooldown_seconds(settings.signal_cooldown_seconds)
             last_symbol = self.last_signal_time.get(symbol_cd_key, 0.0)
             if now - last_symbol < symbol_cd:
                 logger.debug(
@@ -600,7 +600,7 @@ class SignalEngine:
                 cooldown = settings.mega_cooldown_seconds
             else:
                 cooldown_key = key
-                cooldown = settings.signal_cooldown_seconds
+                cooldown = clamp_cooldown_seconds(settings.signal_cooldown_seconds)
             last_time = self.last_signal_time.get(cooldown_key, 0.0)
             if now - last_time < cooldown:
                 return

@@ -108,7 +108,7 @@ from .signal_quality_gate import (
 )
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_screenshot import chart_capture_service
-from .settings import SettingsManager
+from .settings import SettingsManager, clamp_cooldown_seconds
 
 logger = logging.getLogger(__name__)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -117,6 +117,16 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 def _plain_caption(text: str) -> str:
     stripped = _HTML_TAG_RE.sub("", text or "")
     return html.unescape(stripped)
+
+
+def _signal_cooldown_seconds(signal: Signal, settings) -> int:
+    is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
+    is_impulse = signal.signal_type in {"impulse_pump", "impulse_dump"}
+    if is_vertical:
+        return clamp_cooldown_seconds(settings.breakout_cooldown_seconds, default=150)
+    if is_impulse:
+        return clamp_cooldown_seconds(settings.impulse_cooldown_seconds, default=120)
+    return clamp_cooldown_seconds(settings.signal_cooldown_seconds, default=120)
 
 EXCHANGE_LABEL = {
     "binance": ("🟡", "Binance"),
@@ -140,6 +150,7 @@ class TelegramBot:
         self._unreachable_chats: set[int] = set()
         self._send_lock = asyncio.Lock()
         self._last_symbol_signal_time: dict[str, float] = {}
+        self._symbol_dispatch_locks: dict[str, asyncio.Lock] = {}
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
         self.redis: redis.Redis | None = None
@@ -763,6 +774,32 @@ class TelegramBot:
             self._last_signal_analysis_time[sym_key] = now
             logger.info("Signal pro analysis %s %s → chat %s", signal.exchange, sym_key, chat_id)
 
+    def _get_symbol_dispatch_lock(self, symbol: str) -> asyncio.Lock:
+        key = symbol.upper()
+        lock = self._symbol_dispatch_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._symbol_dispatch_locks[key] = lock
+        return lock
+
+    async def _reserve_symbol_cooldown(
+        self,
+        symbol: str,
+        cooldown: int,
+        symbol_key: str,
+    ) -> None:
+        now = time.time()
+        self._last_symbol_signal_time[symbol.upper()] = now
+        if self.redis is not None:
+            try:
+                await self.redis.set(
+                    symbol_key,
+                    str(now),
+                    ex=int(cooldown) + 5,
+                )
+            except Exception:
+                logger.exception("Failed to reserve last_signal in Redis")
+
     async def dispatch_signal(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         if self.application is None:
             return
@@ -771,6 +808,10 @@ class TelegramBot:
         if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
             return
 
+        async with self._get_symbol_dispatch_lock(signal.symbol):
+            await self._dispatch_signal_locked(signal, skip_dedupe=skip_dedupe)
+
+    async def _dispatch_signal_locked(self, signal: Signal, *, skip_dedupe: bool = False) -> None:
         priority_max = self.settings_manager.settings.priority_score_max
         prob = float(signal.details.get("probability_percent", 0) or 0)
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
@@ -801,13 +842,7 @@ class TelegramBot:
         keyboard = self._signal_keyboard(signal)
         notify_chat_id = self.config.notification_chat_id
 
-        cooldown = (
-            self.settings_manager.settings.breakout_cooldown_seconds
-            if is_vertical
-            else self.settings_manager.settings.impulse_cooldown_seconds
-            if is_impulse
-            else self.settings_manager.settings.signal_cooldown_seconds
-        )
+        cooldown = _signal_cooldown_seconds(signal, self.settings_manager.settings)
         symbol_key = f"last_signal:sym:{signal.symbol.upper()}"
         should_send = True
         if not skip_dedupe:
@@ -830,6 +865,9 @@ class TelegramBot:
                 cooldown,
             )
             return
+
+        if not skip_dedupe:
+            await self._reserve_symbol_cooldown(signal.symbol, cooldown, symbol_key)
 
         if (
             settings := self.settings_manager.settings

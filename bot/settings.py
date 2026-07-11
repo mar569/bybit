@@ -9,7 +9,19 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 33
+SETTINGS_VERSION = 34
+MIN_SIGNAL_COOLDOWN_SECONDS = 60
+
+
+def clamp_cooldown_seconds(value: int | float | None, *, default: int = 120) -> int:
+    """Cooldown 0 = спам; минимум MIN_SIGNAL_COOLDOWN_SECONDS."""
+    try:
+        v = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        v = default
+    if v <= 0:
+        v = default
+    return max(MIN_SIGNAL_COOLDOWN_SECONDS, v)
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -727,7 +739,9 @@ class ScannerSettings:
             signal_outcome_min_samples=int(base.get("signal_outcome_min_samples", 12)),
             signal_outcome_min_winrate=float(base.get("signal_outcome_min_winrate", 35.0)),
             scan_interval_seconds=int(base.get("scan_interval_seconds", 1)),
-            signal_cooldown_seconds=int(base.get("signal_cooldown_seconds", 180)),
+            signal_cooldown_seconds=clamp_cooldown_seconds(
+                base.get("signal_cooldown_seconds"), default=120,
+            ),
             liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
             liquidation_min_usd=float(base.get("liquidation_min_usd", 50_000.0)),
             liquidation_burst_window_seconds=float(
@@ -1077,6 +1091,10 @@ class SettingsManager:
                 merged.pop("signal_quality_hard_skip_enabled", None)
             if version < 33:
                 merged["flash_bypass_oi_tier_pct"] = 10.0
+            if version < 34:
+                merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
+                    merged.get("signal_cooldown_seconds"), default=120,
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

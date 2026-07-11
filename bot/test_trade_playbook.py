@@ -61,6 +61,14 @@ def _signal_trend_dump() -> Signal:
     )
 
 
+def test_clamp_cooldown_never_zero() -> None:
+    from bot.settings import clamp_cooldown_seconds, MIN_SIGNAL_COOLDOWN_SECONDS
+
+    assert clamp_cooldown_seconds(0) == 120
+    assert clamp_cooldown_seconds(30) == MIN_SIGNAL_COOLDOWN_SECONDS
+    assert clamp_cooldown_seconds(180) == 180
+
+
 def test_resolve_short_playbook_after_pump() -> None:
     pb = resolve_trade_playbook(_signal_trend_dump(), _ta_short_verdict())
     assert pb is not None
@@ -81,7 +89,7 @@ def test_hot_caption_has_playbook_no_footer() -> None:
     assert "Подробнее" not in text
 
 
-def test_hot_caption_watch_no_duplicate_narrative() -> None:
+def test_hot_caption_watch_no_duplicate_tier_line() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",
         verdict_confidence=7,
@@ -90,15 +98,9 @@ def test_hot_caption_watch_no_duplicate_narrative() -> None:
         invalidation_price=0.06835,
         target_prices=[0.06639],
         action_priority="short",
-        narrative_plain=(
-            "📉 Простыми словами: TA SHORT — цель 0.06639. "
-            "Сейчас отскок — short при ≤0.06695."
-        ),
+        narrative_plain="📉 TA SHORT — цель 0.06639",
         flow_continuation=42,
         flow_correction=42,
-        phase_label="коррекция",
-        structure_label="LH + LL",
-        momentum_label="импульс вниз -1.7%",
     )
     quality = "💧 OI↑ цена↓ — новые шорты\n📈 CVD live 57% buy"
     text = build_hot_caption(
@@ -111,10 +113,8 @@ def test_hot_caption_watch_no_duplicate_narrative() -> None:
     )
     assert text.count("👀") == 1
     assert text.count("WATCH") == 1
-    assert "Простыми словами" not in text
-    assert "факторы смешаны" not in text
+    assert "Простыми словами" in text or "0.06639" in text
     assert "ждать пробой ≤0.06695" in text
-    assert "0.06695" in text
 
 
 def test_pro_detail_no_major_duplicates() -> None:
