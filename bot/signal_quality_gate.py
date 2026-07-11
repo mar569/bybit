@@ -362,22 +362,36 @@ def assess_signal_quality(
 
 
 def format_quality_warnings_html(result: SignalQualityResult) -> str:
+    return _format_quality_lines(result, hot=False)
+
+
+def format_quality_hot_html(result: SignalQualityResult) -> str:
+    """Компактный блок для Hot-caption: без дубля WATCH/ENTRY (уже в шапке)."""
+    return _format_quality_lines(result, hot=True)
+
+
+def _format_quality_lines(result: SignalQualityResult, *, hot: bool) -> str:
     lines: list[str] = []
     if result.flow_label:
         icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
-        lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
+        if hot:
+            lines.append(f"{icon} {result.flow_label}")
+        else:
+            lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
     if result.cvd_detail:
         lines.append(f"📈 {result.cvd_detail}")
     elif result.cvd_ratio is not None:
         lines.append(f"📈 CVD: {result.cvd_ratio:.0%} buy")
-    for w in result.warnings[:3]:
+    max_w = 2 if hot else 3
+    for w in result.warnings[:max_w]:
         lines.append(f"⚠️ {w}")
     if result.tier == "skip" and result.block_reason:
         lines.insert(0, f"🚫 <b>Блок:</b> {result.block_reason}")
-    elif result.tier == "watch" and result.block_reason:
-        lines.insert(0, f"👀 <b>WATCH</b> · {result.block_reason}")
-    elif result.tier == "entry":
-        lines.insert(0, "🎯 <b>ENTRY</b> · триггер по плану")
+    elif not hot:
+        if result.tier == "watch" and result.block_reason:
+            lines.insert(0, f"👀 <b>WATCH</b> · {result.block_reason}")
+        elif result.tier == "entry":
+            lines.insert(0, "🎯 <b>ENTRY</b> · триггер по плану")
     return "\n".join(lines)
 
 

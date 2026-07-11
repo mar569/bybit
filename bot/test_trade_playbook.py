@@ -69,7 +69,7 @@ def test_resolve_short_playbook_after_pump() -> None:
     assert len(pb.target_prices) >= 2
 
 
-def test_hot_caption_has_playbook_and_hint() -> None:
+def test_hot_caption_has_playbook_no_footer() -> None:
     text = build_hot_caption(
         _signal_trend_dump(),
         _ta_short_verdict(),
@@ -78,7 +78,43 @@ def test_hot_caption_has_playbook_and_hint() -> None:
     )
     assert "SHORT" in text
     assert "0.01783" in text or "0.0178" in text
-    assert "Подробнее" in text
+    assert "Подробнее" not in text
+
+
+def test_hot_caption_watch_no_duplicate_narrative() -> None:
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        verdict_confidence=7,
+        current_price=0.067,
+        breakdown_level=0.06695,
+        invalidation_price=0.06835,
+        target_prices=[0.06639],
+        action_priority="short",
+        narrative_plain=(
+            "📉 Простыми словами: TA SHORT — цель 0.06639. "
+            "Сейчас отскок — short при ≤0.06695."
+        ),
+        flow_continuation=42,
+        flow_correction=42,
+        phase_label="коррекция",
+        structure_label="LH + LL",
+        momentum_label="импульс вниз -1.7%",
+    )
+    quality = "💧 OI↑ цена↓ — новые шорты\n📈 CVD live 57% buy"
+    text = build_hot_caption(
+        _signal_trend_dump(),
+        ta,
+        header="👀 <b>WATCH</b> · 🔥 тест",
+        readiness=(False, "ждать пробой ≤0.06695"),
+        quality_html=quality,
+        quality_tier="watch",
+    )
+    assert text.count("👀") == 1
+    assert text.count("WATCH") == 1
+    assert "Простыми словами" not in text
+    assert "факторы смешаны" not in text
+    assert "ждать пробой ≤0.06695" in text
+    assert "0.06695" in text
 
 
 def test_pro_detail_no_major_duplicates() -> None:
@@ -155,6 +191,7 @@ def test_hot_caption_includes_narrative_forecast() -> None:
         _signal_trend_dump(),
         ta,
         header="🚨 ТЕСТ",
+        quality_tier="skip",
     )
     assert "1778.03" in text
     assert "коррекции" in text.lower() or "corr" in text.lower()

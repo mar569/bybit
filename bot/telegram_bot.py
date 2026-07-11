@@ -103,6 +103,7 @@ from .signal_quality_gate import (
     assess_signal_quality,
     attach_cvd_to_signal_details,
     format_manual_ta_flow_html,
+    format_quality_hot_html,
     format_quality_warnings_html,
 )
 from .bybit_cvd import get_taker_cvd_cache
@@ -681,7 +682,15 @@ class TelegramBot:
                 return False
 
     def _signal_keyboard(self, signal: Signal, pro_token: str = "") -> InlineKeyboardMarkup:
-        rows = [[InlineKeyboardButton("📊 CoinGlass", url=signal.link)]]
+        rows = [
+            [
+                InlineKeyboardButton("📊 CoinGlass", url=signal.link),
+                InlineKeyboardButton(
+                    f"📋 {signal.symbol}",
+                    callback_data=f"symcopy:{signal.symbol}",
+                ),
+            ],
+        ]
         if pro_token:
             rows.append([InlineKeyboardButton("📖 Подробнее", callback_data=f"sigpro:{pro_token}")])
         return InlineKeyboardMarkup(rows)
@@ -1028,6 +1037,7 @@ class TelegramBot:
                     return
 
             quality_html = format_quality_warnings_html(quality) if quality else ""
+            hot_quality_html = format_quality_hot_html(quality) if quality else ""
             tier_prefix = ""
             if quality and quality.tier == "entry":
                 tier_prefix = "🎯 <b>ENTRY</b> · "
@@ -1044,7 +1054,8 @@ class TelegramBot:
                     ta_result,
                     header=signal_header,
                     readiness=readiness,
-                    quality_html=quality_html,
+                    quality_html=hot_quality_html,
+                    quality_tier=quality.tier if quality else None,
                 )
                 pro_text = build_pro_detail_html(
                     signal, ta_result, readiness=readiness, quality_html=quality_html,
@@ -3088,6 +3099,20 @@ class TelegramBot:
             return
 
         payload = query.data or ""
+        if payload.startswith("symcopy:"):
+            sym = payload.split(":", 1)[1].upper()
+            if sym and query.message:
+                await query.answer("Тикер ниже — нажмите, чтобы скопировать")
+                try:
+                    await query.message.reply_text(
+                        f"📋 <code>{sym}</code>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except BadRequest:
+                    await query.message.reply_text(sym)
+            else:
+                await query.answer("Тикер не найден", show_alert=True)
+            return
         if payload.startswith("sigpro:"):
             token = payload.split(":", 1)[1]
             pro_text = await self._load_signal_pro(token)
@@ -4022,9 +4047,11 @@ class TelegramBot:
         return label if inline else f"<b>{label}</b>\n"
 
     @staticmethod
-    def _symbol_link_and_copy(signal: Signal, *, inline: bool = False) -> str:
-        """Ссылка на CoinGlass + code для быстрого копирования тикера."""
+    def _symbol_link_and_copy(signal: Signal, *, inline: bool = False, copy_only: bool = False) -> str:
+        """Тикер для caption: одна строка <code> для tap-to-copy (CoinGlass — в кнопках)."""
         sym = signal.symbol
+        if copy_only:
+            return f"<code>{sym}</code>"
         link = f'<a href="{signal.link}"><b>{sym}</b></a>'
         if inline:
             return f"{link} <code>{sym}</code>"
@@ -4048,7 +4075,7 @@ class TelegramBot:
                 title = f"📈 ТРЕНД→отскок ({prior}%)" if is_long else f"📉 ТРЕНД→слив ({prior}%)"
             return (
                 f"<b>{title}</b> · {exchange_emoji} {exchange_name} {signal.oi_period_minutes}м\n"
-                f"{side_emoji} {self._symbol_link_and_copy(signal)}\n"
+                f"{side_emoji} {self._symbol_link_and_copy(signal, copy_only=True)}\n"
                 f"взлёт {spike_text} · OI {abs(signal.oi_change_percent):.2f}% ({oi_usd})\n"
             )
 
@@ -4177,7 +4204,7 @@ class TelegramBot:
         )
 
         lines: list[str] = [" · ".join(header_bits)]
-        lines.append(self._symbol_link_and_copy(signal))
+        lines.append(self._symbol_link_and_copy(signal, copy_only=True))
 
         prior = signal.details.get("reversal_prior_move_pct")
         leg = signal.details.get("reversal_leg_pct")
