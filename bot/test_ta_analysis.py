@@ -16,6 +16,7 @@ from bot.ta_analysis import (
     run_ta_analysis,
     ta_display_score,
     ta_manual_detailed_html,
+    ta_user_intent_html,
     ta_plain_forecast_line,
     ta_scenario_followup_caption_html,
     ta_signal_forecast_summary_line,
@@ -314,6 +315,32 @@ def test_detect_liq_cascade_short() -> None:
     assert sig.active is True
     assert sig.side == "short"
     assert sig.strength >= 7
+
+
+def test_manual_post_pump_below_trigger_not_active() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="long",
+        verdict_confidence=8,
+        current_price=0.05874,
+        breakout_level=0.05995,
+        breakdown_level=0.05727,
+        invalidation_price=0.05698,
+        target_prices=[0.06064],
+        post_pump=True,
+        flow_correction=42,
+        flow_continuation=42,
+        momentum_label="импульс вверх +3.1%",
+        forecast_summary="Базовый сценарий: коррекция.",
+        cvd_delta=-881_800.0,
+        cvd_source="live",
+    )
+    text = ta_manual_detailed_html(ta)
+    assert "WAIT" in text
+    assert "активен" not in text.lower()
+    assert "пробой" in text.lower()
+    intent = ta_user_intent_html(ta, "long")
+    assert "НЕ входить" in intent or "ждите" in intent.lower()
 
 
 def test_ta_manual_detailed_html() -> None:

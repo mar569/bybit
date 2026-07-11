@@ -91,7 +91,45 @@ async def test_reversal_pump_blocked_after_dump() -> None:
     assert not reversal_long, "reversal_pump LONG должен блокироваться после −5%+ дампа"
 
 
+async def test_mega_dump_flash_on_vertical_crash() -> None:
+    """Вертикальный слив −12% за 5м (как CAP) → mega_dump, даже без 15m истории."""
+    settings = SettingsManager()
+    settings.update(
+        signals_enabled=True,
+        flash_enabled=True,
+        impulse_enabled=True,
+        probability_filter_enabled=False,
+        signal_cooldown_seconds=0,
+        tier_enabled=True,
+    )
+
+    sent: list = []
+    engine = SignalEngine(settings, sent.append)
+    now = time.time()
+    oi_usd = 560_000.0
+    await engine.update_snapshot(
+        "Bybit", "CAPUSDT",
+        price=0.01820, open_interest=33_000_000.0,
+        volume_24h=2_800_000.0,
+        timestamp=now - 5 * 60,
+        additional={"open_interest_value": oi_usd},
+    )
+    await engine.update_snapshot(
+        "Bybit", "CAPUSDT",
+        price=0.01600, open_interest=33_000_000.0,
+        volume_24h=2_900_000.0,
+        timestamp=now,
+        additional={"open_interest_value": oi_usd * 0.88},
+    )
+    await engine._evaluate_signals("Bybit:CAPUSDT", "Bybit", "CAPUSDT")
+
+    assert sent, "mega_dump должен сработать на −12% за 5м"
+    assert sent[0].signal_type == "mega_dump"
+    assert sent[0].price_change_percent <= -10.0
+
+
 if __name__ == "__main__":
     asyncio.run(test_impulse_dump_on_sustained_move())
     asyncio.run(test_reversal_pump_blocked_after_dump())
+    asyncio.run(test_mega_dump_flash_on_vertical_crash())
     print("OK: impulse + reversal block tests passed")

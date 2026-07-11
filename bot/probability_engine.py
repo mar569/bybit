@@ -19,6 +19,10 @@ PROBABILITY_BYPASS_TYPES = frozenset({
     "impulse_dump",
     "trend_dump",
     "trend_pump",
+    "mega_pump",
+    "mega_dump",
+    "pulse_pump",
+    "pulse_dump",
 })
 
 # Веса факторов (сумма = 1.0)

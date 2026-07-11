@@ -26,6 +26,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from .config import Config
 from .models import Signal
+from .probability_engine import PROBABILITY_BYPASS_TYPES
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
@@ -823,14 +824,27 @@ class TelegramBot:
 
         if (
             settings := self.settings_manager.settings
-        ).probability_filter_enabled and not skip_dedupe and not is_vertical and not is_reversal:
-            if prob < settings.min_probability_percent:
+        ).probability_filter_enabled and not skip_dedupe:
+            bypass = signal.signal_type in PROBABILITY_BYPASS_TYPES
+            min_prob = settings.min_probability_percent
+            if bypass and getattr(settings, "probability_bypass_weaken", True):
+                floor_prob = max(52.0, min_prob - 8.0)
+                if prob < floor_prob:
+                    logger.info(
+                        "Telegram skip %s %s: probability %.0f%% < %.0f%% (bypass floor)",
+                        signal.exchange,
+                        signal.symbol,
+                        prob,
+                        floor_prob,
+                    )
+                    return
+            elif not bypass and prob < min_prob:
                 logger.info(
                     "Telegram skip %s %s: probability %.0f%% < %.0f%%",
                     signal.exchange,
                     signal.symbol,
                     prob,
-                    settings.min_probability_percent,
+                    min_prob,
                 )
                 return
 
@@ -974,6 +988,7 @@ class TelegramBot:
                         signal.side,
                         signal.signal_score,
                         signal_type=signal.signal_type,
+                        price_change_percent=signal.price_change_percent,
                         cvd_ratio=cvd_ratio,
                         cvd_short_max=settings.signal_cvd_short_max_ratio,
                         cvd_long_min=settings.signal_cvd_long_min_ratio,

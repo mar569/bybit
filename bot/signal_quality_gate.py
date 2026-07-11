@@ -4,8 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .models import Signal
+
 if TYPE_CHECKING:
-    from .models import Signal
     from .settings import ScannerSettings
     from .ta_analysis import TAAnalysisResult
 
@@ -17,6 +18,22 @@ _FADE_TYPES = frozenset({
     "reversal_dump", "impulse_dump", "trend_dump", "vertical_dump",
     "reversal_pump", "impulse_pump", "trend_pump", "vertical_pump",
 })
+_AGGRESSIVE_TYPES = frozenset({
+    "mega_dump", "mega_pump", "liq_cascade_dump", "liq_cascade_pump",
+    "impulse_dump", "impulse_pump", "vertical_dump", "vertical_pump",
+    "trend_dump", "trend_pump", "pulse_dump", "pulse_pump",
+})
+
+
+def is_strong_aggressive_signal(signal: Signal) -> bool:
+    """Крупное движение — quality gate не блокирует алерт, только предупреждает."""
+    st = (signal.signal_type or "").lower()
+    px = float(signal.price_change_percent or 0)
+    if st in {"mega_dump", "mega_pump", "liq_cascade_dump", "liq_cascade_pump"}:
+        return abs(px) >= 3.0
+    if st in _AGGRESSIVE_TYPES:
+        return abs(px) >= 5.0
+    return abs(px) >= 8.0
 
 
 @dataclass(frozen=True)
@@ -188,6 +205,7 @@ def assess_signal_quality(
     oi = float(signal.oi_change_percent or 0)
     px = float(signal.price_change_percent or 0)
     flow_key, flow_label = classify_oi_price_flow(oi, px)
+    aggressive = is_strong_aggressive_signal(signal)
 
     if not getattr(settings, "signal_quality_gate_enabled", True):
         ready = bool(readiness and readiness[0])
@@ -205,13 +223,19 @@ def assess_signal_quality(
         side, cvd_ratio, short_max=short_max, long_min=long_min,
     ):
         pct = f"{cvd_ratio:.0%}" if cvd_ratio is not None else "?"
-        hard_blocks.append(f"CVD {pct} buy против {side.upper()}")
+        msg = f"CVD {pct} buy против {side.upper()}"
+        if aggressive and signal.signal_type in _FADE_TYPES:
+            warnings.append(msg)
+        else:
+            hard_blocks.append(msg)
 
     if getattr(settings, "signal_sweep_guard_enabled", True):
         sweep_block, sweep_msg = _sweep_opposes(side, smc if isinstance(smc, dict) else None)
         if sweep_block:
             is_fade = signal.signal_type in _FADE_TYPES
-            if is_fade or (ta is not None and ta.verdict == "WAIT"):
+            if aggressive and is_fade:
+                warnings.append(sweep_msg)
+            elif is_fade or (ta is not None and ta.verdict == "WAIT"):
                 hard_blocks.append(sweep_msg)
             else:
                 warnings.append(sweep_msg)
@@ -219,14 +243,20 @@ def assess_signal_quality(
     phase_block, phase_msg = _phase_opposes(side, ms if isinstance(ms, dict) else None)
     if phase_block:
         if signal.signal_type in _FADE_TYPES:
-            hard_blocks.append(phase_msg)
+            if aggressive:
+                warnings.append(phase_msg)
+            else:
+                hard_blocks.append(phase_msg)
         else:
             warnings.append(phase_msg)
 
     if getattr(settings, "signal_flow_matrix_enabled", True):
         fm_block, fm_msg = _flow_matrix_blocks(side, flow_key)
         if fm_block and signal.signal_type in _FADE_TYPES:
-            hard_blocks.append(fm_msg)
+            if aggressive:
+                warnings.append(fm_msg)
+            else:
+                hard_blocks.append(fm_msg)
         elif fm_block:
             warnings.append(fm_msg)
 
@@ -243,7 +273,7 @@ def assess_signal_quality(
         htf_block, htf_msg = _htf_opposes(side, smc if isinstance(smc, dict) else None)
         if htf_block:
             cascade = signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
-            if cascade:
+            if cascade or aggressive:
                 warnings.append(htf_msg)
             elif signal.signal_type in _FADE_TYPES:
                 hard_blocks.append(htf_msg)

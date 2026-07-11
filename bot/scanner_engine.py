@@ -532,9 +532,21 @@ class SignalEngine:
                     float(getattr(settings, "trend_exhaustion_min_liquidity_oi_usd", 120_000.0)),
                 )
             if oi_usd_now is None or oi_usd_now < min_liquidity:
+                logger.info(
+                    "Scanner skip %s %s: OI $%s < min $%.0f (%s)",
+                    exchange,
+                    symbol,
+                    f"{oi_usd_now:,.0f}" if oi_usd_now is not None else "?",
+                    min_liquidity,
+                    candidate.signal_type,
+                )
                 return
 
             if settings.min_volume > 0 and (current.volume_24h or 0.0) < settings.min_volume:
+                logger.debug(
+                    "Scanner skip %s %s: 24h volume %.0f < min %.0f",
+                    exchange, symbol, current.volume_24h or 0, settings.min_volume,
+                )
                 return
 
             is_mega = candidate.signal_type in {"mega_pump", "mega_dump"}
@@ -562,6 +574,10 @@ class SignalEngine:
             symbol_cd = settings.signal_cooldown_seconds
             last_symbol = self.last_signal_time.get(symbol_cd_key, 0.0)
             if now - last_symbol < symbol_cd:
+                logger.debug(
+                    "Scanner skip %s %s: symbol cooldown %.0fs",
+                    exchange, symbol, symbol_cd - (now - last_symbol),
+                )
                 return
 
             if is_breakout:
@@ -1297,6 +1313,70 @@ class SignalEngine:
 
         return None
 
+    def _detect_flash_candidate(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        thresholds: ExchangeThresholds,
+    ) -> SignalCandidate | None:
+        """Быстрый mega pump/dump (5–10m) — ловит вертикальные сливы без 15m истории."""
+        if not settings.flash_enabled or current.price is None:
+            return None
+        flash_tiers, flash_min_oi_up, flash_min_oi_down = self._effective_flash_thresholds(
+            settings, thresholds,
+        )
+        if not flash_tiers:
+            return None
+        best: SignalCandidate | None = None
+        for window in settings.flash_window_minutes:
+            earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+            if earlier is None:
+                continue
+            changes = self._compute_changes(current, earlier, window * 60)
+            for tier_pct in sorted(flash_tiers, reverse=True):
+                bypass_oi = tier_pct >= settings.flash_bypass_oi_tier_pct
+                abs_px = abs(changes.price_change_percent)
+                if changes.price_change_percent >= tier_pct:
+                    oi_ok = (
+                        bypass_oi
+                        or abs_px >= 10.0
+                        or changes.oi_change_percent >= flash_min_oi_up
+                    )
+                    if oi_ok:
+                        cand = SignalCandidate(
+                            signal_type="mega_pump",
+                            period_minutes=window,
+                            oi_change_percent=changes.oi_change_percent,
+                            price_change_percent=changes.price_change_percent,
+                            earlier=earlier,
+                            urgency=0,
+                            flash_tier=tier_pct,
+                        )
+                        if best is None or (cand.flash_tier or 0) > (best.flash_tier or 0):
+                            best = cand
+                        break
+                if changes.price_change_percent <= -tier_pct:
+                    oi_ok = (
+                        bypass_oi
+                        or abs_px >= 10.0
+                        or changes.oi_change_percent <= -flash_min_oi_down
+                    )
+                    if oi_ok:
+                        cand = SignalCandidate(
+                            signal_type="mega_dump",
+                            period_minutes=window,
+                            oi_change_percent=changes.oi_change_percent,
+                            price_change_percent=changes.price_change_percent,
+                            earlier=earlier,
+                            urgency=0,
+                            flash_tier=tier_pct,
+                        )
+                        if best is None or (cand.flash_tier or 0) > (best.flash_tier or 0):
+                            best = cand
+                        break
+        return best
+
     def _detect_trend_exhaustion_candidate(
         self,
         exchange: str,
@@ -1350,6 +1430,10 @@ class SignalEngine:
         if liq_cascade is not None:
             return liq_cascade
 
+        flash = self._detect_flash_candidate(history, current, settings, thresholds)
+        if flash is not None:
+            return flash
+
         trend_ex = self._detect_trend_exhaustion_candidate(
             exchange, symbol, history, current, settings, tier,
         )
@@ -1384,8 +1468,14 @@ class SignalEngine:
                 changes = self._compute_changes(current, earlier, window * 60)
                 for tier in sorted(flash_tiers, reverse=True):
                     bypass_oi = tier >= settings.flash_bypass_oi_tier_pct
+                    abs_px = abs(changes.price_change_percent)
                     if changes.price_change_percent >= tier:
-                        if bypass_oi or changes.oi_change_percent >= flash_min_oi_up:
+                        oi_ok = (
+                            bypass_oi
+                            or abs_px >= 10.0
+                            or changes.oi_change_percent >= flash_min_oi_up
+                        )
+                        if oi_ok:
                             candidates.append(SignalCandidate(
                                 signal_type="mega_pump",
                                 period_minutes=window,
@@ -1397,7 +1487,12 @@ class SignalEngine:
                             ))
                             break
                     if changes.price_change_percent <= -tier:
-                        if bypass_oi or changes.oi_change_percent <= -flash_min_oi_down:
+                        oi_ok = (
+                            bypass_oi
+                            or abs_px >= 10.0
+                            or changes.oi_change_percent <= -flash_min_oi_down
+                        )
+                        if oi_ok:
                             candidates.append(SignalCandidate(
                                 signal_type="mega_dump",
                                 period_minutes=window,

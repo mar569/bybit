@@ -2441,6 +2441,21 @@ def run_ta_analysis(
             risk_notes.append(note)
     risk_notes = risk_notes[:7]
 
+    verdict, conf, reason, action_priority = _apply_post_pump_trigger_wait_guard(
+        verdict=verdict,
+        conf=conf,
+        reason=reason,
+        action_priority=action_priority,
+        post_pump=post_pump,
+        current=current,
+        breakout=breakout,
+        breakdown=breakdown,
+        flow_correction=flow.correction,
+        flow_continuation=flow.continuation,
+        momentum=momentum,
+        drawdown_from_high_pct=ms.drawdown_from_high_pct,
+    )
+
     correction_path, continuation_path, forecast_summary = build_market_forecast_paths(
         current=current,
         post_pump=post_pump,
@@ -3372,6 +3387,7 @@ def should_skip_noise_signal(
     signal_score: float,
     *,
     signal_type: str | None = None,
+    price_change_percent: float | None = None,
     cvd_ratio: float | None = None,
     cvd_short_max: float = 0.42,
     cvd_long_min: float = 0.58,
@@ -3382,7 +3398,20 @@ def should_skip_noise_signal(
     timing = int(round(float(signal_score)))
     reason_low = (ta.verdict_reason or "").lower()
 
-    if "вход невыгоден" in reason_low or "плохой r:r" in reason_low:
+    st = (signal_type or "").lower()
+    px_chg = float(price_change_percent or 0)
+    aggressive_dump = (
+        st in {"mega_dump", "impulse_dump", "liq_cascade_dump", "vertical_dump", "trend_dump", "pulse_dump"}
+        and sig == "short" and px_chg <= -5.0
+    )
+    aggressive_pump = (
+        st in {"mega_pump", "impulse_pump", "liq_cascade_pump", "vertical_pump", "trend_pump", "pulse_pump"}
+        and sig == "long" and px_chg >= 5.0
+    )
+
+    if ("вход невыгоден" in reason_low or "плохой r:r" in reason_low) and not (
+        aggressive_dump or aggressive_pump
+    ):
         return True, "плохой R:R"
 
     if cvd_ratio is not None:
@@ -3873,10 +3902,40 @@ def ta_user_intent_html(
                 "лучше дождаться лучшей точки."
             )
     elif aligned_verdict:
-        lines.append(
-            f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
-            "работаем по плану ниже."
-        )
+        if side == "long":
+            state, _ = _long_trigger_state(ta)
+            if ta.post_pump and state in {"armed", "far", "past"}:
+                lines.append(
+                    "🔴 <b>Оценка:</b> bias LONG, но <b>НЕ входить сейчас</b> — "
+                    "после пампа только close ≥ триггера. Market-лонг = риск отката."
+                )
+            elif state in {"armed", "far"}:
+                lines.append(
+                    f"🟡 <b>Оценка:</b> TA <b>{label}</b> {score}/10 — "
+                    "идея верная, но <b>ждите пробой</b> уровня (не market)."
+                )
+            else:
+                lines.append(
+                    f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
+                    "работаем по плану ниже."
+                )
+        elif side == "short":
+            state, _ = _short_trigger_state(ta)
+            if state in {"armed", "far"}:
+                lines.append(
+                    f"🟡 <b>Оценка:</b> TA <b>{label}</b> {score}/10 — "
+                    "ждите пробой вниз, не входить по рынку."
+                )
+            else:
+                lines.append(
+                    f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
+                    "работаем по плану ниже."
+                )
+        else:
+            lines.append(
+                f"✅ <b>Оценка:</b> TA совпадает с вами — <b>{label}</b> {score}/10, "
+                "работаем по плану ниже."
+            )
     elif opposed_verdict:
         lines.append(
             f"🔴 <b>Оценка:</b> ваш <b>{label}</b> против текущего TA "
@@ -4070,17 +4129,109 @@ def _ta_signal_caption_verbose(
     return base
 
 
+def _apply_post_pump_trigger_wait_guard(
+    *,
+    verdict: str,
+    conf: int,
+    reason: str,
+    action_priority: str,
+    post_pump: bool,
+    current: float,
+    breakout: float | None,
+    breakdown: float | None,
+    flow_correction: int,
+    flow_continuation: int,
+    momentum: str,
+    drawdown_from_high_pct: float,
+) -> tuple[str, int, str, str]:
+    """После пампа без пробоя уровня — WAIT, не «активный LONG/SHORT» по рынку."""
+    if not post_pump:
+        return verdict, conf, reason, action_priority
+
+    corr_bias = flow_correction >= flow_continuation - 2
+
+    if verdict == "LONG" and breakout and current > 0:
+        stub = TAAnalysisResult(
+            verdict="LONG",
+            breakout_level=breakout,
+            current_price=current,
+        )
+        state, _ = _long_trigger_state(stub)
+        if state in {"armed", "far", "past"}:
+            wait_reason = f"после пампа — LONG только по close ≥{fmt_price(breakout)}"
+            if corr_bias or momentum == "down" or drawdown_from_high_pct >= 1.5:
+                wait_reason += " · базовый сценарий откат"
+            verdict = "WAIT"
+            action_priority = "long"
+            conf = min(conf, 7 if corr_bias else 8)
+            reason = f"{reason} · {wait_reason}" if reason else wait_reason
+
+    if verdict == "SHORT" and breakdown and current > 0:
+        stub = TAAnalysisResult(
+            verdict="SHORT",
+            breakdown_level=breakdown,
+            current_price=current,
+        )
+        state, _ = _short_trigger_state(stub)
+        cont_bias = flow_continuation > flow_correction + 2
+        if state in {"armed", "far"} and cont_bias:
+            wait_reason = f"после дампа — SHORT только по close ≤{fmt_price(breakdown)}"
+            verdict = "WAIT"
+            action_priority = "short"
+            conf = min(conf, 8)
+            reason = f"{reason} · {wait_reason}" if reason else wait_reason
+
+    return verdict, conf, reason, action_priority
+
+
+def _manual_signal_status(ta: TAAnalysisResult) -> str:
+    """Человекочитаемый статус для ручного TA — без ложного «активен»."""
+    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
+    if rr_bad:
+        return "заблокирован (bad R:R)"
+
+    if ta.verdict == "LONG":
+        state, _ = _long_trigger_state(ta)
+        if state == "ready":
+            return "готов — вход по триггеру LONG"
+        if state in {"armed", "far"}:
+            return "ждёт пробой LONG — не входить по рынку"
+        if state == "past":
+            return "цена выше триггера — ждите ретест, не chase"
+    if ta.verdict == "SHORT":
+        state, _ = _short_trigger_state(ta)
+        if state == "ready":
+            return "готов — вход по триггеру SHORT"
+        if state in {"armed", "far"}:
+            return "ждёт пробой SHORT — не входить по рынку"
+        if state == "past":
+            return "цена ниже триггера — ждите ретест"
+
+    if ta.verdict == "WAIT":
+        if ta.action_priority == "long":
+            return "WAIT · bias LONG — только по пробою вверх"
+        if ta.action_priority == "short":
+            return "WAIT · bias SHORT — только по пробою вниз"
+        return "WAIT — без подтверждения"
+
+    if ta.action_priority in {"long", "short"}:
+        return f"armed — bias {ta.action_priority.upper()}, ждёт уровень"
+    return "не активен"
+
+
+def _manual_verdict_headline(ta: TAAnalysisResult) -> str:
+    score = ta_display_score(ta)
+    if ta.verdict == "WAIT" and ta.action_priority in {"long", "short"}:
+        bias = ta.action_priority.upper()
+        return f"📐 <b>TA</b> · <b>WAIT</b> · bias <b>{bias}</b> {score}/10"
+    return f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10"
+
+
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     """Ручной TA: компактно и с акцентом на решение."""
     score = ta_display_score(ta)
     rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
-    signal_status = "не активен"
-    if rr_bad:
-        signal_status = "заблокирован (bad R:R)"
-    elif ta.verdict in {"LONG", "SHORT"}:
-        signal_status = "активен"
-    elif ta.action_priority in {"long", "short"}:
-        signal_status = "armed (ждёт триггер)"
+    signal_status = _manual_signal_status(ta)
 
     p_short = 34
     p_long = 33
@@ -4095,7 +4246,7 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     p_flat = max(8, 100 - p_short - p_long)
 
     lines = [
-        f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10",
+        _manual_verdict_headline(ta),
         f"📍 <b>Сейчас:</b> цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст'}",
         f"🧭 <b>Статус:</b> {signal_status}.",
         f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
@@ -4169,6 +4320,14 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
 
     if ta.forecast_summary:
         lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
+
+    if ta.cvd_delta is not None and ta.cvd_delta < 0 and (
+        ta.verdict == "LONG" or ta.action_priority == "long"
+    ):
+        lines.append(
+            f"⚠️ <b>CVD Δ отриц.</b> ({ta.cvd_delta / 1000:.1f}K) — агрессивные продажи, "
+            "лонг только после подтверждения пробоя."
+        )
 
     for fl in ta.factor_lines:
         if "CVD" in fl:

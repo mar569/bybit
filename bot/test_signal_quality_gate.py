@@ -123,6 +123,19 @@ def test_scanner_skip_disabled_by_default() -> None:
     assert _settings().signal_quality_scanner_skip_enabled is False
 
 
+def test_capitulation_aggressive_watch_not_skip() -> None:
+    signal = _short_dump_signal()
+    signal.signal_type = "mega_dump"
+    signal.price_change_percent = -12.0
+    signal.oi_change_percent = -2.0
+    signal.details["cvd_ratio"] = 0.35
+    signal.details["smc"] = {}
+    signal.details["market_structure"] = {}
+    result = assess_signal_quality(signal, settings=_settings())
+    assert result.tier != "skip"
+    assert any("капитуляция" in w.lower() for w in result.warnings)
+
+
 def test_manual_ta_flow_warns_on_sweep() -> None:
     ta = TAAnalysisResult(
         verdict="SHORT",

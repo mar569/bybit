@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 32
+SETTINGS_VERSION = 33
 
 # Сохраняем при миграции на профессиональный пресет (tier + liq-cascade + все монеты).
 PRESERVE_ON_MIGRATE = frozenset({
@@ -136,7 +136,7 @@ class ScannerSettings:
     flash_price_tiers: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0)
     flash_min_oi_rise_percent: float = 1.0
     flash_min_oi_drop_percent: float = 1.0
-    flash_bypass_oi_tier_pct: float = 15.0
+    flash_bypass_oi_tier_pct: float = 10.0
 
     # Качество сигнала: деньги в OI, не просто цена
     min_oi_change_usd: float = 45_000.0
@@ -1075,6 +1075,8 @@ class SettingsManager:
                 merged["signal_quality_scanner_skip_enabled"] = False
                 merged["probability_bypass_weaken"] = True
                 merged.pop("signal_quality_hard_skip_enabled", None)
+            if version < 33:
+                merged["flash_bypass_oi_tier_pct"] = 10.0
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1082,7 +1084,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v32: strict quality в Telegram; сканер не режет без TA; preserved: %s)",
+                "Settings migrated v%d → v%d (v33: flash mega раньше + bypass OI при −10%%; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
