@@ -69,6 +69,8 @@ CHART_STYLE = {
     "entry": "#ffa657",
     "scenario_bull": "#3fb950",
     "scenario_bear": "#f85149",
+    "fib": "#8b949e",
+    "fib_key": "#d2a8ff",
 }
 
 
@@ -156,6 +158,9 @@ def _collect_right_labels(ta: TAAnalysisResult) -> list[_RightLabel]:
         add(ta.invalidation_price, f"STOP {fmt_price(ta.invalidation_price)}", CHART_STYLE["inv"])
     for j, tp in enumerate(ta.target_prices[:2]):
         add(tp, f"TP{j + 1} {fmt_price(tp)}", CHART_STYLE["target"])
+    for fl in getattr(ta, "fib_levels", None) or []:
+        if fl.ratio in {0.5, 0.618}:
+            add(fl.price, fl.label, CHART_STYLE["fib_key"])
     for lv in ta.levels[:2]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         add(lv.price, fmt_price(lv.price), color)
@@ -600,6 +605,45 @@ def _draw_smc_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         ax.plot(ts, marker.price, marker="*", color=color, markersize=8, linestyle="None")
 
 
+def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """Fib 0.382 / 0.5 / 0.618 (+ extensions) — тонкие линии без текстового шума."""
+    levels = getattr(ta, "fib_levels", None) or []
+    if not levels or not bars:
+        return
+    current = ta.current_price or bars[-1].close
+    # Не рисуем уровни далеко от цены (>12%)
+    for fl in levels:
+        if current > 0 and abs(fl.price - current) / current > 0.12:
+            continue
+        is_key = fl.ratio in {0.5, 0.618}
+        color = CHART_STYLE["fib_key"] if is_key else CHART_STYLE["fib"]
+        lw = 0.85 if is_key else 0.55
+        alpha = 0.7 if is_key else 0.4
+        ax.axhline(fl.price, color=color, linestyle=":", linewidth=lw, alpha=alpha)
+        # Короткая подпись слева у ключевых
+        if is_key:
+            x0 = mdates.date2num(_bar_times(bars)[0])
+            ax.text(
+                x0, fl.price, f" {fl.label}",
+                color=color, fontsize=5.5, va="bottom", ha="left", alpha=0.85,
+            )
+
+    # Пунктир импульсной ноги (старт → конец)
+    start = getattr(ta, "wave_leg_start", None)
+    end = getattr(ta, "wave_leg_end", None)
+    if start and end and ta.swings:
+        # Найти индексы по цене среди последних swings — приближённо через rulers
+        for ruler in ta.rulers[:1]:
+            if abs(ruler.from_price - start) / max(start, 1e-9) < 0.01 or abs(ruler.to_price - end) / max(end, 1e-9) < 0.01:
+                x0 = _idx_to_date(bars, ruler.start_idx)
+                x1 = _idx_to_date(bars, ruler.end_idx)
+                ax.plot(
+                    [x0, x1], [ruler.from_price, ruler.to_price],
+                    color=CHART_STYLE["fib_key"], linestyle="--", linewidth=0.7, alpha=0.45,
+                )
+                break
+
+
 def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
@@ -621,6 +665,8 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     for lv in ta.levels[:2]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.75, alpha=0.55)
+
+    _draw_fib_levels(ax, bars, ta)
 
     if len(ta.levels) < 2:
         _draw_level_hints(ax, bars, ta)
@@ -1514,6 +1560,19 @@ def _overlay_ta_on_tradingview(
         y = y_at(ta.breakdown_level)
         ax.axhline(y, xmin=x_line_lo, xmax=x_line_hi, color=CHART_STYLE["accent_short"], linewidth=1.4, alpha=0.9, zorder=2)
         ax.text(x_lbl, y, f" S {fmt_price(ta.breakdown_level)}", color=CHART_STYLE["accent_short"], fontsize=7.2, va="center", fontweight="bold")
+
+    for fl in getattr(ta, "fib_levels", None) or []:
+        if fl.ratio not in {0.5, 0.618, 1.272}:
+            continue
+        if not _tv_level_in_range(fl.price, y_min, y_max):
+            continue
+        y = y_at(fl.price)
+        ax.axhline(
+            y, xmin=x_line_lo, xmax=x_line_hi,
+            color=CHART_STYLE["fib_key"], linewidth=0.7, alpha=0.55, linestyle=":", zorder=2,
+        )
+        ax.text(x_lbl, y, f" {fl.label}", color=CHART_STYLE["fib_key"], fontsize=6.2, va="center", alpha=0.85)
+
     if ta.invalidation_price:
         y = y_at(ta.invalidation_price)
         ax.axhline(y, xmin=x_line_lo, xmax=x_line_hi, color=CHART_STYLE["inv"], linewidth=0.9, linestyle="--", alpha=0.75, zorder=2)

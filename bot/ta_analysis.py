@@ -14,6 +14,13 @@ from .ta_range_trade import (
     evaluate_market_flow,
     evaluate_range_trade,
 )
+from .wave_structure import (
+    FibLevel,
+    WaveStructureResult,
+    analyze_wave_structure,
+    apply_wave_to_trade_plan,
+    wave_flow_adjustments,
+)
 
 
 @dataclass(frozen=True)
@@ -194,6 +201,13 @@ class TAAnalysisResult:
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
     cvd_delta: float | None = None
+    # Wave Lite + Fib (внутренний слой / график; не для Hot-caption)
+    fib_levels: list[FibLevel] = field(default_factory=list)
+    wave_phase: str = ""
+    wave_bias: str = "neutral"
+    wave_confidence: int = 0
+    wave_leg_start: float | None = None
+    wave_leg_end: float | None = None
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -2080,6 +2094,18 @@ def run_ta_analysis(
     bullish, bearish, breakout, breakdown = build_scenarios(
         bars, levels, zones, key_levels, swings,
     )
+    # Fib после сильных факторов (П/С, пробой) — не раньше
+    sr_prices = [lv.price for lv in levels] + [kl.price for kl in key_levels]
+    for z in zones:
+        sr_prices.append((z.top + z.bottom) / 2.0)
+    wave = analyze_wave_structure(
+        bars,
+        swings,
+        structure_label=structure,
+        sr_prices=sr_prices,
+        breakout=breakout,
+        breakdown=breakdown,
+    )
     _, _, cons_override, post_pump = resolve_trade_triggers(
         bars, swings, levels, zones, key_levels,
     )
@@ -2343,6 +2369,47 @@ def run_ta_analysis(
             bars, levels, is_long=trade_is_long, invalidation=invalidation_price,
             bullish=bullish, bearish=bearish,
         )
+
+    # Wave Lite + Fib: стоп/цели и мягкий bias (без текста в Hot)
+    inv, targets, _wave_cont, _wave_corr = apply_wave_to_trade_plan(
+        verdict=verdict,
+        action_priority=action_priority,
+        current=current,
+        inv=inv,
+        targets=targets,
+        breakout=breakout,
+        breakdown=breakdown,
+        wave=wave,
+    )
+    if (
+        wave.valid
+        and wave.has_confluence
+        and wave.entry_hint_price
+        and wave.wave_phase in {"shallow_pullback", "wave_2_4_zone", "deep_pullback"}
+        and not range_aligned
+        and not (liq_cascade.active and verdict == "SHORT")
+    ):
+        hint = wave.entry_hint_price
+        if action_priority == "long" and wave.wave_bias == "long" and hint < current * 1.002:
+            entry = (hint * 0.998, hint * 1.004)
+        elif action_priority == "short" and wave.wave_bias == "short" and hint > current * 0.998:
+            entry = (hint * 0.996, hint * 1.002)
+
+    if (
+        wave.leg is not None
+        and wave.wave_phase == "late_impulse"
+        and verdict in {"LONG", "SHORT"}
+    ):
+        if (
+            (verdict == "LONG" and wave.leg.direction == "up")
+            or (verdict == "SHORT" and wave.leg.direction == "down")
+        ):
+            conf = min(conf, 7)
+            if "вдогонку" not in (reason or ""):
+                reason = f"{reason} · у края импульса — лучше от Fib/ретеста" if reason else (
+                    "у края импульса — лучше от Fib/ретеста"
+                )
+
     cascade_override_rr = liq_cascade.active and liq_cascade.strength >= 5 and verdict == "SHORT"
     is_bad_trade, bad_trade_reason = _trade_quality_guard(
         verdict=verdict,
@@ -2431,6 +2498,14 @@ def run_ta_analysis(
         post_pump=post_pump,
         drawdown_from_high_pct=ms.drawdown_from_high_pct,
     )
+    w_cont, w_corr = wave_flow_adjustments(wave, action_priority=action_priority)
+    if w_cont or w_corr:
+        flow = MarketFlowScores(
+            continuation=int(_clamp(flow.continuation + w_cont, 0, 100)),
+            correction=int(_clamp(flow.correction + w_corr, 0, 100)),
+            convergence=flow.convergence,
+            notes=list(flow.notes),
+        )
     if verdict == "WAIT" and action_priority == "neutral":
         if flow.continuation >= flow.correction + 18 and momentum in {"up", "flat"}:
             action_priority = "long"
@@ -2578,7 +2653,18 @@ def run_ta_analysis(
             and getattr(taker_cvd, "trade_count", 0) > 0
             else "proxy"
         ),
-        cvd_delta=getattr(taker_cvd, "delta", None) if taker_cvd is not None else None,
+        cvd_delta=(
+            float(getattr(taker_cvd, "delta", 0) or 0)
+            if taker_cvd is not None
+            and getattr(taker_cvd, "trade_count", 0) > 0
+            else None
+        ),
+        fib_levels=list(wave.chart_fib_levels),
+        wave_phase=wave.wave_phase if wave.leg else "",
+        wave_bias=wave.wave_bias if wave.leg else "neutral",
+        wave_confidence=wave.confidence if wave.leg else 0,
+        wave_leg_start=wave.leg.start_price if wave.leg else None,
+        wave_leg_end=wave.leg.end_price if wave.leg else None,
     )
 
 
