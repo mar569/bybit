@@ -167,9 +167,8 @@ class LiquidationAlertService:
 
         total = sum(usd for _, usd in bucket.events)
         count = len(bucket.events)
+        # Одна крупная ликвидация тоже алерт (раньше требовалось count≥2)
         if total < min_usd:
-            return None
-        if count < 2 and total < min_usd * 1.25:
             return None
         if now < self._cooldown_until.get(cooldown_key, 0.0):
             return None

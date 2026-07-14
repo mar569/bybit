@@ -433,31 +433,33 @@ class TelegramBot:
             except Exception as exc:
                 logger.warning("Could not verify TELEGRAM_ALERT_CHAT_ID=%s: %s", alert_chat_id, exc)
 
-        analysis_chat_id = self.config.telegram_analysis_chat_id
+        analysis_chat_id = self.config.effective_analysis_chat_id
         if analysis_chat_id is not None:
             try:
                 chat = await self.application.bot.get_chat(analysis_chat_id)
                 logger.info(
-                    "Analysis chat OK: %s (%s)",
+                    "Analysis chat OK: %s (%s)%s",
                     chat.title or chat.username or chat.id,
                     analysis_chat_id,
+                    " [fallback→alert/admin]" if self.config.analysis_chat_is_fallback else "",
                 )
             except BadRequest as exc:
                 logger.warning(
-                    "TELEGRAM_ANALYSIS_CHAT_ID=%s недоступен: %s. "
-                    "Добавьте бота в чат или очистите переменную.",
+                    "Analysis chat id=%s недоступен: %s. "
+                    "Добавьте бота в чат или задайте TELEGRAM_ANALYSIS_CHAT_ID.",
                     analysis_chat_id,
                     exc,
                 )
             except Exception as exc:
                 logger.warning(
-                    "Could not verify TELEGRAM_ANALYSIS_CHAT_ID=%s: %s",
+                    "Could not verify analysis chat id=%s: %s",
                     analysis_chat_id,
                     exc,
                 )
         elif s.analysis_enabled:
             logger.warning(
-                "analysis_enabled=ON, но TELEGRAM_ANALYSIS_CHAT_ID не задан — "
+                "analysis_enabled=ON, но нет чата для разборов "
+                "(TELEGRAM_ANALYSIS_CHAT_ID / TELEGRAM_ALERT_CHAT_ID) — "
                 "разборы ликвидаций не будут отправляться"
             )
 
@@ -747,7 +749,7 @@ class TelegramBot:
         pro_text: str,
     ) -> None:
         settings = self.settings_manager.settings
-        chat_id = self.config.telegram_analysis_chat_id
+        chat_id = self.config.effective_analysis_chat_id
         if chat_id is None or not settings.analysis_enabled:
             return
         if not settings.signal_pro_to_analysis_chat:
@@ -1384,9 +1386,9 @@ class TelegramBot:
         if self.application is None:
             return
         settings = self.settings_manager.settings
-        chat_id = self.config.telegram_analysis_chat_id
+        chat_id = self.config.effective_analysis_chat_id
         if chat_id is None:
-            logger.warning("Analysis dispatch skipped: TELEGRAM_ANALYSIS_CHAT_ID not set")
+            logger.warning("Analysis dispatch skipped: no analysis/alert chat configured")
             return
         if self._bot_notifications_blocked():
             return

@@ -82,6 +82,24 @@ class BybitLiquidationTracker:
         self._subscribed: set[str] = set()
         self._last_symbol_refresh = 0.0
         self._lock = asyncio.Lock()
+        self._events_seen = 0
+        self._events_forwarded = 0
+        self._last_event_ts = 0.0
+        self._connect_count = 0
+
+    def get_diagnostics(self) -> dict[str, float | int | str]:
+        return {
+            "subscribed": len(self._subscribed),
+            "events_seen": self._events_seen,
+            "events_forwarded": self._events_forwarded,
+            "last_event_age_sec": (
+                round(time.time() - self._last_event_ts, 1)
+                if self._last_event_ts > 0
+                else -1
+            ),
+            "connect_count": self._connect_count,
+            "enabled": bool(self._enabled()),
+        }
 
     def get_stats(self, symbol: str, window_minutes: int = 15) -> LiquidationStats:
         symbol = symbol.upper()
@@ -122,7 +140,8 @@ class BybitLiquidationTracker:
                     ping_timeout=10,
                     max_size=2**20,
                 ) as websocket:
-                    logger.info("Bybit liquidation websocket connected")
+                    self._connect_count += 1
+                    logger.info("Bybit liquidation websocket connected (#%d)", self._connect_count)
                     await self._subscribe_symbols(websocket)
                     self._last_symbol_refresh = time.time()
                     async for message in websocket:
@@ -186,6 +205,8 @@ class BybitLiquidationTracker:
                 ts_ms = row.get("T")
                 ts = float(ts_ms) / 1000.0 if ts_ms else now
                 usd_value = size * price
+                self._events_seen += 1
+                self._last_event_ts = now
                 self._events[symbol].append(LiquidationEvent(
                     timestamp=ts,
                     symbol=symbol,
@@ -207,6 +228,7 @@ class BybitLiquidationTracker:
 
         if self._on_event is not None:
             for alert_event in new_events:
+                self._events_forwarded += 1
                 await self._on_event(alert_event)
 
     def stop(self) -> None:

@@ -52,7 +52,10 @@ async def _scanner_heartbeat_loop(scanner: SignalEngine) -> None:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
-async def _analysis_heartbeat_loop(analysis_engine: LiquidationAnalysisEngine) -> None:
+async def _analysis_heartbeat_loop(
+    analysis_engine: LiquidationAnalysisEngine,
+    liquidation_tracker: BybitLiquidationTracker | None = None,
+) -> None:
     await asyncio.sleep(120)
     while True:
         ad = analysis_engine.get_diagnostics()
@@ -68,6 +71,18 @@ async def _analysis_heartbeat_loop(analysis_engine: LiquidationAnalysisEngine) -
             ad.get("skipped_cooldown", 0),
             ad["errors"],
         )
+        if liquidation_tracker is not None:
+            ld = liquidation_tracker.get_diagnostics()
+            logger.info(
+                "Liq WS heartbeat: enabled=%s subscribed=%s seen=%s fwd=%s "
+                "last_age=%ss connects=%s",
+                ld["enabled"],
+                ld["subscribed"],
+                ld["events_seen"],
+                ld["events_forwarded"],
+                ld["last_event_age_sec"],
+                ld["connect_count"],
+            )
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
@@ -137,8 +152,12 @@ async def main() -> None:
     )
 
     def liquidation_symbols() -> list[str]:
-        if settings.settings.liquidation_all_symbols and bybit.symbols:
-            return bybit.symbols
+        # Не подписывать все 400+ пар — WS подвисает/молчит. Топ + majors.
+        watch = scanner.get_liquidation_watch_symbols(limit=250)
+        if watch:
+            return watch
+        if bybit.symbols:
+            return bybit.symbols[:250]
         return scanner.get_bybit_top_symbols()
 
     def _liquidation_ws_enabled() -> bool:
@@ -234,19 +253,21 @@ async def main() -> None:
         )
         if config.analysis_chat_configured:
             logger.info(
-                "Analysis chat=%s | liq≥$%s/$%s/$%s alt/standard/major | "
-                "conf wait≥%.0f%% dir≥%.0f%% | chart=%s",
-                config.telegram_analysis_chat_id,
+                "Analysis chat=%s%s | liq≥$%s/$%s/$%s alt/standard/major | "
+                "conf wait≥%.0f%% dir≥%.0f%% | chart=%s | require_trend=%s",
+                config.effective_analysis_chat_id,
+                " (fallback alert/admin)" if config.analysis_chat_is_fallback else "",
                 int(s.analysis_alt_min_liq_usd),
                 int(s.analysis_min_liq_usd),
                 int(s.analysis_major_min_liq_usd),
                 float(getattr(s, "analysis_min_confidence_wait", 42.0)),
                 float(getattr(s, "analysis_min_confidence_directional", 58.0)),
                 "ON" if s.analysis_chart_enabled else "OFF",
+                "ON" if getattr(s, "analysis_require_trend", False) else "OFF",
             )
         elif s.analysis_enabled:
             logger.warning(
-                "analysis_enabled=ON but TELEGRAM_ANALYSIS_CHAT_ID is missing — no analysis alerts",
+                "analysis_enabled=ON but no chat id — set TELEGRAM_ANALYSIS_CHAT_ID or TELEGRAM_ALERT_CHAT_ID",
             )
         if telegram.redis is not None:
             telegram.outcome_tracker = OutcomeTracker(telegram.redis, scanner)
@@ -263,7 +284,7 @@ async def main() -> None:
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         analysis_heartbeat_task = asyncio.create_task(
-            _analysis_heartbeat_loop(analysis_engine),
+            _analysis_heartbeat_loop(analysis_engine, liquidation_tracker),
         )
         liq_task = asyncio.create_task(liquidation_tracker.run())
         binance_liq_task = asyncio.create_task(binance_liquidation_tracker.run())

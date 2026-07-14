@@ -672,9 +672,10 @@ class LiquidationAnalysisEngine:
             self._stats["skipped_trend"] += 1
             return None
 
-        require_trend = bool(getattr(settings, "analysis_require_trend", True)) and not skip_trend_gate
+        require_trend = bool(getattr(settings, "analysis_require_trend", False)) and not skip_trend_gate
         min_trend = float(getattr(settings, "analysis_min_trend_pct", 1.5))
-        force_liq = float(getattr(settings, "analysis_force_liq_usd", 50_000.0))
+        force_liq = float(getattr(settings, "analysis_force_liq_usd", 25_000.0))
+        # Кластер ≥ force_liq всегда проходит — иначе дни молчания при слабом тренде
         trend_strength = max(abs(ctx.trend_pct_1h), abs(ctx.trend_pct_4h))
         if require_trend and trend_strength < min_trend and total_usd < force_liq:
             self._stats["skipped_trend"] += 1

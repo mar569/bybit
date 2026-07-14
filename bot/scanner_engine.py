@@ -163,11 +163,41 @@ class SignalEngine:
         top = self._top_symbols.get("Bybit")
         if top:
             return sorted(top)
-        return [
-            key.split(":", 1)[1]
-            for key in self._volumes
-            if key.startswith("Bybit:") and self._volumes[key] > 0
-        ][: self.settings.settings.top_n_symbols or 150]
+        items = [
+            (key.split(":", 1)[1], volume)
+            for key, volume in self._volumes.items()
+            if key.startswith("Bybit:") and volume > 0
+        ]
+        items.sort(key=lambda item: item[1], reverse=True)
+        return [sym for sym, _ in items][: self.settings.settings.top_n_symbols or 150]
+
+    def get_liquidation_watch_symbols(self, *, limit: int = 250) -> list[str]:
+        """Символы для liq WebSocket: majors + топ по объёму (не все 400+)."""
+        settings = self.settings.settings
+        majors = {
+            str(s).upper()
+            for s in (getattr(settings, "major_symbols", None) or ())
+        }
+        if settings.liquidation_all_symbols:
+            items = [
+                (key.split(":", 1)[1].upper(), volume)
+                for key, volume in self._volumes.items()
+                if key.startswith("Bybit:") and volume > 0
+            ]
+            items.sort(key=lambda item: item[1], reverse=True)
+            ranked = [sym for sym, _ in items]
+        else:
+            ranked = [s.upper() for s in self.get_bybit_top_symbols()]
+        out: list[str] = []
+        seen: set[str] = set()
+        for sym in list(majors) + ranked:
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+            if len(out) >= max(50, int(limit)):
+                break
+        return out
 
     def _reset_daily_counts_if_needed(self) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

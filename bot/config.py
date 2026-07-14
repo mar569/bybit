@@ -54,15 +54,32 @@ class Config(BaseSettings):
         return self.telegram_admin_id
 
     @property
+    def effective_analysis_chat_id(self) -> int | None:
+        """Чат разборов: ANALYSIS_CHAT, иначе ALERT/admin (чтобы ON в настройках не молчал)."""
+        if self.telegram_analysis_chat_id is not None:
+            return self.telegram_analysis_chat_id
+        if self.telegram_alert_chat_id is not None:
+            return self.telegram_alert_chat_id
+        return self.telegram_admin_id
+
+    @property
     def analysis_chat_configured(self) -> bool:
-        return self.telegram_analysis_chat_id is not None
+        """Разборы можно слать, если есть любой целевой чат (analysis или alert/admin)."""
+        return self.effective_analysis_chat_id is not None
+
+    @property
+    def analysis_chat_is_fallback(self) -> bool:
+        return (
+            self.telegram_analysis_chat_id is None
+            and self.effective_analysis_chat_id is not None
+        )
 
     @property
     def anomaly_chat_id(self) -> int | None:
         """Куда слать аномалии: отдельный чат или тот же, что analysis."""
         if self.telegram_anomaly_chat_id is not None:
             return self.telegram_anomaly_chat_id
-        return self.telegram_analysis_chat_id
+        return self.effective_analysis_chat_id
 
     @property
     def anomaly_chat_configured(self) -> bool:

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 37
+SETTINGS_VERSION = 38
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -390,7 +390,7 @@ class ScannerSettings:
     analysis_min_oi_usd: float = 120_000.0
     analysis_min_price_move_pct: float = 1.5
     analysis_min_trend_pct: float = 2.0
-    analysis_require_trend: bool = True
+    analysis_require_trend: bool = False
     analysis_force_liq_usd: float = 25_000.0
     analysis_max_per_hour: int = 5
     analysis_signal_trigger_enabled: bool = True
@@ -817,7 +817,7 @@ class ScannerSettings:
                 base.get("analysis_min_price_move_pct", 0.0)
             ),
             analysis_min_trend_pct=float(base.get("analysis_min_trend_pct", 2.0)),
-            analysis_require_trend=bool(base.get("analysis_require_trend", True)),
+            analysis_require_trend=bool(base.get("analysis_require_trend", False)),
             analysis_force_liq_usd=float(base.get("analysis_force_liq_usd", 35_000.0)),
             analysis_max_per_hour=int(base.get("analysis_max_per_hour", 5)),
             analysis_signal_trigger_enabled=bool(
@@ -1126,6 +1126,18 @@ class SettingsManager:
                 merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
                     merged.get("signal_cooldown_seconds"), default=60,
                 )
+            if version < 38:
+                # Ликвидации/анализы снова живые: без мёртвого trend-gate, fallback chat
+                merged["analysis_require_trend"] = False
+                merged["analysis_force_liq_usd"] = min(
+                    float(merged.get("analysis_force_liq_usd", 25_000.0)), 25_000.0
+                )
+                merged["analysis_cooldown_seconds"] = min(
+                    int(merged.get("analysis_cooldown_seconds", 3600)), 900
+                )
+                merged["analysis_max_per_hour"] = max(
+                    int(merged.get("analysis_max_per_hour", 5)), 8
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1133,7 +1145,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v37: setup score ENTRY/WATCH; preserved: %s)",
+                "Settings migrated v%d → v%d (v38: liq/analysis delivery fix; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
