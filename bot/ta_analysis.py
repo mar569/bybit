@@ -208,6 +208,14 @@ class TAAnalysisResult:
     wave_confidence: int = 0
     wave_leg_start: float | None = None
     wave_leg_end: float | None = None
+    wave_has_confluence: bool = False
+    wave_confluence_count: int = 0
+    wave_confluence_sr: bool = False
+    wave_confluence_round: bool = False
+    wave_confluence_retest: bool = False
+    elliott_label: str = ""
+    abc_phase: str = ""
+    abc_label_ru: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -2665,6 +2673,14 @@ def run_ta_analysis(
         wave_confidence=wave.confidence if wave.leg else 0,
         wave_leg_start=wave.leg.start_price if wave.leg else None,
         wave_leg_end=wave.leg.end_price if wave.leg else None,
+        wave_has_confluence=bool(wave.has_confluence) if wave.leg else False,
+        wave_confluence_count=int(wave.confluence_count) if wave.leg else 0,
+        wave_confluence_sr=bool(wave.confluence_sr) if wave.leg else False,
+        wave_confluence_round=bool(wave.confluence_round) if wave.leg else False,
+        wave_confluence_retest=bool(wave.confluence_retest) if wave.leg else False,
+        elliott_label=wave.elliott_label if wave.leg else "",
+        abc_phase=wave.abc_phase if wave.leg else "",
+        abc_label_ru=wave.abc_label_ru if wave.leg else "",
     )
 
 
@@ -3717,14 +3733,23 @@ def evaluate_entry_readiness(
     st = (signal_type or "").lower()
     effective_verdict = ta.verdict
     if ta.verdict == "WAIT":
+        # Ранний WAIT→направление только если не погоня у края диапазона
+        late_chase = (
+            (sig == "long" and ta.range_position >= 0.85 and ta.momentum_pct >= 0.5)
+            or (sig == "short" and ta.range_position <= 0.15 and ta.momentum_pct <= -0.5)
+            or (ta.wave_phase or "") == "late_impulse"
+        )
         early_trigger = (
-            st in _EARLY_TRIGGER_SIGNAL_TYPES
+            not late_chase
+            and st in _EARLY_TRIGGER_SIGNAL_TYPES
             and (
                 (sig == "long" and ta.action_priority == "long")
                 or (sig == "short" and ta.action_priority == "short")
             )
         )
         if not early_trigger:
+            if late_chase:
+                return False, "импульс у края — не вдогонку, ждать откат/уровень"
             return False, "TA ждёт пробой уровня"
         effective_verdict = "LONG" if ta.action_priority == "long" else "SHORT"
 

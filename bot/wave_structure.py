@@ -90,6 +90,10 @@ class WaveStructureResult:
     confluence_round: bool = False
     confluence_retest: bool = False
     confluence_count: int = 0
+    # Эллиотт Lite: импульс + коррекция ABC
+    elliott_label: str = ""
+    abc_phase: str = ""  # A | B | C | complete | forming | ""
+    abc_label_ru: str = ""
 
     @property
     def has_confluence(self) -> bool:
@@ -555,6 +559,186 @@ def score_fib_confluence(
     return conf_sr, conf_round, conf_retest, count
 
 
+def _confluence_labels_ru(
+    *,
+    sr: bool,
+    rnd: bool,
+    retest: bool,
+) -> list[str]:
+    out: list[str] = []
+    if sr:
+        out.append("Fib + П/С")
+    if rnd:
+        out.append("Fib + круглый уровень")
+    if retest:
+        out.append("Fib + ретест пробоя")
+    return out
+
+
+@dataclass(frozen=True)
+class AbcPattern:
+    """Коррекция ABC после импульса (Эллиотт Lite)."""
+    phase: str  # A | B | C | complete | forming
+    label_ru: str
+    a_price: float
+    b_price: float
+    c_price: float | None = None
+    b_retrace_pct: float = 0.0  # откат B относительно ноги A
+
+
+def detect_abc_pattern(
+    swings: list["SwingPoint"],
+    bars: list["KlineBar"],
+    leg: ImpulseLeg,
+) -> AbcPattern | None:
+    """3-волновая коррекция ABC после импульса A→B."""
+    if not swings or not bars:
+        return None
+    alt = _alternate_swings(swings)
+    post = [s for s in alt if s.index >= leg.end_idx]
+    current = bars[-1].close
+    if current <= 0:
+        return None
+
+    if leg.direction == "up":
+        # Коррекция вниз: low (конец A), high (конец B), low (C)
+        lows = [s for s in post if s.kind == "low"]
+        highs = [s for s in post if s.kind == "high"]
+        if not lows:
+            if current < leg.end_price * 0.995:
+                return AbcPattern(
+                    phase="forming",
+                    label_ru="формируется волна A коррекции",
+                    a_price=leg.end_price,
+                    b_price=current,
+                )
+            return None
+        a_end = lows[0].price
+        a_leg = leg.end_price - a_end
+        if a_leg <= 0:
+            return None
+        if not highs:
+            phase = "A" if current <= a_end * 1.003 else "forming"
+            return AbcPattern(
+                phase=phase,
+                label_ru="волна A коррекции (откат от импульса)",
+                a_price=leg.end_price,
+                b_price=a_end,
+                c_price=current if phase == "A" else None,
+            )
+        b_end = highs[0].price
+        b_ret = (b_end - a_end) / a_leg if a_leg > 0 else 0.0
+        c_lows = [s for s in lows[1:] if s.index > highs[0].index]
+        if c_lows:
+            c_end = c_lows[0].price
+            return AbcPattern(
+                phase="complete",
+                label_ru=f"ABC завершена · B откатила {b_ret:.0%} ноги A",
+                a_price=leg.end_price,
+                b_price=b_end,
+                c_price=c_end,
+                b_retrace_pct=b_ret,
+            )
+        if current < b_end * 0.998:
+            return AbcPattern(
+                phase="C",
+                label_ru=f"волна C коррекции · B @ {b_ret:.0%} A",
+                a_price=leg.end_price,
+                b_price=b_end,
+                c_price=current,
+                b_retrace_pct=b_ret,
+            )
+        return AbcPattern(
+            phase="B",
+            label_ru=f"волна B коррекции · откат {b_ret:.0%} ноги A",
+            a_price=leg.end_price,
+            b_price=b_end,
+            c_price=None,
+            b_retrace_pct=b_ret,
+        )
+    else:
+        # Импульс вниз → коррекция вверх: high (A), low (B), high (C)
+        highs = [s for s in post if s.kind == "high"]
+        lows = [s for s in post if s.kind == "low"]
+        if not highs:
+            if current > leg.end_price * 1.005:
+                return AbcPattern(
+                    phase="forming",
+                    label_ru="формируется волна A коррекции",
+                    a_price=leg.end_price,
+                    b_price=current,
+                )
+            return None
+        a_end = highs[0].price
+        a_leg = a_end - leg.end_price
+        if a_leg <= 0:
+            return None
+        if not lows:
+            phase = "A" if current >= a_end * 0.997 else "forming"
+            return AbcPattern(
+                phase=phase,
+                label_ru="волна A коррекции (откат от импульса)",
+                a_price=leg.end_price,
+                b_price=a_end,
+                c_price=current if phase == "A" else None,
+            )
+        b_end = lows[0].price
+        b_ret = (a_end - b_end) / a_leg if a_leg > 0 else 0.0
+        c_highs = [s for s in highs[1:] if s.index > lows[0].index]
+        if c_highs:
+            c_end = c_highs[0].price
+            return AbcPattern(
+                phase="complete",
+                label_ru=f"ABC завершена · B откатила {b_ret:.0%} ноги A",
+                a_price=leg.end_price,
+                b_price=b_end,
+                c_price=c_end,
+                b_retrace_pct=b_ret,
+            )
+        if current > b_end * 1.002:
+            return AbcPattern(
+                phase="C",
+                label_ru=f"волна C коррекции · B @ {b_ret:.0%} A",
+                a_price=leg.end_price,
+                b_price=b_end,
+                c_price=current,
+                b_retrace_pct=b_ret,
+            )
+        return AbcPattern(
+            phase="B",
+            label_ru=f"волна B коррекции · откат {b_ret:.0%} ноги A",
+            a_price=leg.end_price,
+            b_price=b_end,
+            c_price=None,
+            b_retrace_pct=b_ret,
+        )
+
+
+def _elliott_label_ru(
+    leg: ImpulseLeg,
+    phase: str,
+    abc: AbcPattern | None,
+) -> str:
+    if abc and abc.phase in {"B", "C", "complete"}:
+        if abc.phase == "B":
+            return f"импульс → коррекция ABC (волна B)"
+        if abc.phase == "C":
+            return f"импульс → коррекция ABC (волна C — зона входа)"
+        return "импульс → ABC завершена → ждать новый импульс"
+    mapping = {
+        "shallow_pullback": "импульс 1–3 · мелкий откат (волна 2/4)",
+        "wave_2_4_zone": "импульс · золотая зона Fib 0.5–0.618 (волна 2/4)",
+        "deep_pullback": "глубокий откат · риск слома структуры",
+        "mid_correction": "коррекция внутри импульса",
+        "late_impulse": "финал импульса (волна 5) — не входить вдогонку",
+        "impulse_invalidated": "импульс сломан — смена bias",
+    }
+    base = mapping.get(phase, "структура волны")
+    if leg.direction == "up":
+        return f"бычий {base}"
+    return f"медв. {base}"
+
+
 def analyze_wave_structure(
     bars: list["KlineBar"],
     swings: list["SwingPoint"],
@@ -591,6 +775,13 @@ def analyze_wave_structure(
         breakdown=breakdown,
         direction=leg.direction,
     )
+    abc = detect_abc_pattern(swings, bars, leg)
+    elliott = _elliott_label_ru(leg, phase, abc)
+    conf_labels = _confluence_labels_ru(sr=conf_sr, rnd=conf_round, retest=conf_retest)
+    if conf_labels:
+        notes = [f"confluence: {', '.join(conf_labels)}"] + notes
+    if abc:
+        notes = [abc.label_ru] + notes[:2]
 
     entry_hint: float | None = None
     stop_hint: float | None = None
@@ -661,6 +852,9 @@ def analyze_wave_structure(
         confluence_round=conf_round,
         confluence_retest=conf_retest,
         confluence_count=conf_count,
+        elliott_label=elliott,
+        abc_phase=abc.phase if abc else "",
+        abc_label_ru=abc.label_ru if abc else "",
     )
 
 

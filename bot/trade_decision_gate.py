@@ -1,0 +1,402 @@
+"""Единый алгоритм решения о сделке (ENTRY / WATCH / SKIP).
+
+Сканер находит движения часто. Алгоритм решает:
+- ENTRY — открывать позицию (уровень + структура + поток, не погоня)
+- WATCH — монета интересна, план есть, ждать цену входа
+- SKIP — шум / конфликт / плохой R:R
+
+Скоринг 0–100: структура + локация + волны/Fib + поток − штрафы за погоню.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import Signal
+    from .ta_analysis import TAAnalysisResult
+
+_PULLBACK_PHASES = frozenset({
+    "shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction",
+})
+_CHASE_TYPES = frozenset({
+    "mega_pump", "mega_dump", "impulse_pump", "impulse_dump",
+    "vertical_pump", "vertical_dump", "pulse_pump", "pulse_dump",
+    "trend_pump", "trend_dump", "price_pump", "price_dump",
+})
+
+# Пороги по умолчанию (settings v37)
+DEFAULT_MIN_ENTRY_SCORE = 62
+DEFAULT_MIN_WATCH_SCORE = 36
+
+
+@dataclass(frozen=True)
+class TradeDecision:
+    action: str  # entry | watch | skip
+    reason: str
+    location: str = ""  # fib | sr | retest | trigger | abc | none
+    chase: bool = False
+    setup_score: int = 0
+
+
+@dataclass(frozen=True)
+class SetupScore:
+    total: int
+    structure: int
+    location: int
+    wave: int
+    flow: int
+    penalties: int
+    location_kind: str
+    factors: tuple[str, ...]
+
+
+def _near_level(price: float, level: float | None, *, tol_pct: float = 0.55) -> bool:
+    if not level or price <= 0 or level <= 0:
+        return False
+    return abs(price - level) / price * 100.0 <= tol_pct
+
+
+def _is_late_chase(ta: TAAnalysisResult, side: str) -> tuple[bool, str]:
+    side = (side or "").lower()
+    rp = float(getattr(ta, "range_position", 0.5) or 0.5)
+    mom = float(getattr(ta, "momentum_pct", 0.0) or 0.0)
+    phase = (getattr(ta, "wave_phase", "") or "").lower()
+
+    if phase == "late_impulse":
+        return True, "финал импульса — ждать откат"
+
+    if side == "long":
+        if rp >= 0.90 and mom >= 0.6:
+            return True, f"погоня лонга у хая ({rp:.0%})"
+        if rp >= 0.84 and mom >= 1.2:
+            return True, f"импульс +{mom:.1f}% у вершины"
+        if getattr(ta, "post_pump", False) and rp >= 0.86 and mom >= 0.3:
+            return True, "post-pump — ждать откат"
+    elif side == "short":
+        if rp <= 0.10 and mom <= -0.6:
+            return True, f"погоня шорта у лоя ({rp:.0%})"
+        if rp <= 0.16 and mom <= -1.2:
+            return True, f"импульс {mom:.1f}% у дна"
+    return False, ""
+
+
+def _fib_location_ok(ta: TAAnalysisResult, side: str) -> bool:
+    if not bool(getattr(ta, "wave_has_confluence", False)):
+        return False
+    phase = (getattr(ta, "wave_phase", "") or "").lower()
+    bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    if phase not in _PULLBACK_PHASES:
+        return False
+    if side == "long" and bias == "long":
+        return True
+    if side == "short" and bias == "short":
+        return True
+    return False
+
+
+def _sr_location_ok(ta: TAAnalysisResult, side: str, *, tol_pct: float = 0.70) -> bool:
+    px = float(getattr(ta, "current_price", 0) or 0)
+    if px <= 0:
+        return False
+    if side == "long":
+        if _near_level(px, getattr(ta, "nearest_support", None), tol_pct=tol_pct):
+            return True
+        dist = getattr(ta, "dist_to_long_pct", None)
+        if dist is not None and 0 <= float(dist) <= tol_pct:
+            return True
+        ez = getattr(ta, "entry_zone", None)
+        if ez and isinstance(ez, tuple) and len(ez) == 2:
+            lo, hi = float(ez[0]), float(ez[1])
+            if lo <= px <= hi * 1.006:
+                return True
+    else:
+        if _near_level(px, getattr(ta, "nearest_resistance", None), tol_pct=tol_pct):
+            return True
+        dist = getattr(ta, "dist_to_short_pct", None)
+        if dist is not None and 0 <= float(dist) <= tol_pct:
+            return True
+        ez = getattr(ta, "entry_zone", None)
+        if ez and isinstance(ez, tuple) and len(ez) == 2:
+            lo, hi = float(ez[0]), float(ez[1])
+            if lo * 0.994 <= px <= hi:
+                return True
+    return False
+
+
+def _retest_location_ok(ta: TAAnalysisResult, side: str, *, tol_pct: float = 0.75) -> bool:
+    px = float(getattr(ta, "current_price", 0) or 0)
+    if px <= 0:
+        return False
+    if side == "long":
+        bo = getattr(ta, "breakout_level", None)
+        if bo and px >= float(bo) * 0.991 and _near_level(px, float(bo), tol_pct=tol_pct):
+            return True
+    else:
+        bd = getattr(ta, "breakdown_level", None)
+        if bd and px <= float(bd) * 1.009 and _near_level(px, float(bd), tol_pct=tol_pct):
+            return True
+    return False
+
+
+def _abc_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
+    phase = (getattr(ta, "abc_phase", "") or "").upper()
+    if phase not in {"C", "COMPLETE"}:
+        return False
+    bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    if side == "long" and bias in {"long", "neutral"}:
+        return True
+    if side == "short" and bias in {"short", "neutral"}:
+        return True
+    return False
+
+
+def detect_location(ta: TAAnalysisResult, side: str) -> str:
+    if _fib_location_ok(ta, side):
+        return "fib"
+    if _abc_entry_ok(ta, side):
+        return "abc"
+    if _retest_location_ok(ta, side):
+        return "retest"
+    if _sr_location_ok(ta, side):
+        return "sr"
+    return "none"
+
+
+def _side_aligned(ta: TAAnalysisResult, side: str) -> tuple[bool, str]:
+    side = (side or "").lower()
+    verdict = (getattr(ta, "verdict", "") or "").upper()
+    priority = (getattr(ta, "action_priority", "") or "neutral").lower()
+
+    if side == "long":
+        if verdict == "SHORT":
+            return False, "TA SHORT против лонга"
+        if verdict in {"LONG", "WAIT"} and priority in {"long", "neutral"}:
+            if verdict == "LONG" or priority == "long":
+                return True, ""
+            return True, ""
+        if priority == "short":
+            return False, "приоритет short"
+        return verdict == "LONG", "нет подтверждения лонга"
+    if side == "short":
+        if verdict == "LONG":
+            return False, "TA LONG против шорта"
+        if verdict in {"SHORT", "WAIT"} and priority in {"short", "neutral"}:
+            if verdict == "SHORT" or priority == "short":
+                return True, ""
+            return True, ""
+        if priority == "long":
+            return False, "приоритет long"
+        return verdict == "SHORT", "нет подтверждения шорта"
+    return False, "нет стороны"
+
+
+def _flow_score(ta: TAAnalysisResult, side: str) -> tuple[int, list[str]]:
+    pts = 0
+    notes: list[str] = []
+    cont = int(getattr(ta, "flow_continuation", 0) or 0)
+    corr = int(getattr(ta, "flow_correction", 0) or 0)
+    diff = cont - corr if side == "long" else corr - cont
+    if diff >= 12:
+        pts += 10
+        notes.append("поток за стороной")
+    elif diff >= 5:
+        pts += 5
+    elif diff <= -12:
+        pts -= 8
+        notes.append("поток против")
+    oi = getattr(ta, "oi_narrative_label", "") or ""
+    if oi and oi != "Мало данных OI":
+        if side == "long" and any(x in oi.lower() for x in ("long", "накоп", "aligned")):
+            pts += 5
+        elif side == "short" and any(x in oi.lower() for x in ("short", "шорт", "unwind")):
+            pts += 5
+    return max(-10, min(15, pts)), notes
+
+
+def score_trade_setup(
+    signal: Signal,
+    ta: TAAnalysisResult,
+    *,
+    side: str | None = None,
+    readiness: tuple[bool, str] | None = None,
+) -> SetupScore:
+    """Единый скоринг качества сетапа 0–100."""
+    side = (side or signal.side or "long").lower()
+    ready = bool(readiness and readiness[0])
+    location = detect_location(ta, side)
+    chase, chase_reason = _is_late_chase(ta, side)
+    aligned, _ = _side_aligned(ta, side)
+
+    structure = 0
+    loc_pts = 0
+    wave = 0
+    penalties = 0
+    factors: list[str] = []
+
+    verdict = (ta.verdict or "").upper()
+    priority = (ta.action_priority or "neutral").lower()
+
+    if side == "long":
+        if verdict == "LONG":
+            structure += 22
+            factors.append("TA LONG")
+        elif priority == "long":
+            structure += 14
+            factors.append("приоритет long")
+        elif aligned:
+            structure += 8
+    else:
+        if verdict == "SHORT":
+            structure += 22
+            factors.append("TA SHORT")
+        elif priority == "short":
+            structure += 14
+            factors.append("приоритет short")
+        elif aligned:
+            structure += 8
+
+    if not aligned:
+        penalties += 18
+        factors.append("конфликт TA")
+
+    loc_map = {"fib": 28, "abc": 26, "retest": 24, "sr": 16, "none": 0}
+    loc_pts = loc_map.get(location, 0)
+    if location != "none":
+        factors.append(f"локация {location}")
+
+    phase = (ta.wave_phase or "").lower()
+    if phase == "wave_2_4_zone":
+        wave += 16
+        factors.append("Fib 0.5–0.618")
+    elif phase in _PULLBACK_PHASES:
+        wave += 8
+    if getattr(ta, "abc_phase", "") in {"C", "complete"}:
+        wave += 14
+        factors.append("ABC волна C")
+    if getattr(ta, "wave_has_confluence", False):
+        wave += min(12, 4 * int(getattr(ta, "wave_confluence_count", 0) or 0))
+
+    flow, flow_notes = _flow_score(ta, side)
+    factors.extend(flow_notes)
+
+    if chase:
+        penalties += 22
+        factors.append(chase_reason or "погоня")
+    if "вход невыгоден" in (getattr(ta, "verdict_reason", "") or "").lower():
+        penalties += 30
+        factors.append("плохой R:R")
+
+    if ready and location == "none":
+        loc_pts = max(loc_pts, 14)
+        location = "trigger"
+        factors.append("триггер ready")
+    elif ready:
+        loc_pts = max(loc_pts, 10)
+
+    total = max(0, min(100, structure + loc_pts + wave + flow - penalties))
+    return SetupScore(
+        total=total,
+        structure=structure,
+        location=loc_pts,
+        wave=wave,
+        flow=flow,
+        penalties=penalties,
+        location_kind=location,
+        factors=tuple(factors[:6]),
+    )
+
+
+def decide_trade_action(
+    signal: Signal,
+    ta: TAAnalysisResult,
+    *,
+    readiness: tuple[bool, str] | None = None,
+    quality_tier: str | None = None,
+    watch_allowed: bool = True,
+    min_entry_score: int = DEFAULT_MIN_ENTRY_SCORE,
+    min_watch_score: int = DEFAULT_MIN_WATCH_SCORE,
+) -> TradeDecision:
+    """ENTRY = скоринг + локация/триггер; WATCH = интерес + план; SKIP = шум."""
+    side = (signal.side or "").lower()
+    ready = bool(readiness and readiness[0])
+    ready_reason = (readiness[1] if readiness else "") or ""
+
+    if quality_tier == "skip":
+        return TradeDecision("skip", "quality skip", setup_score=0)
+
+    if "вход невыгоден" in (getattr(ta, "verdict_reason", "") or "").lower():
+        return TradeDecision("skip", "плохой R:R", setup_score=0)
+
+    setup = score_trade_setup(signal, ta, side=side, readiness=readiness)
+    chase, chase_reason = _is_late_chase(ta, side)
+    location = setup.location_kind
+    aligned, align_reason = _side_aligned(ta, side)
+
+    if not aligned and setup.total < min_watch_score:
+        return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
+
+    # ENTRY: достаточный скор + (локация или ready) + не жёсткая погоня
+    has_location = location in {"fib", "abc", "retest", "sr", "trigger"}
+    can_entry = (
+        setup.total >= min_entry_score
+        and has_location
+        and (not chase or location in {"fib", "abc", "retest"})
+    )
+    if can_entry and (ready or location in {"fib", "abc", "retest", "sr"}):
+        reason = f"сетап {setup.total}/100"
+        if ready_reason:
+            reason = f"{reason} · {ready_reason}"
+        return TradeDecision(
+            "entry", reason, location=location, chase=False, setup_score=setup.total,
+        )
+
+    # Ready trigger без погоня — тоже ENTRY при хорошем скоре
+    if ready and not chase and setup.total >= min_entry_score - 8:
+        return TradeDecision(
+            "entry",
+            ready_reason or f"триггер · сетап {setup.total}/100",
+            location="trigger",
+            chase=False,
+            setup_score=setup.total,
+        )
+
+    # WATCH: движение + план, ждём уровень (чаще сигналы, но не market entry)
+    if watch_allowed and setup.total >= min_watch_score:
+        reason = chase_reason or ready_reason or "ждать уровень входа"
+        if not has_location:
+            reason = f"{reason} · план: Fib/ретest/ПС"
+        return TradeDecision(
+            "watch", reason, location=location, chase=chase, setup_score=setup.total,
+        )
+
+    if watch_allowed and aligned and (signal.signal_type or "").lower() in _CHASE_TYPES:
+        return TradeDecision(
+            "watch",
+            chase_reason or "импульс — ждать откат к уровню",
+            location=location,
+            chase=True,
+            setup_score=setup.total,
+        )
+
+    return TradeDecision(
+        "skip",
+        align_reason or f"слабый сетап {setup.total}/100",
+        location=location,
+        chase=chase,
+        setup_score=setup.total,
+    )
+
+
+def apply_decision_to_quality_tier(
+    quality_tier: str,
+    decision: TradeDecision,
+) -> str:
+    q = (quality_tier or "watch").lower()
+    if decision.action == "skip":
+        return "skip"
+    if decision.action == "watch":
+        return "watch" if q != "skip" else "skip"
+    if q == "skip":
+        return "skip"
+    return "entry"

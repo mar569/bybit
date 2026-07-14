@@ -106,6 +106,7 @@ from .signal_quality_gate import (
     format_quality_hot_html,
     format_quality_warnings_html,
 )
+from .trade_decision_gate import apply_decision_to_quality_tier, decide_trade_action
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_screenshot import chart_capture_service
 from .settings import SettingsManager, clamp_cooldown_seconds
@@ -898,11 +899,13 @@ class TelegramBot:
         sent_any = False
         ta_result = None
         readiness: tuple[bool, str] | None = None
+        trade_decision = None
         png: bytes | None = None
         pro_text = ""
         need_ta = (
             settings.signal_chart_enabled
             or settings.signal_playbook_enabled
+            or getattr(settings, "trade_decision_gate_enabled", True)
             or (
                 not skip_dedupe
                 and (settings.actionable_signals_only or settings.actionable_show_readiness_badge)
@@ -1018,6 +1021,40 @@ class TelegramBot:
                     readiness=readiness,
                     outcome_stats=outcome_stats,
                 )
+
+                if getattr(settings, "trade_decision_gate_enabled", True) and not skip_dedupe:
+                    trade_decision = decide_trade_action(
+                        signal,
+                        ta_result,
+                        readiness=readiness,
+                        quality_tier=quality.tier,
+                        watch_allowed=bool(settings.signal_watch_mode_enabled),
+                        min_entry_score=int(getattr(settings, "trade_decision_min_entry_score", 62)),
+                        min_watch_score=int(getattr(settings, "trade_decision_min_watch_score", 36)),
+                    )
+                    new_tier = apply_decision_to_quality_tier(quality.tier, trade_decision)
+                    signal.details["trade_decision"] = trade_decision.action
+                    signal.details["trade_decision_reason"] = trade_decision.reason
+                    signal.details["trade_location"] = trade_decision.location
+                    signal.details["setup_score"] = trade_decision.setup_score
+                    if new_tier != quality.tier or trade_decision.reason:
+                        from .signal_quality_gate import SignalQualityResult
+
+                        quality = SignalQualityResult(
+                            tier=new_tier,
+                            block_reason=trade_decision.reason if new_tier != "entry" else quality.block_reason,
+                            warnings=quality.warnings,
+                            flow_label=quality.flow_label,
+                            cvd_ratio=quality.cvd_ratio,
+                            cvd_detail=quality.cvd_detail,
+                        )
+                    if trade_decision.action == "skip":
+                        logger.info(
+                            "Telegram skip %s %s: trade gate — %s",
+                            signal.exchange, signal.symbol, trade_decision.reason,
+                        )
+                        return
+
                 signal.details["quality_tier"] = quality.tier
                 signal.details["quality_block"] = quality.block_reason
 
@@ -1047,7 +1084,11 @@ class TelegramBot:
                         )
                         return
 
-                if settings.actionable_signals_only and not skip_dedupe:
+                # При включённом арбитре: ENTRY только entry; WATCH если режим watch;
+                # иначе импульс без локации не шлём как «готовый сигнал».
+                gate_on = getattr(settings, "trade_decision_gate_enabled", True)
+                enforce_actionable = settings.actionable_signals_only or gate_on
+                if enforce_actionable and not skip_dedupe:
                     if quality.tier == "watch" and not settings.signal_watch_mode_enabled:
                         logger.info(
                             "Telegram skip %s %s: watch-only mode off — %s",
@@ -1064,9 +1105,15 @@ class TelegramBot:
                                 signal.exchange, signal.symbol, reason,
                             )
                             return
+                    if gate_on and quality.tier not in {"entry", "watch"}:
+                        logger.info(
+                            "Telegram skip %s %s: gate tier=%s — %s",
+                            signal.exchange, signal.symbol, quality.tier, quality.block_reason,
+                        )
+                        return
             else:
                 quality = None
-                if settings.actionable_signals_only and not skip_dedupe:
+                if (settings.actionable_signals_only or getattr(settings, "trade_decision_gate_enabled", True)) and not skip_dedupe:
                     logger.info(
                         "Telegram skip %s %s: actionable filter needs TA",
                         signal.exchange,
@@ -1094,9 +1141,14 @@ class TelegramBot:
                     readiness=readiness,
                     quality_html=hot_quality_html,
                     quality_tier=quality.tier if quality else None,
+                    decision=trade_decision,
                 )
                 pro_text = build_pro_detail_html(
-                    signal, ta_result, readiness=readiness, quality_html=quality_html,
+                    signal,
+                    ta_result,
+                    readiness=readiness,
+                    quality_html=quality_html,
+                    decision=trade_decision,
                 )
                 pro_token = await self._store_signal_pro(pro_text)
                 keyboard = self._signal_keyboard(signal, pro_token)

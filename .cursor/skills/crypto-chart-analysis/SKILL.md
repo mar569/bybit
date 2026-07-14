@@ -70,6 +70,12 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 2. **Fib + круглый уровень** — 0.382/0.5/0.618 у round number
 3. **Fib + ретест пробоя** — после слома структуры Fib у уровня breakout/breakdown
 
+**Trade Decision Gate** (`bot/trade_decision_gate.py`): Hot ENTRY только при локации (fib/sr/retest/trigger). Импульс сканера у хая/лоя без отката → **WATCH**, не вход вдогонку.
+
+**Trade Analyst** (`bot/trade_analyst.py`): профи-тезис в Hot/Pro — структура, Elliott ABC, Fib confluence, аргументы (OI/CVD/SMC), вход/стоп/цели, риски.
+
+**Elliott ABC Lite** (`bot/wave_structure.py`): после импульса ищется коррекция A→B→C; волна C @ Fib = лучшая зона продолжения.
+
 Fib — **подсказка**, не окончательное решение для входа.
 На графике: Fib **0.382 / 0.5 / 0.618** (+ 1.272/1.618 как цели после отката).
 **Не пиши** в Telegram Hot «волна 2/Эллиотт».

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 35
+SETTINGS_VERSION = 37
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -271,7 +271,7 @@ class ScannerSettings:
     min_probability_percent: float = 66.0
     probability_filter_enabled: bool = True
 
-    # Только сигналы с готовым входом (TA LONG/SHORT, триггер рядом)
+    # Только ENTRY без WATCH — false = чаще алерты с планом (WATCH + ENTRY)
     actionable_signals_only: bool = False
     actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 3.0
@@ -280,6 +280,11 @@ class ScannerSettings:
     actionable_require_smc: bool = False
     actionable_show_readiness_badge: bool = True
     actionable_accept_armed: bool = True
+
+    # v36: единый арбитр ENTRY — локация (Fib/ПС/ретест) обязательна; импульс → WATCH
+    trade_decision_gate_enabled: bool = True
+    trade_decision_min_entry_score: int = 62
+    trade_decision_min_watch_score: int = 36
 
     # Не слать «шум»: WAIT + слабый TA + конфликт со сканером
     signal_skip_noise: bool = True
@@ -693,6 +698,9 @@ class ScannerSettings:
             actionable_require_smc=bool(base.get("actionable_require_smc", False)),
             actionable_show_readiness_badge=bool(base.get("actionable_show_readiness_badge", True)),
             actionable_accept_armed=bool(base.get("actionable_accept_armed", True)),
+            trade_decision_gate_enabled=bool(base.get("trade_decision_gate_enabled", True)),
+            trade_decision_min_entry_score=int(base.get("trade_decision_min_entry_score", 62)),
+            trade_decision_min_watch_score=int(base.get("trade_decision_min_watch_score", 36)),
             signal_skip_noise=bool(base.get("signal_skip_noise", True)),
             signal_ta_compact=bool(base.get("signal_ta_compact", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
@@ -1104,6 +1112,20 @@ class SettingsManager:
                 merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
                     merged.get("signal_cooldown_seconds"), default=90,
                 )
+            if version < 36:
+                # Арбитр входа: импульс ≠ ENTRY; только локация (Fib/П/С/ретест)
+                merged["trade_decision_gate_enabled"] = True
+                merged["actionable_signals_only"] = True
+                merged["signal_watch_mode_enabled"] = True
+                merged["signal_skip_noise"] = True
+            if version < 37:
+                merged["trade_decision_min_entry_score"] = 62
+                merged["trade_decision_min_watch_score"] = 36
+                merged["actionable_signals_only"] = False
+                merged["signal_watch_mode_enabled"] = True
+                merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
+                    merged.get("signal_cooldown_seconds"), default=60,
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1111,7 +1133,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v35: идеальный пресет входов — ранний flash/pulse, быстрый TRIGGER; preserved: %s)",
+                "Settings migrated v%d → v%d (v37: setup score ENTRY/WATCH; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

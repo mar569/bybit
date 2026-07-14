@@ -17,9 +17,16 @@ from .ta_analysis import (
     entry_readiness_line_html,
     ta_signal_scenario_line_html,
 )
+from .trade_analyst import (
+    TradeThesis,
+    build_trade_thesis,
+    format_thesis_hot_html,
+    format_thesis_pro_html,
+)
 
 if TYPE_CHECKING:
     from .models import Signal
+    from .trade_decision_gate import TradeDecision
 
 _POST_PUMP_SHORT_TYPES = frozenset({
     "vertical_pump",
@@ -82,7 +89,18 @@ def resolve_trade_playbook(signal: Signal, ta: TAAnalysisResult) -> TradePlayboo
 
     entry = ta.breakout_level if is_long else ta.breakdown_level
     entry_op = "≥" if is_long else "≤"
-    if entry is None and ta.current_price:
+    st = (signal.signal_type or "").lower()
+    chase_type = st in {
+        "mega_pump", "mega_dump", "impulse_pump", "impulse_dump",
+        "vertical_pump", "vertical_dump", "pulse_pump", "pulse_dump",
+    }
+    # План позиции: уровень, не «текущая цена» на импульсе
+    if ta.entry_zone and ta.wave_has_confluence:
+        entry = (ta.entry_zone[0] + ta.entry_zone[1]) / 2.0
+        entry_op = "≈"
+    elif chase_type and entry is not None:
+        entry_op = "≥" if is_long else "≤"
+    elif entry is None and ta.current_price and not chase_type:
         entry = ta.current_price
         entry_op = "≈"
     stop = ta.invalidation_price
@@ -109,6 +127,13 @@ def resolve_trade_playbook(signal: Signal, ta: TAAnalysisResult) -> TradePlayboo
 
 def _playbook_logic(signal: Signal, ta: TAAnalysisResult, side: str) -> str:
     st = signal.signal_type or ""
+    if ta.elliott_label and ta.wave_has_confluence:
+        bits = [ta.elliott_label]
+        if ta.abc_label_ru:
+            bits.append(ta.abc_label_ru)
+        return " · ".join(bits)[:100]
+    if ta.abc_label_ru:
+        return ta.abc_label_ru[:90]
     if st in {"trend_dump", "trend_pump"}:
         prior = signal.details.get("trend_prior_pct")
         if prior is not None:
@@ -211,26 +236,21 @@ def build_hot_caption(
     readiness: tuple[bool, str] | None = None,
     quality_html: str = "",
     quality_tier: str | None = None,
+    decision: TradeDecision | None = None,
 ) -> str:
-    """Короткий caption под график; полный разбор — в «Подробнее»."""
-    pb = resolve_trade_playbook(signal, ta)
+    """Короткий caption: профи-тезис + план входа."""
+    thesis = build_trade_thesis(
+        signal, ta, decision=decision, readiness=readiness,
+    )
     parts = [header.strip()]
     if quality_html:
         parts.append(quality_html.strip())
-    if pb:
-        parts.append(
-            format_playbook_html(
-                pb,
-                readiness=readiness,
-                minimal=True,
-            )
-        )
-    else:
-        scenario = ta_signal_scenario_line_html(
-            ta, signal_side=signal.side, signal_type=signal.signal_type,
-        )
-        if scenario:
-            parts.append(scenario)
+    parts.append(format_thesis_hot_html(thesis, skip_headline=bool(quality_tier)))
+    # Fallback playbook если нет уровней в тезисе
+    if thesis.action == "entry" and not thesis.entry_price and not thesis.entry_zone:
+        pb = resolve_trade_playbook(signal, ta)
+        if pb:
+            parts.append(format_playbook_html(pb, readiness=readiness, minimal=True))
 
     text = "\n\n".join(p for p in parts if p)
     if len(text) > 980:
@@ -244,8 +264,9 @@ def build_pro_detail_html(
     *,
     readiness: tuple[bool, str] | None = None,
     quality_html: str = "",
+    decision: TradeDecision | None = None,
 ) -> str:
-    """Полный разбор для чата анализов и кнопки «Подробнее»."""
+    """Полный разбор: аналитический план + факторы."""
     exchange = signal.exchange
     sym = signal.symbol
     score = ta_display_score(ta)
@@ -257,28 +278,30 @@ def build_pro_detail_html(
     body = "\n".join(lines)
     if quality_html:
         body = _append_unique(lines, body, quality_html)
-    pb = resolve_trade_playbook(signal, ta)
 
+    thesis = build_trade_thesis(
+        signal, ta, decision=decision, readiness=readiness,
+    )
+    body = _append_unique(lines, body, format_thesis_pro_html(thesis))
+
+    conflict = ta_scanner_conflict_line_html(ta, signal.side)
+    body = _append_unique(lines, body, conflict)
+
+    pb = resolve_trade_playbook(signal, ta)
     if pb:
-        conflict = ta_scanner_conflict_line_html(ta, signal.side)
-        body = _append_unique(lines, body, conflict)
         body = _append_unique(lines, body, format_playbook_html(pb, readiness=readiness))
 
-        scenario = ta_signal_scenario_line_html(
-            ta, signal_side=signal.side, signal_type=signal.signal_type,
-        )
-        body = _append_unique(lines, body, scenario)
+    plain = ta_plain_forecast_line(ta)
+    body = _append_unique(lines, body, plain)
 
-        plain = ta_plain_forecast_line(ta)
-        body = _append_unique(lines, body, plain)
+    basis = ta_signal_forecast_summary_line(ta)
+    body = _append_unique(lines, body, basis)
 
-        basis = ta_signal_forecast_summary_line(ta)
-        body = _append_unique(lines, body, basis)
+    if ta.smc and ta.smc.smc_score >= 4:
+        smc = format_smc_compact_html(ta.smc)
+        body = _append_unique(lines, body, smc or "")
 
-        if ta.smc and ta.smc.smc_score >= 4:
-            smc = format_smc_compact_html(ta.smc)
-            body = _append_unique(lines, body, smc or "")
-    else:
+    if not pb:
         verbose = ta_signal_caption_html(
             ta,
             signal_side=signal.side,
@@ -292,7 +315,10 @@ def build_pro_detail_html(
     prob = signal.details.get("probability_percent")
     if prob:
         lines.append(f"🎯 Вероятность сканера: <b>{float(prob):.0f}%</b>")
+    trade_dec = signal.details.get("trade_decision_reason")
+    if trade_dec:
+        lines.append(f"⚖️ Арбитр: <i>{trade_dec}</i>")
     lines.append(
-        "📈 <b>График:</b> уровни на картинке = вход / стоп / цели плана."
+        "📈 <b>График:</b> Fib / уровни / ABC — разметка на картинке."
     )
     return "\n".join(lines)
