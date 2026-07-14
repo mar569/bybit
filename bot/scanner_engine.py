@@ -519,8 +519,21 @@ class SignalEngine:
             is_liq_cascade = candidate.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
             is_impulse = candidate.signal_type in {"impulse_pump", "impulse_dump"}
             is_trend_ex = candidate.signal_type in {"trend_dump", "trend_pump"}
+            is_peak_crash = (
+                is_breakout
+                and (candidate.breakout_meta or {}).get("vertical_mode") == "peak_crash"
+            )
             min_liquidity = tier.min_open_interest_usd
-            if is_breakout:
+            if is_peak_crash:
+                # Слив от хая — важнее скорость, чем жёсткий порог флет-брейкаута
+                min_liquidity = max(
+                    min_liquidity,
+                    min(
+                        float(settings.breakout_min_liquidity_oi_usd),
+                        float(settings.impulse_min_liquidity_oi_usd),
+                    ),
+                )
+            elif is_breakout:
                 min_liquidity = max(min_liquidity, settings.breakout_min_liquidity_oi_usd)
             elif is_reversal:
                 min_liquidity = max(min_liquidity, settings.reversal_min_liquidity_oi_usd)
@@ -1320,7 +1333,7 @@ class SignalEngine:
         settings: ScannerSettings,
         thresholds: ExchangeThresholds,
     ) -> SignalCandidate | None:
-        """Быстрый mega pump/dump (5–10m) — ловит вертикальные сливы без 15m истории."""
+        """Быстрый mega pump/dump — point-to-point И dump от хая окна (wick→crash)."""
         if not settings.flash_enabled or current.price is None:
             return None
         flash_tiers, flash_min_oi_up, flash_min_oi_down = self._effective_flash_thresholds(
@@ -1330,52 +1343,157 @@ class SignalEngine:
             return None
         best: SignalCandidate | None = None
         for window in settings.flash_window_minutes:
-            earlier = self._point_at_cutoff(history, current.timestamp - window * 60)
+            window_start = current.timestamp - window * 60
+            earlier = self._point_at_cutoff(history, window_start)
             if earlier is None:
                 continue
             changes = self._compute_changes(current, earlier, window * 60)
+            # Peak / trough в окне — ловит wick→sliv (как MAGMA)
+            peak_point: SnapshotPoint | None = None
+            trough_point: SnapshotPoint | None = None
+            for p in history:
+                if p.timestamp < window_start or p.price is None or p.price <= 0:
+                    continue
+                if peak_point is None or (p.price or 0) >= (peak_point.price or 0):
+                    peak_point = p
+                if trough_point is None or (p.price or 0) <= (trough_point.price or float("inf")):
+                    trough_point = p
+
+            peak_dump_pct = 0.0
+            trough_pump_pct = 0.0
+            peak_earlier = earlier
+            trough_earlier = earlier
+            if peak_point and peak_point.price and current.price < peak_point.price:
+                peak_dump_pct = self._percent_change(peak_point.price, current.price)
+                peak_earlier = peak_point
+            if trough_point and trough_point.price and current.price > trough_point.price:
+                trough_pump_pct = self._percent_change(trough_point.price, current.price)
+                trough_earlier = trough_point
+
             for tier_pct in sorted(flash_tiers, reverse=True):
                 bypass_oi = tier_pct >= settings.flash_bypass_oi_tier_pct
                 abs_px = abs(changes.price_change_percent)
-                if changes.price_change_percent >= tier_pct:
+                if changes.price_change_percent >= tier_pct or trough_pump_pct >= tier_pct:
+                    use_trough = trough_pump_pct >= tier_pct and trough_pump_pct >= changes.price_change_percent
+                    move = trough_pump_pct if use_trough else changes.price_change_percent
+                    oi_chg = (
+                        self._oi_percent_change(trough_earlier, current)
+                        if use_trough else changes.oi_change_percent
+                    )
                     oi_ok = (
                         bypass_oi
-                        or abs_px >= 10.0
-                        or changes.oi_change_percent >= flash_min_oi_up
+                        or abs(move) >= 10.0
+                        or oi_chg >= flash_min_oi_up
                     )
                     if oi_ok:
                         cand = SignalCandidate(
                             signal_type="mega_pump",
                             period_minutes=window,
-                            oi_change_percent=changes.oi_change_percent,
-                            price_change_percent=changes.price_change_percent,
-                            earlier=earlier,
+                            oi_change_percent=oi_chg,
+                            price_change_percent=round(move, 2),
+                            earlier=trough_earlier if use_trough else earlier,
                             urgency=0,
                             flash_tier=tier_pct,
+                            breakout_meta={
+                                "flash_mode": "trough_to_now" if use_trough else "point",
+                                "window_min": float(window),
+                            },
                         )
                         if best is None or (cand.flash_tier or 0) > (best.flash_tier or 0):
                             best = cand
                         break
-                if changes.price_change_percent <= -tier_pct:
+                if changes.price_change_percent <= -tier_pct or peak_dump_pct <= -tier_pct:
+                    use_peak = peak_dump_pct <= -tier_pct and peak_dump_pct <= changes.price_change_percent
+                    move = peak_dump_pct if use_peak else changes.price_change_percent
+                    oi_chg = (
+                        self._oi_percent_change(peak_earlier, current)
+                        if use_peak else changes.oi_change_percent
+                    )
                     oi_ok = (
                         bypass_oi
-                        or abs_px >= 10.0
-                        or changes.oi_change_percent <= -flash_min_oi_down
+                        or abs(move) >= 8.0
+                        or oi_chg <= -flash_min_oi_down
                     )
                     if oi_ok:
                         cand = SignalCandidate(
                             signal_type="mega_dump",
                             period_minutes=window,
-                            oi_change_percent=changes.oi_change_percent,
-                            price_change_percent=changes.price_change_percent,
-                            earlier=earlier,
-                            urgency=0,
+                            oi_change_percent=oi_chg,
+                            price_change_percent=round(move, 2),
+                            earlier=peak_earlier if use_peak else earlier,
+                            urgency=1 if use_peak else 0,
                             flash_tier=tier_pct,
+                            breakout_meta={
+                                "flash_mode": "peak_to_now" if use_peak else "point",
+                                "window_min": float(window),
+                                "peak_price": round(peak_earlier.price or 0, 8) if use_peak else None,
+                            },
                         )
-                        if best is None or (cand.flash_tier or 0) > (best.flash_tier or 0):
+                        if best is None or (cand.flash_tier or 0) > (best.flash_tier or 0) or (
+                            (cand.flash_tier or 0) == (best.flash_tier or 0)
+                            and cand.urgency > (best.urgency or 0)
+                        ):
                             best = cand
                         break
         return best
+
+    def _detect_vertical_spike_dump(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+    ) -> SignalCandidate | None:
+        """Вертикальный слив от локального хая (не требует 20м флета).
+
+        Ловит MAGMA-подобные: wick/spike вверх → мгновенный crash.
+        """
+        if not settings.breakout_enabled or current.price is None:
+            return None
+        window_min = max(5, int(settings.breakout_spike_minutes) + 2)
+        window_start = current.timestamp - window_min * 60
+        points = [
+            p for p in history
+            if p.timestamp >= window_start and p.price is not None and p.price > 0
+        ]
+        if len(points) < 6:
+            return None
+        peak = max(points, key=lambda p: p.price or 0.0)
+        peak_px = peak.price or 0.0
+        if peak_px <= 0 or current.price >= peak_px * 0.995:
+            return None
+        peak_age_min = (current.timestamp - peak.timestamp) / 60.0
+        if peak_age_min > float(window_min):
+            return None
+        dump_pct = self._percent_change(peak_px, current.price)
+        min_dump = max(float(tier.breakout_min_dump_percent), 2.5)
+        if dump_pct > -min_dump:
+            return None
+        # Не считать «сливом» медленное сползание — нужен быстрый кусок после хая
+        after_peak = [p for p in points if p.timestamp >= peak.timestamp]
+        if len(after_peak) >= 3:
+            mid = after_peak[len(after_peak) // 2]
+            mid_dump = self._percent_change(peak_px, mid.price or peak_px)
+            # половина слива за первую половину пути после хая
+            if mid_dump > dump_pct * 0.35 and peak_age_min > 4.0:
+                return None
+        oi_pct = self._oi_percent_change(peak, current)
+        meta = {
+            "spike_percent": round(dump_pct, 2),
+            "peak_price": round(peak_px, 8),
+            "peak_age_min": round(peak_age_min, 2),
+            "vertical_mode": "peak_crash",
+            "window_min": float(window_min),
+        }
+        return SignalCandidate(
+            signal_type="vertical_dump",
+            period_minutes=max(1, int(round(peak_age_min)) or settings.breakout_spike_minutes),
+            oi_change_percent=oi_pct,
+            price_change_percent=round(dump_pct, 2),
+            earlier=peak,
+            urgency=1,
+            breakout_meta=meta,
+        )
 
     def _detect_trend_exhaustion_candidate(
         self,
@@ -1433,6 +1551,11 @@ class SignalEngine:
         flash = self._detect_flash_candidate(history, current, settings, thresholds)
         if flash is not None:
             return flash
+
+        # Вертикальный peak→crash (без требования 20м флета) — раньше impulse/flat-breakout
+        spike_dump = self._detect_vertical_spike_dump(history, current, settings, tier)
+        if spike_dump is not None:
+            return spike_dump
 
         trend_ex = self._detect_trend_exhaustion_candidate(
             exchange, symbol, history, current, settings, tier,
