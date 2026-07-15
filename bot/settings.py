@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 38
+SETTINGS_VERSION = 39
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -248,6 +248,21 @@ class ScannerSettings:
     trend_exhaustion_risk_max_pullback_pct: float = 1.8
     trend_exhaustion_risk_min_confluence: int = 2
     trend_exhaustion_risk_cooldown_seconds: int = 600
+
+    # Потенциал тренда (AKE): флет → пробой + OI↑ + CVD↑, early WATCH
+    trend_seed_enabled: bool = True
+    trend_seed_bypass_top_n: bool = True
+    trend_seed_base_minutes: int = 25
+    trend_seed_break_minutes: int = 5
+    trend_seed_max_flat_percent: float = 3.0
+    trend_seed_min_break_percent: float = 1.2
+    trend_seed_max_extension_percent: float = 10.0
+    trend_seed_min_oi_rise_percent: float = 0.8
+    trend_seed_min_oi_change_usd: float = 25_000.0
+    trend_seed_cvd_min_ratio: float = 0.55
+    trend_seed_require_cvd: bool = False
+    trend_seed_min_liquidity_oi_usd: float = 100_000.0
+    trend_seed_cooldown_seconds: int = 150
 
     min_open_interest: float = 80_000.0
     min_volume: float = 0.0
@@ -672,6 +687,27 @@ class ScannerSettings:
             trend_exhaustion_risk_cooldown_seconds=int(
                 base.get("trend_exhaustion_risk_cooldown_seconds", 600)
             ),
+            trend_seed_enabled=bool(base.get("trend_seed_enabled", True)),
+            trend_seed_bypass_top_n=bool(base.get("trend_seed_bypass_top_n", True)),
+            trend_seed_base_minutes=int(base.get("trend_seed_base_minutes", 25)),
+            trend_seed_break_minutes=int(base.get("trend_seed_break_minutes", 5)),
+            trend_seed_max_flat_percent=float(base.get("trend_seed_max_flat_percent", 3.0)),
+            trend_seed_min_break_percent=float(base.get("trend_seed_min_break_percent", 1.2)),
+            trend_seed_max_extension_percent=float(
+                base.get("trend_seed_max_extension_percent", 10.0)
+            ),
+            trend_seed_min_oi_rise_percent=float(
+                base.get("trend_seed_min_oi_rise_percent", 0.8)
+            ),
+            trend_seed_min_oi_change_usd=float(
+                base.get("trend_seed_min_oi_change_usd", 25_000.0)
+            ),
+            trend_seed_cvd_min_ratio=float(base.get("trend_seed_cvd_min_ratio", 0.55)),
+            trend_seed_require_cvd=bool(base.get("trend_seed_require_cvd", False)),
+            trend_seed_min_liquidity_oi_usd=float(
+                base.get("trend_seed_min_liquidity_oi_usd", 100_000.0)
+            ),
+            trend_seed_cooldown_seconds=int(base.get("trend_seed_cooldown_seconds", 150)),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),
@@ -1138,6 +1174,20 @@ class SettingsManager:
                 merged["analysis_max_per_hour"] = max(
                     int(merged.get("analysis_max_per_hour", 5)), 8
                 )
+            if version < 39:
+                merged["trend_seed_enabled"] = True
+                merged["trend_seed_bypass_top_n"] = True
+                merged["trend_seed_base_minutes"] = 25
+                merged["trend_seed_break_minutes"] = 5
+                merged["trend_seed_max_flat_percent"] = 3.0
+                merged["trend_seed_min_break_percent"] = 1.2
+                merged["trend_seed_max_extension_percent"] = 10.0
+                merged["trend_seed_min_oi_rise_percent"] = 0.8
+                merged["trend_seed_min_oi_change_usd"] = 25_000.0
+                merged["trend_seed_cvd_min_ratio"] = 0.55
+                merged["trend_seed_require_cvd"] = False
+                merged["trend_seed_min_liquidity_oi_usd"] = 100_000.0
+                merged["trend_seed_cooldown_seconds"] = 150
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1145,7 +1195,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v38: liq/analysis delivery fix; preserved: %s)",
+                "Settings migrated v%d → v%d (v39: trend_seed AKE model; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

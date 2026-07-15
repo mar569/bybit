@@ -127,6 +127,10 @@ def _signal_cooldown_seconds(signal: Signal, settings) -> int:
         return clamp_cooldown_seconds(settings.breakout_cooldown_seconds, default=150)
     if is_impulse:
         return clamp_cooldown_seconds(settings.impulse_cooldown_seconds, default=120)
+    if signal.signal_type == "trend_seed":
+        return clamp_cooldown_seconds(
+            getattr(settings, "trend_seed_cooldown_seconds", 150), default=150,
+        )
     return clamp_cooldown_seconds(settings.signal_cooldown_seconds, default=120)
 
 EXCHANGE_LABEL = {
@@ -820,12 +824,14 @@ class TelegramBot:
         is_vertical = signal.signal_type in {"vertical_pump", "vertical_dump"}
         is_impulse = signal.signal_type in {"impulse_pump", "impulse_dump"}
         is_trend = signal.signal_type in {"trend_pump", "trend_dump"}
+        is_trend_seed = signal.signal_type == "trend_seed"
         is_reversal = signal.signal_type in {"reversal_pump", "reversal_dump"}
         is_liq_cascade = signal.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
         is_priority = (
             is_vertical
             or is_impulse
             or is_trend
+            or is_trend_seed
             or is_reversal
             or is_liq_cascade
             or prob >= 75
@@ -834,6 +840,10 @@ class TelegramBot:
         )
         if is_vertical or is_impulse or is_trend:
             message = self._format_vertical_breakout_message(
+                signal, compact=self.settings_manager.settings.signal_message_compact,
+            )
+        elif is_trend_seed:
+            message = self._format_trend_seed_message(
                 signal, compact=self.settings_manager.settings.signal_message_compact,
             )
         else:
@@ -4104,6 +4114,8 @@ class TelegramBot:
             return "📊", "тренд ↑" if is_long else "тренд ↓"
         if st in {"vertical_pump", "vertical_dump"}:
             return "🚨", "вертикаль ↑" if is_long else "вертикаль ↓"
+        if st == "trend_seed":
+            return "🌱", "потенциал тренда"
         return ("🟢", "LONG") if is_long else ("🔴", "SHORT")
 
     @staticmethod
@@ -4120,6 +4132,7 @@ class TelegramBot:
             "impulse_dump": "📉 ИМПУЛЬС ВНИЗ",
             "trend_pump": "📈 ТРЕНД → ОТСКОК",
             "trend_dump": "📉 ТРЕНД → СЛИВ",
+            "trend_seed": "🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -4148,6 +4161,48 @@ class TelegramBot:
         if inline:
             return f"{link} <code>{sym}</code>"
         return f"{link}\n<code>{sym}</code>"
+
+    def _format_trend_seed_message(self, signal: Signal, *, compact: bool = False) -> str:
+        exchange_key = "bybit" if "bybit" in signal.exchange.lower() else "binance"
+        exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
+        flat_pct = signal.details.get("seed_flat_range_pct", signal.details.get("flat_range_percent", "—"))
+        break_pct = signal.details.get("seed_break_above_base_pct", signal.price_change_percent)
+        oi_pct = abs(signal.oi_change_percent)
+        oi_usd = format_oi_usd(signal.oi_change_usd)
+        cvd = signal.details.get("seed_cvd_ratio", signal.details.get("cvd_ratio"))
+        cvd_miss = float(signal.details.get("seed_cvd_missing", 0) or 0)
+        if cvd is not None:
+            try:
+                cvd_txt = f"{float(cvd):.0%} buy"
+            except (TypeError, ValueError):
+                cvd_txt = str(cvd)
+        elif cvd_miss >= 0.5:
+            cvd_txt = "нет данных"
+        else:
+            cvd_txt = "—"
+        break_txt = (
+            f"+{float(break_pct):.2f}%"
+            if isinstance(break_pct, (int, float))
+            else str(break_pct)
+        )
+        if compact:
+            return (
+                f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH</b> · {exchange_emoji} {exchange_name}\n"
+                f"{self._symbol_link_and_copy(signal, copy_only=True)}\n"
+                f"база→пробой {break_txt} · OI +{oi_pct:.2f}% ({oi_usd}) · CVD {cvd_txt}\n"
+            )
+        base_min = int(float(signal.details.get("seed_base_minutes", 25) or 25))
+        return (
+            f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH</b>\n"
+            f"{exchange_emoji} <b>{exchange_name}</b> · выход из базы {base_min}м\n"
+            f"🟢 <b>LONG</b> (ранний режим, не market)\n"
+            f"{self._symbol_link_and_copy(signal)}\n"
+            f"📊 Флет: <b>{flat_pct}%</b> → пробой <b>{break_txt}</b>\n"
+            f"📈 OI: <b>+{oi_pct:.2f}%</b> (<b>{oi_usd}</b>) · CVD: <b>{cvd_txt}</b>\n\n"
+            f"<i>Поток подтверждает старт тренда — ждать ретест/уровень</i>\n\n"
+            f"{self._market_structure_section(signal)}"
+            f"{self._bybit_real_data_section(signal)}"
+        )
 
     def _format_vertical_breakout_message(self, signal: Signal, *, compact: bool = False) -> str:
         if compact:

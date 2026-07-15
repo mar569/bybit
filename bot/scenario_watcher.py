@@ -23,6 +23,7 @@ IMPULSE_SIGNAL_TYPES = frozenset({
     "impulse_dump",
     "trend_pump",
     "trend_dump",
+    "trend_seed",
     "vertical_pump",
     "vertical_dump",
     "mega_pump",

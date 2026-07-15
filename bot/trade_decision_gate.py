@@ -22,7 +22,7 @@ _PULLBACK_PHASES = frozenset({
 _CHASE_TYPES = frozenset({
     "mega_pump", "mega_dump", "impulse_pump", "impulse_dump",
     "vertical_pump", "vertical_dump", "pulse_pump", "pulse_dump",
-    "trend_pump", "trend_dump", "price_pump", "price_dump",
+    "trend_pump", "trend_dump", "trend_seed", "price_pump", "price_dump",
 })
 
 # Пороги по умолчанию (settings v37)
@@ -335,6 +335,26 @@ def decide_trade_action(
 
     if not aligned and setup.total < min_watch_score:
         return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
+
+    # trend_seed: ранний потенциал — ENTRY только у локации; иначе WATCH (не market-chase)
+    st = (signal.signal_type or "").lower()
+    if st == "trend_seed" and watch_allowed:
+        has_loc = location in {"fib", "abc", "retest", "sr"}
+        cvd_miss = float((signal.details or {}).get("seed_cvd_missing", 0) or 0)
+        if has_loc and setup.total >= min_entry_score and not chase:
+            return TradeDecision(
+                "entry",
+                f"seed у уровня · сетап {setup.total}/100",
+                location=location,
+                chase=False,
+                setup_score=setup.total,
+            )
+        reason = "потенциал тренда · ждать ретест/Fib"
+        if cvd_miss >= 0.5:
+            reason = f"{reason} · CVD слабый/нет"
+        return TradeDecision(
+            "watch", reason, location=location, chase=True, setup_score=max(setup.total, min_watch_score),
+        )
 
     # ENTRY: достаточный скор + (локация или ready) + не жёсткая погоня
     has_location = location in {"fib", "abc", "retest", "sr", "trigger"}

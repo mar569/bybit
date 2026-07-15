@@ -98,3 +98,21 @@ def test_weak_setup_watch() -> None:
         min_watch_score=30,
     )
     assert d.action in {"watch", "entry"}
+
+
+def test_trend_seed_defaults_to_watch() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="long",
+        current_price=1.06,
+        range_position=0.72,
+        momentum_pct=1.2,
+    )
+    d = decide_trade_action(
+        _sig(signal_type="trend_seed", price_change_percent=2.0, details={"seed_cvd_missing": 0}),
+        ta,
+        readiness=(False, "нет"),
+        min_watch_score=30,
+    )
+    assert d.action == "watch"
+    assert "потенциал" in d.reason.lower() or "тренд" in d.reason.lower()

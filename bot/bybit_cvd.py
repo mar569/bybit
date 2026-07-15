@@ -307,6 +307,20 @@ class BybitTakerCvdCache:
     def attach_live(self, tracker: BybitTakerCvdLiveTracker) -> None:
         self._live = tracker
 
+    def peek_live_cvd(
+        self,
+        symbol: str,
+        *,
+        lookback_minutes: float = 10.0,
+        min_trades: int = 25,
+    ) -> TakerCvdSnapshot | None:
+        """Синхронный peek live CVD (без REST) — для ранних детекторов сканера."""
+        if self._live is None:
+            return None
+        return self._live.build_snapshot(
+            symbol, lookback_minutes=lookback_minutes, min_trades=min_trades,
+        )
+
     async def get_cvd(
         self,
         symbol: str,

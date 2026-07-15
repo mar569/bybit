@@ -20,6 +20,7 @@ from .signal_quality_gate import assess_signal_quality, attach_cvd_to_signal_det
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager, clamp_cooldown_seconds
 from .symbol_tiers import TierThresholds, tier_thresholds
 from .trend_exhaustion import TrendExhaustionRisk, detect_trend_exhaustion, detect_trend_exhaustion_risk
+from .trend_seed import detect_trend_seed
 from .anomaly_alerts import AnomalyBatcher, detect_anomaly_for_symbol
 
 HISTORY_MAX_POINTS = 3600
@@ -32,7 +33,7 @@ _OI_FLOW_BYPASS_TYPES = frozenset({
     "mega_pump", "mega_dump", "vertical_pump", "vertical_dump",
     "reversal_pump", "reversal_dump", "liq_cascade_pump", "liq_cascade_dump",
     "impulse_pump", "impulse_dump", "price_pump", "price_dump",
-    "trend_dump", "trend_pump",
+    "trend_dump", "trend_pump", "trend_seed",
 })
 
 
@@ -549,6 +550,7 @@ class SignalEngine:
             is_liq_cascade = candidate.signal_type in {"liq_cascade_pump", "liq_cascade_dump"}
             is_impulse = candidate.signal_type in {"impulse_pump", "impulse_dump"}
             is_trend_ex = candidate.signal_type in {"trend_dump", "trend_pump"}
+            is_trend_seed = candidate.signal_type == "trend_seed"
             is_peak_crash = (
                 is_breakout
                 and (candidate.breakout_meta or {}).get("vertical_mode") == "peak_crash"
@@ -573,6 +575,11 @@ class SignalEngine:
                 min_liquidity = max(
                     min_liquidity,
                     float(getattr(settings, "trend_exhaustion_min_liquidity_oi_usd", 120_000.0)),
+                )
+            elif is_trend_seed:
+                min_liquidity = max(
+                    min_liquidity,
+                    float(getattr(settings, "trend_seed_min_liquidity_oi_usd", 100_000.0)),
                 )
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 logger.info(
@@ -601,6 +608,7 @@ class SignalEngine:
                 and not is_liq_cascade
                 and not is_impulse
                 and not is_trend_ex
+                and not is_trend_seed
             ):
                 flow_ok, weak_oi_flow = _evaluate_oi_flow(
                     oi_change_usd=changes.oi_change_usd,
@@ -638,6 +646,9 @@ class SignalEngine:
             elif is_trend_ex:
                 cooldown_key = f"{key}:trend_exhaustion"
                 cooldown = int(getattr(settings, "trend_exhaustion_cooldown_seconds", 180))
+            elif is_trend_seed:
+                cooldown_key = f"{key}:trend_seed"
+                cooldown = int(getattr(settings, "trend_seed_cooldown_seconds", 150))
             elif is_mega:
                 cooldown_key = f"{key}:mega"
                 cooldown = settings.mega_cooldown_seconds
@@ -660,6 +671,10 @@ class SignalEngine:
                     score = 1 if (is_breakout or is_liq_cascade) else (
                         1 if float((candidate.breakout_meta or {}).get("reversal_peak_age_min", 99)) <= 2.5 else 2
                     )
+            elif is_trend_seed:
+                cvd_miss = float((candidate.breakout_meta or {}).get("seed_cvd_missing", 0))
+                ext = float((candidate.breakout_meta or {}).get("seed_extension_pct", 99))
+                score = 1 if cvd_miss < 0.5 and ext <= 6.0 else 2
             else:
                 score = self._calculate_score(
                     changes.oi_change_percent,
@@ -682,6 +697,7 @@ class SignalEngine:
                 and not is_liq_cascade
                 and not is_impulse
                 and not is_trend_ex
+                and not is_trend_seed
                 and min_score
                 and score < min_score
             ):
@@ -1562,6 +1578,53 @@ class SignalEngine:
             breakout_meta=hit.meta,
         )
 
+    def _detect_trend_seed_candidate(
+        self,
+        history: deque[SnapshotPoint],
+        current: SnapshotPoint,
+        settings: ScannerSettings,
+        tier: TierThresholds,
+        *,
+        symbol: str,
+        exchange: str,
+    ) -> SignalCandidate | None:
+        if not getattr(settings, "trend_seed_enabled", True):
+            return None
+        if not getattr(settings, "trend_seed_bypass_top_n", True):
+            if not self._is_in_top_n(exchange, symbol):
+                return None
+
+        cvd_ratio: float | None = None
+        if "bybit" in exchange.lower():
+            try:
+                lookback = float(getattr(settings, "signal_cvd_lookback_minutes", 10.0))
+                snap = get_taker_cvd_cache().peek_live_cvd(
+                    symbol, lookback_minutes=lookback,
+                )
+                if snap is not None:
+                    cvd_ratio = float(snap.ratio)
+            except Exception:
+                cvd_ratio = None
+
+        hit = detect_trend_seed(
+            history,
+            current,
+            settings=settings,
+            tier=tier,
+            cvd_ratio=cvd_ratio,
+        )
+        if hit is None:
+            return None
+        return SignalCandidate(
+            signal_type=hit.signal_type,
+            period_minutes=hit.period_minutes,
+            oi_change_percent=hit.oi_change_percent,
+            price_change_percent=hit.price_change_percent,
+            earlier=hit.earlier,
+            urgency=hit.urgency,
+            breakout_meta=hit.meta,
+        )
+
     def _pick_best_candidate(
         self,
         history: deque[SnapshotPoint],
@@ -1604,6 +1667,12 @@ class SignalEngine:
         reversal = self._detect_sharp_reversal(history, current, settings, tier)
         if reversal is not None:
             return reversal
+
+        trend_seed = self._detect_trend_seed_candidate(
+            history, current, settings, tier, symbol=symbol, exchange=exchange,
+        )
+        if trend_seed is not None:
+            return trend_seed
 
         candidates: list[SignalCandidate] = []
         pulse_oi_up, pulse_price_up, pulse_oi_down, pulse_price_down, squeeze_min = (

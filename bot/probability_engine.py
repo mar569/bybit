@@ -19,6 +19,7 @@ PROBABILITY_BYPASS_TYPES = frozenset({
     "impulse_dump",
     "trend_dump",
     "trend_pump",
+    "trend_seed",
     "mega_pump",
     "mega_dump",
     "pulse_pump",
@@ -162,6 +163,7 @@ def _pattern_strength(signal: Signal) -> float:
         "short_squeeze": 0.78,
         "pulse_pump": 0.62,
         "pulse_dump": 0.62,
+        "trend_seed": 0.68,
         "oi_pump": 0.48,
         "oi_dump": 0.48,
         "price_pump": 0.40,
@@ -264,7 +266,7 @@ def _compute_structure_penalty(
         drawdown = 0.0
         range_pos = 0.5
 
-    pulse_types = {"pulse_pump", "pulse_dump", "oi_pump", "oi_dump", "price_pump", "price_dump"}
+    pulse_types = {"pulse_pump", "pulse_dump", "oi_pump", "oi_dump", "price_pump", "price_dump", "trend_seed"}
 
     if is_long:
         if post_crash:
