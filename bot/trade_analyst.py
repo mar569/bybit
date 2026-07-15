@@ -41,6 +41,7 @@ class TradeThesis:
     wait_for: str = ""
     arguments: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
+    fib_action: str = ""  # короткая инструкция: входить / ждать / Fib не строим
 
 
 def _pick_side(signal: Signal, ta: TAAnalysisResult) -> str:
@@ -51,6 +52,16 @@ def _pick_side(signal: Signal, ta: TAAnalysisResult) -> str:
     if ta.action_priority in {"long", "short"}:
         return ta.action_priority
     return (signal.side or "long").lower()
+
+
+def _fib_price_at(ta: TAAnalysisResult, ratio: float) -> float | None:
+    for lv in ta.fib_levels or []:
+        if lv.kind == "retracement" and abs(lv.ratio - ratio) < 1e-9:
+            return lv.price
+    for lv in ta.fib_levels or []:
+        if abs(lv.ratio - ratio) < 1e-9:
+            return lv.price
+    return None
 
 
 def _fib_zone_text(ta: TAAnalysisResult) -> str:
@@ -83,6 +94,111 @@ def _confluence_text(ta: TAAnalysisResult) -> str:
     if not bits:
         bits.append(f"confluence ×{ta.wave_confluence_count}")
     return "Fib + " + " + ".join(bits)
+
+
+def build_fib_action_text(
+    ta: TAAnalysisResult,
+    *,
+    action: str = "watch",
+    location: str = "",
+    side: str = "long",
+    entry_zone: tuple[float, float] | None = None,
+    stop_price: float | None = None,
+    target_prices: list[float] | None = None,
+) -> str:
+    """Понятная инструкция: входить сейчас / ждать Fib / Fib не строим.
+
+    Используется в Hot/Pro и ручном TA.
+    """
+    _ = side
+    status = (getattr(ta, "fib_status", "") or "").lower()
+    reject = (getattr(ta, "fib_reject_reason", "") or "").strip()
+    location = (location or "").lower()
+    action = (action or "watch").lower()
+    zone = entry_zone or ta.entry_zone
+    stop = stop_price if stop_price is not None else ta.invalidation_price
+    targets = list(target_prices or ta.target_prices or [])[:3]
+
+    f618 = _fib_price_at(ta, 0.618)
+    f500 = _fib_price_at(ta, 0.5)
+    wait_px = f618 or f500
+
+    if action == "entry" and location == "fib":
+        parts = ["Вход от Fib 0.5–0.618"]
+        if zone:
+            parts.append(f"зона {fmt_price(zone[0])}–{fmt_price(zone[1])}")
+        elif wait_px:
+            parts.append(f"≈ {fmt_price(wait_px)}")
+        if stop:
+            parts.append(f"стоп {fmt_price(stop)}")
+        if targets:
+            parts.append("TP " + "/".join(fmt_price(t) for t in targets))
+        return " · ".join(parts)
+
+    if action == "entry" and ta.wave_has_confluence and ta.fib_levels:
+        parts = ["Вход у Fib-зоны"]
+        if zone:
+            parts.append(f"{fmt_price(zone[0])}–{fmt_price(zone[1])}")
+        if stop:
+            parts.append(f"стоп {fmt_price(stop)}")
+        return " · ".join(parts)
+
+    if action == "watch":
+        if wait_px:
+            ratio_lbl = "0.618" if f618 else "0.5"
+            return (
+                f"Не входить сейчас · ждать откат к Fib ~{fmt_price(wait_px)} "
+                f"({ratio_lbl}) или ретест"
+            )
+        if status in {"late_impulse", "late"} or ta.wave_phase == "late_impulse":
+            return "Не входить сейчас · финал импульса — ждать откат к Fib 0.5–0.618"
+        if status == "chart_only" or (ta.fib_levels and not ta.wave_has_confluence):
+            return (
+                "Не входить по Fib · нет confluence с П/С — "
+                "ждать совпадение или ретест"
+            )
+        if reject:
+            return f"Не входить сейчас · {reject[:90]}"
+        return "Не входить сейчас · ждать откат к Fib или ретест"
+
+    if action == "skip":
+        if reject:
+            return f"Fib не строим: {reject[:90]} · вход только от П/С или ретеста"
+        return "Fib не применяем · вход только от П/С или ретеста"
+
+    if status in {"no_impulse", "broken", "empty"} or not ta.fib_levels:
+        reason = reject or "нет валидной импульсной ноги A→B"
+        return f"Fib не строим: {reason[:90]} · вход только от П/С или ретеста"
+
+    if status == "chart_only":
+        return "Fib на графике · без confluence — не вход, только ориентир"
+
+    if status == "late_impulse" or ta.wave_phase == "late_impulse":
+        return "Финал импульса — не вдогонку · ждать Fib 0.5–0.618"
+
+    if status == "ready" and wait_px:
+        return f"Fib готов · зона ≈ {fmt_price(wait_px)} (0.5–0.618)"
+
+    return _fib_zone_text(ta) or "Fib: смотреть график"
+
+
+def fib_action_line_html(ta: TAAnalysisResult, *, side: str | None = None) -> str:
+    """Однострочный Fib для ручного TA / caption без TradeDecision."""
+    side = side or (ta.action_priority if ta.action_priority in {"long", "short"} else "long")
+    if ta.verdict == "LONG":
+        action = "entry"
+        location = "fib" if ta.wave_has_confluence else ""
+    elif ta.verdict == "SHORT":
+        action = "entry"
+        location = "fib" if ta.wave_has_confluence else ""
+    elif (getattr(ta, "fib_status", "") or "") in {"no_impulse", "broken", "empty"}:
+        action = "skip"
+        location = ""
+    else:
+        action = "watch"
+        location = ""
+    text = build_fib_action_text(ta, action=action, location=location, side=side)
+    return f"📐 {text}"
 
 
 def _resolve_levels(
@@ -133,6 +249,11 @@ def _pullback_wait_hint(ta: TAAnalysisResult, side: str) -> str:
         if ta.breakdown_level and ta.current_price:
             if float(ta.current_price) < float(ta.breakdown_level):
                 return f"ретест пробоя ≈ {fmt_price(ta.breakdown_level)}"
+        if ta.fib_levels:
+            for ratio in (0.618, 0.5, 0.382):
+                for lv in ta.fib_levels:
+                    if lv.kind == "retracement" and abs(lv.ratio - ratio) < 0.02:
+                        return f"откат Fib {ratio:.3f} ≈ {fmt_price(lv.price)}"
     return "откат к Fib / ретест уровня"
 
 
@@ -152,6 +273,7 @@ def build_trade_thesis(
 
     entry, zone, stop, targets = _resolve_levels(signal, ta, side)
     label = "LONG" if side == "long" else "SHORT"
+    location = decision.location if decision else ""
 
     structure = ta.structure_label or "структура не определена"
     phase = ta.phase_label or ta.phase or ""
@@ -160,18 +282,32 @@ def build_trade_thesis(
         structure_line += f" · {phase}"
 
     wave_bits: list[str] = []
-    if ta.elliott_label:
-        wave_bits.append(ta.elliott_label)
-    elif ta.wave_phase:
+    if ta.wave_leg_start and ta.wave_leg_end:
+        wave_bits.append(
+            f"импульс A→B {fmt_price(ta.wave_leg_start)}→{fmt_price(ta.wave_leg_end)}"
+        )
+    if ta.wave_phase:
         wave_bits.append(_PHASE_RU.get(ta.wave_phase, ta.wave_phase))
     if ta.abc_label_ru:
         wave_bits.append(ta.abc_label_ru)
-    wave_line = "Волны: " + (" · ".join(wave_bits) if wave_bits else "импульс не подтверждён")
+    wave_line = "Импульс: " + (" · ".join(wave_bits) if wave_bits else "не подтверждён")
 
-    fib_line = _confluence_text(ta)
-    fib_zone = _fib_zone_text(ta)
-    if fib_zone:
-        fib_line = f"{fib_zone} · {fib_line}"
+    fib_action = build_fib_action_text(
+        ta,
+        action=action,
+        location=location,
+        side=side,
+        entry_zone=zone,
+        stop_price=stop,
+        target_prices=targets,
+    )
+    fib_line = fib_action
+    if ta.wave_has_confluence and location == "fib":
+        fib_line = f"{fib_action} · {_confluence_text(ta)}"
+    else:
+        fib_zone = _fib_zone_text(ta)
+        if fib_zone and fib_zone not in fib_line:
+            fib_line = f"{fib_action} · {fib_zone}"
 
     arguments: list[str] = []
     if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
@@ -207,38 +343,34 @@ def build_trade_thesis(
         )
     )
     if action == "watch":
-        if decision and decision.reason:
-            wait_for = decision.reason
-        elif readiness and not readiness[0]:
-            wait_for = readiness[1]
-        elif ta.wave_phase in {"late_impulse"}:
-            wait_for = "откат к Fib 0.5–0.618 или ретест пробоя"
-        elif not ta.wave_has_confluence:
-            wait_for = "совпадение Fib с П/С / круглым / ретестом"
-        else:
-            wait_for = "подтверждение у уровня входа"
+        # Главный текст ожидания — из Fib action (понятная цена)
+        wait_for = fib_action
         if is_chase_watch:
-            wait_for = f"{wait_for} · {_pullback_wait_hint(ta, side)}"
-            wait_for = wait_for.replace("вход ≈", "ждать").replace("≈ ≈", "≈")
-        elif zone:
-            mid = (zone[0] + zone[1]) / 2.0
-            wait_for = f"{wait_for} · вход ≈ {fmt_price(mid)}"
-        elif side == "long" and ta.breakout_level and not is_chase_watch:
-            wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakout_level)}"
-        elif side == "short" and ta.breakdown_level and not is_chase_watch:
-            wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakdown_level)}"
+            hint = _pullback_wait_hint(ta, side)
+            if hint and hint not in wait_for:
+                wait_for = f"{wait_for} · {hint}"
+        # Нет конкретной Fib-цены — добавим уровень входа (пробой / зона)
+        if "Fib ~" not in wait_for and "зона " not in wait_for.lower():
+            if zone:
+                mid = (zone[0] + zone[1]) / 2.0
+                wait_for = f"{wait_for} · вход ≈ {fmt_price(mid)}"
+            elif side == "long" and ta.breakout_level and not is_chase_watch:
+                wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakout_level)}"
+            elif side == "short" and ta.breakdown_level and not is_chase_watch:
+                wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakdown_level)}"
+        fib_action = wait_for  # Hot показывает ту же строку с ценой
 
     if action == "entry":
         headline = f"🎯 <b>{label}</b> · сетап {conf}/10"
-        if ta.abc_phase == "C":
+        if location == "fib" or ta.wave_phase == "wave_2_4_zone":
             thesis = (
-                f"Коррекция <b>ABC</b> в волне C — зона продолжения тренда "
-                f"после импульса. {_confluence_text(ta)}."
+                f"Импульс завершён, цена в зоне <b>Fib 0.5–0.618</b>. "
+                f"{_confluence_text(ta)} — вход лимиткой в зону, не market вдогонку."
             )
-        elif ta.wave_phase == "wave_2_4_zone":
+        elif ta.abc_phase == "C":
             thesis = (
-                f"Импульс завершён, цена в <b>золотой зоне Fib</b> (волна 2/4). "
-                f"{_confluence_text(ta)} — аргументированный вход."
+                f"Коррекция к импульсу в зоне продолжения. "
+                f"{_confluence_text(ta)}."
             )
         elif decision and decision.location == "retest":
             thesis = "Ретест уровня пробоя после слома структуры — классический профи-вход."
@@ -259,7 +391,11 @@ def build_trade_thesis(
 
     inv = ""
     if stop:
-        inv = f"инвалидация ниже {fmt_price(stop)}" if side == "long" else f"инвалидация выше {fmt_price(stop)}"
+        inv = (
+            f"инвалидация ниже {fmt_price(stop)}"
+            if side == "long"
+            else f"инвалидация выше {fmt_price(stop)}"
+        )
 
     return TradeThesis(
         side=side,
@@ -278,6 +414,7 @@ def build_trade_thesis(
         wait_for=wait_for,
         arguments=arguments[:4],
         risks=risks[:3],
+        fib_action=fib_action,
     )
 
 
@@ -302,14 +439,15 @@ def format_thesis_hot_html(thesis: TradeThesis, *, skip_headline: bool = False) 
             bits.append(f"🎯 {tps}")
         if bits:
             lines.append(" · ".join(bits))
-        why = thesis.wave_line.replace("Волны: ", "") if thesis.wave_line else ""
-        if why and "не подтверждён" not in why:
-            lines.append(f"📐 {why[:75]}")
+        action_txt = thesis.fib_action or thesis.fib_line
+        if action_txt and ("Fib" in action_txt or "Вход" in action_txt):
+            lines.append(f"📐 {action_txt[:95]}")
     elif thesis.action == "watch":
         if not skip_headline:
-            label = "LONG" if thesis.side == "long" else "SHORT"
             lines.append(f"👀 <b>WATCH</b> · движение {label} · не входить сейчас")
-        if thesis.wait_for:
+        if thesis.fib_action:
+            lines.append(f"⏳ {thesis.fib_action[:120]}")
+        elif thesis.wait_for:
             lines.append(f"⏳ {thesis.wait_for[:110]}")
         chase_watch = (
             thesis.risks
@@ -321,7 +459,10 @@ def format_thesis_hot_html(thesis: TradeThesis, *, skip_headline: bool = False) 
     else:
         if not skip_headline:
             lines.append(thesis.headline)
-        lines.append(thesis.thesis[:120])
+        if thesis.fib_action:
+            lines.append(f"📐 {thesis.fib_action[:120]}")
+        else:
+            lines.append(thesis.thesis[:120])
     return "\n".join(lines)
 
 
@@ -334,6 +475,8 @@ def format_thesis_pro_html(thesis: TradeThesis) -> str:
         thesis.wave_line,
         f"📐 {thesis.fib_line}",
     ]
+    if thesis.fib_action and thesis.fib_action not in thesis.fib_line:
+        lines.append(f"➡️ <b>Как входить:</b> {thesis.fib_action}")
     if thesis.arguments:
         lines.append("<b>Аргументы:</b>")
         for a in thesis.arguments:
@@ -347,14 +490,16 @@ def format_thesis_pro_html(thesis: TradeThesis) -> str:
         if thesis.stop_price:
             lines.append(f"🛑 <b>Стоп:</b> {fmt_price(thesis.stop_price)}")
         if thesis.target_prices:
-            tps = " → ".join(fmt_price(t) for t in thesis.target_prices[:4])
+            tps = " / ".join(fmt_price(t) for t in thesis.target_prices[:3])
             lines.append(f"🎯 <b>Цели:</b> {tps}")
         if thesis.invalidation:
-            lines.append(f"❌ {thesis.invalidation}")
-    elif thesis.wait_for:
-        lines.append(f"⏳ <b>Условие входа:</b> {thesis.wait_for}")
+            lines.append(f"⛔ {thesis.invalidation}")
+    elif thesis.action == "watch":
+        if thesis.wait_for:
+            lines.append(f"⏳ <b>Ждать:</b> {thesis.wait_for}")
+        if thesis.target_prices:
+            tps = " / ".join(fmt_price(t) for t in thesis.target_prices[:2])
+            lines.append(f"🎯 после входа: {tps}")
     if thesis.risks:
-        lines.append("<b>Риски:</b>")
-        for r in thesis.risks:
-            lines.append(f"  ⚠️ {r}")
+        lines.append("<b>Риски:</b> " + "; ".join(thesis.risks))
     return "\n".join(lines)

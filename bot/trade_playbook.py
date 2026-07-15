@@ -127,11 +127,18 @@ def resolve_trade_playbook(signal: Signal, ta: TAAnalysisResult) -> TradePlayboo
 
 def _playbook_logic(signal: Signal, ta: TAAnalysisResult, side: str) -> str:
     st = signal.signal_type or ""
-    if ta.elliott_label and ta.wave_has_confluence:
-        bits = [ta.elliott_label]
-        if ta.abc_label_ru:
-            bits.append(ta.abc_label_ru)
-        return " · ".join(bits)[:100]
+    if ta.wave_has_confluence and ta.wave_phase in {
+        "shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction",
+    }:
+        phase = {
+            "shallow_pullback": "мелкий откат",
+            "wave_2_4_zone": "Fib 0.5–0.618",
+            "deep_pullback": "глубокий Fib",
+            "mid_correction": "коррекция",
+        }.get(ta.wave_phase, "откат")
+        return f"откат к Fib ({phase})"[:100]
+    if ta.abc_label_ru and ta.wave_has_confluence:
+        return f"откат к Fib · {ta.abc_label_ru}"[:100]
     if ta.abc_label_ru:
         return ta.abc_label_ru[:90]
     if st in {"trend_dump", "trend_pump"}:

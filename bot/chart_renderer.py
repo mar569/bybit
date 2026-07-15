@@ -606,7 +606,7 @@ def _draw_smc_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
 
 
 def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    """Fib 0.382 / 0.5 / 0.618 (+ extensions) — тонкие линии без текстового шума."""
+    """Fib 0.382 / 0.5 / 0.618 (+ extensions) — ключевые 0.5/0.618 заметнее."""
     levels = getattr(ta, "fib_levels", None) or []
     if not levels or not bars:
         return
@@ -617,15 +617,24 @@ def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -
             continue
         is_key = fl.ratio in {0.5, 0.618}
         color = CHART_STYLE["fib_key"] if is_key else CHART_STYLE["fib"]
-        lw = 0.85 if is_key else 0.55
-        alpha = 0.7 if is_key else 0.4
-        ax.axhline(fl.price, color=color, linestyle=":", linewidth=lw, alpha=alpha)
-        # Короткая подпись слева у ключевых
+        lw = 1.05 if is_key else 0.55
+        alpha = 0.85 if is_key else 0.4
+        ls = "-." if is_key else ":"
+        ax.axhline(fl.price, color=color, linestyle=ls, linewidth=lw, alpha=alpha)
+        # Подпись: 0.5 / 0.618 крупнее и справа у цены
         if is_key:
+            x1 = mdates.date2num(_bar_times(bars)[-1])
+            ratio_lbl = "0.5" if abs(fl.ratio - 0.5) < 1e-9 else "0.618"
+            ax.text(
+                x1, fl.price, f" Fib {ratio_lbl} ",
+                color=color, fontsize=7.0, va="center", ha="left", alpha=0.95,
+                fontweight="bold",
+            )
+        elif fl.ratio in {0.382, 1.272, 1.618}:
             x0 = mdates.date2num(_bar_times(bars)[0])
             ax.text(
                 x0, fl.price, f" {fl.label}",
-                color=color, fontsize=5.5, va="bottom", ha="left", alpha=0.85,
+                color=color, fontsize=5.5, va="bottom", ha="left", alpha=0.75,
             )
 
     # Пунктир импульсной ноги (старт → конец)
@@ -1567,11 +1576,26 @@ def _overlay_ta_on_tradingview(
         if not _tv_level_in_range(fl.price, y_min, y_max):
             continue
         y = y_at(fl.price)
+        is_key = fl.ratio in {0.5, 0.618}
+        ratio_lbl = "0.5" if abs(fl.ratio - 0.5) < 1e-9 else (
+            "0.618" if abs(fl.ratio - 0.618) < 1e-9 else fl.label
+        )
         ax.axhline(
             y, xmin=x_line_lo, xmax=x_line_hi,
-            color=CHART_STYLE["fib_key"], linewidth=0.7, alpha=0.55, linestyle=":", zorder=2,
+            color=CHART_STYLE["fib_key"],
+            linewidth=1.0 if is_key else 0.7,
+            alpha=0.75 if is_key else 0.55,
+            linestyle="-." if is_key else ":",
+            zorder=2,
         )
-        ax.text(x_lbl, y, f" {fl.label}", color=CHART_STYLE["fib_key"], fontsize=6.2, va="center", alpha=0.85)
+        ax.text(
+            x_lbl, y, f" Fib {ratio_lbl}",
+            color=CHART_STYLE["fib_key"],
+            fontsize=7.0 if is_key else 6.2,
+            va="center",
+            alpha=0.95,
+            fontweight="bold" if is_key else "normal",
+        )
 
     if ta.invalidation_price:
         y = y_at(ta.invalidation_price)

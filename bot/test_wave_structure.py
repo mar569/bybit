@@ -63,6 +63,8 @@ def test_noise_rejected_no_fib() -> None:
     wave = analyze_wave_structure(bars, swings)
     assert wave.leg is None or not wave.valid
     assert wave.chart_fib_levels == []
+    assert wave.fib_status in {"no_impulse", "broken", "late_impulse", "empty"}
+    assert wave.fib_reject_reason  # понятная причина на шуме
 
 
 def test_clean_impulse_gets_valid_fib() -> None:
@@ -84,6 +86,10 @@ def test_clean_impulse_gets_valid_fib() -> None:
     assert wave.wave_bias in {"long", "neutral"}
     # без П/С / round / retest — Fib не даёт entry_hint
     assert wave.entry_hint_price is None or wave.has_confluence
+    assert wave.fib_status in {"ready", "chart_only"}
+    if not wave.has_confluence:
+        assert wave.fib_status == "chart_only"
+        assert "confluence" in wave.fib_reject_reason.lower() or "П/С" in wave.fib_reject_reason
 
 
 def test_fib_without_confluence_does_not_move_flow() -> None:
@@ -110,6 +116,8 @@ def test_fib_with_sr_confluence_gives_entry_hint() -> None:
     assert wave.confluence_sr
     assert wave.has_confluence
     assert wave.entry_hint_price is not None
+    assert wave.fib_status == "ready"
+    assert wave.fib_reject_reason == ""
     cont, _ = wave_flow_adjustments(wave, action_priority="long")
     if wave.wave_phase in {"shallow_pullback", "wave_2_4_zone"}:
         assert cont >= 5
@@ -156,3 +164,8 @@ def test_detect_impulse_requires_pullback() -> None:
     swings = find_swing_points(bars, window=2)
     leg = detect_impulse_leg(swings, bars)
     assert leg is None
+    wave = analyze_wave_structure(bars, swings)
+    assert wave.fib_status in {"late_impulse", "no_impulse"}
+    assert wave.fib_reject_reason
+    # Без отката / слабый ход — Fib не для входа; причина всегда заполнена
+    assert len(wave.fib_reject_reason) >= 8

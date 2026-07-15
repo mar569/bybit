@@ -73,6 +73,16 @@ class ImpulseLeg:
         return (self.start_price + self.end_price) / 2.0
 
 
+# Статусы для понятного UX (Hot/Pro / ручной TA)
+# ready | chart_only | late_impulse | no_impulse | broken | empty
+FIB_STATUS_READY = "ready"
+FIB_STATUS_CHART_ONLY = "chart_only"
+FIB_STATUS_LATE = "late_impulse"
+FIB_STATUS_NO_IMPULSE = "no_impulse"
+FIB_STATUS_BROKEN = "broken"
+FIB_STATUS_EMPTY = "empty"
+
+
 @dataclass
 class WaveStructureResult:
     leg: ImpulseLeg | None = None
@@ -94,6 +104,9 @@ class WaveStructureResult:
     elliott_label: str = ""
     abc_phase: str = ""  # A | B | C | complete | forming | ""
     abc_label_ru: str = ""
+    # Понятный статус для сигналов / ручного TA
+    fib_status: str = FIB_STATUS_EMPTY
+    fib_reject_reason: str = ""
 
     @property
     def has_confluence(self) -> bool:
@@ -102,7 +115,8 @@ class WaveStructureResult:
 
     @property
     def chart_fib_levels(self) -> list[FibLevel]:
-        if not self.valid:
+        """Уровни для графика — то, что analyze_wave уже отфильтровал в fib_levels."""
+        if not self.fib_levels:
             return []
         allowed = set(FIB_CHART_RATIOS)
         return [lv for lv in self.fib_levels if lv.ratio in allowed]
@@ -214,29 +228,45 @@ def _score_leg(
     *,
     atr_pct: float,
 ) -> ImpulseLeg | None:
+    leg, _reason = _score_leg_detailed(
+        bars, start_idx, end_idx, start_price, end_price, direction, atr_pct=atr_pct,
+    )
+    return leg
+
+
+def _score_leg_detailed(
+    bars: list["KlineBar"],
+    start_idx: int,
+    end_idx: int,
+    start_price: float,
+    end_price: float,
+    direction: str,
+    *,
+    atr_pct: float,
+) -> tuple[ImpulseLeg | None, str]:
+    """Возвращает (нога, причина отказа). Пустая причина = ок."""
     bars_len = end_idx - start_idx + 1
     if bars_len < MIN_BARS_IN_LEG or bars_len > MAX_BARS_IN_LEG:
-        return None
+        return None, "нога слишком короткая или длинная"
     if start_price <= 0 or end_price <= 0:
-        return None
+        return None, "некорректные цены ноги"
 
     size = abs(end_price - start_price)
     size_pct = size / start_price * 100.0
     min_pct = max(MIN_IMPULSE_PCT, atr_pct * MIN_IMPULSE_ATR_MULT if atr_pct > 0 else MIN_IMPULSE_PCT)
     if size_pct < min_pct:
-        return None
+        return None, f"ход слишком мал ({size_pct:.1f}% < {min_pct:.1f}%)"
 
     eff = _path_efficiency(bars, start_idx, end_idx, direction=direction)
     if eff < MIN_EFFICIENCY:
-        return None
+        return None, "пила, не импульс (низкая efficiency)"
 
     against = _counter_trend_share(bars, start_idx, end_idx, direction=direction)
     if against > 0.45:
-        return None
+        return None, "внутри ноги слишком много свечей против хода"
 
     atr_mult = size_pct / atr_pct if atr_pct > 0 else size_pct / MIN_IMPULSE_PCT
 
-    # Черновик ноги для оценки отката
     draft = ImpulseLeg(
         start_idx=start_idx,
         end_idx=end_idx,
@@ -249,26 +279,21 @@ def _score_leg(
     )
     pb = _pullback_fraction(bars, draft)
 
-    # Импульс не завершён — Fib рано (ещё рисуем ход, а не коррекция к нему)
     if pb < MIN_PULLBACK_OF_LEG:
-        return None
-    # Полный слом ноги — не строим Fib для входа по тренду
+        return None, "импульс ещё идёт — Fib рано (нет отката)"
     if pb > MAX_PULLBACK_OF_LEG:
-        return None
+        return None, "откат >100% — нога сломана"
 
-    # Качество 0–100
     q = 0
-    q += min(35, int(size_pct * 6))           # размер
-    q += int(eff * 30)                        # чистота
-    q += min(20, int(atr_mult * 8))           # vs ATR
-    # Идеальный откат для Fib — 0.25–0.70 ноги
+    q += min(35, int(size_pct * 6))
+    q += int(eff * 30)
+    q += min(20, int(atr_mult * 8))
     if 0.25 <= pb <= 0.70:
         q += 15
     elif 0.12 <= pb < 0.25 or 0.70 < pb <= 0.90:
         q += 6
     q -= int(against * 20)
 
-    # Свежесть: конец ноги не слишком старый
     age = len(bars) - 1 - end_idx
     if age > 36:
         q -= 15
@@ -277,7 +302,7 @@ def _score_leg(
 
     q = max(0, min(100, q))
     if q < MIN_QUALITY_TO_USE:
-        return None
+        return None, f"качество ноги низкое ({q}<{MIN_QUALITY_TO_USE})"
 
     return ImpulseLeg(
         start_idx=start_idx,
@@ -290,7 +315,7 @@ def _score_leg(
         atr_mult=round(atr_mult, 3),
         pullback_frac=round(pb, 3),
         quality=q,
-    )
+    ), ""
 
 
 def detect_impulse_leg(
@@ -298,48 +323,110 @@ def detect_impulse_leg(
     bars: list["KlineBar"],
 ) -> ImpulseLeg | None:
     """Только качественная завершённая импульсная нога — иначе None."""
+    leg, _reason = detect_impulse_leg_detailed(swings, bars)
+    return leg
+
+
+def detect_impulse_leg_detailed(
+    swings: list["SwingPoint"],
+    bars: list["KlineBar"],
+) -> tuple[ImpulseLeg | None, str]:
+    """Нога + лучшая понятная причина отказа, если ноги нет."""
     if not bars or len(bars) < 12 or len(swings) < 2:
-        return None
+        return None, "мало данных для импульса"
 
     atr_pct = _atr_pct(bars)
     window_start = max(0, len(bars) - RECENT_WINDOW_BARS)
     alt = _alternate_swings([s for s in swings if s.index >= window_start])
     if len(alt) < 2:
-        return None
+        return None, "нет чётких swing A→B"
 
     scored: list[ImpulseLeg] = []
-    # Перебираем пары swing low→high / high→low в окне
+    reject_priority = [
+        "импульс ещё идёт — Fib рано (нет отката)",
+        "откат >100% — нога сломана",
+        "пила, не импульс (низкая efficiency)",
+        "ход слишком мал",
+        "качество ноги низкое",
+        "внутри ноги слишком много свечей против хода",
+        "нога слишком короткая или длинная",
+    ]
+    reject_hits: dict[str, int] = {}
+
     for i in range(len(alt) - 1):
         for j in range(i + 1, min(i + 4, len(alt))):
             a, b = alt[i], alt[j]
-            # Между A и B не должно быть более сильного экстремума того же типа,
-            # иначе якорь неверный
             if a.kind == "low" and b.kind == "high" and b.price > a.price:
-                # B должен быть max high между ними
                 mid_highs = [s for s in alt[i : j + 1] if s.kind == "high"]
                 if mid_highs and b.price < max(s.price for s in mid_highs) * 0.999:
                     continue
-                leg = _score_leg(
+                leg, reason = _score_leg_detailed(
                     bars, a.index, b.index, a.price, b.price, "up", atr_pct=atr_pct,
                 )
                 if leg:
                     scored.append(leg)
+                elif reason:
+                    key = reason.split("(")[0].strip()
+                    # сохраняем полное сообщение для приоритетных
+                    full = reason
+                    reject_hits[full] = reject_hits.get(full, 0) + 1
             elif a.kind == "high" and b.kind == "low" and b.price < a.price:
                 mid_lows = [s for s in alt[i : j + 1] if s.kind == "low"]
                 if mid_lows and b.price > min(s.price for s in mid_lows) * 1.001:
                     continue
-                leg = _score_leg(
+                leg, reason = _score_leg_detailed(
                     bars, a.index, b.index, a.price, b.price, "down", atr_pct=atr_pct,
                 )
                 if leg:
                     scored.append(leg)
+                elif reason:
+                    full = reason
+                    reject_hits[full] = reject_hits.get(full, 0) + 1
 
-    if not scored:
-        return None
+    if scored:
+        scored.sort(key=lambda L: (L.quality, L.end_idx), reverse=True)
+        return scored[0], ""
 
-    # Лучшая нога: качество, затем свежесть
-    scored.sort(key=lambda L: (L.quality, L.end_idx), reverse=True)
-    return scored[0]
+    if not reject_hits:
+        return None, "нет валидной импульсной ноги A→B"
+
+    # Выбираем самую «информативную» причину по приоритету и частоте
+    def _prio(msg: str) -> tuple[int, int]:
+        for idx, needle in enumerate(reject_priority):
+            if needle in msg:
+                return (idx, -reject_hits[msg])
+        return (99, -reject_hits[msg])
+
+    best = sorted(reject_hits.keys(), key=_prio)[0]
+    return None, best
+
+
+def _fib_status_for(
+    *,
+    leg: ImpulseLeg | None,
+    valid: bool,
+    phase: str,
+    conf_count: int,
+    reject_reason: str,
+) -> tuple[str, str]:
+    """(fib_status, fib_reject_reason) для UX."""
+    if leg is None:
+        reason = reject_reason or "нет валидной импульсной ноги A→B"
+        if "сломана" in reason or ">100%" in reason:
+            return FIB_STATUS_BROKEN, reason
+        if "ещё идёт" in reason or "Fib рано" in reason:
+            return FIB_STATUS_LATE, reason
+        return FIB_STATUS_NO_IMPULSE, reason
+
+    if phase == "late_impulse":
+        return FIB_STATUS_LATE, "финал импульса — не входить вдогонку, ждать откат к Fib"
+    if phase == "impulse_invalidated":
+        return FIB_STATUS_BROKEN, "импульс сломан — Fib для входа по тренду не подходит"
+    if not valid:
+        return FIB_STATUS_NO_IMPULSE, reject_reason or "импульс не подтверждён"
+    if conf_count < 1:
+        return FIB_STATUS_CHART_ONLY, "нет confluence с П/С — только подсказка, не вход"
+    return FIB_STATUS_READY, ""
 
 
 def build_fib_levels(leg: ImpulseLeg) -> list[FibLevel]:
@@ -753,13 +840,19 @@ def analyze_wave_structure(
     Сначала ищем сильный импульс, потом проверяем 3 сочетания;
     без confluence Fib не двигает вход (только может быть на графике).
     """
-    empty = WaveStructureResult()
+    empty = WaveStructureResult(
+        fib_status=FIB_STATUS_EMPTY,
+        fib_reject_reason="мало данных для импульса",
+    )
     if not bars or len(bars) < 12:
         return empty
 
-    leg = detect_impulse_leg(swings, bars)
+    leg, no_leg_reason = detect_impulse_leg_detailed(swings, bars)
     if leg is None:
-        return empty
+        status, reason = _fib_status_for(
+            leg=None, valid=False, phase="unknown", conf_count=0, reject_reason=no_leg_reason,
+        )
+        return WaveStructureResult(fib_status=status, fib_reject_reason=reason)
 
     fib_levels = build_fib_levels(leg)
     current = bars[-1].close
@@ -836,6 +929,9 @@ def analyze_wave_structure(
 
     # На график Fib можно при valid импульсе; на вход — только с confluence
     show_fib = valid or (leg.quality >= MIN_QUALITY_TO_USE and phase == "late_impulse")
+    fib_status, fib_reject = _fib_status_for(
+        leg=leg, valid=valid, phase=phase, conf_count=conf_count, reject_reason="",
+    )
 
     return WaveStructureResult(
         leg=leg,
@@ -855,6 +951,8 @@ def analyze_wave_structure(
         elliott_label=elliott,
         abc_phase=abc.phase if abc else "",
         abc_label_ru=abc.label_ru if abc else "",
+        fib_status=fib_status,
+        fib_reject_reason=fib_reject,
     )
 
 

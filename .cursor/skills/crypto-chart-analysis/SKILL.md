@@ -57,7 +57,7 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 
 ## Wave Lite + Fibonacci (внутренний слой бота)
 
-В коде: `bot/wave_structure.py` → поля `ta.fib_levels`, `ta.wave_phase`, `ta.wave_bias`, confluence-флаги.
+В коде: `bot/wave_structure.py` → поля `ta.fib_levels`, `ta.wave_phase`, `ta.wave_bias`, `ta.fib_status`, `ta.fib_reject_reason`, confluence-флаги.
 
 **Fib строится только на качественной импульсной ноге**, иначе уровни пустые:
 - размер ≥ max(2.2%, ATR×1.8)
@@ -72,13 +72,23 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 
 **Trade Decision Gate** (`bot/trade_decision_gate.py`): Hot ENTRY только при локации (fib/sr/retest/trigger). Импульс сканера у хая/лоя без отката → **WATCH**, не вход вдогонку.
 
-**Trade Analyst** (`bot/trade_analyst.py`): профи-тезис в Hot/Pro — структура, Elliott ABC, Fib confluence, аргументы (OI/CVD/SMC), вход/стоп/цели, риски.
+**Trade Analyst** (`bot/trade_analyst.py`): профи-тезис в Hot/Pro — структура, Fib action («входить / ждать зону / Fib не строим»), вход/стоп/цели, риски.
 
 **Elliott ABC Lite** (`bot/wave_structure.py`): после импульса ищется коррекция A→B→C; волна C @ Fib = лучшая зона продолжения.
 
 Fib — **подсказка**, не окончательное решение для входа.
 На графике: Fib **0.382 / 0.5 / 0.618** (+ 1.272/1.618 как цели после отката).
 **Не пиши** в Telegram Hot «волна 2/Эллиотт».
+
+### 5 правил входа по сигналу бота
+
+1. **Смотри ENTRY / WATCH / SKIP** — не цену алерта. WATCH = движение есть, market сейчас запрещён.
+2. **Импульс → откат → вход.** Fib строится на ноге A→B; вход в зоне **0.5–0.618** (иногда 0.382), не на хае/лое импульса.
+3. **Fib сам не вход** — нужен confluence (П/С, круглый, ретест). Без него: «только ориентир / ждать совпадение».
+4. **Стоп** — за 0.786 или за начало ноги A; **TP** — хай/лой импульса, затем 1.272 / 1.618.
+5. **Как открывать позицию:** лимитка в зону из сообщения (📍 или «ждать Fib ~X»), стоп из того же плана. Не market на импульсном Hot-алерте.
+
+Статусы `ta.fib_status`: `ready` | `chart_only` | `late_impulse` | `no_impulse` | `broken` — в тексте всегда явная инструкция или `fib_reject_reason`.
 
 ## Как «чертить линии» в ответе
 

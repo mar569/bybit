@@ -201,7 +201,7 @@ class TAAnalysisResult:
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
     cvd_delta: float | None = None
-    # Wave Lite + Fib (внутренний слой / график; не для Hot-caption)
+    # Wave Lite + Fib (график + понятный UX в Hot/Pro)
     fib_levels: list[FibLevel] = field(default_factory=list)
     wave_phase: str = ""
     wave_bias: str = "neutral"
@@ -216,6 +216,8 @@ class TAAnalysisResult:
     elliott_label: str = ""
     abc_phase: str = ""
     abc_label_ru: str = ""
+    fib_status: str = ""
+    fib_reject_reason: str = ""
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -2681,6 +2683,8 @@ def run_ta_analysis(
         elliott_label=wave.elliott_label if wave.leg else "",
         abc_phase=wave.abc_phase if wave.leg else "",
         abc_label_ru=wave.abc_label_ru if wave.leg else "",
+        fib_status=getattr(wave, "fib_status", "") or "",
+        fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
     )
 
 
@@ -2972,6 +2976,14 @@ def ta_action_summary_html(ta: TAAnalysisResult) -> str:
         if ta.target_prices:
             tps = "→".join(fmt_price(t) for t in ta.target_prices[:2])
             lines.append(f"TP {tps}")
+
+    # Понятный Fib: входить / ждать зону / не строим
+    try:
+        from .trade_analyst import fib_action_line_html
+
+        lines.append(fib_action_line_html(ta))
+    except Exception:
+        pass
 
     if ta.forecast_summary:
         lines.append(f"🔮 {ta.forecast_summary[:120]}")
@@ -4387,6 +4399,16 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         f"🧭 <b>Статус:</b> {signal_status}.",
         f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
     ]
+
+    try:
+        from .trade_analyst import fib_action_line_html
+
+        lines.append(fib_action_line_html(ta))
+    except Exception:
+        if getattr(ta, "fib_reject_reason", None):
+            lines.append(f"📐 Fib не строим: {ta.fib_reject_reason[:90]}")
+        elif ta.fib_levels:
+            lines.append("📐 Fib на графике · вход только с confluence П/С")
 
     if ta.narrative_plain:
         lines.append(ta.narrative_plain)
