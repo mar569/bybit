@@ -24,6 +24,15 @@ _CHASE_TYPES = frozenset({
     "vertical_pump", "vertical_dump", "pulse_pump", "pulse_dump",
     "trend_pump", "trend_dump", "trend_seed", "price_pump", "price_dump",
 })
+_REVERSAL_TYPES = frozenset({"reversal_pump", "reversal_dump"})
+_URGENT_DUMP_TYPES = frozenset({
+    "vertical_dump", "mega_dump", "reversal_dump", "impulse_dump",
+    "liq_cascade_dump", "trend_dump", "pulse_dump",
+})
+_URGENT_PUMP_TYPES = frozenset({
+    "vertical_pump", "mega_pump", "reversal_pump", "impulse_pump",
+    "liq_cascade_pump", "trend_pump",
+})
 
 # Пороги по умолчанию (settings v37)
 DEFAULT_MIN_ENTRY_SCORE = 62
@@ -319,6 +328,16 @@ def score_trade_setup(
     )
 
 
+def _cvd_confirms_side(side: str, cvd_ratio: float | None, *, long_min: float = 0.58, short_max: float = 0.42) -> bool:
+    if cvd_ratio is None:
+        return False
+    if side == "long":
+        return float(cvd_ratio) >= long_min
+    if side == "short":
+        return float(cvd_ratio) <= short_max
+    return False
+
+
 def decide_trade_action(
     signal: Signal,
     ta: TAAnalysisResult,
@@ -400,6 +419,50 @@ def decide_trade_action(
             location=location,
             chase=not early_seed,
             setup_score=max(setup.total, min_watch_score),
+        )
+
+    # Reversal: ENTRY только при CVD confirm + локация; иначе WATCH/skip
+    if st in _REVERSAL_TYPES:
+        try:
+            cvd_raw = details.get("cvd_ratio")
+            cvd_f = float(cvd_raw) if cvd_raw is not None else None
+        except (TypeError, ValueError):
+            cvd_f = None
+        cvd_ok = _cvd_confirms_side(side, cvd_f)
+        has_loc = location in {"fib", "abc", "retest", "sr"}
+        if has_loc and cvd_ok and setup.total >= min_entry_score and not chase:
+            return TradeDecision(
+                "entry",
+                f"разворот + CVD · сетап {setup.total}/100",
+                location=location,
+                chase=False,
+                setup_score=setup.total,
+            )
+        if not cvd_ok:
+            reason = (
+                f"разворот без CVD confirm ({cvd_f:.0%} buy)"
+                if cvd_f is not None
+                else "разворот без CVD — ждать поток"
+            )
+            if watch_allowed:
+                return TradeDecision(
+                    "watch", reason, location=location, chase=True, setup_score=setup.total,
+                )
+            return TradeDecision("skip", reason, location=location, chase=True, setup_score=setup.total)
+        if watch_allowed:
+            return TradeDecision(
+                "watch",
+                chase_reason or "разворот — ждать подтверждение у уровня",
+                location=location,
+                chase=chase,
+                setup_score=max(setup.total, min_watch_score),
+            )
+        return TradeDecision(
+            "skip",
+            "разворот без готового entry",
+            location=location,
+            chase=chase,
+            setup_score=setup.total,
         )
 
     # ENTRY: достаточный скор + (локация или ready) + не жёсткая погоня

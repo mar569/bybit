@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 41
+SETTINGS_VERSION = 42
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -311,6 +311,12 @@ class ScannerSettings:
         "trend_seed",
         "impulse_pump",
         "impulse_dump",
+        "reversal_pump",
+        "reversal_dump",
+        "vertical_dump",
+        "mega_dump",
+        "vertical_pump",
+        "mega_pump",
     )
 
     # Не слать «шум»: WAIT + слабый TA + конфликт со сканером
@@ -760,7 +766,17 @@ class ScannerSettings:
             ),
             signal_watch_allow_types=cls._parse_str_tuple(
                 base.get("signal_watch_allow_types"),
-                ("trend_seed", "impulse_pump", "impulse_dump"),
+                (
+                    "trend_seed",
+                    "impulse_pump",
+                    "impulse_dump",
+                    "reversal_pump",
+                    "reversal_dump",
+                    "vertical_dump",
+                    "mega_dump",
+                    "vertical_pump",
+                    "mega_pump",
+                ),
             ),
             signal_skip_noise=bool(base.get("signal_skip_noise", True)),
             signal_ta_compact=bool(base.get("signal_ta_compact", True)),
@@ -1228,6 +1244,19 @@ class SettingsManager:
                     "impulse_dump",
                 ]
                 merged["trade_decision_block_chase_watch"] = True
+            if version < 42:
+                merged["signal_watch_allow_types"] = [
+                    "trend_seed",
+                    "impulse_pump",
+                    "impulse_dump",
+                    "reversal_pump",
+                    "reversal_dump",
+                    "vertical_dump",
+                    "mega_dump",
+                    "vertical_pump",
+                    "mega_pump",
+                ]
+                merged["trade_decision_block_chase_watch"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1235,7 +1264,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v41: WATCH allowlist early types; preserved: %s)",
+                "Settings migrated v%d → v%d (v42: reversal CVD + opposite dump CD; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

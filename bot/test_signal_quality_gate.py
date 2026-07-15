@@ -153,3 +153,41 @@ def test_manual_ta_flow_warns_on_sweep() -> None:
     html = format_manual_ta_flow_html(ta, cvd_snap=cvd)
     assert "Sweep" in html
     assert "отскок" in html or "SHORT" in html
+
+
+def test_reversal_pump_weak_cvd_skipped() -> None:
+    signal = Signal(
+        exchange="Bybit",
+        symbol="MAGMAUSDT",
+        signal_type="reversal_pump",
+        oi_period_minutes=3,
+        oi_change_percent=0.84,
+        oi_change_value=0,
+        oi_change_usd=24_000.0,
+        oi_direction="up",
+        signals_today=1,
+        price_change_percent=0.9,
+        price_change_value=None,
+        price_direction="up",
+        volume_change_percent=0,
+        trade_count=None,
+        spread=None,
+        funding_rate=None,
+        liquidation_estimate=None,
+        vwap=None,
+        atr=None,
+        rsi=None,
+        ema_short=None,
+        ema_long=None,
+        volume_24h=1e6,
+        volume_speed=None,
+        signal_score=2,
+        side="long",
+        current_price=0.317,
+        current_open_interest=1e6,
+        link="",
+        details={"cvd_ratio": 0.55},
+    )
+    result = assess_signal_quality(signal, settings=_settings())
+    assert result.tier == "skip"
+    assert "CVD" in (result.block_reason or "")

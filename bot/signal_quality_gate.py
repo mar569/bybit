@@ -229,6 +229,18 @@ def assess_signal_quality(
         else:
             hard_blocks.append(msg)
 
+    # Разворот требует явного CVD confirm (≥58% buy / ≤42% sell), не «нейтраль 55%»
+    if (
+        getattr(settings, "signal_cvd_gate_enabled", True)
+        and signal.signal_type in {"reversal_pump", "reversal_dump"}
+    ):
+        if cvd_ratio is None:
+            hard_blocks.append("разворот без CVD — риск ложного отскока")
+        elif side == "long" and cvd_ratio < long_min:
+            hard_blocks.append(f"CVD {cvd_ratio:.0%} слаб для reversal LONG (нужно ≥{long_min:.0%})")
+        elif side == "short" and cvd_ratio > short_max:
+            hard_blocks.append(f"CVD {cvd_ratio:.0%} слаб для reversal SHORT (нужно ≤{short_max:.0%})")
+
     if getattr(settings, "signal_sweep_guard_enabled", True):
         sweep_block, sweep_msg = _sweep_opposes(side, smc if isinstance(smc, dict) else None)
         if sweep_block:
@@ -341,7 +353,10 @@ def assess_signal_quality(
             cvd_detail=cvd_detail,
         )
 
-    if getattr(settings, "signal_watch_mode_enabled", True):
+    allow = {str(x).lower() for x in (getattr(settings, "signal_watch_allow_types", ()) or ())}
+    st = (signal.signal_type or "").lower()
+    watch_ok = bool(getattr(settings, "signal_watch_mode_enabled", False)) or st in allow
+    if watch_ok:
         return SignalQualityResult(
             tier="watch",
             block_reason=readiness[1] if readiness and not readiness[0] else "ждать подтверждение",

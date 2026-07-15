@@ -141,6 +141,28 @@ def _watch_allowed_for_signal(signal: Signal, settings) -> bool:
     allow = getattr(settings, "signal_watch_allow_types", ()) or ()
     return (signal.signal_type or "").lower() in {str(x).lower() for x in allow}
 
+
+_URGENT_DUMP_TYPES = frozenset({
+    "vertical_dump", "mega_dump", "reversal_dump", "impulse_dump",
+    "liq_cascade_dump", "trend_dump", "pulse_dump",
+})
+_URGENT_PUMP_TYPES = frozenset({
+    "vertical_pump", "mega_pump", "reversal_pump", "impulse_pump",
+    "liq_cascade_pump", "trend_pump",
+})
+
+
+def _opposite_urgent_allowed(signal: Signal, last_side: str | None) -> bool:
+    if not last_side:
+        return False
+    side = (signal.side or "").lower()
+    st = signal.signal_type or ""
+    if side == "short" and last_side == "long" and st in _URGENT_DUMP_TYPES:
+        return True
+    if side == "long" and last_side == "short" and st in _URGENT_PUMP_TYPES:
+        return True
+    return False
+
 EXCHANGE_LABEL = {
     "binance": ("🟡", "Binance"),
     "bybit": ("⚫", "ByBit"),
@@ -163,6 +185,7 @@ class TelegramBot:
         self._unreachable_chats: set[int] = set()
         self._send_lock = asyncio.Lock()
         self._last_symbol_signal_time: dict[str, float] = {}
+        self._last_symbol_signal_side: dict[str, str] = {}
         self._symbol_dispatch_locks: dict[str, asyncio.Lock] = {}
         self.application: Application | None = None
         self._run_task: asyncio.Task | None = None
@@ -867,19 +890,35 @@ class TelegramBot:
 
         cooldown = _signal_cooldown_seconds(signal, self.settings_manager.settings)
         symbol_key = f"last_signal:sym:{signal.symbol.upper()}"
+        side_key = f"last_signal_side:sym:{signal.symbol.upper()}"
         should_send = True
         if not skip_dedupe:
             now = time.time()
-            last_local = self._last_symbol_signal_time.get(signal.symbol.upper(), 0.0)
-            if now - last_local < cooldown:
+            sym_u = signal.symbol.upper()
+            last_local = self._last_symbol_signal_time.get(sym_u, 0.0)
+            last_side = self._last_symbol_signal_side.get(sym_u)
+            if self.redis is not None and last_side is None:
+                try:
+                    raw_side = await self.redis.get(side_key)
+                    if raw_side:
+                        last_side = raw_side.decode() if isinstance(raw_side, bytes) else str(raw_side)
+                except Exception:
+                    pass
+            opposite_ok = _opposite_urgent_allowed(signal, last_side)
+            if now - last_local < cooldown and not opposite_ok:
                 should_send = False
-            elif self.redis is not None:
+            elif self.redis is not None and not opposite_ok:
                 try:
                     last = await self.redis.get(symbol_key)
                     if last is not None and now - float(last) < cooldown:
                         should_send = False
                 except Exception:
                     should_send = True
+            if opposite_ok and now - last_local < cooldown:
+                logger.info(
+                    "Telegram allow opposite urgent %s %s after %s",
+                    signal.symbol, signal.signal_type, last_side,
+                )
 
         if not should_send:
             logger.debug(
@@ -891,6 +930,17 @@ class TelegramBot:
 
         if not skip_dedupe:
             await self._reserve_symbol_cooldown(signal.symbol, cooldown, symbol_key)
+            sym_u = signal.symbol.upper()
+            self._last_symbol_signal_side[sym_u] = (signal.side or "long").lower()
+            if self.redis is not None:
+                try:
+                    await self.redis.set(
+                        side_key,
+                        (signal.side or "long").lower(),
+                        ex=int(cooldown) + 30,
+                    )
+                except Exception:
+                    pass
 
         if (
             settings := self.settings_manager.settings

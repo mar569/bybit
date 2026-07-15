@@ -1,5 +1,5 @@
 {
-  "settings_version": 41,
+  "settings_version": 42,
   "oi_period_minutes": 5,
   "long_period_minutes": 5,
   "short_period_minutes": 5,
@@ -182,7 +182,13 @@
   "signal_watch_allow_types": [
     "trend_seed",
     "impulse_pump",
-    "impulse_dump"
+    "impulse_dump",
+    "reversal_pump",
+    "reversal_dump",
+    "vertical_dump",
+    "mega_dump",
+    "vertical_pump",
+    "mega_pump"
   ],
   "signal_skip_noise": true,
   "signal_ta_compact": true,

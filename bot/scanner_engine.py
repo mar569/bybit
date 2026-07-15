@@ -36,6 +36,23 @@ _OI_FLOW_BYPASS_TYPES = frozenset({
     "trend_dump", "trend_pump", "trend_seed",
 })
 
+_URGENT_DUMP_TYPES = frozenset({
+    "vertical_dump", "mega_dump", "reversal_dump", "impulse_dump",
+    "liq_cascade_dump", "trend_dump", "pulse_dump",
+})
+_URGENT_PUMP_TYPES = frozenset({
+    "vertical_pump", "mega_pump", "reversal_pump", "impulse_pump",
+    "liq_cascade_pump", "trend_pump",
+})
+
+
+def _signal_side_hint(signal_type: str, price_change_percent: float) -> str:
+    if abs(price_change_percent) >= 0.25:
+        return "short" if price_change_percent < 0 else "long"
+    if signal_type in _URGENT_DUMP_TYPES or signal_type.endswith("_dump"):
+        return "short"
+    return "long"
+
 
 def _evaluate_oi_flow(
     *,
@@ -119,6 +136,7 @@ class SignalEngine:
         self.history: dict[str, deque[SnapshotPoint]] = {}
         self.last_signal_time: dict[str, float] = {}
         self._last_trend_risk_time: dict[str, float] = {}
+        self.last_signal_side: dict[str, str] = {}
         self.daily_signal_counts: dict[str, int] = {}
         self._daily_reset_key: str | None = None
         self._volumes: dict[str, float] = {}
@@ -717,12 +735,30 @@ class SignalEngine:
             symbol_cd_key = self._symbol_cooldown_key(symbol)
             symbol_cd = clamp_cooldown_seconds(settings.signal_cooldown_seconds)
             last_symbol = self.last_signal_time.get(symbol_cd_key, 0.0)
-            if now - last_symbol < symbol_cd:
+            cand_side = _signal_side_hint(
+                candidate.signal_type, candidate.price_change_percent,
+            )
+            last_side = self.last_signal_side.get(symbol_cd_key, "")
+            opposite_urgent = (
+                last_side
+                and cand_side != last_side
+                and (
+                    (cand_side == "short" and candidate.signal_type in _URGENT_DUMP_TYPES)
+                    or (cand_side == "long" and candidate.signal_type in _URGENT_PUMP_TYPES)
+                )
+            )
+            if now - last_symbol < symbol_cd and not opposite_urgent:
                 logger.debug(
                     "Scanner skip %s %s: symbol cooldown %.0fs",
                     exchange, symbol, symbol_cd - (now - last_symbol),
                 )
                 return
+            if opposite_urgent and now - last_symbol < symbol_cd:
+                logger.info(
+                    "Scanner allow opposite urgent %s %s %s after %s (cd remaining %.0fs)",
+                    exchange, symbol, candidate.signal_type, last_side,
+                    symbol_cd - (now - last_symbol),
+                )
 
             if is_breakout:
                 cooldown_key = f"{key}:breakout"
@@ -834,6 +870,7 @@ class SignalEngine:
             self.last_signal_time[cooldown_key] = now
             self.last_signal_time[symbol_cd_key] = now
             side = self._determine_side(changes.price_change_percent, candidate.signal_type)
+            self.last_signal_side[symbol_cd_key] = side
 
             market_structure_dict = None
             smc_dict = None
@@ -1605,7 +1642,7 @@ class SignalEngine:
         if peak_age_min > float(window_min):
             return None
         dump_pct = self._percent_change(peak_px, current.price)
-        min_dump = max(float(tier.breakout_min_dump_percent), 2.5)
+        min_dump = max(float(tier.breakout_min_dump_percent), 2.0)
         if dump_pct > -min_dump:
             return None
         # Не считать «сливом» медленное сползание — нужен быстрый кусок после хая
@@ -1614,7 +1651,7 @@ class SignalEngine:
             mid = after_peak[len(after_peak) // 2]
             mid_dump = self._percent_change(peak_px, mid.price or peak_px)
             # половина слива за первую половину пути после хая
-            if mid_dump > dump_pct * 0.35 and peak_age_min > 4.0:
+            if mid_dump > dump_pct * 0.35 and peak_age_min > 5.0:
                 return None
         oi_pct = self._oi_percent_change(peak, current)
         meta = {

@@ -157,3 +157,27 @@ def test_chase_pulse_still_skipped() -> None:
         block_chase_watch=True,
     )
     assert d.action == "skip"
+def test_reversal_weak_cvd_not_entry() -> None:
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=0.317,
+        range_position=0.55,
+        momentum_pct=0.9,
+        wave_has_confluence=True,
+        wave_phase="wave_2_4_zone",
+        wave_bias="long",
+        nearest_support=0.316,
+    )
+    d = decide_trade_action(
+        _sig(
+            signal_type="reversal_pump",
+            details={"cvd_ratio": 0.55},
+            price_change_percent=0.9,
+        ),
+        ta,
+        readiness=(True, "armed"),
+        watch_allowed=True,
+        min_entry_score=50,
+    )
+    assert d.action != "entry"
