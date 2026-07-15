@@ -113,6 +113,29 @@ def _resolve_levels(
     return entry, zone, stop, targets
 
 
+def _pullback_wait_hint(ta: TAAnalysisResult, side: str) -> str:
+    """Уровень ожидания при WATCH — не цена у хая/лоя."""
+    side = (side or "").lower()
+    if side == "long":
+        if ta.nearest_support and ta.nearest_support > 0:
+            return f"откат к поддержке ≈ {fmt_price(ta.nearest_support)}"
+        if ta.breakout_level and ta.current_price:
+            if float(ta.current_price) > float(ta.breakout_level):
+                return f"ретест пробоя ≈ {fmt_price(ta.breakout_level)}"
+        if ta.fib_levels:
+            for ratio in (0.618, 0.5, 0.382):
+                for lv in ta.fib_levels:
+                    if lv.kind == "retracement" and abs(lv.ratio - ratio) < 0.02:
+                        return f"откат Fib {ratio:.3f} ≈ {fmt_price(lv.price)}"
+    else:
+        if ta.nearest_resistance and ta.nearest_resistance > 0:
+            return f"откат к сопротивлению ≈ {fmt_price(ta.nearest_resistance)}"
+        if ta.breakdown_level and ta.current_price:
+            if float(ta.current_price) < float(ta.breakdown_level):
+                return f"ретест пробоя ≈ {fmt_price(ta.breakdown_level)}"
+    return "откат к Fib / ретест уровня"
+
+
 def build_trade_thesis(
     signal: Signal,
     ta: TAAnalysisResult,
@@ -174,14 +197,15 @@ def build_trade_thesis(
         risks.append("плохое R:R")
 
     wait_for = ""
-    planned_entry: float | None = None
-    if zone:
-        planned_entry = (zone[0] + zone[1]) / 2.0
-    elif side == "long" and ta.breakout_level:
-        planned_entry = ta.breakout_level
-    elif side == "short" and ta.breakdown_level:
-        planned_entry = ta.breakdown_level
-
+    is_chase_watch = (
+        action == "watch"
+        and (
+            (decision is not None and decision.chase)
+            or ta.wave_phase == "late_impulse"
+            or (ta.post_pump and ta.range_position >= 0.80)
+            or ta.range_position >= 0.82
+        )
+    )
     if action == "watch":
         if decision and decision.reason:
             wait_for = decision.reason
@@ -193,8 +217,16 @@ def build_trade_thesis(
             wait_for = "совпадение Fib с П/С / круглым / ретестом"
         else:
             wait_for = "подтверждение у уровня входа"
-        if planned_entry:
-            wait_for = f"{wait_for} · вход ≈ {fmt_price(planned_entry)}"
+        if is_chase_watch:
+            wait_for = f"{wait_for} · {_pullback_wait_hint(ta, side)}"
+            wait_for = wait_for.replace("вход ≈", "ждать").replace("≈ ≈", "≈")
+        elif zone:
+            mid = (zone[0] + zone[1]) / 2.0
+            wait_for = f"{wait_for} · вход ≈ {fmt_price(mid)}"
+        elif side == "long" and ta.breakout_level and not is_chase_watch:
+            wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakout_level)}"
+        elif side == "short" and ta.breakdown_level and not is_chase_watch:
+            wait_for = f"{wait_for} · вход ≈ {fmt_price(ta.breakdown_level)}"
 
     if action == "entry":
         headline = f"🎯 <b>{label}</b> · сетап {conf}/10"
@@ -219,9 +251,9 @@ def build_trade_thesis(
         headline = f"🚫 <b>НЕ ВХОДИТЬ</b> · {label}"
         thesis = decision.reason if decision else (risks[0] if risks else "сетап слабый")
     else:
-        headline = f"👀 <b>WATCH {label}</b> · ждать уровень"
+        headline = f"👀 <b>WATCH</b> · движение {label} · не входить сейчас"
         thesis = (
-            f"Движение есть, но <b>входить сейчас рано</b>. "
+            f"Движение есть, но <b>market-вход запрещён</b>. "
             f"{wait_for or 'ждать откат к Fib или ретест'}."
         )
 
@@ -275,10 +307,15 @@ def format_thesis_hot_html(thesis: TradeThesis, *, skip_headline: bool = False) 
             lines.append(f"📐 {why[:75]}")
     elif thesis.action == "watch":
         if not skip_headline:
-            lines.append(f"👀 <b>WATCH {label}</b>")
+            label = "LONG" if thesis.side == "long" else "SHORT"
+            lines.append(f"👀 <b>WATCH</b> · движение {label} · не входить сейчас")
         if thesis.wait_for:
-            lines.append(f"⏳ {thesis.wait_for[:95]}")
-        if thesis.target_prices:
+            lines.append(f"⏳ {thesis.wait_for[:110]}")
+        chase_watch = (
+            thesis.risks
+            and any("post-pump" in r or "финал" in r for r in thesis.risks)
+        ) or ("погоня" in (thesis.wait_for or "").lower())
+        if thesis.target_prices and not chase_watch:
             tps = "/".join(fmt_price(t) for t in thesis.target_prices[:2])
             lines.append(f"🎯 после входа: {tps}")
     else:

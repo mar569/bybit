@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 39
+SETTINGS_VERSION = 41
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -289,7 +289,7 @@ class ScannerSettings:
     probability_filter_enabled: bool = True
 
     # Только ENTRY без WATCH — false = чаще алерты с планом (WATCH + ENTRY)
-    actionable_signals_only: bool = False
+    actionable_signals_only: bool = True
     actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 3.0
     actionable_min_signal_score: int = 2
@@ -302,6 +302,16 @@ class ScannerSettings:
     trade_decision_gate_enabled: bool = True
     trade_decision_min_entry_score: int = 62
     trade_decision_min_watch_score: int = 36
+    trade_chase_range_block_pct: float = 82.0
+    trade_chase_range_mid_pct: float = 78.0
+    trade_decision_block_chase_watch: bool = True
+
+    # WATCH в Hot только для этих типов (ранние по фактам), без открытия всех pulse
+    signal_watch_allow_types: tuple[str, ...] = (
+        "trend_seed",
+        "impulse_pump",
+        "impulse_dump",
+    )
 
     # Не слать «шум»: WAIT + слабый TA + конфликт со сканером
     signal_skip_noise: bool = True
@@ -353,7 +363,7 @@ class ScannerSettings:
     signal_cvd_short_max_ratio: float = 0.42
     signal_cvd_long_min_ratio: float = 0.58
     signal_cvd_lookback_minutes: float = 10.0
-    signal_watch_mode_enabled: bool = True
+    signal_watch_mode_enabled: bool = False
     signal_btc_regime_filter_enabled: bool = True
     signal_btc_block_pct: float = 0.35
     signal_flow_matrix_enabled: bool = True
@@ -732,7 +742,7 @@ class ScannerSettings:
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
             min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
-            actionable_signals_only=bool(base.get("actionable_signals_only", False)),
+            actionable_signals_only=bool(base.get("actionable_signals_only", True)),
             actionable_min_ta_score=int(base.get("actionable_min_ta_score", 7)),
             actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 2.5)),
             actionable_min_signal_score=int(base.get("actionable_min_signal_score", 2)),
@@ -743,6 +753,15 @@ class ScannerSettings:
             trade_decision_gate_enabled=bool(base.get("trade_decision_gate_enabled", True)),
             trade_decision_min_entry_score=int(base.get("trade_decision_min_entry_score", 62)),
             trade_decision_min_watch_score=int(base.get("trade_decision_min_watch_score", 36)),
+            trade_chase_range_block_pct=float(base.get("trade_chase_range_block_pct", 82.0)),
+            trade_chase_range_mid_pct=float(base.get("trade_chase_range_mid_pct", 78.0)),
+            trade_decision_block_chase_watch=bool(
+                base.get("trade_decision_block_chase_watch", True)
+            ),
+            signal_watch_allow_types=cls._parse_str_tuple(
+                base.get("signal_watch_allow_types"),
+                ("trend_seed", "impulse_pump", "impulse_dump"),
+            ),
             signal_skip_noise=bool(base.get("signal_skip_noise", True)),
             signal_ta_compact=bool(base.get("signal_ta_compact", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
@@ -780,7 +799,7 @@ class ScannerSettings:
             signal_cvd_short_max_ratio=float(base.get("signal_cvd_short_max_ratio", 0.42)),
             signal_cvd_long_min_ratio=float(base.get("signal_cvd_long_min_ratio", 0.58)),
             signal_cvd_lookback_minutes=float(base.get("signal_cvd_lookback_minutes", 10.0)),
-            signal_watch_mode_enabled=bool(base.get("signal_watch_mode_enabled", True)),
+            signal_watch_mode_enabled=bool(base.get("signal_watch_mode_enabled", False)),
             signal_btc_regime_filter_enabled=bool(
                 base.get("signal_btc_regime_filter_enabled", True)
             ),
@@ -1194,6 +1213,21 @@ class SettingsManager:
                 merged["trend_seed_require_cvd"] = False
                 merged["trend_seed_min_liquidity_oi_usd"] = 100_000.0
                 merged["trend_seed_cooldown_seconds"] = 150
+            if version < 40:
+                merged["actionable_signals_only"] = True
+                merged["signal_watch_mode_enabled"] = False
+                merged["trade_chase_range_block_pct"] = 82.0
+                merged["trade_chase_range_mid_pct"] = 78.0
+                merged["trade_decision_block_chase_watch"] = True
+            if version < 41:
+                merged["signal_watch_mode_enabled"] = False
+                merged["actionable_signals_only"] = True
+                merged["signal_watch_allow_types"] = [
+                    "trend_seed",
+                    "impulse_pump",
+                    "impulse_dump",
+                ]
+                merged["trade_decision_block_chase_watch"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1201,7 +1235,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v39: trend_seed AKE model; preserved: %s)",
+                "Settings migrated v%d → v%d (v41: WATCH allowlist early types; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

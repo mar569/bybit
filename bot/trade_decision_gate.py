@@ -28,6 +28,8 @@ _CHASE_TYPES = frozenset({
 # Пороги по умолчанию (settings v37)
 DEFAULT_MIN_ENTRY_SCORE = 62
 DEFAULT_MIN_WATCH_SCORE = 36
+DEFAULT_CHASE_RANGE_HIGH_PCT = 82.0
+DEFAULT_CHASE_RANGE_MID_PCT = 78.0
 
 
 @dataclass(frozen=True)
@@ -57,26 +59,36 @@ def _near_level(price: float, level: float | None, *, tol_pct: float = 0.55) -> 
     return abs(price - level) / price * 100.0 <= tol_pct
 
 
-def _is_late_chase(ta: TAAnalysisResult, side: str) -> tuple[bool, str]:
+def _is_late_chase(
+    ta: TAAnalysisResult,
+    side: str,
+    *,
+    range_high_pct: float = DEFAULT_CHASE_RANGE_HIGH_PCT,
+    range_mid_pct: float = DEFAULT_CHASE_RANGE_MID_PCT,
+) -> tuple[bool, str]:
     side = (side or "").lower()
     rp = float(getattr(ta, "range_position", 0.5) or 0.5)
     mom = float(getattr(ta, "momentum_pct", 0.0) or 0.0)
     phase = (getattr(ta, "wave_phase", "") or "").lower()
+    hi = max(0.70, min(float(range_high_pct) / 100.0, 0.95))
+    mid = max(0.65, min(float(range_mid_pct) / 100.0, hi - 0.02))
 
     if phase == "late_impulse":
         return True, "финал импульса — ждать откат"
 
     if side == "long":
-        if rp >= 0.90 and mom >= 0.6:
+        if rp >= hi and mom >= 0.35:
             return True, f"погоня лонга у хая ({rp:.0%})"
-        if rp >= 0.84 and mom >= 1.2:
+        if rp >= mid and mom >= 0.9:
             return True, f"импульс +{mom:.1f}% у вершины"
-        if getattr(ta, "post_pump", False) and rp >= 0.86 and mom >= 0.3:
+        if getattr(ta, "post_pump", False) and rp >= mid + 0.04 and mom >= 0.25:
             return True, "post-pump — ждать откат"
     elif side == "short":
-        if rp <= 0.10 and mom <= -0.6:
+        lo = 1.0 - hi
+        lo_mid = 1.0 - mid
+        if rp <= lo and mom <= -0.35:
             return True, f"погоня шорта у лоя ({rp:.0%})"
-        if rp <= 0.16 and mom <= -1.2:
+        if rp <= lo_mid and mom <= -0.9:
             return True, f"импульс {mom:.1f}% у дна"
     return False, ""
 
@@ -316,6 +328,9 @@ def decide_trade_action(
     watch_allowed: bool = True,
     min_entry_score: int = DEFAULT_MIN_ENTRY_SCORE,
     min_watch_score: int = DEFAULT_MIN_WATCH_SCORE,
+    chase_range_high_pct: float = DEFAULT_CHASE_RANGE_HIGH_PCT,
+    chase_range_mid_pct: float = DEFAULT_CHASE_RANGE_MID_PCT,
+    block_chase_watch: bool = True,
 ) -> TradeDecision:
     """ENTRY = скоринг + локация/триггер; WATCH = интерес + план; SKIP = шум."""
     side = (signal.side or "").lower()
@@ -329,18 +344,37 @@ def decide_trade_action(
         return TradeDecision("skip", "плохой R:R", setup_score=0)
 
     setup = score_trade_setup(signal, ta, side=side, readiness=readiness)
-    chase, chase_reason = _is_late_chase(ta, side)
+    chase, chase_reason = _is_late_chase(
+        ta, side,
+        range_high_pct=chase_range_high_pct,
+        range_mid_pct=chase_range_mid_pct,
+    )
     location = setup.location_kind
     aligned, align_reason = _side_aligned(ta, side)
+    has_location = location in {"fib", "abc", "retest", "sr", "trigger"}
+    safe_location = location in {"fib", "abc", "retest", "sr"}
+    st = (signal.signal_type or "").lower()
+    details = signal.details or {}
+    seed_ext = float(details.get("seed_extension_pct", 99) or 99)
+    # Ранний seed по фактам (ещё <8% от mid базы) — не режем как late chase TA
+    early_seed = st == "trend_seed" and seed_ext <= 8.0
+
+    if chase and block_chase_watch and not safe_location and not early_seed:
+        return TradeDecision(
+            "skip",
+            chase_reason or "погоня — не входить",
+            location=location,
+            chase=True,
+            setup_score=setup.total,
+        )
 
     if not aligned and setup.total < min_watch_score:
         return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
 
-    # trend_seed: ранний потенциал — ENTRY только у локации; иначе WATCH (не market-chase)
-    st = (signal.signal_type or "").lower()
+    # trend_seed: ранний потенциал — ENTRY у локации; иначе WATCH (не market)
     if st == "trend_seed" and watch_allowed:
         has_loc = location in {"fib", "abc", "retest", "sr"}
-        cvd_miss = float((signal.details or {}).get("seed_cvd_missing", 0) or 0)
+        cvd_miss = float(details.get("seed_cvd_missing", 0) or 0)
         if has_loc and setup.total >= min_entry_score and not chase:
             return TradeDecision(
                 "entry",
@@ -349,15 +383,26 @@ def decide_trade_action(
                 chase=False,
                 setup_score=setup.total,
             )
+        if chase and block_chase_watch and not early_seed:
+            return TradeDecision(
+                "skip",
+                chase_reason or "seed уже поздно — ждать глубокий откат",
+                location=location,
+                chase=True,
+                setup_score=setup.total,
+            )
         reason = "потенциал тренда · ждать ретест/Fib"
         if cvd_miss >= 0.5:
             reason = f"{reason} · CVD слабый/нет"
         return TradeDecision(
-            "watch", reason, location=location, chase=True, setup_score=max(setup.total, min_watch_score),
+            "watch",
+            reason,
+            location=location,
+            chase=not early_seed,
+            setup_score=max(setup.total, min_watch_score),
         )
 
     # ENTRY: достаточный скор + (локация или ready) + не жёсткая погоня
-    has_location = location in {"fib", "abc", "retest", "sr", "trigger"}
     can_entry = (
         setup.total >= min_entry_score
         and has_location

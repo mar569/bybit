@@ -133,6 +133,14 @@ def _signal_cooldown_seconds(signal: Signal, settings) -> int:
         )
     return clamp_cooldown_seconds(settings.signal_cooldown_seconds, default=120)
 
+
+def _watch_allowed_for_signal(signal: Signal, settings) -> bool:
+    """Общий WATCH-режим ИЛИ тип в allowlist (ранние тренды/импульс без спама pulse)."""
+    if bool(getattr(settings, "signal_watch_mode_enabled", False)):
+        return True
+    allow = getattr(settings, "signal_watch_allow_types", ()) or ()
+    return (signal.signal_type or "").lower() in {str(x).lower() for x in allow}
+
 EXCHANGE_LABEL = {
     "binance": ("🟡", "Binance"),
     "bybit": ("⚫", "ByBit"),
@@ -1037,14 +1045,24 @@ class TelegramBot:
                 )
 
                 if getattr(settings, "trade_decision_gate_enabled", True) and not skip_dedupe:
+                    watch_ok = _watch_allowed_for_signal(signal, settings)
                     trade_decision = decide_trade_action(
                         signal,
                         ta_result,
                         readiness=readiness,
                         quality_tier=quality.tier,
-                        watch_allowed=bool(settings.signal_watch_mode_enabled),
+                        watch_allowed=watch_ok,
                         min_entry_score=int(getattr(settings, "trade_decision_min_entry_score", 62)),
                         min_watch_score=int(getattr(settings, "trade_decision_min_watch_score", 36)),
+                        chase_range_high_pct=float(
+                            getattr(settings, "trade_chase_range_block_pct", 82.0)
+                        ),
+                        chase_range_mid_pct=float(
+                            getattr(settings, "trade_chase_range_mid_pct", 78.0)
+                        ),
+                        block_chase_watch=bool(
+                            getattr(settings, "trade_decision_block_chase_watch", True)
+                        ),
                     )
                     new_tier = apply_decision_to_quality_tier(quality.tier, trade_decision)
                     signal.details["trade_decision"] = trade_decision.action
@@ -1072,6 +1090,13 @@ class TelegramBot:
                 signal.details["quality_tier"] = quality.tier
                 signal.details["quality_block"] = quality.block_reason
 
+                if not (is_vertical or is_impulse or is_trend or is_trend_seed):
+                    message = self._format_signal_message(
+                        signal,
+                        is_priority=is_priority,
+                        compact=settings.signal_message_compact,
+                    )
+
                 if quality.tier == "skip" and not skip_dedupe:
                     logger.info(
                         "Telegram skip %s %s: quality — %s",
@@ -1098,18 +1123,18 @@ class TelegramBot:
                         )
                         return
 
-                # При включённом арбитре: ENTRY только entry; WATCH если режим watch;
-                # иначе импульс без локации не шлём как «готовый сигнал».
+                # ENTRY всегда; WATCH — если общий режим или тип в allowlist
                 gate_on = getattr(settings, "trade_decision_gate_enabled", True)
                 enforce_actionable = settings.actionable_signals_only or gate_on
+                watch_ok = _watch_allowed_for_signal(signal, settings)
                 if enforce_actionable and not skip_dedupe:
-                    if quality.tier == "watch" and not settings.signal_watch_mode_enabled:
+                    if quality.tier == "watch" and not watch_ok:
                         logger.info(
-                            "Telegram skip %s %s: watch-only mode off — %s",
+                            "Telegram skip %s %s: watch not in allowlist — %s",
                             signal.exchange, signal.symbol, quality.block_reason,
                         )
                         return
-                    if quality.tier != "entry" and not settings.signal_watch_mode_enabled:
+                    if quality.tier != "entry" and not watch_ok:
                         ready, reason = self._eval_signal_readiness(
                             ta_result, signal, for_filter=True,
                         )
@@ -1125,6 +1150,9 @@ class TelegramBot:
                             signal.exchange, signal.symbol, quality.tier, quality.block_reason,
                         )
                         return
+                    if quality.tier == "watch" and watch_ok:
+                        # early WATCH: ок, дальше шлём
+                        pass
             else:
                 quality = None
                 if (settings.actionable_signals_only or getattr(settings, "trade_decision_gate_enabled", True)) and not skip_dedupe:
@@ -2954,6 +2982,7 @@ class TelegramBot:
             "/ta — справка по ручному TA-чату\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
             "🌱 <b>Тренды</b> — снимок потенциальных трендов (флет→пробой+OI)\n"
+            "Hot: <b>ENTRY</b> + early WATCH (<code>trend_seed</code>/impulse), pulse у хая молчит\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить все каналы\n"
             "/resume — восстановить каналы\n"
@@ -4262,6 +4291,10 @@ class TelegramBot:
         """Эмодзи + подпись направления сканера (не всегда = вход в сделку)."""
         is_long = signal.side == "long"
         st = signal.signal_type
+        tier = (signal.details.get("quality_tier") or "").lower()
+        decision = (signal.details.get("trade_decision") or "").lower()
+        if tier == "watch" or decision == "watch":
+            return ("👀", "движение ↑" if is_long else "движение ↓")
         if st in {"reversal_pump", "reversal_dump"}:
             return "↩️", "разворот ↑" if is_long else "разворот ↓"
         if st in {"impulse_pump", "impulse_dump"}:
@@ -4272,7 +4305,9 @@ class TelegramBot:
             return "🚨", "вертикаль ↑" if is_long else "вертикаль ↓"
         if st == "trend_seed":
             return "🌱", "потенциал тренда"
-        return ("🟢", "LONG") if is_long else ("🔴", "SHORT")
+        if st in {"pulse_pump", "pulse_dump", "pump", "dump", "oi_pump", "oi_dump", "price_pump", "price_dump"}:
+            return ("📈", "движение ↑") if is_long else ("📉", "движение ↓")
+        return ("📈", "движение ↑") if is_long else ("📉", "движение ↓")
 
     @staticmethod
     def _signal_type_header(signal: Signal, *, inline: bool = False) -> str:

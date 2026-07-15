@@ -92,7 +92,8 @@ def test_thesis_watch_on_late_impulse() -> None:
         decision=TradeDecision("watch", "погоня", chase=True),
     )
     assert thesis.action == "watch"
-    assert "рано" in thesis.thesis.lower() or thesis.wait_for
+    assert "market-вход" in thesis.thesis.lower() or "не входить" in thesis.thesis.lower()
+    assert "вход ≈ 1.1" not in (thesis.wait_for or "")
 
 
 def test_abc_detection_up_impulse() -> None:

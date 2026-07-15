@@ -46,7 +46,7 @@ def _sig(**kwargs) -> Signal:
     return Signal(**base)
 
 
-def test_chase_gets_watch_not_entry() -> None:
+def test_chase_gets_skip_not_entry() -> None:
     ta = TAAnalysisResult(
         verdict="LONG",
         action_priority="long",
@@ -56,8 +56,8 @@ def test_chase_gets_watch_not_entry() -> None:
         wave_phase="late_impulse",
     )
     d = decide_trade_action(_sig(), ta, readiness=(True, "armed"))
-    assert d.action == "watch"
-    assert d.setup_score >= 0
+    assert d.action == "skip"
+    assert d.chase is True
 
 
 def test_fib_setup_scores_entry() -> None:
@@ -109,10 +109,51 @@ def test_trend_seed_defaults_to_watch() -> None:
         momentum_pct=1.2,
     )
     d = decide_trade_action(
-        _sig(signal_type="trend_seed", price_change_percent=2.0, details={"seed_cvd_missing": 0}),
+        _sig(signal_type="trend_seed", price_change_percent=2.0, details={"seed_cvd_missing": 0, "seed_extension_pct": 3.0}),
         ta,
         readiness=(False, "нет"),
         min_watch_score=30,
     )
     assert d.action == "watch"
     assert "потенциал" in d.reason.lower() or "тренд" in d.reason.lower()
+
+
+def test_early_seed_survives_high_range_position() -> None:
+    """TA range высокий, но seed ещё early (<8%) → WATCH, не skip."""
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=1.05,
+        range_position=0.88,
+        momentum_pct=1.0,
+    )
+    d = decide_trade_action(
+        _sig(
+            signal_type="trend_seed",
+            details={"seed_extension_pct": 4.0, "seed_cvd_missing": 0},
+        ),
+        ta,
+        readiness=(False, "ждать"),
+        watch_allowed=True,
+        block_chase_watch=True,
+    )
+    assert d.action == "watch"
+    assert d.chase is False
+
+
+def test_chase_pulse_still_skipped() -> None:
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=1.1,
+        range_position=0.92,
+        momentum_pct=2.0,
+    )
+    d = decide_trade_action(
+        _sig(signal_type="pulse_pump"),
+        ta,
+        readiness=(False, "x"),
+        watch_allowed=False,
+        block_chase_watch=True,
+    )
+    assert d.action == "skip"
