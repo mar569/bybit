@@ -20,7 +20,7 @@ from .signal_quality_gate import assess_signal_quality, attach_cvd_to_signal_det
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager, clamp_cooldown_seconds
 from .symbol_tiers import TierThresholds, tier_thresholds
 from .trend_exhaustion import TrendExhaustionRisk, detect_trend_exhaustion, detect_trend_exhaustion_risk
-from .trend_seed import detect_trend_seed
+from .trend_seed import TrendSeedScanRow, detect_trend_seed, rank_trend_seed_hits
 from .anomaly_alerts import AnomalyBatcher, detect_anomaly_for_symbol
 
 HISTORY_MAX_POINTS = 3600
@@ -473,6 +473,99 @@ class SignalEngine:
             "max_history_points": max_history,
             "dirty_queue": len(self._dirty_keys),
         }
+
+    async def scan_trend_seeds(
+        self,
+        *,
+        limit: int | None = None,
+        exchange_filter: str | None = "Bybit",
+    ) -> list[TrendSeedScanRow]:
+        """Снимок потенциальных трендов по live-истории (без эмита Signal)."""
+        settings = self.settings.settings
+        if not getattr(settings, "trend_seed_enabled", True):
+            return []
+
+        scan_limit = int(
+            limit
+            if limit is not None
+            else getattr(settings, "trend_seed_scan_limit", 15)
+        )
+        min_liq = float(getattr(settings, "trend_seed_min_liquidity_oi_usd", 100_000.0))
+        lookback = float(getattr(settings, "signal_cvd_lookback_minutes", 10.0))
+        filt = (exchange_filter or "").strip().lower() or None
+
+        # Коротко копируем хвосты истории под lock
+        snapshots: list[tuple[str, str, deque[SnapshotPoint]]] = []
+        async with self.lock:
+            for key, history in self.history.items():
+                if not history or len(history) < 16:
+                    continue
+                if ":" not in key:
+                    continue
+                exchange, symbol = key.split(":", 1)
+                if filt and filt not in exchange.lower():
+                    continue
+                current = history[-1]
+                if current.price is None or current.open_interest is None:
+                    continue
+                snapshots.append((exchange, symbol, deque(history)))
+
+        rows: list[TrendSeedScanRow] = []
+        for exchange, symbol, history in snapshots:
+            current = history[-1]
+            oi_usd = self._oi_usd_value(
+                current.open_interest, current.price, current.additional,
+            )
+            if oi_usd is not None and oi_usd < min_liq:
+                continue
+
+            thresholds = settings.for_exchange(exchange)
+            in_top = self._is_in_top_n(exchange, symbol)
+            tier = tier_thresholds(symbol, settings, thresholds, in_top_n=in_top)
+
+            cvd_ratio: float | None = None
+            if "bybit" in exchange.lower():
+                try:
+                    snap = get_taker_cvd_cache().peek_live_cvd(
+                        symbol, lookback_minutes=lookback,
+                    )
+                    if snap is not None:
+                        cvd_ratio = float(snap.ratio)
+                except Exception:
+                    cvd_ratio = None
+
+            hit = detect_trend_seed(
+                history,
+                current,
+                settings=settings,
+                tier=tier,
+                cvd_ratio=cvd_ratio,
+            )
+            if hit is None:
+                continue
+
+            meta = hit.meta
+            rows.append(
+                TrendSeedScanRow(
+                    exchange=exchange,
+                    symbol=symbol.upper(),
+                    break_pct=float(meta.get("seed_break_above_base_pct", hit.price_change_percent)),
+                    oi_pct=float(hit.oi_change_percent),
+                    extension_pct=float(meta.get("seed_extension_pct", 0.0)),
+                    urgency=int(hit.urgency),
+                    cvd_ratio=(
+                        float(meta["seed_cvd_ratio"])
+                        if "seed_cvd_ratio" in meta
+                        else cvd_ratio
+                    ),
+                    base_minutes=float(meta.get("seed_base_minutes", 25.0)),
+                    flat_range_pct=float(meta.get("seed_flat_range_pct", 0.0)),
+                    price=current.price,
+                    meta=dict(meta),
+                )
+            )
+
+        return rank_trend_seed_hits(rows, limit=scan_limit)
 
     async def _evaluate_signals(self, key: str, exchange: str, symbol: str) -> None:
         async with self.lock:

@@ -23,6 +23,35 @@ class TrendSeedHit:
     meta: dict[str, float]
 
 
+@dataclass(frozen=True)
+class TrendSeedScanRow:
+    """Лёгкая строка для отчёта «потенциал трендов» (без эмита Signal)."""
+    exchange: str
+    symbol: str
+    break_pct: float
+    oi_pct: float
+    extension_pct: float
+    urgency: int
+    cvd_ratio: float | None
+    base_minutes: float
+    flat_range_pct: float
+    price: float | None = None
+    meta: dict[str, float] | None = None
+
+
+def rank_trend_seed_hits(
+    rows: list[TrendSeedScanRow],
+    *,
+    limit: int = 15,
+) -> list[TrendSeedScanRow]:
+    """urgency desc → extension asc (раньше лучше) → OI rise desc."""
+    ranked = sorted(
+        rows,
+        key=lambda r: (-int(r.urgency), float(r.extension_pct), -float(r.oi_pct)),
+    )
+    return ranked[: max(1, int(limit))] if limit else ranked
+
+
 def _point_at_cutoff(history: deque[SnapshotPoint], cutoff: float) -> SnapshotPoint | None:
     for point in history:
         if point.timestamp >= cutoff:

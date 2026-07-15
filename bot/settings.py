@@ -263,6 +263,8 @@ class ScannerSettings:
     trend_seed_require_cvd: bool = False
     trend_seed_min_liquidity_oi_usd: float = 100_000.0
     trend_seed_cooldown_seconds: int = 150
+    trend_seed_scan_limit: int = 15
+    trend_seed_scan_cooldown_seconds: int = 45
 
     min_open_interest: float = 80_000.0
     min_volume: float = 0.0
@@ -708,6 +710,10 @@ class ScannerSettings:
                 base.get("trend_seed_min_liquidity_oi_usd", 100_000.0)
             ),
             trend_seed_cooldown_seconds=int(base.get("trend_seed_cooldown_seconds", 150)),
+            trend_seed_scan_limit=int(base.get("trend_seed_scan_limit", 15)),
+            trend_seed_scan_cooldown_seconds=int(
+                base.get("trend_seed_scan_cooldown_seconds", 45)
+            ),
             min_open_interest=float(base["min_open_interest"]),
             min_volume=float(base["min_volume"]),
             enabled_binance=bool(base.get("enabled_binance", True)),

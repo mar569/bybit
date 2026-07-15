@@ -168,6 +168,8 @@ class TelegramBot:
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
         self._pause_snapshot: dict[str, bool] | None = None
+        self._last_trend_seed_scan_at: float = 0.0
+        self._trend_seed_scan_lock = asyncio.Lock()
 
     _BOT_PAUSE_KEYS: tuple[str, ...] = (
         "signals_enabled",
@@ -2930,6 +2932,8 @@ class TelegramBot:
             )
         elif text in {"📐 Ручной анализ", "Ручной анализ"}:
             await self._start_manual_ta_wizard(update, context)
+        elif text in {"🌱 Тренды", "Тренды", "Потенциал трендов", "🌱 Потенциал трендов"}:
+            await self._handle_trend_seed_scan_request(update)
         elif text in {"📋 Команды", "Команды", "❓ Помощь", "Помощь"}:
             await update.message.reply_text(
                 self._build_help_text(),
@@ -2949,6 +2953,7 @@ class TelegramBot:
             "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
             "/ta — справка по ручному TA-чату\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
+            "🌱 <b>Тренды</b> — снимок потенциальных трендов (флет→пробой+OI)\n"
             "/scan — диагностика сканера\n"
             "/pause — остановить все каналы\n"
             "/resume — восстановить каналы\n"
@@ -2961,6 +2966,144 @@ class TelegramBot:
             "🔥 score 1–2 = приоритет (звук)\n\n"
             "Все настройки применяются сразу."
         )
+
+    def _trend_seed_scan_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="tseed:refresh")],
+        ])
+
+    @staticmethod
+    def _format_trend_seed_scan_report(rows: list[Any], *, scanned: int | None = None) -> str:
+        from .trend_seed import TrendSeedScanRow
+
+        header = (
+            "<b>🌱 Потенциал трендов</b> · снимок сейчас\n"
+            "<i>Флет → пробой + OI↑ (+CVD). WATCH, не market-chase.</i>\n\n"
+        )
+        if not rows:
+            return (
+                header
+                + "Сейчас нет явных seed (флет→пробой+OI).\n"
+                + "Сканер продолжает копить историю — нажми Обновить позже."
+            )
+
+        lines = [header]
+        for i, row in enumerate(rows, 1):
+            if not isinstance(row, TrendSeedScanRow):
+                continue
+            cvd = (
+                f"{row.cvd_ratio:.0%} buy"
+                if row.cvd_ratio is not None
+                else "нет"
+            )
+            lines.append(
+                f"{i}. <code>{row.symbol}</code> · "
+                f"<b>+{row.break_pct:.2f}%</b> · "
+                f"OI <b>+{row.oi_pct:.2f}%</b> · "
+                f"CVD {cvd} · "
+                f"база {row.base_minutes:.0f}м"
+            )
+        if scanned is not None:
+            lines.append(f"\n<i>Проверено пар: {scanned} · показано: {len(rows)}</i>")
+        return "\n".join(lines)
+
+    async def _handle_trend_seed_scan_request(
+        self,
+        update: Update,
+        *,
+        query: CallbackQuery | None = None,
+        from_callback: bool = False,
+    ) -> None:
+        if self.scanner is None:
+            text = "⚠️ Сканер ещё не запущен."
+            if query is not None and from_callback:
+                try:
+                    await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+                except BadRequest:
+                    pass
+            elif update.message is not None:
+                await update.message.reply_text(text)
+            return
+
+        settings = self.settings_manager.settings
+        cd = int(getattr(settings, "trend_seed_scan_cooldown_seconds", 45))
+        now = time.time()
+        wait = cd - (now - self._last_trend_seed_scan_at)
+        if wait > 0 and self._last_trend_seed_scan_at > 0:
+            if query is not None and from_callback:
+                await query.answer(f"Cooldown {int(wait) + 1}с", show_alert=True)
+                return
+            if update.message is not None:
+                await update.message.reply_text(
+                    f"Подожди ещё <b>{int(wait) + 1}с</b> перед новым снимком.",
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+
+        if self._trend_seed_scan_lock.locked():
+            tip = "Уже идёт поиск…"
+            if query is not None and from_callback:
+                await query.answer(tip, show_alert=True)
+            elif update.message is not None:
+                await update.message.reply_text(tip)
+            return
+
+        status_msg = None
+        if update.message is not None and not from_callback:
+            status_msg = await update.message.reply_text(
+                "🌱 Ищу потенциальные тренды по истории сканера…",
+            )
+
+        async with self._trend_seed_scan_lock:
+            try:
+                rows = await self.scanner.scan_trend_seeds(exchange_filter="Bybit")
+                self._last_trend_seed_scan_at = time.time()
+                diag = self.scanner.get_diagnostics()
+                scanned = int(diag.get("pairs_tracked") or 0)
+                report = self._format_trend_seed_scan_report(rows, scanned=scanned)
+                kb = self._trend_seed_scan_keyboard()
+                if query is not None and from_callback:
+                    try:
+                        await query.edit_message_text(
+                            report,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=kb,
+                            disable_web_page_preview=True,
+                        )
+                    except BadRequest:
+                        if query.message is not None:
+                            await query.message.reply_text(
+                                report,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=kb,
+                                disable_web_page_preview=True,
+                            )
+                elif status_msg is not None:
+                    try:
+                        await status_msg.edit_text(
+                            report,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=kb,
+                            disable_web_page_preview=True,
+                        )
+                    except BadRequest:
+                        if update.message is not None:
+                            await update.message.reply_text(
+                                report,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=kb,
+                                disable_web_page_preview=True,
+                            )
+            except Exception:
+                logger.exception("Trend seed scan failed")
+                err = "⚠️ Ошибка при поиске потенциальных трендов."
+                if status_msg is not None:
+                    try:
+                        await status_msg.edit_text(err)
+                    except BadRequest:
+                        pass
+                elif query is not None and query.message is not None:
+                    await query.message.reply_text(err)
 
     def _build_exchanges_text(self) -> str:
         s = self.settings_manager.settings
@@ -3201,6 +3344,18 @@ class TelegramBot:
             return
 
         payload = query.data or ""
+        if payload.startswith("tseed:"):
+            if not self._is_admin(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            if payload == "tseed:refresh":
+                await query.answer("Обновляю…")
+                await self._handle_trend_seed_scan_request(
+                    update, query=query, from_callback=True,
+                )
+            else:
+                await query.answer("Неизвестная команда", show_alert=True)
+            return
         if payload.startswith("symcopy:"):
             sym = payload.split(":", 1)[1].upper()
             if sym and query.message:
@@ -3750,8 +3905,9 @@ class TelegramBot:
                     KeyboardButton("🎛 Каналы"),
                 ],
                 [KeyboardButton("💧 Ликвидация"), KeyboardButton("🧠 Анализ")],
-                [KeyboardButton("📐 Ручной анализ"), KeyboardButton("🔧 Настройки")],
-                [KeyboardButton("📊 Биржи"), KeyboardButton("📋 Команды")],
+                [KeyboardButton("📐 Ручной анализ"), KeyboardButton("🌱 Тренды")],
+                [KeyboardButton("🔧 Настройки"), KeyboardButton("📊 Биржи")],
+                [KeyboardButton("📋 Команды")],
             ],
             resize_keyboard=True,
         )

@@ -171,3 +171,31 @@ def test_settings_v39_defaults() -> None:
     assert s.trend_seed_max_flat_percent == 3.0
     assert s.trend_seed_min_break_percent == 1.2
     assert s.trend_seed_cooldown_seconds == 150
+    assert s.trend_seed_scan_limit == 15
+    assert s.trend_seed_scan_cooldown_seconds == 45
+
+
+def test_rank_trend_seed_hits_order_and_limit() -> None:
+    from bot.trend_seed import TrendSeedScanRow, rank_trend_seed_hits
+
+    rows = [
+        TrendSeedScanRow(
+            exchange="Bybit", symbol="LATE", break_pct=3.0, oi_pct=2.0,
+            extension_pct=9.0, urgency=7, cvd_ratio=0.56, base_minutes=25,
+            flat_range_pct=1.5,
+        ),
+        TrendSeedScanRow(
+            exchange="Bybit", symbol="EARLY", break_pct=1.5, oi_pct=1.0,
+            extension_pct=2.0, urgency=9, cvd_ratio=0.60, base_minutes=25,
+            flat_range_pct=1.2,
+        ),
+        TrendSeedScanRow(
+            exchange="Bybit", symbol="MID", break_pct=2.0, oi_pct=3.0,
+            extension_pct=4.0, urgency=9, cvd_ratio=None, base_minutes=25,
+            flat_range_pct=1.8,
+        ),
+    ]
+    ranked = rank_trend_seed_hits(rows, limit=2)
+    assert len(ranked) == 2
+    assert ranked[0].symbol == "EARLY"  # urgency 9, меньший extension
+    assert ranked[1].symbol == "MID"    # urgency 9, больше OI чем LATE отсечён limit

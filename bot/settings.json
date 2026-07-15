@@ -143,6 +143,8 @@
   "trend_seed_require_cvd": false,
   "trend_seed_min_liquidity_oi_usd": 100000.0,
   "trend_seed_cooldown_seconds": 150,
+  "trend_seed_scan_limit": 15,
+  "trend_seed_scan_cooldown_seconds": 45,
   "min_open_interest": 80000.0,
   "min_volume": 0.0,
   "enabled_binance": true,
