@@ -1048,6 +1048,8 @@ class TelegramBot:
                             neutral=True,
                             chart_source=settings.signal_chart_source,
                             exchange=signal.exchange.lower(),
+                            pattern_detection_enabled=settings.pattern_detection_enabled,
+                            pattern_min_confidence=settings.pattern_min_confidence,
                         ),
                         timeout=35.0,
                     )

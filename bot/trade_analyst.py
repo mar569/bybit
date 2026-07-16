@@ -280,6 +280,10 @@ def build_trade_thesis(
     structure_line = f"Структура: <b>{structure}</b>"
     if phase:
         structure_line += f" · {phase}"
+    if ta.primary_chart_pattern:
+        pat = ta.primary_chart_pattern
+        status = "подтв." if pat.status == "confirmed" else "форм."
+        structure_line += f" · {pat.label_ru} ({status})"
 
     wave_bits: list[str] = []
     if ta.wave_leg_start and ta.wave_leg_end:

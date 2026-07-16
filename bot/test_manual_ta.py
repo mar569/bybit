@@ -41,5 +41,5 @@ def test_mtw_callback_roundtrip() -> None:
 
 
 def test_manual_ta_hours() -> None:
-    assert manual_ta_hours(5) == 5
-    assert manual_ta_hours(15) == 10
+    assert manual_ta_hours(5) == 18
+    assert manual_ta_hours(15) == 24

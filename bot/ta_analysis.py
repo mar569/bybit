@@ -21,6 +21,8 @@ from .wave_structure import (
     apply_wave_to_trade_plan,
     wave_flow_adjustments,
 )
+from .chart_pattern_models import ChartPattern
+from .chart_patterns import detect_chart_patterns, format_chart_pattern_compact, pick_primary_pattern
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,8 @@ class TAAnalysisResult:
     abc_label_ru: str = ""
     fib_status: str = ""
     fib_reject_reason: str = ""
+    chart_patterns: list[ChartPattern] = field(default_factory=list)
+    primary_chart_pattern: ChartPattern | None = None
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -2089,6 +2093,8 @@ def run_ta_analysis(
     interval_minutes: int = 5,
     history_bars: list[KlineBar] | None = None,
     taker_cvd: object | None = None,
+    pattern_detection_enabled: bool = True,
+    pattern_min_confidence: float = 0.55,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
     swings = find_swing_points(bars)
@@ -2098,6 +2104,13 @@ def run_ta_analysis(
     trend_lines = detect_trend_lines(bars, swings)
     consolidation = detect_consolidation(bars)
     patterns = detect_candle_patterns(bars)
+    pattern_bars = list(history_bars or bars)
+    chart_patterns = detect_chart_patterns(
+        pattern_bars,
+        enabled=pattern_detection_enabled,
+        min_confidence=pattern_min_confidence,
+    )
+    primary_chart_pattern = pick_primary_pattern(chart_patterns)
     rulers = compute_rulers(bars, swings)
     structure = classify_structure(swings)
     key_levels = build_key_levels(bars, levels, zones)
@@ -2685,6 +2698,8 @@ def run_ta_analysis(
         abc_label_ru=wave.abc_label_ru if wave.leg else "",
         fib_status=getattr(wave, "fib_status", "") or "",
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
+        chart_patterns=chart_patterns,
+        primary_chart_pattern=primary_chart_pattern,
     )
 
 
@@ -2698,6 +2713,8 @@ def ta_summary_compact(ta: TAAnalysisResult) -> str:
         parts.append(f"ключ {fmt_price(ta.breakout_level)}")
     if ta.patterns:
         parts.append(ta.patterns[-1].label_ru)
+    if ta.primary_chart_pattern:
+        parts.append(format_chart_pattern_compact(ta.primary_chart_pattern))
     return " · ".join(parts)
 
 

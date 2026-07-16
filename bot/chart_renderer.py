@@ -16,12 +16,14 @@ from matplotlib.patches import Ellipse, Rectangle
 
 from .bybit_klines import BybitKlineCache, KlineBar
 from .bybit_cvd import get_taker_cvd_cache
+from .chart_pattern_draw import draw_chart_patterns
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
     draw_rsi_panel,
     draw_volume_panel,
 )
+from .manual_ta import pattern_chart_hours
 from .chart_screenshot import chart_capture_service
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
@@ -663,6 +665,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     _draw_channel(ax, bars, ta)
     _draw_extended_trend_lines(ax, bars, ta)
     _draw_consolidation_box(ax, bars, ta)
+    draw_chart_patterns(ax, bars, ta.chart_patterns)
 
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)
@@ -1016,24 +1019,25 @@ def _render_chart_figure(
 ) -> bytes:
     use_enhanced = enhanced
     if use_enhanced:
-        fig = plt.figure(figsize=(17, 10.8), dpi=120)
+        # Шире область свечей (~+13%): боковые панели остаются, но уже
+        fig = plt.figure(figsize=(18.2, 10.8), dpi=120)
         gs = fig.add_gridspec(3, 1, height_ratios=[4.2, 1.0, 0.9], hspace=0.04)
         ax = fig.add_subplot(gs[0])
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
-        fig.subplots_adjust(left=0.20, right=0.78, top=0.92, bottom=0.08)
+        fig.subplots_adjust(left=0.155, right=0.825, top=0.92, bottom=0.08)
     else:
-        fig_size = (19.2, 10.2) if pro_mode else (17, 8.5)
+        fig_size = (20.4, 10.2) if pro_mode else (18.2, 8.5)
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
         ax_vol = None
         ax_rsi = None
         fig.patch.set_facecolor(CHART_STYLE["bg"])
         ax.set_facecolor(CHART_STYLE["bg"])
         if pro_mode:
-            fig.subplots_adjust(left=0.14, right=0.86, top=0.93, bottom=0.09)
+            fig.subplots_adjust(left=0.11, right=0.89, top=0.93, bottom=0.09)
         else:
-            fig.subplots_adjust(left=0.16, right=0.84, top=0.92, bottom=0.10)
+            fig.subplots_adjust(left=0.13, right=0.87, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
@@ -1671,22 +1675,21 @@ async def render_annotated_chart(
     chart_source: str = "annotated",
     exchange: str = "bybit",
     liq_context: dict | None = None,
+    pattern_detection_enabled: bool = True,
+    pattern_min_confidence: float = 0.55,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
-    bars = await _fetch_bars(symbol, hours, interval_minutes=interval_minutes)
+    effective_hours = max(hours, pattern_chart_hours(interval_minutes))
+    bars = await _fetch_bars(symbol, effective_hours, interval_minutes=interval_minutes)
     if not bars:
         return None, None
 
     btc_bars: list[KlineBar] | None = None
     htf_bars: list[KlineBar] | None = None
-    history_bars: list[KlineBar] | None = None
+    history_bars: list[KlineBar] | None = bars
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
-        btc_bars = await _fetch_bars("BTCUSDT", hours, interval_minutes=interval_minutes)
+        btc_bars = await _fetch_bars("BTCUSDT", effective_hours, interval_minutes=interval_minutes)
     if interval_minutes <= 15:
-        htf_bars = await _fetch_bars(symbol, max(24, hours * 2), interval_minutes=60)
-    # Для ручного TA (neutral=True) подтягиваем более глубокую историю паттернов.
-    if neutral:
-        hist_hours = 48 if interval_minutes <= 15 else 72
-        history_bars = await _fetch_bars(symbol, hist_hours, interval_minutes=interval_minutes)
+        htf_bars = await _fetch_bars(symbol, max(24, effective_hours * 2), interval_minutes=60)
 
     taker_cvd = None
     if symbol:
@@ -1706,13 +1709,15 @@ async def render_annotated_chart(
         btc_bars=btc_bars,
         htf_bars=htf_bars,
         symbol=symbol,
-        hours=hours,
+        hours=effective_hours,
         invalidation_price=invalidation_price,
         neutral=neutral,
         liq_context=liq_context,
         interval_minutes=interval_minutes,
         history_bars=history_bars,
         taker_cvd=taker_cvd,
+        pattern_detection_enabled=pattern_detection_enabled,
+        pattern_min_confidence=pattern_min_confidence,
     )
     if verdict_override:
         ta.verdict = verdict_override
@@ -1747,7 +1752,7 @@ async def render_annotated_chart(
     png = _render_chart_figure(
         bars, ta,
         symbol=symbol,
-        title_suffix=f"Bybit {interval_minutes}m · {hours}ч",
+        title_suffix=f"Bybit {interval_minutes}m · {effective_hours}ч",
         accent_color=accent,
         interval_minutes=interval_minutes,
         pro_mode=pro_mode,

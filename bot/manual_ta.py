@@ -55,8 +55,13 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
     return normalize_symbol(token_match.group(1)), interval
 
 
+def pattern_chart_hours(interval_minutes: int) -> int:
+    """Окно истории для поиска и отрисовки графических фигур."""
+    return {5: 18, 10: 12, 15: 24, 60: 72}.get(interval_minutes, 18)
+
+
 def manual_ta_hours(interval_minutes: int) -> int:
-    return {5: 5, 10: 8, 15: 10, 60: 48}.get(interval_minutes, 5)
+    return pattern_chart_hours(interval_minutes)
 
 
 def bars_per_hour(interval_minutes: int) -> int:

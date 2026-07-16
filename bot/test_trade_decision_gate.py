@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from bot.models import Signal
 from bot.ta_analysis import TAAnalysisResult
+from bot.chart_pattern_models import ChartPattern, PatternLine
 from bot.trade_decision_gate import (
     decide_trade_action,
+    detect_location,
     score_trade_setup,
 )
 
@@ -181,3 +183,36 @@ def test_reversal_weak_cvd_not_entry() -> None:
         min_entry_score=50,
     )
     assert d.action != "entry"
+
+
+def test_pattern_location_boosts_setup_score() -> None:
+    pat = ChartPattern(
+        kind="cup_handle",
+        subtype="continuation",
+        status="confirmed",
+        points=(),
+        lines=(),
+        zone_top=1.06,
+        zone_bottom=1.0,
+        neckline=PatternLine(0, 1.06, 40, 1.06, "rim"),
+        pole_height=0.06,
+        target_price=1.12,
+        stop_price=0.99,
+        confidence=0.78,
+        score_breakdown={},
+        source_rule="test",
+        label_ru="Чашка",
+        direction="bullish",
+    )
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=1.059,
+        range_position=0.5,
+        momentum_pct=0.2,
+        primary_chart_pattern=pat,
+    )
+    assert detect_location(ta, "long") == "pattern"
+    setup = score_trade_setup(_sig(), ta)
+    assert setup.location_kind == "pattern"
+    assert setup.location >= 20

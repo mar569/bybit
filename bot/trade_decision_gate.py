@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .chart_patterns import pattern_location_ok
+
 if TYPE_CHECKING:
     from .models import Signal
     from .ta_analysis import TAAnalysisResult
@@ -177,6 +179,12 @@ def detect_location(ta: TAAnalysisResult, side: str) -> str:
         return "fib"
     if _abc_entry_ok(ta, side):
         return "abc"
+    if pattern_location_ok(
+        getattr(ta, "primary_chart_pattern", None),
+        side=side,
+        price=float(getattr(ta, "current_price", 0) or 0),
+    ):
+        return "pattern"
     if _retest_location_ok(ta, side):
         return "retest"
     if _sr_location_ok(ta, side):
@@ -281,7 +289,7 @@ def score_trade_setup(
         penalties += 18
         factors.append("конфликт TA")
 
-    loc_map = {"fib": 28, "abc": 26, "retest": 24, "sr": 16, "none": 0}
+    loc_map = {"fib": 28, "abc": 26, "retest": 24, "pattern": 22, "sr": 16, "none": 0}
     loc_pts = loc_map.get(location, 0)
     if location != "none":
         factors.append(f"локация {location}")
@@ -370,8 +378,8 @@ def decide_trade_action(
     )
     location = setup.location_kind
     aligned, align_reason = _side_aligned(ta, side)
-    has_location = location in {"fib", "abc", "retest", "sr", "trigger"}
-    safe_location = location in {"fib", "abc", "retest", "sr"}
+    has_location = location in {"fib", "abc", "retest", "sr", "trigger", "pattern"}
+    safe_location = location in {"fib", "abc", "retest", "sr", "pattern"}
     st = (signal.signal_type or "").lower()
     details = signal.details or {}
     seed_ext = float(details.get("seed_extension_pct", 99) or 99)
@@ -392,7 +400,7 @@ def decide_trade_action(
 
     # trend_seed: ранний потенциал — ENTRY у локации; иначе WATCH (не market)
     if st == "trend_seed" and watch_allowed:
-        has_loc = location in {"fib", "abc", "retest", "sr"}
+        has_loc = location in {"fib", "abc", "retest", "sr", "pattern"}
         cvd_miss = float(details.get("seed_cvd_missing", 0) or 0)
         if has_loc and setup.total >= min_entry_score and not chase:
             return TradeDecision(
@@ -429,7 +437,7 @@ def decide_trade_action(
         except (TypeError, ValueError):
             cvd_f = None
         cvd_ok = _cvd_confirms_side(side, cvd_f)
-        has_loc = location in {"fib", "abc", "retest", "sr"}
+        has_loc = location in {"fib", "abc", "retest", "sr", "pattern"}
         if has_loc and cvd_ok and setup.total >= min_entry_score and not chase:
             return TradeDecision(
                 "entry",
@@ -469,9 +477,9 @@ def decide_trade_action(
     can_entry = (
         setup.total >= min_entry_score
         and has_location
-        and (not chase or location in {"fib", "abc", "retest"})
+        and (not chase or location in {"fib", "abc", "retest", "pattern"})
     )
-    if can_entry and (ready or location in {"fib", "abc", "retest", "sr"}):
+    if can_entry and (ready or location in {"fib", "abc", "retest", "sr", "pattern"}):
         reason = f"сетап {setup.total}/100"
         if ready_reason:
             reason = f"{reason} · {ready_reason}"

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 42
+SETTINGS_VERSION = 43
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -346,8 +346,12 @@ class ScannerSettings:
     # График к сигналу: annotated = TA-разметка, tradingview, coinglass, generated
     signal_chart_enabled: bool = True
     signal_chart_source: str = "annotated"
-    signal_chart_hours: int = 5
+    signal_chart_hours: int = 18
     signal_chart_interval_minutes: int = 5
+
+    # Графические фигуры (ГиП, флаг, треугольник и т.д.)
+    pattern_detection_enabled: bool = True
+    pattern_min_confidence: float = 0.55
 
     # Ручной TA: tv_annotated = TradingView + уровни, annotated = matplotlib
     manual_ta_chart_source: str = "tv_annotated"
@@ -799,8 +803,10 @@ class ScannerSettings:
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
             signal_chart_source=str(base.get("signal_chart_source", "annotated")),
-            signal_chart_hours=int(base.get("signal_chart_hours", 5)),
+            signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
+            pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
+            pattern_min_confidence=float(base.get("pattern_min_confidence", 0.55)),
             manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", True)),
