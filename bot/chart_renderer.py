@@ -749,9 +749,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
 
 def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
-    """Текстовые блоки в боковых полях — без дублирования."""
+    """Текстовые блоки в боковых полях — уровни слева, план/итог справа."""
     base_bbox = dict(
-        boxstyle="round,pad=0.4",
+        boxstyle="round,pad=0.55",
         facecolor=CHART_STYLE["panel"],
         edgecolor=CHART_STYLE["panel_border"],
         alpha=0.94,
@@ -759,42 +759,45 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
     panel_style = dict(
         transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=7.8,
-        linespacing=1.28,
+        fontsize=7.6,
+        linespacing=1.38,
         bbox=base_bbox,
     )
     bull_style = {**panel_style, "color": CHART_STYLE["accent_long"]}
     bear_style = {**panel_style, "color": CHART_STYLE["accent_short"]}
 
-    lx, rx = 0.008, 0.992
+    # Отступ от края, чтобы боксы не липли к рамке
+    lx, rx = 0.018, 0.982
 
     key_levels = ta_chart_key_levels_text(ta)
     if key_levels:
-        fig.text(lx, 0.985, key_levels, va="top", ha="left", **panel_style)
+        fig.text(lx, 0.975, key_levels, va="top", ha="left", **panel_style)
+
+    # Справа сверху вниз: ИТОГ → ПЛАН → сценарий (с зазорами)
+    fig.text(rx, 0.975, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
 
     plan = ta_chart_plan_text(ta)
     if plan:
-        fig.text(lx, 0.64, plan, va="top", ha="left", **panel_style)
+        fig.text(rx, 0.68, plan, va="top", ha="right", **panel_style)
 
-    fig.text(rx, 0.985, ta_chart_panel_text(ta), va="top", ha="right", **panel_style)
-
+    scenario_y = 0.36 if plan else 0.68
     bull_text = ta_chart_scenario_text(ta.bullish_scenario, title="БЫЧИЙ СЦЕНАРИЙ")
     if bull_text and ta.verdict in {"LONG", "WAIT"}:
-        fig.text(rx, 0.64, bull_text, va="top", ha="right", **bull_style)
+        fig.text(rx, scenario_y, bull_text, va="top", ha="right", **bull_style)
 
     bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
     if bear_text and ta.verdict == "SHORT":
-        fig.text(rx, 0.64, bear_text, va="top", ha="right", **bear_style)
+        fig.text(rx, scenario_y, bear_text, va="top", ha="right", **bear_style)
 
     summary = ta_chart_summary_text(ta)
     if summary:
         fig.text(
-            0.50, 0.015 if not with_subpanels else 0.115,
+            0.50, 0.018 if not with_subpanels else 0.125,
             summary,
-            va="bottom", ha="center", fontsize=7.6, color=CHART_STYLE["text"],
+            va="bottom", ha="center", fontsize=7.5, color=CHART_STYLE["text"],
             transform=fig.transFigure,
             bbox=dict(
-                boxstyle="round,pad=0.35",
+                boxstyle="round,pad=0.45",
                 facecolor=CHART_STYLE["panel"],
                 edgecolor=CHART_STYLE["warning"],
                 alpha=0.90,
@@ -803,7 +806,7 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
 
 
 def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
-    """PRO-версия: ключевые блоки без дублирования."""
+    """PRO-версия: уровни слева, план/итог/сценарий справа."""
     def _drop_dup_title(text: str, title: str) -> str:
         if not text:
             return ""
@@ -812,22 +815,22 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
             return "\n".join(lines[1:]).strip()
         return text
 
-    left_x, right_x = 0.008, 0.992
+    left_x, right_x = 0.018, 0.982
     text_color = CHART_STYLE["text"]
     panel_fc = "#101828"
     edge = CHART_STYLE["panel_border"]
 
     base = dict(
         transform=fig.transFigure,
-        fontsize=8.4,
+        fontsize=8.2,
         color=text_color,
-        linespacing=1.32,
-        bbox=dict(boxstyle="round,pad=0.45", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
+        linespacing=1.40,
+        bbox=dict(boxstyle="round,pad=0.55", facecolor=panel_fc, edgecolor=edge, alpha=0.97),
     )
 
     fig.text(
         left_x,
-        0.985,
+        0.975,
         "КЛЮЧЕВЫЕ УРОВНИ\n" + (
             _drop_dup_title(ta_chart_key_levels_text(ta), "КЛЮЧЕВЫЕ УРОВНИ")
             or "уровни не определены"
@@ -836,26 +839,27 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
         va="top",
         **base,
     )
-    fig.text(
-        left_x,
-        0.68,
-        "ПЛАН ДЕЙСТВИЙ\n" + (
-            _drop_dup_title(ta_chart_plan_text(ta), "ПЛАН ДЕЙСТВИЙ")
-            or "ожидать подтверждения"
-        ),
-        ha="left",
-        va="top",
-        **base,
-    )
 
     fig.text(
         right_x,
-        0.985,
+        0.975,
         "ИТОГ\n" + _drop_dup_title(ta_chart_panel_text(ta), "ИТОГ"),
         ha="right",
         va="top",
         **base,
     )
+    fig.text(
+        right_x,
+        0.68,
+        "ПЛАН ДЕЙСТВИЙ\n" + (
+            _drop_dup_title(ta_chart_plan_text(ta), "ПЛАН ДЕЙСТВИЙ")
+            or "ожидать подтверждения"
+        ),
+        ha="right",
+        va="top",
+        **base,
+    )
+
     show_bull = (
         ta.bullish_scenario is not None
         and (ta.verdict == "LONG" or ta.action_priority == "long" or ta.bearish_scenario is None)
@@ -864,6 +868,7 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
         ta.bearish_scenario is not None
         and (ta.verdict == "SHORT" or ta.action_priority == "short" or ta.bullish_scenario is None)
     )
+    scenario_y = 0.36
     if show_bull and ta.bullish_scenario:
         bull = ta.bullish_scenario
         bull_lines = [
@@ -873,10 +878,10 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
             f"SL: {fmt_price(bull.stop_price)}",
         ]
         fig.text(
-            right_x, 0.58, "\n".join(bull_lines),
-            ha="right", va="top", fontsize=8.2, color=CHART_STYLE["accent_long"],
-            transform=fig.transFigure, linespacing=1.30,
-            bbox=dict(boxstyle="round,pad=0.42", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
+            right_x, scenario_y, "\n".join(bull_lines),
+            ha="right", va="top", fontsize=8.0, color=CHART_STYLE["accent_long"],
+            transform=fig.transFigure, linespacing=1.36,
+            bbox=dict(boxstyle="round,pad=0.52", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
         )
     if show_bear and ta.bearish_scenario and not show_bull:
         bear = ta.bearish_scenario
@@ -887,10 +892,10 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
             f"SL: {fmt_price(bear.stop_price)}",
         ]
         fig.text(
-            right_x, 0.58, "\n".join(bear_lines),
-            ha="right", va="top", fontsize=8.2, color=CHART_STYLE["accent_short"],
-            transform=fig.transFigure, linespacing=1.30,
-            bbox=dict(boxstyle="round,pad=0.42", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
+            right_x, scenario_y, "\n".join(bear_lines),
+            ha="right", va="top", fontsize=8.0, color=CHART_STYLE["accent_short"],
+            transform=fig.transFigure, linespacing=1.36,
+            bbox=dict(boxstyle="round,pad=0.52", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
         )
 
 
@@ -1026,7 +1031,7 @@ def _render_chart_figure(
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
-        fig.subplots_adjust(left=0.155, right=0.825, top=0.92, bottom=0.08)
+        fig.subplots_adjust(left=0.145, right=0.800, top=0.92, bottom=0.08)
     else:
         fig_size = (20.4, 10.2) if pro_mode else (18.2, 8.5)
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
