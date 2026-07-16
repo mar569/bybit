@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 43
+SETTINGS_VERSION = 44
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -351,7 +351,7 @@ class ScannerSettings:
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
     pattern_detection_enabled: bool = True
-    pattern_min_confidence: float = 0.55
+    pattern_min_confidence: float = 0.68
 
     # Ручной TA: tv_annotated = TradingView + уровни, annotated = matplotlib
     manual_ta_chart_source: str = "tv_annotated"
@@ -806,7 +806,7 @@ class ScannerSettings:
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
-            pattern_min_confidence=float(base.get("pattern_min_confidence", 0.55)),
+            pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
             manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", True)),

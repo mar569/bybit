@@ -10,6 +10,7 @@ from .pattern_specs import (
     DOUBLE_MIN_BARS_BETWEEN,
     FLAG_BODY_MAX_BARS,
     FLAG_BODY_MIN_BARS,
+    FLAG_PARALLEL_SLOPE_RATIO,
     FLAG_POLE_MAX_BARS,
     FLAG_POLE_MIN_BARS,
     CUP_HANDLE_MAX_BARS,
@@ -17,15 +18,25 @@ from .pattern_specs import (
     CUP_RIM_TOLERANCE_PCT,
     DIAMOND_MIN_SWINGS,
     HEAD_SHOULDER_TOLERANCE_PCT,
-    PATTERN_LABELS_RU,
-    TARGET_HS_FACTOR,
-    TARGET_POLE_FACTOR,
-    TARGET_TRIANGLE_FACTOR,
-    THREE_INDIANS_MIN_BARS,
-    TRIANGLE_MIN_SWINGS,
-    WEDGE_MIN_SWINGS,
+    MAX_CHART_PATTERNS,
+    MAX_REPORT_PATTERNS,
+    MIN_DRAW_CONFIDENCE,
     MIN_PATTERN_CONFIDENCE,
     MIN_TRADE_PATTERN_CONFIDENCE,
+    OVERLAP_FAMILIES,
+    PATTERN_LABELS_RU,
+    PENNANT_BODY_MAX_BARS,
+    RECTANGLE_MAX_RANGE_PCT,
+    RECTANGLE_MIN_BARS,
+    TARGET_HS_FACTOR,
+    TARGET_POLE_FACTOR,
+    TARGET_RECTANGLE_FACTOR,
+    TARGET_TRIANGLE_FACTOR,
+    THREE_INDIANS_FIB,
+    THREE_INDIANS_MIN_BARS,
+    THREE_INDIANS_TOLERANCE_PCT,
+    TRIANGLE_MIN_SWINGS,
+    WEDGE_MIN_SWINGS,
 )
 
 
@@ -129,6 +140,171 @@ def _score_geometry(base: float, **parts: float) -> tuple[float, dict[str, float
     return min(1.0, max(0.0, total)), breakdown
 
 
+def _prior_trend_bias(bars: list[KlineBar], end_idx: int, *, lookback: int = 24) -> str:
+    """bullish / bearish / neutral по движению до фигуры."""
+    if end_idx <= 2:
+        return "neutral"
+    start = max(0, end_idx - lookback)
+    move = bars[end_idx].close - bars[start].open
+    ref = abs(bars[start].open) or 1e-9
+    pct = move / ref * 100.0
+    if pct >= 1.2:
+        return "bullish"
+    if pct <= -1.2:
+        return "bearish"
+    return "neutral"
+
+
+def _is_near_range_extreme(
+    bars: list[KlineBar],
+    *,
+    side: str,
+    lookback: int = 40,
+    band_pct: float = 0.22,
+) -> bool:
+    """Ложный пробой только у пика/дна движения (статья)."""
+    if len(bars) < 10:
+        return False
+    seg = bars[-lookback:]
+    hi = max(b.high for b in seg)
+    lo = min(b.low for b in seg)
+    span = hi - lo
+    if span <= 0:
+        return False
+    close = bars[-1].close
+    if side == "bearish":
+        return close >= hi - span * band_pct
+    return close <= lo + span * band_pct
+
+
+def _patterns_overlap(a: ChartPattern, b: ChartPattern) -> bool:
+    """Одна ценовая/временная зона — не показывать оба."""
+    if not a.points or not b.points:
+        return a.kind == b.kind
+    a0 = min(p.index for p in a.points)
+    a1 = max(p.index for p in a.points)
+    b0 = min(p.index for p in b.points)
+    b1 = max(p.index for p in b.points)
+    # пересечение по времени
+    if a1 < b0 or b1 < a0:
+        return False
+    overlap = min(a1, b1) - max(a0, b0)
+    span = max(a1 - a0, b1 - b0, 1)
+    if overlap / span < 0.35:
+        return False
+    for family in OVERLAP_FAMILIES:
+        if a.kind in family and b.kind in family:
+            return True
+    # близкие зоны по цене
+    if a.zone_top and a.zone_bottom and b.zone_top and b.zone_bottom:
+        mid_a = (a.zone_top + a.zone_bottom) / 2
+        mid_b = (b.zone_top + b.zone_bottom) / 2
+        if mid_a > 0 and abs(mid_a - mid_b) / mid_a < 0.012:
+            return True
+    return False
+
+
+def _suppress_overlaps(patterns: list[ChartPattern]) -> list[ChartPattern]:
+    """Приоритет: confirmed → выше confidence → Баскервили сильнее сырой ГиП."""
+    def _rank(p: ChartPattern) -> tuple:
+        bask = 1 if p.kind.startswith("baskerville") else 0
+        conf_ok = 1 if p.status == "confirmed" else 0
+        return (conf_ok, bask, p.confidence)
+
+    kept: list[ChartPattern] = []
+    for pat in sorted(patterns, key=_rank, reverse=True):
+        if any(_patterns_overlap(pat, k) for k in kept):
+            continue
+        kept.append(pat)
+    return kept
+
+
+def _detect_rectangle(
+    bars: list[KlineBar],
+    atr: float,
+) -> list[ChartPattern]:
+    """Горизонтальный канал: продолжение или разворот после пробоя."""
+    out: list[ChartPattern] = []
+    n = len(bars)
+    if n < RECTANGLE_MIN_BARS + 8:
+        return out
+    for width in range(RECTANGLE_MIN_BARS, min(48, n - 4)):
+        start = n - width - 3
+        if start < 2:
+            continue
+        body = bars[start : start + width]
+        top = max(b.high for b in body)
+        bottom = min(b.low for b in body)
+        mid = (top + bottom) / 2
+        if mid <= 0:
+            continue
+        range_pct = (top - bottom) / mid * 100.0
+        if range_pct > RECTANGLE_MAX_RANGE_PCT or (top - bottom) < atr * 0.7:
+            continue
+        # касания границ
+        top_hits = sum(1 for b in body if abs(b.high - top) / mid * 100 <= 0.35)
+        bot_hits = sum(1 for b in body if abs(b.low - bottom) / mid * 100 <= 0.35)
+        if top_hits < 2 or bot_hits < 2:
+            continue
+        prior = _prior_trend_bias(bars, start)
+        height = top - bottom
+        close = bars[-1].close
+        if close > top * 1.001:
+            direction = "bullish"
+            status = "confirmed"
+            subtype = "continuation" if prior == "bullish" else "reversal"
+            target = top + height * TARGET_RECTANGLE_FACTOR
+            stop = bottom - atr * 0.2
+        elif close < bottom * 0.999:
+            direction = "bearish"
+            status = "confirmed"
+            subtype = "continuation" if prior == "bearish" else "reversal"
+            target = bottom - height * TARGET_RECTANGLE_FACTOR
+            stop = top + atr * 0.2
+        else:
+            direction = "bullish" if prior == "bullish" else "bearish" if prior == "bearish" else "neutral"
+            status = "forming"
+            subtype = "continuation"
+            target = top + height * TARGET_RECTANGLE_FACTOR if direction != "bearish" else bottom - height * TARGET_RECTANGLE_FACTOR
+            stop = bottom - atr * 0.2 if direction != "bearish" else top + atr * 0.2
+        conf, breakdown = _score_geometry(
+            0.62,
+            touches=0.14 if top_hits + bot_hits >= 5 else 0.08,
+            channel=0.12,
+            breakout=0.14 if status == "confirmed" else 0.0,
+        )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
+        out.append(
+            ChartPattern(
+                kind="rectangle",
+                subtype=subtype,
+                status=status,
+                points=(
+                    PatternPoint(start, top, "rect_top"),
+                    PatternPoint(start + width - 1, bottom, "rect_bottom"),
+                ),
+                lines=(
+                    PatternLine(start, top, start + width - 1, top, "upper_bound"),
+                    PatternLine(start, bottom, start + width - 1, bottom, "lower_bound"),
+                ),
+                zone_top=top,
+                zone_bottom=bottom,
+                neckline=None,
+                pole_height=height,
+                target_price=target,
+                stop_price=stop,
+                confidence=conf,
+                score_breakdown=breakdown,
+                source_rule="buyhold:rectangle",
+                label_ru=PATTERN_LABELS_RU["rectangle"] + (f" ({subtype})" if subtype else ""),
+                direction=direction,
+            )
+        )
+        break
+    return out[:1]
+
+
 def _detect_double_top_bottom(
     bars: list[KlineBar],
     swings: list[SwingPoint],
@@ -143,7 +319,12 @@ def _detect_double_top_bottom(
             h1, h2 = highs[i], highs[i + 1]
             if h2.index - h1.index < DOUBLE_MIN_BARS_BETWEEN:
                 continue
+            # без большого временного разрыва (статья: сразу после H1 → H2)
+            if h2.index - h1.index > 40:
+                continue
             if _pct_diff(h1.price, h2.price) > DOUBLE_EXTREMUM_TOLERANCE_PCT:
+                continue
+            if _prior_trend_bias(bars, h1.index) != "bullish":
                 continue
             valleys = [s for s in lows if h1.index < s.index < h2.index]
             if not valleys:
@@ -158,12 +339,15 @@ def _detect_double_top_bottom(
             stop = peak + atr * 0.25
             status = _status_from_break(bars, bullish=False, trigger=neckline)
             conf, breakdown = _score_geometry(
-                0.55,
-                symmetry=0.18 if _pct_diff(h1.price, h2.price) < 0.35 else 0.10,
+                0.62,
+                symmetry=0.16 if _pct_diff(h1.price, h2.price) < 0.35 else 0.08,
                 spacing=0.12,
                 neckline=0.10,
-                breakout=0.15 if status == "confirmed" else 0.0,
+                context=0.08,
+                breakout=0.14 if status == "confirmed" else 0.0,
             )
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
             out.append(
                 ChartPattern(
                     kind="double_top",
@@ -197,7 +381,11 @@ def _detect_double_top_bottom(
             l1, l2 = lows[i], lows[i + 1]
             if l2.index - l1.index < DOUBLE_MIN_BARS_BETWEEN:
                 continue
+            if l2.index - l1.index > 40:
+                continue
             if _pct_diff(l1.price, l2.price) > DOUBLE_EXTREMUM_TOLERANCE_PCT:
+                continue
+            if _prior_trend_bias(bars, l1.index) != "bearish":
                 continue
             peaks = [s for s in highs if l1.index < s.index < l2.index]
             if not peaks:
@@ -212,12 +400,15 @@ def _detect_double_top_bottom(
             stop = trough - atr * 0.25
             status = _status_from_break(bars, bullish=True, trigger=neckline)
             conf, breakdown = _score_geometry(
-                0.55,
-                symmetry=0.18 if _pct_diff(l1.price, l2.price) < 0.35 else 0.10,
+                0.62,
+                symmetry=0.16 if _pct_diff(l1.price, l2.price) < 0.35 else 0.08,
                 spacing=0.12,
                 neckline=0.10,
-                breakout=0.15 if status == "confirmed" else 0.0,
+                context=0.08,
+                breakout=0.14 if status == "confirmed" else 0.0,
             )
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
             out.append(
                 ChartPattern(
                     kind="double_bottom",
@@ -253,6 +444,10 @@ def _detect_head_shoulders(
     swings: list[SwingPoint],
     atr: float,
 ) -> list[ChartPattern]:
+    """ГиП: High1 < High2 > High3, шея по коррекционным Low.
+    Перевёрнутая: Low1 > Low2 < Low3, шея по коррекционным High.
+    Только после направленного движения (картинки BuyHold).
+    """
     out: list[ChartPattern] = []
     highs = [s for s in swings if s.kind == "high"]
     lows = [s for s in swings if s.kind == "low"]
@@ -261,9 +456,13 @@ def _detect_head_shoulders(
 
     for i in range(len(highs) - 2):
         ls, head, rs = highs[i], highs[i + 1], highs[i + 2]
-        if head.price <= ls.price or head.price <= rs.price:
+        # High1 < High2 > High3
+        if not (ls.price < head.price and head.price > rs.price):
             continue
         if _pct_diff(ls.price, rs.price) > HEAD_SHOULDER_TOLERANCE_PCT:
+            continue
+        prior = _prior_trend_bias(bars, ls.index, lookback=28)
+        if prior != "bullish":
             continue
         left_vals = [s for s in lows if ls.index < s.index < head.index]
         right_vals = [s for s in lows if head.index < s.index < rs.index]
@@ -274,18 +473,24 @@ def _detect_head_shoulders(
         neckline = PatternLine(nl_l.index, nl_l.price, nl_r.index, nl_r.price, "neckline")
         neck_now = _line_value(neckline, rs.index)
         height = head.price - neck_now
-        if height < atr:
+        if height < atr * 1.1:
             continue
-        target = neck_now - height * TARGET_HS_FACTOR
-        stop = head.price + atr * 0.2
+        # закрепление под шеей
         status = _status_from_break(bars, bullish=False, trigger=neck_now)
+        target = neck_now - height * TARGET_HS_FACTOR
+        stop = max(ls.price, rs.price) + atr * 0.15
+        # идеал: шея горизонтальна или слегка вверх (после роста)
+        neck_slope_bonus = 0.06 if nl_r.price >= nl_l.price * 0.998 else 0.0
         conf, breakdown = _score_geometry(
-            0.58,
-            shoulders=0.15 if _pct_diff(ls.price, rs.price) < 1.5 else 0.08,
-            head=0.12,
-            neckline=0.10,
-            breakout=0.15 if status == "confirmed" else 0.0,
+            0.64,
+            structure=0.14,
+            shoulders=0.12 if _pct_diff(ls.price, rs.price) < 1.5 else 0.06,
+            context=0.10,
+            neck=neck_slope_bonus,
+            breakout=0.14 if status == "confirmed" else 0.0,
         )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
         out.append(
             ChartPattern(
                 kind="head_shoulders",
@@ -307,7 +512,7 @@ def _detect_head_shoulders(
                 stop_price=stop,
                 confidence=conf,
                 score_breakdown=breakdown,
-                source_rule="buyhold:head_shoulders",
+                source_rule="buyhold:head_shoulders_H1<H2>H3",
                 label_ru=PATTERN_LABELS_RU["head_shoulders"],
                 direction="bearish",
             )
@@ -315,9 +520,13 @@ def _detect_head_shoulders(
 
     for i in range(len(lows) - 2):
         ls, head, rs = lows[i], lows[i + 1], lows[i + 2]
-        if head.price >= ls.price or head.price >= rs.price:
+        # Low1 > Low2 < Low3
+        if not (ls.price > head.price and head.price < rs.price):
             continue
         if _pct_diff(ls.price, rs.price) > HEAD_SHOULDER_TOLERANCE_PCT:
+            continue
+        prior = _prior_trend_bias(bars, ls.index, lookback=28)
+        if prior != "bearish":
             continue
         left_peaks = [s for s in highs if ls.index < s.index < head.index]
         right_peaks = [s for s in highs if head.index < s.index < rs.index]
@@ -328,18 +537,23 @@ def _detect_head_shoulders(
         neckline = PatternLine(nl_l.index, nl_l.price, nl_r.index, nl_r.price, "neckline")
         neck_now = _line_value(neckline, rs.index)
         height = neck_now - head.price
-        if height < atr:
+        if height < atr * 1.1:
             continue
-        target = neck_now + height * TARGET_HS_FACTOR
-        stop = head.price - atr * 0.2
         status = _status_from_break(bars, bullish=True, trigger=neck_now)
+        target = neck_now + height * TARGET_HS_FACTOR
+        stop = min(ls.price, rs.price) - atr * 0.15
+        # статья: в идеале шея наклонена вниз
+        neck_slope_bonus = 0.08 if nl_r.price <= nl_l.price * 1.002 else 0.0
         conf, breakdown = _score_geometry(
-            0.58,
-            shoulders=0.15 if _pct_diff(ls.price, rs.price) < 1.5 else 0.08,
-            head=0.12,
-            neckline=0.10,
-            breakout=0.15 if status == "confirmed" else 0.0,
+            0.64,
+            structure=0.14,
+            shoulders=0.12 if _pct_diff(ls.price, rs.price) < 1.5 else 0.06,
+            context=0.10,
+            neck=neck_slope_bonus,
+            breakout=0.14 if status == "confirmed" else 0.0,
         )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
         out.append(
             ChartPattern(
                 kind="inverse_head_shoulders",
@@ -361,12 +575,13 @@ def _detect_head_shoulders(
                 stop_price=stop,
                 confidence=conf,
                 score_breakdown=breakdown,
-                source_rule="buyhold:inverse_head_shoulders",
+                source_rule="buyhold:inverse_hs_L1>L2<L3",
                 label_ru=PATTERN_LABELS_RU["inverse_head_shoulders"],
                 direction="bullish",
             )
         )
-    return out
+    # оставляем лучшие 2 для Баскервилей / suppress
+    return sorted(out, key=lambda p: p.confidence, reverse=True)[:2]
 
 
 def _fit_bounds(
@@ -386,83 +601,128 @@ def _detect_flag_pennant(
     bars: list[KlineBar],
     atr: float,
 ) -> list[ChartPattern]:
+    """Флаг = почти параллельный канал против штока.
+    Вымпел = короткий сходящийся треугольник A-B-C-D после резкого импульса.
+    Цель ≈ 0.85 × длина штока от точки пробоя.
+    """
     out: list[ChartPattern] = []
     n = len(bars)
-    if n < 20:
+    if n < 24:
         return out
+    swings = find_pattern_swings(bars, window=2)
 
-    search_from = max(10, n - 80)
-    for pole_start in range(search_from, n - FLAG_BODY_MIN_BARS - FLAG_POLE_MIN_BARS):
+    search_from = max(8, n - 70)
+    for pole_start in range(search_from, n - 10):
         for pole_len in range(FLAG_POLE_MIN_BARS, FLAG_POLE_MAX_BARS + 1):
             pole_end = pole_start + pole_len
-            if pole_end >= n - FLAG_BODY_MIN_BARS:
+            if pole_end >= n - 6:
                 break
             pole_move = bars[pole_end].close - bars[pole_start].open
-            if abs(pole_move) < atr * 2.2:
+            if abs(pole_move) < atr * 2.5:
                 continue
             bullish = pole_move > 0
-            body_end = min(n - 1, pole_end + FLAG_BODY_MAX_BARS)
-            bounds = _fit_bounds(bars, pole_end, body_end)
-            if not bounds:
-                continue
-            _, _, top, bottom = bounds
-            body_height = top - bottom
-            if body_height > abs(pole_move) * 0.65 or body_height < atr * 0.25:
-                continue
-            if body_end - pole_end < FLAG_BODY_MIN_BARS:
-                continue
+            max_body = min(FLAG_BODY_MAX_BARS, n - pole_end - 1)
+            for body_len in range(FLAG_BODY_MIN_BARS, max_body + 1):
+                body_end = pole_end + body_len
+                body_swings = [s for s in swings if pole_end <= s.index <= body_end]
+                bh = [s for s in body_swings if s.kind == "high"]
+                bl = [s for s in body_swings if s.kind == "low"]
+                if len(bh) < 2 or len(bl) < 2:
+                    continue
+                a_high, c_high = bh[0], bh[-1]
+                b_low, d_low = bl[0], bl[-1]
+                if not (a_high.index < c_high.index and b_low.index < d_low.index):
+                    continue
+                body_height = max(s.price for s in bh) - min(s.price for s in bl)
+                pole_height = abs(pole_move)
+                if body_height > pole_height * 0.55 or body_height < atr * 0.2:
+                    continue
 
-            upper = PatternLine(pole_end, top, body_end, top * 0.55 + bottom * 0.45, "upper_bound")
-            lower = PatternLine(pole_end, bottom, body_end, top * 0.45 + bottom * 0.55, "lower_bound")
-            slope_top = (upper.end_price - upper.start_price) / max(1, upper.end_idx - upper.start_idx)
-            slope_bot = (lower.end_price - lower.start_price) / max(1, lower.end_idx - lower.start_idx)
-            converging = abs(slope_top - slope_bot) > atr * 0.02
-            kind = "pennant" if converging else "flag"
-            if bullish and slope_top > 0.0001:
-                continue
-            if not bullish and slope_top < -0.0001:
-                continue
+                upper = PatternLine(a_high.index, a_high.price, c_high.index, c_high.price, "upper_bound")
+                lower = PatternLine(b_low.index, b_low.price, d_low.index, d_low.price, "lower_bound")
+                span_u = max(1, upper.end_idx - upper.start_idx)
+                span_l = max(1, lower.end_idx - lower.start_idx)
+                slope_top = (upper.end_price - upper.start_price) / span_u
+                slope_bot = (lower.end_price - lower.start_price) / span_l
 
-            pole_height = abs(pole_move)
-            trigger = top if bullish else bottom
-            target = (
-                trigger + pole_height * TARGET_POLE_FACTOR
-                if bullish
-                else trigger - pole_height * TARGET_POLE_FACTOR
-            )
-            stop = bottom - atr * 0.2 if bullish else top + atr * 0.2
-            status = _status_from_break(bars, bullish=bullish, trigger=trigger)
-            conf, breakdown = _score_geometry(
-                0.52,
-                pole=0.18,
-                channel=0.12,
-                breakout=0.15 if status == "confirmed" else 0.0,
-            )
-            out.append(
-                ChartPattern(
-                    kind=kind,
-                    subtype="continuation",
-                    status=status,
-                    points=(
-                        PatternPoint(pole_start, bars[pole_start].open, "pole_start"),
-                        PatternPoint(pole_end, bars[pole_end].close, "pole_end"),
-                        PatternPoint(body_end, trigger, "break"),
-                    ),
-                    lines=(upper, lower),
-                    zone_top=top,
-                    zone_bottom=bottom,
-                    neckline=None,
-                    pole_height=pole_height,
-                    target_price=target,
-                    stop_price=stop,
-                    confidence=conf,
-                    score_breakdown=breakdown,
-                    source_rule=f"buyhold:{kind}",
-                    label_ru=PATTERN_LABELS_RU[kind],
-                    direction="bullish" if bullish else "bearish",
+                converging = c_high.price < a_high.price and d_low.price > b_low.price
+                max_abs = max(abs(slope_top), abs(slope_bot), atr * 1e-6)
+                parallel = abs(slope_top - slope_bot) / max_abs <= FLAG_PARALLEL_SLOPE_RATIO
+
+                # флаг: против импульса; вымпел: сжатие
+                against_pole = (bullish and slope_top <= atr * 0.02) or (not bullish and slope_top >= -atr * 0.02)
+                if converging and body_len <= PENNANT_BODY_MAX_BARS:
+                    kind = "pennant"
+                elif parallel and against_pole:
+                    kind = "flag"
+                else:
+                    continue
+
+                trigger = _line_value(upper, body_end) if bullish else _line_value(lower, body_end)
+                status = _status_from_break(bars, bullish=bullish, trigger=trigger)
+                target = (
+                    trigger + pole_height * TARGET_POLE_FACTOR
+                    if bullish
+                    else trigger - pole_height * TARGET_POLE_FACTOR
                 )
-            )
-    return out[-3:]
+                stop = (
+                    _line_value(lower, body_end) - atr * 0.2
+                    if bullish
+                    else _line_value(upper, body_end) + atr * 0.2
+                )
+                conf, breakdown = _score_geometry(
+                    0.62,
+                    pole=0.16,
+                    compress=0.12 if kind == "pennant" else 0.08,
+                    channel=0.10 if kind == "flag" else 0.04,
+                    breakout=0.14 if status == "confirmed" else 0.0,
+                )
+                if conf < MIN_PATTERN_CONFIDENCE:
+                    continue
+                out.append(
+                    ChartPattern(
+                        kind=kind,
+                        subtype="continuation",
+                        status=status,
+                        points=(
+                            PatternPoint(pole_start, bars[pole_start].open, "pole_start"),
+                            PatternPoint(pole_end, bars[pole_end].close, "pole_end"),
+                            PatternPoint(a_high.index, a_high.price, "A"),
+                            PatternPoint(b_low.index, b_low.price, "B"),
+                            PatternPoint(c_high.index, c_high.price, "C"),
+                            PatternPoint(d_low.index, d_low.price, "D"),
+                        ),
+                        lines=(upper, lower),
+                        zone_top=max(a_high.price, c_high.price),
+                        zone_bottom=min(b_low.price, d_low.price),
+                        neckline=None,
+                        pole_height=pole_height,
+                        target_price=target,
+                        stop_price=stop,
+                        confidence=conf,
+                        score_breakdown=breakdown,
+                        source_rule=f"buyhold:{kind}_ABCD",
+                        label_ru=PATTERN_LABELS_RU[kind],
+                        direction="bullish" if bullish else "bearish",
+                    )
+                )
+    return _suppress_overlaps(out)[:1]
+
+
+def _pre_pattern_impulse(
+    bars: list[KlineBar],
+    pattern_start: int,
+    *,
+    lookback: int = 20,
+) -> float:
+    """Высота импульса до фигуры (для клина: цель ≈ импульс до входа в клин)."""
+    if pattern_start <= 2:
+        return 0.0
+    start = max(0, pattern_start - lookback)
+    seg = bars[start:pattern_start]
+    if len(seg) < 3:
+        return 0.0
+    return max(b.high for b in seg) - min(b.low for b in seg)
 
 
 def _detect_triangles_wedges(
@@ -470,6 +730,10 @@ def _detect_triangles_wedges(
     bars: list[KlineBar],
     atr: float,
 ) -> list[ChartPattern]:
+    """Треугольники A-B-C-D и клинья по BuyHold.
+    Цель треугольника = ширина основания от точки пробоя.
+    Нисходящий клин на бычьем рынке = продолжение вверх; цель ≈ импульс до клина.
+    """
     out: list[ChartPattern] = []
     if len(swings) < TRIANGLE_MIN_SWINGS:
         return out
@@ -479,20 +743,24 @@ def _detect_triangles_wedges(
     if len(highs) < 2 or len(lows) < 2:
         return out
 
-    h1, h2 = highs[-2], highs[-1]
-    l1, l2 = lows[-2], lows[-1]
-    span = max(h2.index, l2.index) - min(h1.index, l1.index)
+    # A/C = highs, B/D = lows (как на картинках)
+    a_high, c_high = highs[-2], highs[-1]
+    b_low, d_low = lows[-2], lows[-1]
+    span = max(c_high.index, d_low.index) - min(a_high.index, b_low.index)
     if span < 8:
         return out
 
-    high_falling = h2.price < h1.price * 0.999
-    low_rising = l2.price > l1.price * 1.001
-    high_flat = _pct_diff(h1.price, h2.price) < 0.45
-    low_flat = _pct_diff(l1.price, l2.price) < 0.45
+    high_falling = c_high.price < a_high.price * 0.999
+    low_rising = d_low.price > b_low.price * 1.001
+    high_flat = _pct_diff(a_high.price, c_high.price) < 0.45
+    low_flat = _pct_diff(b_low.price, d_low.price) < 0.45
+    high_rising = c_high.price > a_high.price * 1.001
+    low_falling = d_low.price < b_low.price * 0.999
 
-    upper = PatternLine(h1.index, h1.price, h2.index, h2.price, "upper_bound")
-    lower = PatternLine(l1.index, l1.price, l2.index, l2.price, "lower_bound")
-    base_width = max(h1.price, h2.price) - min(l1.price, l2.price)
+    upper = PatternLine(a_high.index, a_high.price, c_high.index, c_high.price, "upper_bound")
+    lower = PatternLine(b_low.index, b_low.price, d_low.index, d_low.price, "lower_bound")
+    # основание = вертикальная ширина в начале фигуры
+    base_width = max(a_high.price, c_high.price) - min(b_low.price, d_low.price)
     if base_width < atr * 0.8:
         return out
 
@@ -506,67 +774,90 @@ def _detect_triangles_wedges(
     elif high_falling and low_flat:
         kind = "triangle_descending"
         direction = "bearish"
+    elif high_rising and low_rising:
+        kind = "wedge_rising"
+    elif high_falling and low_falling:
+        kind = "wedge_falling"
     else:
-        same_slope_up = h2.price > h1.price and l2.price > l1.price
-        same_slope_down = h2.price < h1.price and l2.price < l1.price
-        if same_slope_up:
-            kind = "wedge_rising"
-        elif same_slope_down:
-            kind = "wedge_falling"
-        else:
-            return out
+        return out
 
-    end_idx = max(h2.index, l2.index)
+    pattern_start = min(a_high.index, b_low.index)
+    prior = _prior_trend_bias(bars, pattern_start)
+    if kind == "wedge_rising":
+        # медвежий рынок → продолжение вниз; бычий → разворот вниз
+        subtype = "continuation" if prior == "bearish" else "reversal"
+        direction = "bearish"
+    elif kind == "wedge_falling":
+        # бычий рынок → продолжение вверх (картинка); медвежий → разворот вверх
+        subtype = "continuation" if prior == "bullish" else "reversal"
+        direction = "bullish"
+    else:
+        subtype = "continuation"
+        if kind == "triangle_symmetric" and prior in {"bullish", "bearish"}:
+            direction = prior
+
+    end_idx = max(c_high.index, d_low.index)
     upper_now = _line_value(upper, end_idx)
     lower_now = _line_value(lower, end_idx)
-    trigger_up = upper_now
-    trigger_down = lower_now
-    bullish_break = bars[-1].close > trigger_up
-    bearish_break = bars[-1].close < trigger_down
+    impulse = _pre_pattern_impulse(bars, pattern_start)
+
+    # клин: цель ≈ импульс до фигуры; треугольник: ширина основания от пробоя
+    measure = impulse if kind.startswith("wedge") and impulse >= atr * 1.5 else base_width
+
+    bullish_break = bars[-1].close > upper_now
+    bearish_break = bars[-1].close < lower_now
     if bullish_break:
         status = "confirmed"
-        target = bars[-1].close + base_width * TARGET_TRIANGLE_FACTOR
+        breakout_px = upper_now
+        target = breakout_px + measure * TARGET_TRIANGLE_FACTOR
         direction = "bullish"
     elif bearish_break:
         status = "confirmed"
-        target = bars[-1].close - base_width * TARGET_TRIANGLE_FACTOR
+        breakout_px = lower_now
+        target = breakout_px - measure * TARGET_TRIANGLE_FACTOR
         direction = "bearish"
     else:
         status = "forming"
-        target = (
-            upper_now + base_width * TARGET_TRIANGLE_FACTOR
-            if direction == "bullish"
-            else lower_now - base_width * TARGET_TRIANGLE_FACTOR
-        )
+        if direction == "bullish" or (kind.startswith("wedge") and direction == "bullish"):
+            target = upper_now + measure * TARGET_TRIANGLE_FACTOR
+        elif direction == "bearish":
+            target = lower_now - measure * TARGET_TRIANGLE_FACTOR
+        else:
+            target = upper_now + measure * TARGET_TRIANGLE_FACTOR
 
     conf, breakdown = _score_geometry(
-        0.50,
-        convergence=0.15,
-        swings=0.10,
-        breakout=0.15 if status == "confirmed" else 0.0,
+        0.58,
+        convergence=0.14,
+        context=0.12 if kind.startswith("wedge") else 0.08,
+        breakout=0.14 if status == "confirmed" else 0.0,
     )
+    if conf < MIN_PATTERN_CONFIDENCE:
+        return out
+    label = PATTERN_LABELS_RU.get(kind, kind)
+    if kind.startswith("wedge"):
+        label = f"{label} ({'прод.' if subtype == 'continuation' else 'разв.'})"
     out.append(
         ChartPattern(
             kind=kind,
-            subtype="continuation" if kind.startswith("triangle") else "reversal",
+            subtype=subtype if kind.startswith("wedge") else "continuation",
             status=status,
             points=(
-                PatternPoint(h1.index, h1.price, "high1"),
-                PatternPoint(h2.index, h2.price, "high2"),
-                PatternPoint(l1.index, l1.price, "low1"),
-                PatternPoint(l2.index, l2.price, "low2"),
+                PatternPoint(a_high.index, a_high.price, "A"),
+                PatternPoint(b_low.index, b_low.price, "B"),
+                PatternPoint(c_high.index, c_high.price, "C"),
+                PatternPoint(d_low.index, d_low.price, "D"),
             ),
             lines=(upper, lower),
-            zone_top=max(h1.price, h2.price, upper_now),
-            zone_bottom=min(l1.price, l2.price, lower_now),
+            zone_top=max(a_high.price, c_high.price, upper_now),
+            zone_bottom=min(b_low.price, d_low.price, lower_now),
             neckline=None,
-            pole_height=base_width,
+            pole_height=measure,
             target_price=target,
             stop_price=lower_now - atr * 0.2 if direction != "bearish" else upper_now + atr * 0.2,
             confidence=conf,
             score_breakdown=breakdown,
-            source_rule=f"buyhold:{kind}",
-            label_ru=PATTERN_LABELS_RU.get(kind, kind),
+            source_rule=f"buyhold:{kind}_ABCD_base_from_breakout",
+            label_ru=label,
             direction=direction,
         )
     )
@@ -578,80 +869,133 @@ def _detect_false_breakout(
     swings: list[SwingPoint],
     atr: float,
 ) -> list[ChartPattern]:
+    """По картинкам BuyHold:
+    1) пробой уровня → не удержались → reclaim;
+    2) сильнее, если возвратный импульс поглощает пробойный;
+    3) вход после обновления локального экстремума после reclaim;
+    4) только у пика/дна движения.
+    """
     out: list[ChartPattern] = []
-    if len(bars) < 15 or len(swings) < 3:
+    if len(bars) < 20 or len(swings) < 3:
         return out
-    highs = [s.price for s in swings if s.kind == "high"]
-    lows = [s.price for s in swings if s.kind == "low"]
-    if not highs or not lows:
+    n = len(bars)
+    swing_highs = [s for s in swings if s.kind == "high"]
+    swing_lows = [s for s in swings if s.kind == "low"]
+    if not swing_highs or not swing_lows:
         return out
-    resistance = max(highs[-3:])
-    support = min(lows[-3:])
-    lookback = bars[-12:]
-    max_h = max(b.high for b in lookback)
-    min_l = min(b.low for b in lookback)
-    close = bars[-1].close
 
-    if max_h > resistance * 1.001 and close < resistance:
-        target = support
-        stop = max_h + atr * 0.15
-        conf, breakdown = _score_geometry(0.54, reclaim=0.18, impulse=0.12)
-        out.append(
-            ChartPattern(
-                kind="false_breakout",
-                subtype="reversal",
-                status="confirmed",
-                points=(
-                    PatternPoint(len(bars) - 1, close, "reclaim"),
-                    PatternPoint(len(bars) - 3, max_h, "fake_high"),
-                ),
-                lines=(
-                    PatternLine(len(bars) - 12, resistance, len(bars) - 1, resistance, "level"),
-                ),
-                zone_top=max_h,
-                zone_bottom=resistance,
-                neckline=PatternLine(len(bars) - 12, resistance, len(bars) - 1, resistance, "level"),
-                pole_height=max_h - resistance,
-                target_price=target,
-                stop_price=stop,
-                confidence=conf,
-                score_breakdown=breakdown,
-                source_rule="buyhold:false_breakout",
-                label_ru=PATTERN_LABELS_RU["false_breakout"] + " (сопр.)",
-                direction="bearish",
+    # --- ложный пробой поддержки (бычий) ---
+    if _is_near_range_extreme(bars, side="bullish"):
+        support = min(s.price for s in swing_lows[-4:])
+        # ищем бар с low < support, затем close обратно выше
+        fake_idx = None
+        reclaim_idx = None
+        for i in range(max(5, n - 18), n):
+            if bars[i].low < support * 0.999:
+                fake_idx = i
+                break
+        if fake_idx is not None:
+            for j in range(fake_idx, min(n, fake_idx + 4)):
+                if bars[j].close > support:
+                    reclaim_idx = j
+                    break
+        if fake_idx is not None and reclaim_idx is not None:
+            breakout_size = support - bars[fake_idx].low
+            reclaim_body = abs(bars[reclaim_idx].close - bars[reclaim_idx].open)
+            absorbed = reclaim_body >= breakout_size * 0.85
+            # локальный max после reclaim — триггер Buy (картинка 3)
+            post = bars[reclaim_idx: min(n, reclaim_idx + 8)]
+            local_high = max(b.high for b in post) if post else bars[reclaim_idx].high
+            local_high_idx = reclaim_idx + max(range(len(post)), key=lambda k: post[k].high) if post else reclaim_idx
+            status = _status_from_break(bars, bullish=True, trigger=local_high)
+            conf, breakdown = _score_geometry(
+                0.62,
+                reclaim=0.16,
+                absorb=0.12 if absorbed else 0.04,
+                peak=0.10,
+                breakout=0.12 if status == "confirmed" else 0.0,
             )
-        )
+            if conf >= MIN_PATTERN_CONFIDENCE:
+                out.append(
+                    ChartPattern(
+                        kind="false_breakout",
+                        subtype="reversal",
+                        status=status,
+                        points=(
+                            PatternPoint(fake_idx, bars[fake_idx].low, "fake_low"),
+                            PatternPoint(reclaim_idx, bars[reclaim_idx].close, "reclaim"),
+                            PatternPoint(local_high_idx, local_high, "buy_trigger"),
+                        ),
+                        lines=(PatternLine(max(0, fake_idx - 8), support, n - 1, support, "level"),),
+                        zone_top=support,
+                        zone_bottom=bars[fake_idx].low,
+                        neckline=PatternLine(max(0, fake_idx - 8), support, n - 1, support, "level"),
+                        pole_height=breakout_size,
+                        target_price=local_high + (local_high - bars[fake_idx].low),
+                        stop_price=bars[fake_idx].low - atr * 0.2,
+                        confidence=conf,
+                        score_breakdown=breakdown,
+                        source_rule="buyhold:false_breakout_support",
+                        label_ru=PATTERN_LABELS_RU["false_breakout"] + " (подд.)",
+                        direction="bullish",
+                    )
+                )
 
-    if min_l < support * 0.999 and close > support:
-        target = resistance
-        stop = min_l - atr * 0.15
-        conf, breakdown = _score_geometry(0.54, reclaim=0.18, impulse=0.12)
-        out.append(
-            ChartPattern(
-                kind="false_breakout",
-                subtype="reversal",
-                status="confirmed",
-                points=(
-                    PatternPoint(len(bars) - 1, close, "reclaim"),
-                    PatternPoint(len(bars) - 3, min_l, "fake_low"),
-                ),
-                lines=(
-                    PatternLine(len(bars) - 12, support, len(bars) - 1, support, "level"),
-                ),
-                zone_top=support,
-                zone_bottom=min_l,
-                neckline=PatternLine(len(bars) - 12, support, len(bars) - 1, support, "level"),
-                pole_height=support - min_l,
-                target_price=target,
-                stop_price=stop,
-                confidence=conf,
-                score_breakdown=breakdown,
-                source_rule="buyhold:false_breakout",
-                label_ru=PATTERN_LABELS_RU["false_breakout"] + " (подд.)",
-                direction="bullish",
+    # --- ложный пробой сопротивления (медвежий) ---
+    if _is_near_range_extreme(bars, side="bearish"):
+        resistance = max(s.price for s in swing_highs[-4:])
+        fake_idx = None
+        reclaim_idx = None
+        for i in range(max(5, n - 18), n):
+            if bars[i].high > resistance * 1.001:
+                fake_idx = i
+                break
+        if fake_idx is not None:
+            for j in range(fake_idx, min(n, fake_idx + 4)):
+                if bars[j].close < resistance:
+                    reclaim_idx = j
+                    break
+        if fake_idx is not None and reclaim_idx is not None:
+            breakout_size = bars[fake_idx].high - resistance
+            reclaim_body = abs(bars[reclaim_idx].close - bars[reclaim_idx].open)
+            absorbed = reclaim_body >= breakout_size * 0.85
+            post = bars[reclaim_idx: min(n, reclaim_idx + 8)]
+            local_low = min(b.low for b in post) if post else bars[reclaim_idx].low
+            local_low_idx = reclaim_idx + min(range(len(post)), key=lambda k: post[k].low) if post else reclaim_idx
+            status = _status_from_break(bars, bullish=False, trigger=local_low)
+            conf, breakdown = _score_geometry(
+                0.62,
+                reclaim=0.16,
+                absorb=0.12 if absorbed else 0.04,
+                peak=0.10,
+                breakout=0.12 if status == "confirmed" else 0.0,
             )
-        )
-    return out
+            if conf >= MIN_PATTERN_CONFIDENCE:
+                out.append(
+                    ChartPattern(
+                        kind="false_breakout",
+                        subtype="reversal",
+                        status=status,
+                        points=(
+                            PatternPoint(fake_idx, bars[fake_idx].high, "fake_high"),
+                            PatternPoint(reclaim_idx, bars[reclaim_idx].close, "reclaim"),
+                            PatternPoint(local_low_idx, local_low, "sell_trigger"),
+                        ),
+                        lines=(PatternLine(max(0, fake_idx - 8), resistance, n - 1, resistance, "level"),),
+                        zone_top=bars[fake_idx].high,
+                        zone_bottom=resistance,
+                        neckline=PatternLine(max(0, fake_idx - 8), resistance, n - 1, resistance, "level"),
+                        pole_height=breakout_size,
+                        target_price=local_low - (bars[fake_idx].high - local_low),
+                        stop_price=bars[fake_idx].high + atr * 0.2,
+                        confidence=conf,
+                        score_breakdown=breakdown,
+                        source_rule="buyhold:false_breakout_resistance",
+                        label_ru=PATTERN_LABELS_RU["false_breakout"] + " (сопр.)",
+                        direction="bearish",
+                    )
+                )
+    return out[:1]
 
 
 def _detect_one_two_three(
@@ -659,80 +1003,49 @@ def _detect_one_two_three(
     swings: list[SwingPoint],
     atr: float,
 ) -> list[ChartPattern]:
+    """Сперандео по картинке:
+    Бычий после даунтренда: т.1 = коррекционный High, т.2 = не обновили Low, вход = пробой т.1.
+    Медвежий зеркально.
+    """
     out: list[ChartPattern] = []
     highs = [s for s in swings if s.kind == "high"]
     lows = [s for s in swings if s.kind == "low"]
     if len(highs) < 2 or len(lows) < 2:
         return out
+    n = len(bars)
 
-  # Bearish 1-2-3 after uptrend
-    for i in range(len(lows) - 1):
-        p1 = lows[i]
-        later_highs = [h for h in highs if h.index > p1.index]
-        if not later_highs:
-            continue
-        p2 = later_highs[0]
-        prior_highs = [h for h in highs if h.index < p2.index]
-        if prior_highs and p2.price >= max(h.price for h in prior_highs) * 0.998:
-            continue
-        later_lows = [l for l in lows if l.index > p2.index]
-        if not later_lows:
-            continue
-        p3 = later_lows[0]
-        if p3.price >= p1.price:
-            continue
-        trigger = p1.price
-        status = _status_from_break(bars, bullish=False, trigger=trigger)
-        target = p3.price - (p2.price - p3.price)
-        stop = p2.price + atr * 0.2
-        conf, breakdown = _score_geometry(0.53, sequence=0.18, breakout=0.12 if status == "confirmed" else 0.0)
-        out.append(
-            ChartPattern(
-                kind="one_two_three",
-                subtype="reversal",
-                status=status,
-                points=(
-                    PatternPoint(p1.index, p1.price, "point1"),
-                    PatternPoint(p2.index, p2.price, "point2"),
-                    PatternPoint(p3.index, p3.price, "point3"),
-                ),
-                lines=(PatternLine(p1.index, trigger, len(bars) - 1, trigger, "trigger"),),
-                zone_top=p2.price,
-                zone_bottom=p3.price,
-                neckline=PatternLine(p1.index, trigger, len(bars) - 1, trigger, "trigger"),
-                pole_height=p2.price - p1.price,
-                target_price=target,
-                stop_price=stop,
-                confidence=conf,
-                score_breakdown=breakdown,
-                source_rule="buyhold:one_two_three",
-                label_ru=PATTERN_LABELS_RU["one_two_three"] + " ↓",
-                direction="bearish",
-            )
-        )
-        break
-
-    # Bullish 1-2-3 after downtrend
+    # Бычий 1-2-3 (после даунтренда)
     for i in range(len(highs) - 1):
         p1 = highs[i]
+        if _prior_trend_bias(bars, p1.index, lookback=20) != "bearish":
+            continue
+        prior_lows = [l for l in lows if l.index < p1.index]
+        if not prior_lows:
+            continue
+        abs_low = min(prior_lows, key=lambda s: s.price)
         later_lows = [l for l in lows if l.index > p1.index]
         if not later_lows:
             continue
         p2 = later_lows[0]
-        prior_lows = [l for l in lows if l.index < p2.index]
-        if prior_lows and p2.price <= min(l.price for l in prior_lows) * 1.002:
+        # не удалось обновить минимум всего движения
+        if p2.price <= abs_low.price * 1.001:
             continue
-        later_highs = [h for h in highs if h.index > p2.index]
-        if not later_highs:
-            continue
-        p3 = later_highs[0]
-        if p3.price <= p1.price:
+        if p2.index - p1.index < 3:
             continue
         trigger = p1.price
         status = _status_from_break(bars, bullish=True, trigger=trigger)
-        target = p3.price + (p3.price - p2.price)
-        stop = p2.price - atr * 0.2
-        conf, breakdown = _score_geometry(0.53, sequence=0.18, breakout=0.12 if status == "confirmed" else 0.0)
+        # стоп: за т.2 (агрессивно) или за abs low (консервативно) — берём т.2
+        stop = p2.price - atr * 0.15
+        target = trigger + (trigger - p2.price)
+        conf, breakdown = _score_geometry(
+            0.62,
+            structure=0.16,
+            failed_low=0.14,
+            context=0.08,
+            breakout=0.14 if status == "confirmed" else 0.0,
+        )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
         out.append(
             ChartPattern(
                 kind="one_two_three",
@@ -741,23 +1054,164 @@ def _detect_one_two_three(
                 points=(
                     PatternPoint(p1.index, p1.price, "point1"),
                     PatternPoint(p2.index, p2.price, "point2"),
-                    PatternPoint(p3.index, p3.price, "point3"),
+                    PatternPoint(n - 1, bars[-1].close, "point3"),
                 ),
-                lines=(PatternLine(p1.index, trigger, len(bars) - 1, trigger, "trigger"),),
-                zone_top=p3.price,
+                lines=(PatternLine(p1.index, trigger, n - 1, trigger, "trigger"),),
+                zone_top=trigger,
                 zone_bottom=p2.price,
-                neckline=PatternLine(p1.index, trigger, len(bars) - 1, trigger, "trigger"),
-                pole_height=p1.price - p2.price,
+                neckline=PatternLine(p1.index, trigger, n - 1, trigger, "trigger"),
+                pole_height=trigger - p2.price,
                 target_price=target,
                 stop_price=stop,
                 confidence=conf,
                 score_breakdown=breakdown,
-                source_rule="buyhold:one_two_three",
+                source_rule="buyhold:one_two_three_bull",
                 label_ru=PATTERN_LABELS_RU["one_two_three"] + " ↑",
                 direction="bullish",
             )
         )
         break
+
+    # Медвежий 1-2-3 (после аптренда)
+    for i in range(len(lows) - 1):
+        p1 = lows[i]
+        if _prior_trend_bias(bars, p1.index, lookback=20) != "bullish":
+            continue
+        prior_highs = [h for h in highs if h.index < p1.index]
+        if not prior_highs:
+            continue
+        abs_high = max(prior_highs, key=lambda s: s.price)
+        later_highs = [h for h in highs if h.index > p1.index]
+        if not later_highs:
+            continue
+        p2 = later_highs[0]
+        if p2.price >= abs_high.price * 0.999:
+            continue
+        if p2.index - p1.index < 3:
+            continue
+        trigger = p1.price
+        status = _status_from_break(bars, bullish=False, trigger=trigger)
+        stop = p2.price + atr * 0.15
+        target = trigger - (p2.price - trigger)
+        conf, breakdown = _score_geometry(
+            0.62,
+            structure=0.16,
+            failed_high=0.14,
+            context=0.08,
+            breakout=0.14 if status == "confirmed" else 0.0,
+        )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
+        out.append(
+            ChartPattern(
+                kind="one_two_three",
+                subtype="reversal",
+                status=status,
+                points=(
+                    PatternPoint(p1.index, p1.price, "point1"),
+                    PatternPoint(p2.index, p2.price, "point2"),
+                    PatternPoint(n - 1, bars[-1].close, "point3"),
+                ),
+                lines=(PatternLine(p1.index, trigger, n - 1, trigger, "trigger"),),
+                zone_top=p2.price,
+                zone_bottom=trigger,
+                neckline=PatternLine(p1.index, trigger, n - 1, trigger, "trigger"),
+                pole_height=p2.price - trigger,
+                target_price=target,
+                stop_price=stop,
+                confidence=conf,
+                score_breakdown=breakdown,
+                source_rule="buyhold:one_two_three_bear",
+                label_ru=PATTERN_LABELS_RU["one_two_three"] + " ↓",
+                direction="bearish",
+            )
+        )
+        break
+    return out[:1]
+
+
+def _detect_expanding_triangle(
+    swings: list[SwingPoint],
+    bars: list[KlineBar],
+    atr: float,
+) -> list[ChartPattern]:
+    """Расходящийся треугольник: HH + LL, на пике/дне → разворот при импульсном пробое."""
+    out: list[ChartPattern] = []
+    from .pattern_specs import EXPANDING_MIN_SWINGS
+
+    if len(swings) < EXPANDING_MIN_SWINGS:
+        return out
+    recent = swings[-8:]
+    highs = [s for s in recent if s.kind == "high"]
+    lows = [s for s in recent if s.kind == "low"]
+    if len(highs) < 2 or len(lows) < 2:
+        return out
+    h1, h2 = highs[-2], highs[-1]
+    l1, l2 = lows[-2], lows[-1]
+    # расходятся: хаи растут, лои падают
+    if not (h2.price > h1.price * 1.001 and l2.price < l1.price * 0.999):
+        return out
+    if h2.index - h1.index < 4 or l2.index - l1.index < 4:
+        return out
+    upper = PatternLine(h1.index, h1.price, h2.index, h2.price, "upper_bound")
+    lower = PatternLine(l1.index, l1.price, l2.index, l2.price, "lower_bound")
+    width = max(h1.price, h2.price) - min(l1.price, l2.price)
+    if width < atr * 1.2:
+        return out
+    start_idx = min(h1.index, l1.index)
+    prior = _prior_trend_bias(bars, start_idx)
+    # статья: на пике роста — пробой нижней; на дне — верхней
+    end_idx = max(h2.index, l2.index)
+    upper_now = _line_value(upper, end_idx)
+    lower_now = _line_value(lower, end_idx)
+    close = bars[-1].close
+    if prior == "bullish" and close < lower_now:
+        direction, status = "bearish", "confirmed"
+        target = close - width * TARGET_TRIANGLE_FACTOR
+    elif prior == "bearish" and close > upper_now:
+        direction, status = "bullish", "confirmed"
+        target = close + width * TARGET_TRIANGLE_FACTOR
+    elif prior == "bullish":
+        direction, status = "bearish", "forming"
+        target = lower_now - width * TARGET_TRIANGLE_FACTOR
+    elif prior == "bearish":
+        direction, status = "bullish", "forming"
+        target = upper_now + width * TARGET_TRIANGLE_FACTOR
+    else:
+        return out
+    conf, breakdown = _score_geometry(
+        0.60,
+        divergence=0.16,
+        context=0.12,
+        breakout=0.14 if status == "confirmed" else 0.0,
+    )
+    if conf < MIN_PATTERN_CONFIDENCE:
+        return out
+    out.append(
+        ChartPattern(
+            kind="expanding_triangle",
+            subtype="reversal",
+            status=status,
+            points=(
+                PatternPoint(h1.index, h1.price, "high1"),
+                PatternPoint(h2.index, h2.price, "high2"),
+                PatternPoint(l1.index, l1.price, "low1"),
+                PatternPoint(l2.index, l2.price, "low2"),
+            ),
+            lines=(upper, lower),
+            zone_top=max(h1.price, h2.price),
+            zone_bottom=min(l1.price, l2.price),
+            neckline=None,
+            pole_height=width,
+            target_price=target,
+            stop_price=upper_now + atr * 0.2 if direction == "bearish" else lower_now - atr * 0.2,
+            confidence=conf,
+            score_breakdown=breakdown,
+            source_rule="buyhold:expanding_triangle",
+            label_ru=PATTERN_LABELS_RU["expanding_triangle"],
+            direction=direction,
+        )
+    )
     return out
 
 
@@ -958,7 +1412,9 @@ def _detect_baskerville(
             status = "confirmed" if close >= trigger * 0.999 else "forming"
             target = trigger + (hs.pole_height or atr * 3) * TARGET_HS_FACTOR
             stop = neck - atr * 0.3
-            conf, breakdown = _score_geometry(0.60, trap=0.18, reclaim=0.15, breakout=0.12 if status == "confirmed" else 0.0)
+            conf, breakdown = _score_geometry(0.66, trap=0.18, reclaim=0.15, breakout=0.14 if status == "confirmed" else 0.0)
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
             out.append(
                 ChartPattern(
                     kind="baskerville_bullish",
@@ -991,11 +1447,14 @@ def _detect_baskerville(
             status = "confirmed" if close <= trigger * 1.001 else "forming"
             target = trigger - (hs.pole_height or atr * 3) * TARGET_HS_FACTOR
             stop = neck + atr * 0.3
-            conf, breakdown = _score_geometry(0.60, trap=0.18, reclaim=0.15, breakout=0.12 if status == "confirmed" else 0.0)
+            conf, breakdown = _score_geometry(0.66, trap=0.18, reclaim=0.15, breakout=0.14 if status == "confirmed" else 0.0)
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
             out.append(
                 ChartPattern(
                     kind="baskerville_bearish",
-                    subtype="reversal",
+                    # статья: после ложной перевёрнутой ГиП — продолжение нисходящего
+                    subtype="continuation",
                     status=status,
                     points=hs.points + (PatternPoint(len(bars) - 1, close, "reclaim"),),
                     lines=hs.lines,
@@ -1020,6 +1479,7 @@ def _detect_three_indians(
     swings: list[SwingPoint],
     atr: float,
 ) -> list[ChartPattern]:
+    """Строго по Рашке: H3 ≈ H1 + 1.272×(H2−H1) (и зеркально для лоев)."""
     out: list[ChartPattern] = []
     highs = [s for s in swings if s.kind == "high"]
     lows = [s for s in swings if s.kind == "low"]
@@ -1028,9 +1488,20 @@ def _detect_three_indians(
         h1, h2, h3 = highs[i], highs[i + 1], highs[i + 2]
         if h2.index - h1.index < THREE_INDIANS_MIN_BARS or h3.index - h2.index < THREE_INDIANS_MIN_BARS:
             continue
-        if h2.price <= h1.price or h3.price <= h2.price:
+        if h2.price <= h1.price:
             continue
-        if h3.price - h1.price < atr * 0.6:
+        expected = h1.price + THREE_INDIANS_FIB * (h2.price - h1.price)
+        if expected <= 0:
+            continue
+        # формула 1.272 ИЛИ касание трендовой H1→H2 (как на картинке)
+        trend_proj = _line_value(PatternLine(h1.index, h1.price, h2.index, h2.price, "t"), h3.index)
+        near_fib = abs(h3.price - expected) / expected * 100.0 <= THREE_INDIANS_TOLERANCE_PCT
+        near_line = abs(h3.price - trend_proj) / max(trend_proj, 1e-9) * 100.0 <= THREE_INDIANS_TOLERANCE_PCT
+        if not (near_fib or near_line):
+            continue
+        if h3.price <= h2.price * 0.998:
+            continue
+        if h3.price - h1.price < atr * 0.8:
             continue
         trend = PatternLine(h1.index, h1.price, h3.index, h3.price, "trend")
         target = h3.price - (h3.price - h1.price) * 0.618
@@ -1038,7 +1509,18 @@ def _detect_three_indians(
         status = "forming"
         if bars[-1].close < _line_value(trend, len(bars) - 1):
             status = "confirmed"
-        conf, breakdown = _score_geometry(0.54, sequence=0.16, trend=0.10, breakout=0.12 if status == "confirmed" else 0.0)
+        fit = max(
+            1.0 - abs(h3.price - expected) / expected,
+            1.0 - abs(h3.price - trend_proj) / max(trend_proj, 1e-9),
+        )
+        conf, breakdown = _score_geometry(
+            0.58,
+            fib_fit=0.20 * max(0.0, fit),
+            sequence=0.12,
+            breakout=0.12 if status == "confirmed" else 0.0,
+        )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
         out.append(
             ChartPattern(
                 kind="three_indians",
@@ -1057,8 +1539,8 @@ def _detect_three_indians(
                 target_price=target,
                 stop_price=stop,
                 confidence=conf,
-                score_breakdown=breakdown,
-                source_rule="buyhold:three_indians",
+                score_breakdown={**breakdown, "expected_h3": round(expected, 8)},
+                source_rule="buyhold:three_indians_fib_1.272",
                 label_ru=PATTERN_LABELS_RU["three_indians"] + " ↓",
                 direction="bearish",
             )
@@ -1068,9 +1550,19 @@ def _detect_three_indians(
         l1, l2, l3 = lows[i], lows[i + 1], lows[i + 2]
         if l2.index - l1.index < THREE_INDIANS_MIN_BARS or l3.index - l2.index < THREE_INDIANS_MIN_BARS:
             continue
-        if l2.price >= l1.price or l3.price >= l2.price:
+        if l2.price >= l1.price:
             continue
-        if l1.price - l3.price < atr * 0.6:
+        expected = l1.price - THREE_INDIANS_FIB * (l1.price - l2.price)
+        if expected <= 0:
+            continue
+        trend_proj = _line_value(PatternLine(l1.index, l1.price, l2.index, l2.price, "t"), l3.index)
+        near_fib = abs(l3.price - expected) / expected * 100.0 <= THREE_INDIANS_TOLERANCE_PCT
+        near_line = abs(l3.price - trend_proj) / max(trend_proj, 1e-9) * 100.0 <= THREE_INDIANS_TOLERANCE_PCT
+        if not (near_fib or near_line):
+            continue
+        if l3.price >= l2.price * 1.002:
+            continue
+        if l1.price - l3.price < atr * 0.8:
             continue
         trend = PatternLine(l1.index, l1.price, l3.index, l3.price, "trend")
         target = l3.price + (l1.price - l3.price) * 0.618
@@ -1078,7 +1570,18 @@ def _detect_three_indians(
         status = "forming"
         if bars[-1].close > _line_value(trend, len(bars) - 1):
             status = "confirmed"
-        conf, breakdown = _score_geometry(0.54, sequence=0.16, trend=0.10, breakout=0.12 if status == "confirmed" else 0.0)
+        fit = max(
+            1.0 - abs(l3.price - expected) / expected,
+            1.0 - abs(l3.price - trend_proj) / max(trend_proj, 1e-9),
+        )
+        conf, breakdown = _score_geometry(
+            0.58,
+            fib_fit=0.20 * max(0.0, fit),
+            sequence=0.12,
+            breakout=0.12 if status == "confirmed" else 0.0,
+        )
+        if conf < MIN_PATTERN_CONFIDENCE:
+            continue
         out.append(
             ChartPattern(
                 kind="three_indians",
@@ -1097,13 +1600,13 @@ def _detect_three_indians(
                 target_price=target,
                 stop_price=stop,
                 confidence=conf,
-                score_breakdown=breakdown,
-                source_rule="buyhold:three_indians",
+                score_breakdown={**breakdown, "expected_l3": round(expected, 8)},
+                source_rule="buyhold:three_indians_fib_1.272",
                 label_ru=PATTERN_LABELS_RU["three_indians"] + " ↑",
                 direction="bullish",
             )
         )
-    return out[-2:]
+    return out[-1:]
 
 
 def _detect_diamond(
@@ -1161,6 +1664,8 @@ def _detect_diamond(
         target = close + width * 0.5
 
     conf, breakdown = _score_geometry(0.58, expansion=0.14, contraction=0.14, breakout=0.12 if status == "confirmed" else 0.0)
+    if conf < MIN_PATTERN_CONFIDENCE:
+        return out
     out.append(
         ChartPattern(
             kind="diamond",
@@ -1225,6 +1730,7 @@ def detect_chart_patterns(
     min_confidence: float = MIN_PATTERN_CONFIDENCE,
     enabled: bool = True,
 ) -> list[ChartPattern]:
+    """Строгий поиск: только фигуры выше порога, без пересекающихся дублей."""
     if not enabled or len(bars) < 24:
         return []
     swings = find_pattern_swings(bars)
@@ -1234,32 +1740,32 @@ def detect_chart_patterns(
     found.extend(_detect_double_top_bottom(bars, swings, atr))
     found.extend(hs_patterns)
     found.extend(_detect_baskerville(bars, hs_patterns, atr))
-    found.extend(_detect_cup_with_handle(bars, swings, atr))
+    # чашка отключена по решению пользователя (CUP_ENABLED=False)
     found.extend(_detect_three_indians(bars, swings, atr))
     found.extend(_detect_diamond(swings, bars, atr))
     found.extend(_detect_flag_pennant(bars, atr))
     found.extend(_detect_triangles_wedges(swings, bars, atr))
+    found.extend(_detect_expanding_triangle(swings, bars, atr))
+    found.extend(_detect_rectangle(bars, atr))
     found.extend(_detect_false_breakout(bars, swings, atr))
     found.extend(_detect_one_two_three(bars, swings, atr))
 
-    deduped: list[ChartPattern] = []
-    seen: set[str] = set()
-    for pat in sorted(found, key=lambda p: (-p.confidence, p.points[-1].index if p.points else 0)):
-        key = f"{pat.kind}:{pat.points[0].index if pat.points else 0}"
-        if key in seen:
-            continue
-        seen.add(key)
-        if pat.confidence >= min_confidence:
-            deduped.append(pat)
-    return deduped[:5]
+    strong = [p for p in found if p.confidence >= min_confidence]
+    return _suppress_overlaps(strong)[:MAX_REPORT_PATTERNS]
 
 
 def pick_primary_pattern(patterns: list[ChartPattern]) -> ChartPattern | None:
     if not patterns:
         return None
-    confirmed = [p for p in patterns if p.status == "confirmed"]
-    pool = confirmed or patterns
-    return max(pool, key=lambda p: (p.confidence, 1 if p.status == "confirmed" else 0))
+    # приоритет: confirmed → выше confidence → свежее
+    return max(
+        patterns,
+        key=lambda p: (
+            1 if p.status == "confirmed" else 0,
+            p.confidence,
+            p.points[-1].index if p.points else 0,
+        ),
+    )
 
 
 def format_chart_pattern_compact(pattern: ChartPattern | None) -> str:

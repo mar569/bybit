@@ -35,6 +35,8 @@ PATTERN_STYLE: dict[str, dict[str, float | str]] = {
     "baskerville_bearish": {"color": "#ff6b6b", "fill_alpha": 0.10},
     "three_indians": {"color": "#d2a8ff", "fill_alpha": 0.08},
     "diamond": {"color": "#ffa657", "fill_alpha": 0.09},
+    "expanding_triangle": {"color": "#f0883e", "fill_alpha": 0.08},
+    "rectangle": {"color": "#58a6ff", "fill_alpha": 0.08},
 }
 
 
@@ -75,6 +77,22 @@ def _draw_line(
         ax.text(x1, y1, f" {label}", color=color, fontsize=6.3, va="center")
 
 
+_POINT_LABELS_RU = {
+    "left_shoulder": "Л.плечо",
+    "head": "Голова",
+    "right_shoulder": "П.плечо",
+    "A": "A",
+    "B": "B",
+    "C": "C",
+    "D": "D",
+    "point1": "1",
+    "point2": "2",
+    "point3": "3",
+    "peak1": "H1",
+    "peak2": "H2",
+}
+
+
 def _draw_points(
     ax: "maxes.Axes",
     bars: list[KlineBar],
@@ -83,10 +101,13 @@ def _draw_points(
     color: str,
 ) -> None:
     for pt in points:
+        if pt.role in {"neck_left", "neck_right", "pole_start", "pole_end"}:
+            continue
         x = _x_at(bars, pt.index)
         ax.plot(x, pt.price, marker="o", color=color, markersize=4.5, linestyle="None", alpha=0.95)
-        if pt.role in {"head", "peak1", "peak2", "point1", "point2", "point3", "left_shoulder", "right_shoulder"}:
-            ax.text(x, pt.price, f" {pt.role[:3]}", color=color, fontsize=5.8, va="bottom")
+        label = _POINT_LABELS_RU.get(pt.role)
+        if label:
+            ax.text(x, pt.price, f" {label}", color=color, fontsize=5.8, va="bottom")
 
 
 def _draw_target_stop(
@@ -101,7 +122,7 @@ def _draw_target_stop(
     x = _x_at(bars, len(bars) - 1)
     if pattern.target_price is not None:
         ax.axhline(pattern.target_price, color="#7ee787", linestyle=":", linewidth=0.85, alpha=0.75)
-        ax.text(x, pattern.target_price, " TP", color="#7ee787", fontsize=6.2, va="bottom")
+        ax.text(x, pattern.target_price, " цель", color="#7ee787", fontsize=6.2, va="bottom")
     if pattern.stop_price is not None:
         ax.axhline(pattern.stop_price, color="#ff7b72", linestyle=":", linewidth=0.75, alpha=0.65)
         ax.text(x, pattern.stop_price, " SL", color="#ff7b72", fontsize=6.0, va="top")
@@ -128,9 +149,11 @@ def _draw_head_shoulders(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartP
             alpha=0.07,
             linewidth=0.8,
         ))
+        # контур ГиП как на картинке
+        ax.plot(poly_x, poly_y, color=color, linewidth=1.15, alpha=0.9)
     if pattern.neckline:
         ls_style = "-" if pattern.status == "confirmed" else "--"
-        _draw_line(ax, bars, pattern.neckline, color=color, label="шея", linestyle=ls_style)
+        _draw_line(ax, bars, pattern.neckline, color=color, label="линия шеи", linestyle=ls_style)
     _draw_points(ax, bars, pattern.points, color=color)
 
 
@@ -160,13 +183,53 @@ def _draw_flag_pennant(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPat
         pole_end = pattern.points[1]
         x0 = _x_at(bars, pole_start.index)
         x1 = _x_at(bars, pole_end.index)
-        ax.plot([x0, x1], [pole_start.price, pole_end.price], color=color, linewidth=1.5, alpha=0.85)
+        ax.plot([x0, x1], [pole_start.price, pole_end.price], color="#c9d1d9", linewidth=1.5, alpha=0.85)
         ax.text((x0 + x1) / 2, (pole_start.price + pole_end.price) / 2, " шток", color=color, fontsize=6.0)
+    roles = {p.role: p for p in pattern.points}
+    if all(k in roles for k in ("A", "B", "C", "D")):
+        a, b, c, d = roles["A"], roles["B"], roles["C"], roles["D"]
+        poly_x = [_x_at(bars, a.index), _x_at(bars, c.index), _x_at(bars, d.index), _x_at(bars, b.index)]
+        poly_y = [a.price, c.price, d.price, b.price]
+        ax.add_patch(Polygon(
+            list(zip(poly_x, poly_y)),
+            closed=True,
+            facecolor=color,
+            edgecolor="none",
+            alpha=0.12,
+            linewidth=0,
+        ))
     for line in pattern.lines:
         _draw_line(ax, bars, line, color=color, linestyle="--", alpha=0.8)
-    if pattern.zone_top is not None and pattern.zone_bottom is not None and len(pattern.points) >= 2:
-        i0 = pattern.points[1].index
-        i1 = pattern.points[-1].index
+    _draw_points(ax, bars, pattern.points, color=color)
+
+
+def _draw_triangle_wedge(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
+    roles = {p.role: p for p in pattern.points}
+    if all(k in roles for k in ("A", "B", "C", "D")):
+        a, b, c, d = roles["A"], roles["B"], roles["C"], roles["D"]
+        # заливка A→C→D→B как на картинках треугольника/клина
+        poly_x = [_x_at(bars, a.index), _x_at(bars, c.index), _x_at(bars, d.index), _x_at(bars, b.index)]
+        poly_y = [a.price, c.price, d.price, b.price]
+        ax.add_patch(Polygon(
+            list(zip(poly_x, poly_y)),
+            closed=True,
+            facecolor=color,
+            edgecolor="none",
+            alpha=0.10,
+            linewidth=0,
+        ))
+    for line in pattern.lines:
+        _draw_line(ax, bars, line, color=color, linestyle="--", alpha=0.88)
+    _draw_points(ax, bars, pattern.points, color=color)
+
+
+def _draw_rectangle(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
+    for line in pattern.lines:
+        role = "сопр." if line.role == "upper_bound" else "подд." if line.role == "lower_bound" else ""
+        _draw_line(ax, bars, line, color=color, label=role, linestyle="--", alpha=0.88)
+    if pattern.zone_top is not None and pattern.zone_bottom is not None and pattern.points:
+        i0 = min(p.index for p in pattern.points)
+        i1 = max(p.index for p in pattern.points)
         rect = Rectangle(
             (_x_at(bars, i0), pattern.zone_bottom),
             max(0.0001, _x_at(bars, i1) - _x_at(bars, i0)),
@@ -177,11 +240,6 @@ def _draw_flag_pennant(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPat
             linewidth=0.8,
         )
         ax.add_patch(rect)
-
-
-def _draw_triangle_wedge(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
-    for line in pattern.lines:
-        _draw_line(ax, bars, line, color=color, linestyle="-", alpha=0.88)
     _draw_points(ax, bars, pattern.points, color=color)
 
 
@@ -309,6 +367,8 @@ PATTERN_DRAWERS = {
     "baskerville_bearish": _draw_baskerville,
     "three_indians": _draw_three_indians,
     "diamond": _draw_diamond,
+    "expanding_triangle": _draw_triangle_wedge,
+    "rectangle": _draw_rectangle,
 }
 
 
@@ -317,15 +377,22 @@ def draw_chart_patterns(
     bars: list[KlineBar],
     patterns: list[ChartPattern],
     *,
-    max_patterns: int = 3,
-    min_confidence: float = 0.55,
+    max_patterns: int = 1,
+    min_confidence: float = 0.70,
 ) -> None:
+    """Строго: только 1 главная фигура (по материалам, без каши)."""
     if not bars or not patterns:
         return
+    from .chart_patterns import pick_primary_pattern
+
+    primary = pick_primary_pattern(
+        [p for p in patterns if p.confidence >= min_confidence]
+    )
+    if primary is None:
+        return
+    to_draw = [primary]
     shown = 0
-    for pattern in sorted(patterns, key=lambda p: (-p.confidence, p.status == "confirmed")):
-        if pattern.confidence < min_confidence:
-            continue
+    for pattern in to_draw:
         style = PATTERN_STYLE.get(pattern.kind, {"color": "#ffa657", "fill_alpha": 0.08})
         color = str(style["color"])
         drawer = PATTERN_DRAWERS.get(pattern.kind)

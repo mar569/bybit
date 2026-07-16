@@ -17,6 +17,7 @@ from matplotlib.patches import Ellipse, Rectangle
 from .bybit_klines import BybitKlineCache, KlineBar
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_pattern_draw import draw_chart_patterns
+from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
@@ -665,7 +666,13 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     _draw_channel(ax, bars, ta)
     _draw_extended_trend_lines(ax, bars, ta)
     _draw_consolidation_box(ax, bars, ta)
-    draw_chart_patterns(ax, bars, ta.chart_patterns)
+    draw_chart_patterns(
+        ax,
+        bars,
+        ta.chart_patterns,
+        max_patterns=MAX_CHART_PATTERNS,
+        min_confidence=MIN_DRAW_CONFIDENCE,
+    )
 
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)

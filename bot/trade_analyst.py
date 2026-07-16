@@ -284,6 +284,8 @@ def build_trade_thesis(
         pat = ta.primary_chart_pattern
         status = "подтв." if pat.status == "confirmed" else "форм."
         structure_line += f" · {pat.label_ru} ({status})"
+        if pat.target_price:
+            structure_line += f" → цель {fmt_price(pat.target_price)}"
 
     wave_bits: list[str] = []
     if ta.wave_leg_start and ta.wave_leg_end:
