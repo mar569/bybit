@@ -218,6 +218,14 @@ class TAAnalysisResult:
     elliott_label: str = ""
     abc_phase: str = ""
     abc_label_ru: str = ""
+    elliott_phase: str = ""
+    elliott_confidence: int = 0
+    elliott_entry_mode: str = ""
+    elliott_entry_ready: bool = False
+    elliott_entry_price: float | None = None
+    elliott_stop_price: float | None = None
+    elliott_tp_prices: list[float] = field(default_factory=list)
+    elliott_draw_points: list = field(default_factory=list)
     fib_status: str = ""
     fib_reject_reason: str = ""
     chart_patterns: list[ChartPattern] = field(default_factory=list)
@@ -2684,8 +2692,8 @@ def run_ta_analysis(
         ),
         fib_levels=list(wave.chart_fib_levels),
         wave_phase=wave.wave_phase if wave.leg else "",
-        wave_bias=wave.wave_bias if wave.leg else "neutral",
-        wave_confidence=wave.confidence if wave.leg else 0,
+        wave_bias=wave.wave_bias or "neutral",
+        wave_confidence=wave.confidence if (wave.leg or wave.elliott_entry_ready) else 0,
         wave_leg_start=wave.leg.start_price if wave.leg else None,
         wave_leg_end=wave.leg.end_price if wave.leg else None,
         wave_has_confluence=bool(wave.has_confluence) if wave.leg else False,
@@ -2693,9 +2701,17 @@ def run_ta_analysis(
         wave_confluence_sr=bool(wave.confluence_sr) if wave.leg else False,
         wave_confluence_round=bool(wave.confluence_round) if wave.leg else False,
         wave_confluence_retest=bool(wave.confluence_retest) if wave.leg else False,
-        elliott_label=wave.elliott_label if wave.leg else "",
-        abc_phase=wave.abc_phase if wave.leg else "",
-        abc_label_ru=wave.abc_label_ru if wave.leg else "",
+        elliott_label=wave.elliott_label or "",
+        abc_phase=wave.abc_phase or "",
+        abc_label_ru=wave.abc_label_ru or "",
+        elliott_phase=getattr(wave, "elliott_phase", "") or "",
+        elliott_confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
+        elliott_entry_mode=getattr(wave, "elliott_entry_mode", "") or "",
+        elliott_entry_ready=bool(getattr(wave, "elliott_entry_ready", False)),
+        elliott_entry_price=getattr(wave, "elliott_entry_price", None),
+        elliott_stop_price=getattr(wave, "elliott_stop_price", None),
+        elliott_tp_prices=list(getattr(wave, "elliott_tp_prices", None) or []),
+        elliott_draw_points=list(getattr(wave, "elliott_draw_points", None) or []),
         fib_status=getattr(wave, "fib_status", "") or "",
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,

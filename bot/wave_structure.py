@@ -104,6 +104,16 @@ class WaveStructureResult:
     elliott_label: str = ""
     abc_phase: str = ""  # A | B | C | complete | forming | ""
     abc_label_ru: str = ""
+    # Полные волны Эллиотта 1–5 + ABC (elliott_wave.py)
+    elliott_phase: str = ""
+    elliott_confidence: int = 0
+    elliott_entry_mode: str = ""
+    elliott_entry_ready: bool = False
+    elliott_entry_price: float | None = None
+    elliott_stop_price: float | None = None
+    elliott_tp_prices: list[float] = field(default_factory=list)
+    elliott_draw_points: list = field(default_factory=list)
+    elliott_result: object | None = None
     # Понятный статус для сигналов / ручного TA
     fib_status: str = FIB_STATUS_EMPTY
     fib_reject_reason: str = ""
@@ -849,6 +859,46 @@ def analyze_wave_structure(
 
     leg, no_leg_reason = detect_impulse_leg_detailed(swings, bars)
     if leg is None:
+        # Без Fib-ноги всё равно пробуем полную разметку Эллиотта
+        from .elliott_wave import analyze_elliott_waves
+
+        ew_only = analyze_elliott_waves(bars, swings)
+        if ew_only.has_structure:
+            plan = ew_only.entry_plan
+            status, reason = _fib_status_for(
+                leg=None, valid=False, phase="unknown", conf_count=0, reject_reason=no_leg_reason,
+            )
+            return WaveStructureResult(
+                fib_status=status,
+                fib_reject_reason=reason,
+                elliott_label=ew_only.label_ru,
+                abc_phase=ew_only.abc.phase if ew_only.abc else "",
+                abc_label_ru=ew_only.abc.label_ru if ew_only.abc else "",
+                elliott_phase=ew_only.phase,
+                elliott_confidence=ew_only.confidence,
+                elliott_entry_mode=plan.mode if plan else "",
+                elliott_entry_ready=bool(plan.ready) if plan else False,
+                elliott_entry_price=plan.entry_price if plan else None,
+                elliott_stop_price=plan.stop_price if plan else None,
+                elliott_tp_prices=[p for p in ((plan.tp1, plan.tp2) if plan else ()) if p][:3],
+                elliott_draw_points=list(ew_only.draw_points),
+                elliott_result=ew_only,
+                entry_hint_price=plan.entry_price if plan and plan.ready else None,
+                stop_hint_price=plan.stop_price if plan and plan.ready else None,
+                target_hint_prices=[p for p in ((plan.tp1, plan.tp2) if plan else ()) if p][:3]
+                if plan and plan.ready
+                else [],
+                valid=bool(plan and plan.ready),
+                confidence=ew_only.confidence,
+                wave_bias=(
+                    "long"
+                    if ew_only.impulse and ew_only.impulse.direction == "up"
+                    else "short"
+                    if ew_only.impulse
+                    else "neutral"
+                ),
+                notes=ew_only.notes[:3],
+            )
         status, reason = _fib_status_for(
             leg=None, valid=False, phase="unknown", conf_count=0, reject_reason=no_leg_reason,
         )
@@ -870,11 +920,36 @@ def analyze_wave_structure(
     )
     abc = detect_abc_pattern(swings, bars, leg)
     elliott = _elliott_label_ru(leg, phase, abc)
+
+    # Полная разметка 1–5 + ABC (практический гайд) — поверх Wave Lite
+    from .elliott_wave import analyze_elliott_waves
+
+    ew_full = analyze_elliott_waves(bars, swings)
+    if ew_full.has_structure and ew_full.label_ru:
+        elliott = ew_full.label_ru
+        if ew_full.abc and ew_full.abc.phase:
+            # синхронизируем abc_* с полной разметкой, если она сильнее Lite
+            if not abc or ew_full.confidence >= conf:
+                abc_phase_override = ew_full.abc.phase
+                abc_label_override = ew_full.abc.label_ru
+            else:
+                abc_phase_override = abc.phase
+                abc_label_override = abc.label_ru
+        else:
+            abc_phase_override = abc.phase if abc else ""
+            abc_label_override = abc.label_ru if abc else ""
+    else:
+        abc_phase_override = abc.phase if abc else ""
+        abc_label_override = abc.label_ru if abc else ""
+        ew_full = ew_full if ew_full.has_structure else None
+
     conf_labels = _confluence_labels_ru(sr=conf_sr, rnd=conf_round, retest=conf_retest)
     if conf_labels:
         notes = [f"confluence: {', '.join(conf_labels)}"] + notes
-    if abc:
-        notes = [abc.label_ru] + notes[:2]
+    if abc_label_override:
+        notes = [abc_label_override] + notes[:2]
+    if ew_full and ew_full.notes:
+        notes = list(ew_full.notes[:1]) + notes[:2]
 
     entry_hint: float | None = None
     stop_hint: float | None = None
@@ -914,6 +989,26 @@ def analyze_wave_structure(
                 if f161 and f161 < current and leg.quality >= 75 and conf_count >= 2:
                     targets.append(f161)
 
+    # Точный вход по Эллиотту перекрывает Fib-hint при ready
+    ew_entry_mode = ""
+    ew_entry_ready = False
+    ew_entry_price: float | None = None
+    ew_stop: float | None = None
+    ew_tps: list[float] = []
+    if ew_full and ew_full.entry_plan and ew_full.entry_plan.mode != "wait":
+        plan = ew_full.entry_plan
+        ew_entry_mode = plan.mode
+        ew_entry_ready = bool(plan.ready)
+        ew_entry_price = plan.entry_price
+        ew_stop = plan.stop_price
+        ew_tps = [p for p in (plan.tp1, plan.tp2) if p]
+        if plan.ready and plan.entry_price:
+            entry_hint = plan.entry_price
+            if plan.stop_price:
+                stop_hint = plan.stop_price
+            if ew_tps:
+                targets = ew_tps[:3]
+
     uniq: list[float] = []
     seen: set[float] = set()
     for t in targets:
@@ -933,24 +1028,37 @@ def analyze_wave_structure(
         leg=leg, valid=valid, phase=phase, conf_count=conf_count, reject_reason="",
     )
 
+    # EW ready-вход считаем достаточным для hints даже без Fib-confluence
+    hints_ok = (valid and conf_count >= 1) or (ew_entry_ready and ew_entry_price is not None)
+    ew_conf = int(getattr(ew_full, "confidence", 0) or 0) if ew_full else 0
+
     return WaveStructureResult(
         leg=leg,
         fib_levels=fib_levels if show_fib else [],
         wave_phase=phase,
         wave_bias=bias,
         confidence=conf if (valid and conf_count >= 1) else min(conf, 4),
-        entry_hint_price=entry_hint if (valid and conf_count >= 1) else None,
-        stop_hint_price=stop_hint if (valid and conf_count >= 1) else None,
-        target_hint_prices=uniq[:3] if (valid and conf_count >= 1) else [],
+        entry_hint_price=entry_hint if hints_ok else None,
+        stop_hint_price=stop_hint if hints_ok else None,
+        target_hint_prices=uniq[:3] if hints_ok else [],
         notes=notes[:3],
-        valid=valid,
+        valid=valid or ew_entry_ready,
         confluence_sr=conf_sr,
         confluence_round=conf_round,
         confluence_retest=conf_retest,
         confluence_count=conf_count,
         elliott_label=elliott,
-        abc_phase=abc.phase if abc else "",
-        abc_label_ru=abc.label_ru if abc else "",
+        abc_phase=abc_phase_override,
+        abc_label_ru=abc_label_override,
+        elliott_phase=getattr(ew_full, "phase", "") if ew_full else "",
+        elliott_confidence=ew_conf,
+        elliott_entry_mode=ew_entry_mode,
+        elliott_entry_ready=ew_entry_ready,
+        elliott_entry_price=ew_entry_price,
+        elliott_stop_price=ew_stop,
+        elliott_tp_prices=ew_tps[:3],
+        elliott_draw_points=list(getattr(ew_full, "draw_points", []) or []) if ew_full else [],
+        elliott_result=ew_full,
         fib_status=fib_status,
         fib_reject_reason=fib_reject,
     )
@@ -967,13 +1075,30 @@ def apply_wave_to_trade_plan(
     breakdown: float | None,
     wave: WaveStructureResult,
 ) -> tuple[float | None, list[float], int, int]:
-    """Fib не решает вход. Трогаем план только при valid + confluence."""
-    if not wave.valid or not wave.has_confluence or wave.leg is None or current <= 0:
+    """Fib не решает вход. Трогаем план при valid+confluence ИЛИ готовом EW-входе."""
+    ew_ready = bool(getattr(wave, "elliott_entry_ready", False) and getattr(wave, "elliott_entry_price", None))
+    if current <= 0:
+        return inv, targets, 0, 0
+    if not ew_ready and (not wave.valid or not wave.has_confluence or wave.leg is None):
         return inv, targets, 0, 0
 
     new_inv = inv
     new_targets = list(targets)
     phase = wave.wave_phase
+
+    # EW stop/targets имеют приоритет
+    if ew_ready:
+        ew_stop = getattr(wave, "elliott_stop_price", None)
+        ew_tps = list(getattr(wave, "elliott_tp_prices", None) or [])
+        if ew_stop:
+            new_inv = float(ew_stop)
+        for tp in ew_tps:
+            if tp and tp not in new_targets:
+                if (verdict == "LONG" or action_priority == "long") and tp > current * 1.002:
+                    new_targets.append(float(tp))
+                elif (verdict == "SHORT" or action_priority == "short") and tp < current * 0.998:
+                    new_targets.append(float(tp))
+        return new_inv, new_targets[:4], 8, 0
 
     if wave.stop_hint_price and new_inv:
         if verdict == "LONG" or action_priority == "long":

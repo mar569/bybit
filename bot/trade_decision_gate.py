@@ -174,9 +174,33 @@ def _abc_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
     return False
 
 
+def _elliott_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
+    """Готовый консервативный/агрессивный вход по полной разметке 1–5+ABC."""
+    if not bool(getattr(ta, "elliott_entry_ready", False)):
+        return False
+    mode = (getattr(ta, "elliott_entry_mode", "") or "").lower()
+    if mode not in {"conservative", "aggressive"}:
+        return False
+    entry = getattr(ta, "elliott_entry_price", None)
+    if entry is None or float(entry) <= 0:
+        return False
+    bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    # side плана из entry mode: long при бычьем импульсе
+    if side == "long" and bias in {"long", "neutral"}:
+        return True
+    if side == "short" and bias in {"short", "neutral"}:
+        return True
+    # если bias пустой — доверяем стороне сигнала при ready
+    if bias == "neutral" and mode in {"conservative", "aggressive"}:
+        return True
+    return False
+
+
 def detect_location(ta: TAAnalysisResult, side: str) -> str:
     if _fib_location_ok(ta, side):
         return "fib"
+    if _elliott_entry_ok(ta, side):
+        return "elliott"
     if _abc_entry_ok(ta, side):
         return "abc"
     if pattern_location_ok(
@@ -289,7 +313,7 @@ def score_trade_setup(
         penalties += 18
         factors.append("конфликт TA")
 
-    loc_map = {"fib": 28, "abc": 26, "retest": 24, "pattern": 22, "sr": 16, "none": 0}
+    loc_map = {"fib": 28, "elliott": 27, "abc": 26, "retest": 24, "pattern": 22, "sr": 16, "none": 0}
     loc_pts = loc_map.get(location, 0)
     if location != "none":
         factors.append(f"локация {location}")
@@ -303,6 +327,13 @@ def score_trade_setup(
     if getattr(ta, "abc_phase", "") in {"C", "complete"}:
         wave += 14
         factors.append("ABC волна C")
+    if getattr(ta, "elliott_entry_ready", False):
+        wave += 12
+        mode = getattr(ta, "elliott_entry_mode", "") or ""
+        factors.append(f"EW {mode}" if mode else "EW вход")
+    elif getattr(ta, "elliott_phase", ""):
+        wave += 6
+        factors.append("EW структура")
     if getattr(ta, "wave_has_confluence", False):
         wave += min(12, 4 * int(getattr(ta, "wave_confluence_count", 0) or 0))
 

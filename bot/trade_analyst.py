@@ -212,8 +212,16 @@ def _resolve_levels(
     stop = ta.invalidation_price
     targets = [t for t in (ta.target_prices or []) if t > 0][:4]
 
-    # Fib hint из wave (уже в entry_zone если confluence)
-    if zone:
+    # Точный EW-вход перекрывает зону/пробой
+    if ta.elliott_entry_ready and ta.elliott_entry_price:
+        entry = float(ta.elliott_entry_price)
+        if ta.elliott_stop_price:
+            stop = float(ta.elliott_stop_price)
+        if ta.elliott_tp_prices:
+            targets = [float(t) for t in ta.elliott_tp_prices if t][:4]
+        pad = abs(entry) * 0.0015
+        zone = (entry - pad, entry + pad)
+    elif zone:
         entry = (zone[0] + zone[1]) / 2.0
     elif is_long and ta.breakout_level:
         entry = ta.breakout_level
@@ -292,10 +300,18 @@ def build_trade_thesis(
         wave_bits.append(
             f"импульс A→B {fmt_price(ta.wave_leg_start)}→{fmt_price(ta.wave_leg_end)}"
         )
-    if ta.wave_phase:
+    if ta.elliott_label:
+        wave_bits.append(ta.elliott_label)
+    elif ta.wave_phase:
         wave_bits.append(_PHASE_RU.get(ta.wave_phase, ta.wave_phase))
-    if ta.abc_label_ru:
+    if ta.abc_label_ru and ta.abc_label_ru not in (ta.elliott_label or ""):
         wave_bits.append(ta.abc_label_ru)
+    if ta.elliott_entry_mode in {"conservative", "aggressive"} and ta.elliott_entry_price:
+        mode_ru = "конс." if ta.elliott_entry_mode == "conservative" else "агр."
+        wave_bits.append(
+            f"EW {mode_ru} вход ≈ {fmt_price(ta.elliott_entry_price)}"
+            + (" ✓" if ta.elliott_entry_ready else "")
+        )
     wave_line = "Импульс: " + (" · ".join(wave_bits) if wave_bits else "не подтверждён")
 
     fib_action = build_fib_action_text(
@@ -368,7 +384,19 @@ def build_trade_thesis(
 
     if action == "entry":
         headline = f"🎯 <b>{label}</b> · сетап {conf}/10"
-        if location == "fib" or ta.wave_phase == "wave_2_4_zone":
+        if location == "elliott" or (
+            ta.elliott_entry_ready and ta.elliott_entry_mode in {"conservative", "aggressive"}
+        ):
+            mode_ru = (
+                "консервативный (пробой волны 1/3)"
+                if ta.elliott_entry_mode == "conservative"
+                else "агрессивный (Fib C 1.272/1.618×B)"
+            )
+            thesis = (
+                f"Волны Эллиотта: <b>{mode_ru}</b> вход. "
+                f"{ta.elliott_label or 'структура 1–5+ABC'}."
+            )
+        elif location == "fib" or ta.wave_phase == "wave_2_4_zone":
             thesis = (
                 f"Импульс завершён, цена в зоне <b>Fib 0.5–0.618</b>. "
                 f"{_confluence_text(ta)} — вход лимиткой в зону, не market вдогонку."
@@ -380,6 +408,12 @@ def build_trade_thesis(
             )
         elif decision and decision.location == "retest":
             thesis = "Ретест уровня пробоя после слома структуры — классический профи-вход."
+        elif ta.primary_chart_pattern:
+            pat = ta.primary_chart_pattern
+            thesis = (
+                f"Графическая фигура <b>{pat.label_ru}</b> "
+                f"+ структура рынка подтверждают <b>{label}</b>."
+            )
         else:
             thesis = (
                 f"Сканер зафиксировал движение, TA подтверждает <b>{label}</b> "

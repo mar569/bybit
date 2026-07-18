@@ -17,6 +17,7 @@ from matplotlib.patches import Ellipse, Rectangle
 from .bybit_klines import BybitKlineCache, KlineBar
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_pattern_draw import draw_chart_patterns
+from .chart_elliott_draw import draw_elliott_waves
 from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
@@ -673,6 +674,31 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         max_patterns=MAX_CHART_PATTERNS,
         min_confidence=MIN_DRAW_CONFIDENCE,
     )
+    # Волны Эллиотта (1–5 + ABC) — поверх / рядом с фигурами
+    from .elliott_wave import ElliottWaveResult
+
+    ew_pts = getattr(ta, "elliott_draw_points", None) or []
+    if ew_pts:
+        ew_stub = ElliottWaveResult(
+            label_ru=getattr(ta, "elliott_label", "") or "",
+            phase=getattr(ta, "elliott_phase", "") or "",
+            draw_points=list(ew_pts),
+            confidence=int(getattr(ta, "elliott_confidence", 0) or 0),
+        )
+        # восстановить entry plan для линии входа
+        if getattr(ta, "elliott_entry_price", None):
+            from .elliott_wave import ElliottEntryPlan
+
+            ew_stub.entry_plan = ElliottEntryPlan(
+                mode=getattr(ta, "elliott_entry_mode", "") or "wait",
+                side="long" if (ta.wave_bias or "") == "long" else "short",
+                entry_price=ta.elliott_entry_price,
+                stop_price=getattr(ta, "elliott_stop_price", None),
+                tp1=(ta.elliott_tp_prices[0] if ta.elliott_tp_prices else None),
+                tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
+                ready=bool(getattr(ta, "elliott_entry_ready", False)),
+            )
+        draw_elliott_waves(ax, bars, ew_stub)
 
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)
