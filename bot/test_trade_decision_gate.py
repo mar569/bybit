@@ -57,10 +57,88 @@ def test_chase_gets_skip_not_entry() -> None:
         momentum_pct=2.0,
         wave_phase="late_impulse",
     )
-    d = decide_trade_action(_sig(), ta, readiness=(True, "armed"))
+    d = decide_trade_action(_sig(), ta, readiness=(True, "armed"), watch_allowed=False)
     assert d.action == "skip"
     assert d.chase is True
 
+
+def test_late_impulse_with_fib_is_watch_not_entry() -> None:
+    """Fib/паттерн больше не спасают ENTRY на финале импульса."""
+    ta = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=1.1,
+        range_position=0.9,
+        momentum_pct=1.5,
+        wave_phase="late_impulse",
+        wave_bias="long",
+        wave_has_confluence=True,
+        wave_confluence_count=2,
+        nearest_support=1.05,
+    )
+    d = decide_trade_action(_sig(), ta, readiness=(True, "armed"), watch_allowed=True)
+    assert d.action == "watch"
+    assert d.chase is True
+
+
+def test_ew_complete_blocks_long_continuation() -> None:
+    """После EW complete лонг вдогонку → WATCH; шорт fade при WAIT без ready → WATCH."""
+    ta_long = TAAnalysisResult(
+        verdict="LONG",
+        action_priority="long",
+        current_price=0.0085,
+        range_position=0.88,
+        momentum_pct=0.2,
+        elliott_phase="impulse_complete",
+        wave_bias="long",
+        wave_has_confluence=True,
+        wave_phase="wave_2_4_zone",
+        nearest_support=0.0084,
+    )
+    d_long = decide_trade_action(
+        _sig(signal_type="pulse_pump", side="long"),
+        ta_long,
+        readiness=(True, "armed"),
+        watch_allowed=True,
+        min_entry_score=50,
+    )
+    assert d_long.action == "watch"
+
+    ta_fade = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="short",
+        current_price=0.0085,
+        range_position=0.88,
+        momentum_pct=-0.5,
+        elliott_phase="impulse_complete",
+        wave_bias="long",
+    )
+    d_fade = decide_trade_action(
+        _sig(signal_type="pulse_dump", side="short", price_direction="down"),
+        ta_fade,
+        readiness=(False, "ждать"),
+        watch_allowed=True,
+    )
+    assert d_fade.action == "watch"
+    assert d_fade.action != "entry"
+
+def test_chart_wait_without_ready_is_watch() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="short",
+        current_price=0.0085,
+        range_position=0.7,
+        momentum_pct=-1.0,
+        breakdown_level=0.00834,
+    )
+    d = decide_trade_action(
+        _sig(signal_type="pulse_dump", side="short"),
+        ta,
+        readiness=(False, "нет"),
+        watch_allowed=True,
+        min_watch_score=30,
+    )
+    assert d.action == "watch"
 
 def test_fib_setup_scores_entry() -> None:
     ta = TAAnalysisResult(

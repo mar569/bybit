@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 44
+SETTINGS_VERSION = 45
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -306,7 +306,7 @@ class ScannerSettings:
     trade_chase_range_mid_pct: float = 78.0
     trade_decision_block_chase_watch: bool = True
 
-    # WATCH в Hot только для этих типов (ранние по фактам), без открытия всех pulse
+    # WATCH в Hot для ранних типов + pulse (чтобы late/chase → WATCH, не ложный ENTRY)
     signal_watch_allow_types: tuple[str, ...] = (
         "trend_seed",
         "impulse_pump",
@@ -317,6 +317,8 @@ class ScannerSettings:
         "mega_dump",
         "vertical_pump",
         "mega_pump",
+        "pulse_pump",
+        "pulse_dump",
     )
 
     # Не слать «шум»: WAIT + слабый TA + конфликт со сканером
@@ -1263,6 +1265,22 @@ class SettingsManager:
                     "mega_pump",
                 ]
                 merged["trade_decision_block_chase_watch"] = True
+            if version < 45:
+                # pulse late у хая → WATCH вместо ложного ENTRY; EW/chase жёстче в гейте
+                merged["signal_watch_allow_types"] = [
+                    "trend_seed",
+                    "impulse_pump",
+                    "impulse_dump",
+                    "reversal_pump",
+                    "reversal_dump",
+                    "vertical_dump",
+                    "mega_dump",
+                    "vertical_pump",
+                    "mega_pump",
+                    "pulse_pump",
+                    "pulse_dump",
+                ]
+                merged["trade_decision_block_chase_watch"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1270,7 +1288,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v42: reversal CVD + opposite dump CD; preserved: %s)",
+                "Settings migrated v%d → v%d (v45: pulse WATCH + anti-chase ENTRY; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

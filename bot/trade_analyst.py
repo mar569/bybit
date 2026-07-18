@@ -45,13 +45,23 @@ class TradeThesis:
 
 
 def _pick_side(signal: Signal, ta: TAAnalysisResult) -> str:
+    """Сторона Hot-плана = сторона сканера для pump/dump (без LONG Fib на дамп-заголовке)."""
+    sig = (signal.side or "long").lower()
+    st = (signal.signal_type or "").lower()
+    scanner_locked = (
+        st.endswith("_dump")
+        or st.endswith("_pump")
+        or st in {"pulse_dump", "pulse_pump", "pump", "dump"}
+    )
+    if scanner_locked and sig in {"long", "short"}:
+        return sig
     if ta.verdict == "LONG":
         return "long"
     if ta.verdict == "SHORT":
         return "short"
     if ta.action_priority in {"long", "short"}:
         return ta.action_priority
-    return (signal.side or "long").lower()
+    return sig
 
 
 def _fib_price_at(ta: TAAnalysisResult, ratio: float) -> float | None:

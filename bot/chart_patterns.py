@@ -1706,8 +1706,10 @@ def pattern_location_ok(
         return False
     if pattern.status == "confirmed" and pattern.direction in {"bullish", "bearish"}:
         want = "bullish" if side == "long" else "bearish"
-        if pattern.direction == want:
-            return True
+        if pattern.direction != want:
+            return False
+        # confirmed ≠ вход где угодно: цена должна быть у шеи/зоны
+        # (иначе ENTRY на хае после ГиП «в воздухе»)
 
     levels: list[float] = []
     if pattern.neckline:
@@ -1716,6 +1718,9 @@ def pattern_location_ok(
         levels.append(pattern.zone_top)
     if pattern.zone_bottom is not None:
         levels.append(pattern.zone_bottom)
+    if pattern.target_price and pattern.status == "confirmed":
+        # не используем target как локацию входа
+        pass
     for lv in levels:
         if lv <= 0:
             continue

@@ -742,8 +742,9 @@ def build_elliott_entry_plan(
                 ready=triggered and px >= entry * 0.99,
             )
 
-    # После волны 4: пробой хая/лоя волны 3 → волна 5
-    if p3 and p4 and impulse.current_wave in {"4", "5", "complete"}:
+    # После волны 4 (ещё не 5): пробой хая/лоя волны 3 → старт волны 5
+    # На волне 5 / complete — НЕ входить вдогонку; ждать ABC
+    if p3 and p4 and impulse.current_wave == "4":
         if impulse.direction == "up":
             entry = p3.price
             stop = p4.price * 0.997
@@ -778,6 +779,14 @@ def build_elliott_entry_plan(
                 rr=3.0,
                 ready=px <= entry * 1.001 and px >= entry * 0.988,
             )
+
+    if impulse.current_wave in {"5", "complete"} and not (abc and abc.phase in {"C", "complete"}):
+        return ElliottEntryPlan(
+            mode="wait",
+            side=side,
+            trigger="волна 5/complete — ждать коррекцию ABC, не вдогонку",
+            ready=False,
+        )
 
     # После полного ABC — консервативный вход на обновлении хая волны 1 старшего порядка
     if abc and abc.phase == "complete" and p1 and impulse.current_wave == "complete":

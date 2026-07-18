@@ -81,11 +81,21 @@ def _is_late_chase(
     rp = float(getattr(ta, "range_position", 0.5) or 0.5)
     mom = float(getattr(ta, "momentum_pct", 0.0) or 0.0)
     phase = (getattr(ta, "wave_phase", "") or "").lower()
+    ew_phase = (getattr(ta, "elliott_phase", "") or "").lower()
+    fib_status = (getattr(ta, "fib_status", "") or "").lower()
     hi = max(0.70, min(float(range_high_pct) / 100.0, 0.95))
     mid = max(0.65, min(float(range_mid_pct) / 100.0, hi - 0.02))
 
-    if phase == "late_impulse":
+    if phase == "late_impulse" or fib_status == "late_impulse":
         return True, "финал импульса — ждать откат"
+
+    # EW 1–5 завершён / волна 5: не входить вдогонку по направлению импульса
+    if ew_phase in {"impulse_5", "impulse_complete"}:
+        ew_bias = (getattr(ta, "wave_bias", "") or "").lower()
+        if side == "long" and ew_bias in {"long", "neutral", ""}:
+            return True, "EW волна 5/complete — не лонг вдогонку"
+        if side == "short" and ew_bias in {"short", "neutral", ""}:
+            return True, "EW волна 5/complete — не шорт вдогонку"
 
     if side == "long":
         if rp >= hi and mom >= 0.35:
@@ -94,6 +104,9 @@ def _is_late_chase(
             return True, f"импульс +{mom:.1f}% у вершины"
         if getattr(ta, "post_pump", False) and rp >= mid + 0.04 and mom >= 0.25:
             return True, "post-pump — ждать откат"
+        # у хая после дампа/капитуляции — V-bounce ENTRY запрещён без отката
+        if rp >= hi and mom > -0.15:
+            return True, f"у хая диапазона ({rp:.0%}) — ждать откат"
     elif side == "short":
         lo = 1.0 - hi
         lo_mid = 1.0 - mid
@@ -101,6 +114,8 @@ def _is_late_chase(
             return True, f"погоня шорта у лоя ({rp:.0%})"
         if rp <= lo_mid and mom <= -0.9:
             return True, f"импульс {mom:.1f}% у дна"
+        if rp <= lo and mom < 0.15:
+            return True, f"у лоя диапазона ({rp:.0%}) — ждать откат"
     return False, ""
 
 
@@ -409,29 +424,49 @@ def decide_trade_action(
     )
     location = setup.location_kind
     aligned, align_reason = _side_aligned(ta, side)
-    has_location = location in {"fib", "abc", "retest", "sr", "trigger", "pattern"}
-    safe_location = location in {"fib", "abc", "retest", "sr", "pattern"}
+    has_location = location in {"fib", "abc", "elliott", "retest", "sr", "trigger", "pattern"}
     st = (signal.signal_type or "").lower()
     details = signal.details or {}
     seed_ext = float(details.get("seed_extension_pct", 99) or 99)
     # Ранний seed по фактам (ещё <8% от mid базы) — не режем как late chase TA
     early_seed = st == "trend_seed" and seed_ext <= 8.0
 
-    if chase and block_chase_watch and not safe_location and not early_seed:
+    # Жёстко: финал импульса / волна 5 → никогда ENTRY вдогонку.
+    # После impulse_complete контртренд (fade) можно — но только ниже по коду при ready+локации.
+    wave_phase = (getattr(ta, "wave_phase", "") or "").lower()
+    fib_status = (getattr(ta, "fib_status", "") or "").lower()
+    ew_phase = (getattr(ta, "elliott_phase", "") or "").lower()
+    ew_bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    late_hard = wave_phase == "late_impulse" or fib_status == "late_impulse"
+    if ew_phase == "impulse_5":
+        late_hard = True
+    elif ew_phase == "impulse_complete":
+        # продолжение завершённого импульса = погоня; обратная сторона — не late_hard
+        if side == "long" and ew_bias in {"long", "neutral"}:
+            late_hard = True
+        elif side == "short" and ew_bias in {"short", "neutral"}:
+            late_hard = True
+    if late_hard or (chase and not early_seed):
+        reason = chase_reason or "финал импульса / погоня — ждать откат"
+        if watch_allowed:
+            return TradeDecision(
+                "watch",
+                reason,
+                location=location,
+                chase=True,
+                setup_score=max(setup.total, min_watch_score),
+            )
         return TradeDecision(
             "skip",
-            chase_reason or "погоня — не входить",
+            reason,
             location=location,
             chase=True,
             setup_score=setup.total,
         )
 
-    if not aligned and setup.total < min_watch_score:
-        return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
-
-    # trend_seed: ранний потенциал — ENTRY у локации; иначе WATCH (не market)
+    # trend_seed раньше WAIT-правила: ранний потенциал не режем бейджем WAIT
     if st == "trend_seed" and watch_allowed:
-        has_loc = location in {"fib", "abc", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}
         cvd_miss = float(details.get("seed_cvd_missing", 0) or 0)
         if has_loc and setup.total >= min_entry_score and not chase:
             return TradeDecision(
@@ -441,14 +476,6 @@ def decide_trade_action(
                 chase=False,
                 setup_score=setup.total,
             )
-        if chase and block_chase_watch and not early_seed:
-            return TradeDecision(
-                "skip",
-                chase_reason or "seed уже поздно — ждать глубокий откат",
-                location=location,
-                chase=True,
-                setup_score=setup.total,
-            )
         reason = "потенциал тренда · ждать ретест/Fib"
         if cvd_miss >= 0.5:
             reason = f"{reason} · CVD слабый/нет"
@@ -456,9 +483,29 @@ def decide_trade_action(
             "watch",
             reason,
             location=location,
-            chase=not early_seed,
+            chase=False,
             setup_score=max(setup.total, min_watch_score),
         )
+
+    # TA на графике WAIT + нет триггера → максимум WATCH (не ENTRY против бейджа)
+    if (getattr(ta, "verdict", "") or "").upper() == "WAIT" and not ready:
+        if watch_allowed:
+            return TradeDecision(
+                "watch",
+                "график WAIT — ждать подтверждение",
+                location=location,
+                chase=False,
+                setup_score=max(setup.total, min_watch_score),
+            )
+        return TradeDecision(
+            "skip",
+            "график WAIT — нет подтверждения",
+            location=location,
+            setup_score=setup.total,
+        )
+
+    if not aligned and setup.total < min_watch_score:
+        return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
 
     # Reversal: ENTRY только при CVD confirm + локация; иначе WATCH/skip
     if st in _REVERSAL_TYPES:
@@ -468,7 +515,7 @@ def decide_trade_action(
         except (TypeError, ValueError):
             cvd_f = None
         cvd_ok = _cvd_confirms_side(side, cvd_f)
-        has_loc = location in {"fib", "abc", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}
         if has_loc and cvd_ok and setup.total >= min_entry_score and not chase:
             return TradeDecision(
                 "entry",
@@ -504,13 +551,13 @@ def decide_trade_action(
             setup_score=setup.total,
         )
 
-    # ENTRY: достаточный скор + (локация или ready) + не жёсткая погоня
+    # ENTRY: скор + локация + НЕ погоня (исключений по Fib/паттерну больше нет)
     can_entry = (
         setup.total >= min_entry_score
         and has_location
-        and (not chase or location in {"fib", "abc", "retest", "pattern"})
+        and not chase
     )
-    if can_entry and (ready or location in {"fib", "abc", "retest", "sr", "pattern"}):
+    if can_entry and (ready or location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}):
         reason = f"сетап {setup.total}/100"
         if ready_reason:
             reason = f"{reason} · {ready_reason}"
