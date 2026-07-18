@@ -145,6 +145,7 @@ def _apply_display_zoom(
     interval_minutes: int,
     trailing: float = 0.22,
     leading: float = 0.02,
+    set_ylim: bool = True,
 ) -> None:
     """Зум на последние N часов: шире свечи + Y по видимому диапазону (не весь дамп)."""
     if not bars:
@@ -158,11 +159,20 @@ def _apply_display_zoom(
     t1 = mdates.date2num(times[-1])
     span = max(t1 - t0, 1e-6)
     ax.set_xlim(t0 - span * leading, t1 + span * trailing)
+    if not set_ylim:
+        return
     peak = max(b.high for b in vis)
     trough = min(b.low for b in vis)
-    if peak > trough:
-        pad = (peak - trough) * 0.16
-        ax.set_ylim(trough - pad, peak + pad)
+    if not (peak > trough > 0) or not (peak < 1e12):
+        return
+    pad = max((peak - trough) * 0.16, peak * 0.002)
+    lo = max(0.0, trough - pad)
+    hi = peak + pad
+    # защита от вырожденного/огромного диапазона (ломает bbox/renderer)
+    if hi / max(lo, 1e-12) > 1e6:
+        mid = bars[-1].close if bars[-1].close > 0 else peak
+        lo, hi = mid * 0.92, mid * 1.08
+    ax.set_ylim(lo, hi)
 
 
 @dataclass
@@ -1149,14 +1159,39 @@ def _render_chart_figure(
     from .manual_ta import chart_display_hours
 
     zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
-    _apply_display_zoom(ax, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
+    _apply_display_zoom(ax, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=True)
     if use_enhanced and ax_vol is not None and ax_rsi is not None:
-        _apply_display_zoom(ax_vol, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
-        _apply_display_zoom(ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
+        # vol/rsi только по X; Y у них свой
+        _apply_display_zoom(
+            ax_vol, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
+        )
+        _apply_display_zoom(
+            ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
+        )
     fig.autofmt_xdate(rotation=0)
 
+    # НЕ bbox_inches="tight": при зуме артисты вне осей раздувают PNG до миллионов px
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.10)
+    try:
+        fig.savefig(
+            buffer,
+            format="png",
+            facecolor=fig.get_facecolor(),
+            dpi=120,
+            pad_inches=0.08,
+        )
+    except ValueError as exc:
+        logger.warning("Chart save failed (%s), retry without zoom ylim", exc)
+        # fallback: полный диапазон X/Y без tight
+        _apply_chart_breathing_room(ax, bars, trailing=0.20, leading=0.02)
+        if bars:
+            peak = max(b.high for b in bars)
+            trough = min(b.low for b in bars)
+            if peak > trough > 0:
+                pad = (peak - trough) * 0.10
+                ax.set_ylim(trough - pad, peak + pad)
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", facecolor=fig.get_facecolor(), dpi=100)
     plt.close(fig)
     buffer.seek(0)
     return buffer.getvalue()
