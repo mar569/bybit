@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 45
+SETTINGS_VERSION = 46
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -349,6 +349,7 @@ class ScannerSettings:
     signal_chart_enabled: bool = True
     signal_chart_source: str = "annotated"
     signal_chart_hours: int = 18
+    signal_chart_display_hours: int = 7
     signal_chart_interval_minutes: int = 5
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
@@ -806,6 +807,7 @@ class ScannerSettings:
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
             signal_chart_source=str(base.get("signal_chart_source", "annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
+            signal_chart_display_hours=int(base.get("signal_chart_display_hours", 7)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
@@ -1281,6 +1283,9 @@ class SettingsManager:
                     "pulse_dump",
                 ]
                 merged["trade_decision_block_chase_watch"] = True
+            if version < 46:
+                # Анализ 18ч, на экране зум ~7ч — свечи не скомканы
+                merged["signal_chart_display_hours"] = 7
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1288,7 +1293,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v45: pulse WATCH + anti-chase ENTRY; preserved: %s)",
+                "Settings migrated v%d → v%d (v46: chart display zoom; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

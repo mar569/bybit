@@ -1026,6 +1026,9 @@ class TelegramBot:
                             coinglass_url=signal.link,
                             oi_bars=oi_bars,
                             liq_context=liq_context,
+                            display_hours=int(
+                                getattr(settings, "signal_chart_display_hours", 7) or 7
+                            ),
                         ),
                         timeout=35.0,
                     )
@@ -1050,6 +1053,9 @@ class TelegramBot:
                             exchange=signal.exchange.lower(),
                             pattern_detection_enabled=settings.pattern_detection_enabled,
                             pattern_min_confidence=settings.pattern_min_confidence,
+                            display_hours=int(
+                                getattr(settings, "signal_chart_display_hours", 7) or 7
+                            ),
                         ),
                         timeout=35.0,
                     )

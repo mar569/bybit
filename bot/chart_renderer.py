@@ -25,7 +25,7 @@ from .chart_pro_layers import (
     draw_rsi_panel,
     draw_volume_panel,
 )
-from .manual_ta import pattern_chart_hours
+from .manual_ta import pattern_chart_hours, chart_display_hours
 from .chart_screenshot import chart_capture_service
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
@@ -121,6 +121,48 @@ def _apply_chart_breathing_room(ax: plt.Axes, bars: list[KlineBar], *, trailing:
     t1 = mdates.date2num(times[-1])
     span = max(t1 - t0, 1e-6)
     ax.set_xlim(t0 - span * leading, t1 + span * trailing)
+
+
+def _visible_bars(
+    bars: list[KlineBar],
+    display_hours: int,
+    interval_minutes: int,
+) -> list[KlineBar]:
+    if not bars or display_hours <= 0:
+        return bars
+    per_hour = max(1, 60 // max(1, interval_minutes))
+    n = max(36, display_hours * per_hour)
+    if len(bars) <= n:
+        return bars
+    return bars[-n:]
+
+
+def _apply_display_zoom(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    *,
+    display_hours: int,
+    interval_minutes: int,
+    trailing: float = 0.22,
+    leading: float = 0.02,
+) -> None:
+    """Зум на последние N часов: шире свечи + Y по видимому диапазону (не весь дамп)."""
+    if not bars:
+        return
+    vis = _visible_bars(bars, display_hours, interval_minutes)
+    if len(vis) < 2:
+        _apply_chart_breathing_room(ax, bars, trailing=trailing, leading=leading)
+        return
+    times = _bar_times(vis)
+    t0 = mdates.date2num(times[0])
+    t1 = mdates.date2num(times[-1])
+    span = max(t1 - t0, 1e-6)
+    ax.set_xlim(t0 - span * leading, t1 + span * trailing)
+    peak = max(b.high for b in vis)
+    trough = min(b.low for b in vis)
+    if peak > trough:
+        pad = (peak - trough) * 0.16
+        ax.set_ylim(trough - pad, peak + pad)
 
 
 @dataclass
@@ -1054,19 +1096,20 @@ def _render_chart_figure(
     interval_minutes: int = 5,
     pro_mode: bool = False,
     enhanced: bool = True,
+    display_hours: int | None = None,
 ) -> bytes:
     use_enhanced = enhanced
     if use_enhanced:
         # Шире область свечей (~+13%): боковые панели остаются, но уже
-        fig = plt.figure(figsize=(18.2, 10.8), dpi=120)
+        fig = plt.figure(figsize=(19.2, 10.8), dpi=120)
         gs = fig.add_gridspec(3, 1, height_ratios=[4.2, 1.0, 0.9], hspace=0.04)
         ax = fig.add_subplot(gs[0])
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
-        fig.subplots_adjust(left=0.145, right=0.800, top=0.92, bottom=0.08)
+        fig.subplots_adjust(left=0.130, right=0.805, top=0.92, bottom=0.08)
     else:
-        fig_size = (20.4, 10.2) if pro_mode else (18.2, 8.5)
+        fig_size = (20.4, 10.2) if pro_mode else (19.0, 8.5)
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
         ax_vol = None
         ax_rsi = None
@@ -1075,7 +1118,7 @@ def _render_chart_figure(
         if pro_mode:
             fig.subplots_adjust(left=0.11, right=0.89, top=0.93, bottom=0.09)
         else:
-            fig.subplots_adjust(left=0.13, right=0.87, top=0.92, bottom=0.10)
+            fig.subplots_adjust(left=0.12, right=0.88, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
@@ -1102,10 +1145,14 @@ def _render_chart_figure(
     else:
         _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
-    _apply_chart_breathing_room(ax, bars)
+    # Зум: анализ может быть на 18ч, экран — последние N часов (читаемые свечи)
+    from .manual_ta import chart_display_hours
+
+    zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
+    _apply_display_zoom(ax, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
     if use_enhanced and ax_vol is not None and ax_rsi is not None:
-        _apply_chart_breathing_room(ax_vol, bars)
-        _apply_chart_breathing_room(ax_rsi, bars)
+        _apply_display_zoom(ax_vol, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
+        _apply_display_zoom(ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes)
     fig.autofmt_xdate(rotation=0)
 
     buffer = io.BytesIO()
@@ -1715,9 +1762,13 @@ async def render_annotated_chart(
     liq_context: dict | None = None,
     pattern_detection_enabled: bool = True,
     pattern_min_confidence: float = 0.55,
+    display_hours: int | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
-    effective_hours = max(hours, pattern_chart_hours(interval_minutes))
-    bars = await _fetch_bars(symbol, effective_hours, interval_minutes=interval_minutes)
+    # Полный lookback для паттернов/EW; на экране — зум display_hours
+    analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
+    zoom_hours = chart_display_hours(interval_minutes, configured=display_hours)
+    zoom_hours = min(zoom_hours, analysis_hours)
+    bars = await _fetch_bars(symbol, analysis_hours, interval_minutes=interval_minutes)
     if not bars:
         return None, None
 
@@ -1725,9 +1776,9 @@ async def render_annotated_chart(
     htf_bars: list[KlineBar] | None = None
     history_bars: list[KlineBar] | None = bars
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
-        btc_bars = await _fetch_bars("BTCUSDT", effective_hours, interval_minutes=interval_minutes)
+        btc_bars = await _fetch_bars("BTCUSDT", analysis_hours, interval_minutes=interval_minutes)
     if interval_minutes <= 15:
-        htf_bars = await _fetch_bars(symbol, max(24, effective_hours * 2), interval_minutes=60)
+        htf_bars = await _fetch_bars(symbol, max(24, analysis_hours * 2), interval_minutes=60)
 
     taker_cvd = None
     if symbol:
@@ -1747,7 +1798,7 @@ async def render_annotated_chart(
         btc_bars=btc_bars,
         htf_bars=htf_bars,
         symbol=symbol,
-        hours=effective_hours,
+        hours=analysis_hours,
         invalidation_price=invalidation_price,
         neutral=neutral,
         liq_context=liq_context,
@@ -1787,13 +1838,17 @@ async def render_annotated_chart(
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
     pro_mode = source == "annotated_pro"
+    title = f"Bybit {interval_minutes}m · вид {zoom_hours}ч"
+    if analysis_hours > zoom_hours:
+        title = f"{title} (анализ {analysis_hours}ч)"
     png = _render_chart_figure(
         bars, ta,
         symbol=symbol,
-        title_suffix=f"Bybit {interval_minutes}m · {effective_hours}ч",
+        title_suffix=title,
         accent_color=accent,
         interval_minutes=interval_minutes,
         pro_mode=pro_mode,
+        display_hours=zoom_hours,
         enhanced=source in {"annotated", "annotated_pro"},
     )
     return png, ta
@@ -1811,6 +1866,7 @@ async def render_signal_chart(
     liq_context: dict | None = None,
     chart_source: str = "annotated",
     exchange: str = "bybit",
+    display_hours: int | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     png, ta = await render_annotated_chart(
         symbol,
@@ -1823,6 +1879,7 @@ async def render_signal_chart(
         neutral=True,
         chart_source=chart_source,
         exchange=exchange,
+        display_hours=display_hours,
     )
     if png is None:
         return None, None
@@ -1874,6 +1931,7 @@ async def get_signal_chart_png(
     coinglass_url: str = "",
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
+    display_hours: int | None = None,
 ) -> tuple[bytes | None, str, TAAnalysisResult | None, str]:
     source = (chart_source or "annotated").lower()
     fail_reason = ""
@@ -1890,6 +1948,7 @@ async def get_signal_chart_png(
             liq_context=liq_context,
             chart_source=source,
             exchange=signal_exchange,
+            display_hours=display_hours,
         )
         if png:
             return png, source, ta, ""

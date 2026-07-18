@@ -56,8 +56,17 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 
 def pattern_chart_hours(interval_minutes: int) -> int:
-    """Окно истории для поиска и отрисовки графических фигур."""
+    """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
     return {5: 18, 10: 12, 15: 24, 60: 72}.get(interval_minutes, 18)
+
+
+def chart_display_hours(interval_minutes: int, *, configured: int | None = None) -> int:
+    """Сколько часов показывать на графике (свечи читаемее, чем полный lookback)."""
+    defaults = {5: 7, 10: 8, 15: 10, 60: 36}
+    base = defaults.get(interval_minutes, 7)
+    if configured is None:
+        return base
+    return max(4, min(int(configured), pattern_chart_hours(interval_minutes)))
 
 
 def manual_ta_hours(interval_minutes: int) -> int:
