@@ -3958,6 +3958,9 @@ def format_scenario_update_html(
     breakdown_level: float | None = None,
     breakout_level: float | None = None,
     ta: TAAnalysisResult | None = None,
+    stop_hint: float | None = None,
+    target_hints: list[float] | None = None,
+    user_intent: str = "",
 ) -> str:
     """Короткое уведомление фазы 2: подтверждение сценария после первого сигнала."""
     ex = exchange.replace("Bybit", "ByBit").replace("bybit", "ByBit")
@@ -3986,13 +3989,38 @@ def format_scenario_update_html(
             f"🔻 <b>Можно смотреть SHORT</b> — цена ≤<b>{fmt_price(reference_price)}</b> "
             f"({move_pct:+.1f}% от первого алерта)."
         )
-        body += "\nПроверьте свечу и объём перед входом."
+        if stop_hint:
+            body += f"\n🛑 стоп ~<b>{fmt_price(stop_hint)}</b>"
+        if target_hints:
+            tps = " / ".join(fmt_price(t) for t in target_hints[:2])
+            body += f"\n🎯 {tps}"
+        body += "\nПодтверждение: пробой + закрепление. Проверьте объём."
     elif update_kind == "entry_long":
         body = (
             f"🔺 <b>Можно смотреть LONG</b> — цена ≥<b>{fmt_price(reference_price)}</b> "
             f"({move_pct:+.1f}% от первого алерта)."
         )
-        body += "\nПроверьте свечу и объём перед входом."
+        if stop_hint:
+            body += f"\n🛑 стоп ~<b>{fmt_price(stop_hint)}</b>"
+        if target_hints:
+            tps = " / ".join(fmt_price(t) for t in target_hints[:2])
+            body += f"\n🎯 {tps}"
+        body += "\nПодтверждение: пробой + закрепление. Проверьте объём."
+    elif update_kind == "cancelled_late":
+        body = (
+            f"Цена уже ушла от уровня <b>{fmt_price(reference_price)}</b> "
+            f"({move_pct:+.1f}%) — ловить поздно, слежка снята."
+        )
+    elif update_kind == "cancelled_opposite":
+        intent = (user_intent or "").upper() or "сценарий"
+        body = (
+            f"Против {intent}: ушли через <b>{fmt_price(reference_price)}</b> "
+            f"({move_pct:+.1f}%). Сценарий отменён."
+        )
+    elif update_kind == "expired":
+        body = "Время слежки вышло без подтверждённого входа."
+    elif update_kind == "cancelled_user":
+        body = "Слежка отменена вручную."
     else:
         body = f"Обновление: {update_kind}"
 

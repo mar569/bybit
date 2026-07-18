@@ -16,6 +16,10 @@ UpdateKind = Literal[
     "continuation_confirmed",
     "entry_short",
     "entry_long",
+    "cancelled_late",
+    "cancelled_opposite",
+    "cancelled_user",
+    "expired",
 ]
 
 IMPULSE_SIGNAL_TYPES = frozenset({
@@ -62,10 +66,27 @@ class ScenarioWatch:
     entry_fired: bool = False
     enroll_high: float = 0.0
     trigger_only: bool = False
+    # Ручная подписка: пользователь нажал «Ждать LONG/SHORT»
+    user_intent: str = ""  # long | short | ""
+    zone_low: float | None = None
+    zone_high: float | None = None
+    stop_hint: float | None = None
+    target_hints: tuple[float, ...] = ()
+    late_cancel_pct: float = 1.5
+    opposite_cancel_pct: float = 1.2
+    confirm_buffer_pct: float = 0.08  # закрепление за уровнем
+    chat_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.enroll_high <= 0:
             self.enroll_high = self.local_high
+        self.user_intent = (self.user_intent or "").lower()
+        if self.user_intent not in {"long", "short", ""}:
+            self.user_intent = ""
+
+    @property
+    def is_user_watch(self) -> bool:
+        return self.user_intent in {"long", "short"}
 
 
 @dataclass
@@ -247,6 +268,109 @@ class ScenarioWatcher:
         )
         return True
 
+    def cancel_watch(self, exchange: str, symbol: str) -> ScenarioWatch | None:
+        key = (exchange.lower(), symbol.upper())
+        return self._watches.pop(key, None)
+
+    def get_watch(self, exchange: str, symbol: str) -> ScenarioWatch | None:
+        return self._watches.get((exchange.lower(), symbol.upper()))
+
+    def try_enroll_user_intent(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        intent: str,
+        price: float,
+        breakout_level: float | None,
+        breakdown_level: float | None,
+        zone_low: float | None = None,
+        zone_high: float | None = None,
+        stop_hint: float | None = None,
+        target_hints: list[float] | None = None,
+        coinglass_url: str = "",
+        signal_type: str = "user_watch",
+        settings: Any = None,
+        chat_id: int | None = None,
+    ) -> tuple[bool, str]:
+        """Подписка по кнопке: ждать LONG/SHORT с ранним подтверждением."""
+        intent = (intent or "").lower()
+        if intent not in {"long", "short"}:
+            return False, "нужна сторона long/short"
+        if settings is not None and not getattr(settings, "scenario_watch_enabled", True):
+            return False, "сценарии выключены"
+        if price <= 0:
+            return False, "нет цены"
+        if intent == "long" and not breakout_level and not zone_high and not zone_low:
+            return False, "нет уровня для LONG (пробой/зона)"
+        if intent == "short" and not breakdown_level and not zone_low and not zone_high:
+            return False, "нет уровня для SHORT (пробой/зона)"
+
+        key = (exchange.lower(), symbol.upper())
+        now = time.time()
+        watch_minutes = int(getattr(settings, "scenario_watch_minutes", 45) if settings else 45)
+        late_pct = float(getattr(settings, "scenario_watch_late_cancel_pct", 1.5) if settings else 1.5)
+        opp_pct = float(getattr(settings, "scenario_watch_opposite_cancel_pct", 1.2) if settings else 1.2)
+
+        # Для long: зона около поддержки/Fib, триггер = breakout или верх зоны
+        # Для short: зона около сопротивления/Fib, триггер = breakdown или низ зоны
+        z_lo = zone_low
+        z_hi = zone_high
+        if intent == "long":
+            if z_lo is None and breakout_level:
+                z_lo = breakout_level * 0.992
+            if z_hi is None and breakout_level:
+                z_hi = breakout_level * 1.004
+            if breakout_level is None and z_hi is not None:
+                breakout_level = z_hi
+        else:
+            if z_hi is None and breakdown_level:
+                z_hi = breakdown_level * 1.008
+            if z_lo is None and breakdown_level:
+                z_lo = breakdown_level * 0.996
+            if breakdown_level is None and z_lo is not None:
+                breakdown_level = z_lo
+
+        watch = ScenarioWatch(
+            exchange=exchange,
+            symbol=symbol.upper(),
+            side=intent,
+            signal_type=signal_type or "user_watch",
+            primary="continuation" if intent == "long" else "correction",
+            enroll_price=price,
+            local_high=price,
+            local_low=price,
+            correction_target=breakdown_level if intent == "short" else None,
+            continuation_target=breakout_level if intent == "long" else None,
+            breakdown_level=breakdown_level,
+            breakout_level=breakout_level,
+            initial_verdict="WAIT",
+            coinglass_url=coinglass_url,
+            started_at=now,
+            expires_at=now + watch_minutes * 60,
+            enroll_high=price,
+            trigger_only=True,
+            correction_fired=True,
+            user_intent=intent,
+            zone_low=z_lo,
+            zone_high=z_hi,
+            stop_hint=stop_hint,
+            target_hints=tuple(t for t in (target_hints or []) if t and t > 0)[:3],
+            late_cancel_pct=late_pct,
+            opposite_cancel_pct=opp_pct,
+            chat_id=chat_id,
+        )
+        self._watches[key] = watch
+        self._last_enroll_at[key] = now
+        lvl = breakout_level if intent == "long" else breakdown_level
+        logger.info(
+            "User intent watch %s %s %s @ %s (%.0f min)",
+            exchange, symbol, intent.upper(),
+            fmt_price(lvl) if lvl else "zone",
+            watch_minutes,
+        )
+        return True, f"слежу {intent.upper()} ~{watch_minutes} мин"
+
     def tick(self, scanner: Any, settings: Any) -> list[ScenarioUpdate]:
         if not getattr(settings, "scenario_watch_enabled", True):
             return []
@@ -261,6 +385,13 @@ class ScenarioWatcher:
 
         for key, watch in list(self._watches.items()):
             if now >= watch.expires_at:
+                updates.append(ScenarioUpdate(
+                    watch=watch,
+                    kind="expired",
+                    price=watch.enroll_price,
+                    move_pct=0.0,
+                    reference_price=watch.enroll_price,
+                ))
                 self._watches.pop(key, None)
                 continue
 
@@ -273,7 +404,7 @@ class ScenarioWatcher:
             watch.local_low = min(watch.local_low, price)
             age = now - watch.started_at
 
-            if watch.trigger_only:
+            if watch.is_user_watch or watch.trigger_only:
                 min_age = float(
                     getattr(
                         settings,
@@ -283,10 +414,16 @@ class ScenarioWatcher:
                 )
                 if age < min_age:
                     continue
-                batch = self._check_entry_ready(watch, price)
+                if watch.is_user_watch:
+                    batch = self._check_user_intent(watch, price)
+                else:
+                    batch = self._check_entry_ready(watch, price)
                 updates.extend(batch)
                 for upd in batch:
-                    if upd.kind in {"entry_short", "entry_long"}:
+                    if upd.kind in {
+                        "entry_short", "entry_long",
+                        "cancelled_late", "cancelled_opposite",
+                    }:
                         self._watches.pop(key, None)
                         break
                 continue
@@ -309,6 +446,91 @@ class ScenarioWatcher:
                     break
 
         return updates
+
+    def _check_user_intent(self, watch: ScenarioWatch, price: float) -> list[ScenarioUpdate]:
+        """Зона → короткое подтверждение → ENTRY; опоздание / противоположный пробой → cancel."""
+        if watch.entry_fired:
+            return []
+        intent = watch.user_intent
+        move = (price - watch.enroll_price) / watch.enroll_price * 100.0 if watch.enroll_price > 0 else 0.0
+
+        # Противоположный сильный ход — сценарий сломан
+        if intent == "short" and watch.breakout_level and price >= watch.breakout_level * (
+            1.0 + watch.opposite_cancel_pct / 100.0
+        ):
+            return [ScenarioUpdate(
+                watch=watch, kind="cancelled_opposite", price=price,
+                move_pct=move, reference_price=watch.breakout_level,
+            )]
+        if intent == "long" and watch.breakdown_level and price <= watch.breakdown_level * (
+            1.0 - watch.opposite_cancel_pct / 100.0
+        ):
+            return [ScenarioUpdate(
+                watch=watch, kind="cancelled_opposite", price=price,
+                move_pct=move, reference_price=watch.breakdown_level,
+            )]
+
+        # Опоздали: цена уже далеко за триггером
+        if intent == "short" and watch.breakdown_level and watch.breakdown_level > 0:
+            past = (watch.breakdown_level - price) / watch.breakdown_level * 100.0
+            if past >= watch.late_cancel_pct:
+                return [ScenarioUpdate(
+                    watch=watch, kind="cancelled_late", price=price,
+                    move_pct=move, reference_price=watch.breakdown_level,
+                )]
+        if intent == "long" and watch.breakout_level and watch.breakout_level > 0:
+            past = (price - watch.breakout_level) / watch.breakout_level * 100.0
+            if past >= watch.late_cancel_pct:
+                return [ScenarioUpdate(
+                    watch=watch, kind="cancelled_late", price=price,
+                    move_pct=move, reference_price=watch.breakout_level,
+                )]
+
+        return self._check_entry_ready(watch, price, intent_side=intent)
+
+    def _check_entry_ready(
+        self,
+        watch: ScenarioWatch,
+        price: float,
+        *,
+        intent_side: str | None = None,
+    ) -> list[ScenarioUpdate]:
+        if watch.entry_fired:
+            return []
+
+        side = (intent_side or watch.user_intent or watch.side or "").lower()
+        buf = max(0.02, float(watch.confirm_buffer_pct)) / 100.0
+        out: list[ScenarioUpdate] = []
+        strict = bool(intent_side or watch.is_user_watch)
+
+        def _fire(kind: str, lvl: float) -> list[ScenarioUpdate]:
+            watch.entry_fired = True
+            move = (price - watch.enroll_price) / watch.enroll_price * 100.0
+            return [ScenarioUpdate(
+                watch=watch, kind=kind, price=price,  # type: ignore[arg-type]
+                move_pct=move, reference_price=lvl,
+            )]
+
+        # SHORT
+        if (not strict or side == "short") and watch.breakdown_level:
+            lvl = watch.breakdown_level
+            thresh = lvl * (1.0 - buf) if strict else lvl
+            if price <= thresh:
+                return _fire("entry_short", lvl)
+
+        # LONG
+        if (not strict or side == "long") and watch.breakout_level:
+            lvl = watch.breakout_level
+            thresh = lvl * (1.0 + buf) if strict else lvl
+            if price >= thresh:
+                return _fire("entry_long", lvl)
+
+        # Зона без жёсткого уровня (только user intent)
+        if strict and side == "short" and watch.zone_low and price <= watch.zone_low:
+            return _fire("entry_short", watch.zone_low)
+        if strict and side == "long" and watch.zone_high and price >= watch.zone_high:
+            return _fire("entry_long", watch.zone_high)
+        return out
 
     def _check_correction_primary(
         self,
@@ -400,31 +622,4 @@ class ScenarioWatcher:
                 reference_price=watch.local_high,
             ))
 
-        return out
-
-    def _check_entry_ready(self, watch: ScenarioWatch, price: float) -> list[ScenarioUpdate]:
-        if watch.entry_fired:
-            return []
-
-        out: list[ScenarioUpdate] = []
-        if watch.breakdown_level and price <= watch.breakdown_level:
-            watch.entry_fired = True
-            move = (price - watch.enroll_price) / watch.enroll_price * 100.0
-            out.append(ScenarioUpdate(
-                watch=watch,
-                kind="entry_short",
-                price=price,
-                move_pct=move,
-                reference_price=watch.breakdown_level,
-            ))
-        elif watch.breakout_level and price >= watch.breakout_level:
-            watch.entry_fired = True
-            move = (price - watch.enroll_price) / watch.enroll_price * 100.0
-            out.append(ScenarioUpdate(
-                watch=watch,
-                kind="entry_long",
-                price=price,
-                move_pct=move,
-                reference_price=watch.breakout_level,
-            ))
         return out

@@ -198,6 +198,8 @@ class TelegramBot:
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
+        # Контекст последнего сигнала для кнопок «Ждать LONG/SHORT»
+        self._signal_watch_ctx: dict[str, dict[str, Any]] = {}
         self._pause_snapshot: dict[str, bool] | None = None
         self._last_trend_seed_scan_at: float = 0.0
         self._trend_seed_scan_lock = asyncio.Lock()
@@ -732,7 +734,14 @@ class TelegramBot:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
 
-    def _signal_keyboard(self, signal: Signal, pro_token: str = "") -> InlineKeyboardMarkup:
+    def _signal_keyboard(
+        self,
+        signal: Signal,
+        pro_token: str = "",
+        *,
+        quality_tier: str | None = None,
+        show_intent: bool = False,
+    ) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton("📊 CoinGlass", url=signal.link),
@@ -744,7 +753,64 @@ class TelegramBot:
         ]
         if pro_token:
             rows.append([InlineKeyboardButton("📖 Подробнее", callback_data=f"sigpro:{pro_token}")])
+        # Кнопки подписки на подтверждённый вход
+        if show_intent or (quality_tier or "").lower() in {"watch", "entry"}:
+            ex = (signal.exchange or "bybit").lower().replace(" ", "")
+            sym = signal.symbol.upper()
+            rows.append([
+                InlineKeyboardButton(
+                    "🟢 Ждать LONG",
+                    callback_data=f"swait:long:{ex}:{sym}",
+                ),
+                InlineKeyboardButton(
+                    "🔴 Ждать SHORT",
+                    callback_data=f"swait:short:{ex}:{sym}",
+                ),
+            ])
+            rows.append([
+                InlineKeyboardButton(
+                    "✖️ Отмена слежки",
+                    callback_data=f"swait:cancel:{ex}:{sym}",
+                ),
+            ])
         return InlineKeyboardMarkup(rows)
+
+    def _store_signal_watch_ctx(self, signal: Signal, ta: Any) -> None:
+        if ta is None:
+            return
+        key = f"{(signal.exchange or 'bybit').lower()}:{signal.symbol.upper()}"
+        zone = getattr(ta, "entry_zone", None)
+        zone_lo = zone[0] if zone and len(zone) == 2 else None
+        zone_hi = zone[1] if zone and len(zone) == 2 else None
+        # Fib 0.5–0.618 как зона отката
+        fib_lo = fib_hi = None
+        for fl in getattr(ta, "fib_levels", None) or []:
+            if getattr(fl, "kind", "") == "retracement" and abs(fl.ratio - 0.618) < 0.02:
+                fib_lo = fl.price
+            if getattr(fl, "kind", "") == "retracement" and abs(fl.ratio - 0.5) < 0.02:
+                fib_hi = fl.price
+        if fib_lo and fib_hi:
+            zone_lo = min(fib_lo, fib_hi) if zone_lo is None else min(zone_lo, fib_lo, fib_hi)
+            zone_hi = max(fib_lo, fib_hi) if zone_hi is None else max(zone_hi, fib_lo, fib_hi)
+        self._signal_watch_ctx[key] = {
+            "exchange": signal.exchange,
+            "symbol": signal.symbol.upper(),
+            "price": float(ta.current_price or signal.current_price or 0),
+            "breakout": getattr(ta, "breakout_level", None),
+            "breakdown": getattr(ta, "breakdown_level", None),
+            "zone_low": zone_lo,
+            "zone_high": zone_hi,
+            "stop": getattr(ta, "invalidation_price", None),
+            "targets": list(getattr(ta, "target_prices", None) or [])[:3],
+            "link": signal.link or "",
+            "signal_type": signal.signal_type or "",
+            "ts": time.time(),
+        }
+        # чистим старые (>6ч)
+        cutoff = time.time() - 6 * 3600
+        stale = [k for k, v in self._signal_watch_ctx.items() if float(v.get("ts", 0)) < cutoff]
+        for k in stale:
+            self._signal_watch_ctx.pop(k, None)
 
     async def _store_signal_pro(self, text: str) -> str:
         token = uuid.uuid4().hex[:10]
@@ -1251,7 +1317,13 @@ class TelegramBot:
                     decision=trade_decision,
                 )
                 pro_token = await self._store_signal_pro(pro_text)
-                keyboard = self._signal_keyboard(signal, pro_token)
+                self._store_signal_watch_ctx(signal, ta_result)
+                keyboard = self._signal_keyboard(
+                    signal,
+                    pro_token,
+                    quality_tier=quality.tier if quality else None,
+                    show_intent=True,
+                )
             else:
                 if ta_result is not None:
                     ta_caption = ta_signal_caption_html(
@@ -1262,7 +1334,13 @@ class TelegramBot:
                         compact=settings.signal_ta_compact,
                         signal_type=signal.signal_type,
                     )
+                    self._store_signal_watch_ctx(signal, ta_result)
                 chart_caption = f"{signal_header}\n\n{ta_caption}" if ta_caption else signal_header
+                keyboard = self._signal_keyboard(
+                    signal,
+                    quality_tier=quality.tier if quality else None,
+                    show_intent=ta_result is not None,
+                )
             if png:
                 sent_any = await self._send_chart(
                     notify_chat_id, png, chart_caption, is_priority=is_priority, keyboard=keyboard,
@@ -2072,17 +2150,25 @@ class TelegramBot:
             breakdown_level=watch.breakdown_level,
             breakout_level=watch.breakout_level,
             ta=ta_fresh,
+            stop_hint=getattr(watch, "stop_hint", None),
+            target_hints=list(getattr(watch, "target_hints", ()) or []),
+            user_intent=getattr(watch, "user_intent", "") or "",
         )
         if upd.kind in {"entry_short", "entry_long"}:
             label = "SHORT" if upd.kind == "entry_short" else "LONG"
-            message = (
-                f"🎯 <b>TRIGGER · ENTRY</b> · <b>{watch.symbol}</b> · {label}\n"
-                f"{message}"
-            )
+            prefix = "🎯 <b>ГОТОВО · ENTRY</b>" if watch.is_user_watch else "🎯 <b>TRIGGER · ENTRY</b>"
+            message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
+        elif upd.kind == "cancelled_late":
+            message = f"⏰ <b>Опоздали</b> · <b>{watch.symbol}</b>\n{message}"
+        elif upd.kind == "cancelled_opposite":
+            message = f"🚫 <b>Сценарий снят</b> · <b>{watch.symbol}</b>\n{message}"
+        elif upd.kind == "expired":
+            message = f"⌛ <b>Слежка истекла</b> · <b>{watch.symbol}</b>\n{message}"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=watch.coinglass_url)],
+            [InlineKeyboardButton("📊 CoinGlass", url=watch.coinglass_url or coinglass_url(watch.symbol, watch.exchange))],
         ])
 
+        notify_chat = watch.chat_id or notify_chat_id
         sent = False
         if settings.scenario_watch_chart_enabled:
             try:
@@ -2111,14 +2197,21 @@ class TelegramBot:
                         breakdown_level=watch.breakdown_level,
                         breakout_level=watch.breakout_level,
                         ta=ta_fresh,
+                        stop_hint=getattr(watch, "stop_hint", None),
+                        target_hints=list(getattr(watch, "target_hints", ()) or []),
+                        user_intent=getattr(watch, "user_intent", "") or "",
                     )
+                    if upd.kind in {"entry_short", "entry_long"}:
+                        label = "SHORT" if upd.kind == "entry_short" else "LONG"
+                        prefix = "🎯 <b>ГОТОВО · ENTRY</b>" if watch.is_user_watch else "🎯 <b>TRIGGER · ENTRY</b>"
+                        message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
                     followup = ta_scenario_followup_caption_html(ta_fresh, upd.kind, watch.side)
                     caption = f"{message}\n{followup}" if followup else message
                 else:
                     caption = message
                 if png:
                     sent = await self._send_chart(
-                        notify_chat_id, png, caption, is_priority=True, keyboard=keyboard,
+                        notify_chat, png, caption, is_priority=True, keyboard=keyboard,
                     )
             except asyncio.TimeoutError:
                 logger.warning("Scenario update chart timeout for %s", watch.symbol)
@@ -2126,7 +2219,7 @@ class TelegramBot:
                 logger.exception("Scenario update chart failed for %s", watch.symbol)
 
         if not sent:
-            sent = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
+            sent = await self._send_to_chat(notify_chat, message, keyboard, is_priority=True)
 
         if sent:
             logger.info(
@@ -2136,6 +2229,114 @@ class TelegramBot:
                 upd.kind,
                 upd.move_pct,
             )
+
+    async def _handle_swait_callback(
+        self,
+        update: Update,
+        query: CallbackQuery,
+        payload: str,
+    ) -> None:
+        """Кнопки: Ждать LONG / SHORT / Отмена слежки."""
+        parts = payload.split(":")
+        # swait:long:bybit:SYMBOL  |  swait:cancel:bybit:SYMBOL
+        if len(parts) < 4:
+            await query.answer("Некорректная кнопка", show_alert=True)
+            return
+        action = parts[1].lower()
+        exchange = parts[2]
+        symbol = parts[3].upper()
+        settings = self.settings_manager.settings
+        if not settings.scenario_watch_enabled:
+            await query.answer("Сценарии выключены в настройках", show_alert=True)
+            return
+
+        if action == "cancel":
+            removed = self.scenario_watcher.cancel_watch(exchange, symbol)
+            if removed:
+                await query.answer("Слежка снята")
+                if query.message:
+                    try:
+                        await query.message.reply_text(
+                            f"✖️ Слежка <b>{symbol}</b> отменена.",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except BadRequest:
+                        pass
+            else:
+                await query.answer("Активной слежки нет", show_alert=True)
+            return
+
+        if action not in {"long", "short"}:
+            await query.answer("Неизвестная команда", show_alert=True)
+            return
+
+        ctx_key = f"{exchange.lower()}:{symbol}"
+        ctx = self._signal_watch_ctx.get(ctx_key)
+        if ctx is None or time.time() - float(ctx.get("ts", 0)) > 6 * 3600:
+            # fallback: уровни со сканера / свежий TA
+            price = 0.0
+            if self.scanner is not None:
+                snap = self.scanner.get_snapshot_for(exchange, symbol)
+                if snap and snap.price:
+                    price = float(snap.price)
+            if price <= 0:
+                await query.answer("Контекст сигнала устарел — дождитесь нового", show_alert=True)
+                return
+            ctx = {
+                "exchange": exchange,
+                "symbol": symbol,
+                "price": price,
+                "breakout": price * 1.012,
+                "breakdown": price * 0.988,
+                "zone_low": price * 0.992,
+                "zone_high": price * 1.008,
+                "stop": None,
+                "targets": [],
+                "link": "",
+                "signal_type": "user_watch",
+            }
+
+        chat_id = None
+        if query.message is not None:
+            chat_id = query.message.chat_id
+
+        ok, reason = self.scenario_watcher.try_enroll_user_intent(
+            exchange=str(ctx.get("exchange") or exchange),
+            symbol=symbol,
+            intent=action,
+            price=float(ctx.get("price") or 0),
+            breakout_level=ctx.get("breakout"),
+            breakdown_level=ctx.get("breakdown"),
+            zone_low=ctx.get("zone_low"),
+            zone_high=ctx.get("zone_high"),
+            stop_hint=ctx.get("stop"),
+            target_hints=list(ctx.get("targets") or []),
+            coinglass_url=str(ctx.get("link") or ""),
+            signal_type=str(ctx.get("signal_type") or "user_watch"),
+            settings=settings,
+            chat_id=chat_id,
+        )
+        if not ok:
+            await query.answer(reason[:180], show_alert=True)
+            return
+
+        label = "LONG" if action == "long" else "SHORT"
+        emoji = "🟢" if action == "long" else "🔴"
+        mins = int(getattr(settings, "scenario_watch_minutes", 45))
+        lvl = ctx.get("breakout") if action == "long" else ctx.get("breakdown")
+        lvl_txt = fmt_price(float(lvl)) if lvl else "зона"
+        await query.answer(f"{emoji} Слежу {label}")
+        text = (
+            f"{emoji} <b>Слежка {label}</b> · <b>{symbol}</b>\n"
+            f"Жду подтверждение у <b>{lvl_txt}</b> (~{mins} мин).\n"
+            f"Пинг: зона → короткий confirm → вход.\n"
+            f"Если уйдут без тебя или наоборот — сниму сценарий."
+        )
+        if query.message:
+            try:
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML)
+            except BadRequest:
+                await query.message.reply_text(_plain_caption(text))
 
     def _mta_wizard_state(self, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
         state = context.user_data.get(MTA_WIZARD_KEY)
@@ -3475,6 +3676,9 @@ class TelegramBot:
                     )
             else:
                 await query.answer("Разбор устарел — дождитесь нового сигнала", show_alert=True)
+            return
+        if payload.startswith("swait:"):
+            await self._handle_swait_callback(update, query, payload)
             return
         if await self._handle_channels_callback(update, query, payload):
             return

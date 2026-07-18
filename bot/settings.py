@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 46
+SETTINGS_VERSION = 47
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -337,6 +337,8 @@ class ScannerSettings:
     scenario_watch_trigger_min_age_seconds: float = 12.0
     scenario_watch_enroll_cooldown_seconds: int = 180
     scenario_watch_chart_enabled: bool = True
+    scenario_watch_late_cancel_pct: float = 1.5
+    scenario_watch_opposite_cancel_pct: float = 1.2
 
     # Алерты ручного TA (пробой / ретест / объём)
     manual_ta_alerts_enabled: bool = True
@@ -801,6 +803,10 @@ class ScannerSettings:
                 base.get("scenario_watch_enroll_cooldown_seconds", 180)
             ),
             scenario_watch_chart_enabled=bool(base.get("scenario_watch_chart_enabled", True)),
+            scenario_watch_late_cancel_pct=float(base.get("scenario_watch_late_cancel_pct", 1.5)),
+            scenario_watch_opposite_cancel_pct=float(
+                base.get("scenario_watch_opposite_cancel_pct", 1.2)
+            ),
             manual_ta_alerts_enabled=bool(base.get("manual_ta_alerts_enabled", True)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
@@ -1286,6 +1292,9 @@ class SettingsManager:
             if version < 46:
                 # Анализ 18ч, на экране зум ~7ч — свечи не скомканы
                 merged["signal_chart_display_hours"] = 7
+            if version < 47:
+                merged["scenario_watch_late_cancel_pct"] = 1.5
+                merged["scenario_watch_opposite_cancel_pct"] = 1.2
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1293,7 +1302,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v46: chart display zoom; preserved: %s)",
+                "Settings migrated v%d → v%d (v47: user intent wait LONG/SHORT; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),
