@@ -169,3 +169,19 @@ def test_detect_impulse_requires_pullback() -> None:
     assert wave.fib_reject_reason
     # Без отката / слабый ход — Fib не для входа; причина всегда заполнена
     assert len(wave.fib_reject_reason) >= 8
+
+
+def test_pick_best_impulse_prefers_dump_over_micro() -> None:
+    from bot.wave_structure import _pick_best_impulse_leg
+
+    micro = ImpulseLeg(
+        start_idx=80, end_idx=90, start_price=1.0, end_price=1.04,
+        direction="up", size_pct=4.0, quality=78, efficiency=0.7,
+    )
+    dump = ImpulseLeg(
+        start_idx=10, end_idx=40, start_price=1.5, end_price=1.0,
+        direction="down", size_pct=33.0, quality=70, efficiency=0.75,
+    )
+    picked = _pick_best_impulse_leg([micro, dump])
+    assert picked.direction == "down"
+    assert picked.size_pct >= 30

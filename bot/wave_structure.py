@@ -36,11 +36,17 @@ MIN_IMPULSE_PCT = 2.2          # абсолютный минимум хода, %
 MIN_IMPULSE_ATR_MULT = 1.8     # ход ≥ ATR × это
 MIN_EFFICIENCY = 0.52          # |Δ| / path — иначе «пила», не импульс
 MIN_BARS_IN_LEG = 3
-MAX_BARS_IN_LEG = 48
+MAX_BARS_IN_LEG = 72
 MIN_PULLBACK_OF_LEG = 0.12     # откат ≥ 12% ноги = импульс завершён
 MAX_PULLBACK_OF_LEG = 1.05     # откат >105% = импульс сломан, Fib не для входа
-RECENT_WINDOW_BARS = 72        # ищем ногу только в недавнем окне
+RECENT_WINDOW_BARS = 180       # ~15h на 5m — не терять дамп на краю окна анализа
 MIN_QUALITY_TO_USE = 62        # ниже — не применяем к плану/графику
+# Микро-отскок не должен перебивать крупный impulse, если quality близко
+SIZE_DOMINANCE_RATIO = 1.55
+QUALITY_SIZE_SLACK = 15
+MICRO_VS_DUMP_RATIO = 0.40     # up-нога < 40% размера дампа → шум
+MIN_DUMP_PCT_FOR_DOMINANCE = 8.0
+
 
 
 @dataclass(frozen=True)
@@ -337,6 +343,44 @@ def detect_impulse_leg(
     return leg
 
 
+def _pick_best_impulse_leg(scored: list[ImpulseLeg]) -> ImpulseLeg:
+    """Крупный дамп/импульс важнее свежего микро-отскока при близком quality."""
+    if len(scored) == 1:
+        return scored[0]
+
+    by_quality = sorted(scored, key=lambda L: (L.quality, L.end_idx), reverse=True)
+    by_size = sorted(scored, key=lambda L: (L.size_pct, L.quality, L.end_idx), reverse=True)
+    best_q = by_quality[0]
+    largest = by_size[0]
+
+    # Явный дамп ≥8% бьёт микро-ап внутри полки
+    big_downs = [
+        L for L in scored
+        if L.direction == "down" and L.size_pct >= MIN_DUMP_PCT_FOR_DOMINANCE
+    ]
+    if big_downs:
+        dump = max(big_downs, key=lambda L: (L.size_pct, L.quality))
+        if (
+            best_q.direction == "up"
+            and best_q.size_pct < dump.size_pct * MICRO_VS_DUMP_RATIO
+            and dump.quality >= MIN_QUALITY_TO_USE - 5
+        ):
+            return dump
+
+    # При близком качестве — больший ход
+    if abs(largest.quality - best_q.quality) <= QUALITY_SIZE_SLACK:
+        return largest if largest.size_pct >= best_q.size_pct else best_q
+
+    # Доминирующий размер при умеренной потере quality
+    if (
+        largest.size_pct >= best_q.size_pct * SIZE_DOMINANCE_RATIO
+        and largest.quality >= best_q.quality - QUALITY_SIZE_SLACK
+    ):
+        return largest
+
+    return best_q
+
+
 def detect_impulse_leg_detailed(
     swings: list["SwingPoint"],
     bars: list["KlineBar"],
@@ -394,8 +438,7 @@ def detect_impulse_leg_detailed(
                     reject_hits[full] = reject_hits.get(full, 0) + 1
 
     if scored:
-        scored.sort(key=lambda L: (L.quality, L.end_idx), reverse=True)
-        return scored[0], ""
+        return _pick_best_impulse_leg(scored), ""
 
     if not reject_hits:
         return None, "нет валидной импульсной ноги A→B"

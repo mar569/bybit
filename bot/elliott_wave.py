@@ -431,17 +431,39 @@ def detect_elliott_impulse(
 
     if not candidates:
         return None
-    # предпочитаем валидные полные, затем по quality и свежести (макс index)
+    # валидные полные → quality → размер размаха → свежесть
+    def _span_pct(c: ElliottImpulse) -> float:
+        if not c.points:
+            return 0.0
+        prices = [p.price for p in c.points]
+        mid = (max(prices) + min(prices)) / 2.0
+        if mid <= 0:
+            return 0.0
+        return (max(prices) - min(prices)) / mid * 100.0
+
     candidates.sort(
         key=lambda c: (
             int(c.valid),
             int(c.current_wave == "complete"),
             c.quality,
+            _span_pct(c),
             c.points[-1].index if c.points else 0,
         ),
         reverse=True,
     )
-    return candidates[0]
+    # микро-импульс не перебивает крупный дамп того же окна
+    best = candidates[0]
+    for c in candidates[1:]:
+        if (
+            c.valid
+            and c.direction == "down"
+            and _span_pct(c) >= 8.0
+            and best.direction == "up"
+            and _span_pct(best) < _span_pct(c) * 0.40
+            and c.quality >= best.quality - 12
+        ):
+            return c
+    return best
 
 
 def detect_elliott_abc(

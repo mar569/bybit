@@ -144,6 +144,10 @@ def draw_buy_flat_sell_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisR
 
 def draw_trend_dump_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
     """Активный слив после тренда: OI/liq/momentum → яркий путь вниз."""
+    if ta.verdict == "WAIT":
+        return False
+    if ta.verdict == "LONG":
+        return False
     if not bars or ta.momentum_pct > -0.8:
         return False
     if not (ta.post_pump or ta.repeat_spike_dump_risk or ta.drawdown_from_high_pct >= 2.5):
@@ -172,6 +176,8 @@ def draw_trend_dump_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
 def draw_trend_dump_risk_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
     """Превентивный путь: перегрев у хая, слив ещё не подтверждён."""
+    if ta.verdict == "WAIT":
+        return False
     if not bars:
         return False
     if not (ta.post_pump or ta.repeat_spike_dump_risk):
@@ -223,15 +229,19 @@ def draw_flat_breakout_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
     mid = (z.top + z.bottom) / 2.0
     if ta.verdict == "SHORT" and ta.breakdown_level:
         target = ta.target_prices[0] if ta.target_prices else ta.breakdown_level * 0.995
+        if target >= px:
+            target = ta.breakdown_level * 0.995
         waypoints = [px, z.top, mid, z.bottom, ta.breakdown_level, target]
         label = "flat→short"
     elif ta.verdict == "LONG" and ta.breakout_level:
         target = ta.target_prices[0] if ta.target_prices else ta.breakout_level * 1.008
+        if target <= px:
+            target = ta.breakout_level * 1.008
         waypoints = [px, z.bottom, mid, z.top, ta.breakout_level, target]
         label = "flat→long"
     else:
-        waypoints = [px, z.top, mid, z.bottom, mid]
-        label = "flat"
+        # WAIT / без стороны — не рисуем «путь в никуда»
+        return False
     _draw_zigzag_path(ax, bars, waypoints, color="#8b949e", label=label, alpha=0.75, lw=1.2)
     return True
 

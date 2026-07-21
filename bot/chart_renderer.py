@@ -413,32 +413,32 @@ def _draw_zigzag_forecast_path(
 
 
 def _draw_market_forecast_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
-    """Рисует коррекцию и/или продолжение на основе данных биржи. Возвращает True если нарисовано."""
-    corr = ta.correction_path
-    cont = ta.continuation_path
+    """Рисует коррекцию или продолжение строго в сторону вердикта."""
+    direction = primary_forecast_direction(ta)
+    if direction == "neutral":
+        return False
+
+    corr = ta.correction_path if direction == "short" else None
+    cont = ta.continuation_path if direction == "long" else None
     if corr is None and cont is None:
         return False
 
     corr_color = "#ffa657"
     cont_color = CHART_STYLE["accent_long"]
-    if corr and cont:
-        if corr.confidence >= cont.confidence:
-            _draw_zigzag_forecast_path(ax, bars, corr.waypoints, color=corr_color, label=corr.label, alpha=0.9, lw=1.5)
-        else:
-            _draw_zigzag_forecast_path(ax, bars, cont.waypoints, color=cont_color, label=cont.label, alpha=0.9, lw=1.5)
-    elif corr:
+    if corr:
         _draw_zigzag_forecast_path(ax, bars, corr.waypoints, color=corr_color, label=corr.label)
-    elif cont:
+        if len(corr.waypoints) >= 3:
+            pb = corr.waypoints[2]
+            ax.axhline(pb, color=corr_color, linestyle=":", linewidth=0.85, alpha=0.55, zorder=3)
+            ax.text(
+                _x_after_last_bar(bars, 4), pb, f"откат {fmt_price(pb)}",
+                color=corr_color, fontsize=6.8, va="top", ha="left",
+            )
+        return True
+    if cont:
         _draw_zigzag_forecast_path(ax, bars, cont.waypoints, color=cont_color, label=cont.label)
-
-    if corr and len(corr.waypoints) >= 3:
-        pb = corr.waypoints[2]
-        ax.axhline(pb, color=corr_color, linestyle=":", linewidth=0.85, alpha=0.55, zorder=3)
-        ax.text(
-            _x_after_last_bar(bars, 4), pb, f"откат {fmt_price(pb)}",
-            color=corr_color, fontsize=6.8, va="top", ha="left",
-        )
-    return True
+        return True
+    return False
 
 
 def _draw_extended_trend_lines(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
@@ -490,33 +490,50 @@ def _draw_consolidation_box(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
         ha="center", va="center",
         bbox=dict(boxstyle="round,pad=0.25", facecolor=CHART_STYLE["bg"], edgecolor=CHART_STYLE["warning"], alpha=0.85),
     )
+    # Стрелки выхода только в сторону вердикта; WAIT — без направленных стрелок
+    direction = primary_forecast_direction(ta)
     arrow_dx = max((x1n - x0n) * 0.08, 0.0008)
-    ax.annotate(
-        "",
-        xy=(x1n + arrow_dx, z.top),
-        xytext=(x1n, mid_y),
-        arrowprops=dict(arrowstyle="->", color=CHART_STYLE["accent_long"], lw=1.4, alpha=0.9),
-    )
-    ax.annotate(
-        "",
-        xy=(x1n + arrow_dx, z.bottom),
-        xytext=(x1n, mid_y),
-        arrowprops=dict(arrowstyle="->", color=CHART_STYLE["accent_short"], lw=1.4, alpha=0.9),
-    )
-    ax.text(x1n + arrow_dx * 0.3, z.top * 1.0003, "↑", color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom", ha="left")
-    ax.text(x1n + arrow_dx * 0.3, z.bottom * 0.9997, "↓", color=CHART_STYLE["accent_short"], fontsize=6.5, va="top", ha="left")
+    if direction in {"long", "neutral"} and ta.verdict != "SHORT":
+        if direction == "long" or ta.verdict == "WAIT":
+            alpha_up = 0.9 if direction == "long" else 0.35
+            ax.annotate(
+                "",
+                xy=(x1n + arrow_dx, z.top),
+                xytext=(x1n, mid_y),
+                arrowprops=dict(arrowstyle="->", color=CHART_STYLE["accent_long"], lw=1.2, alpha=alpha_up),
+            )
+            if direction == "long":
+                ax.text(
+                    x1n + arrow_dx * 0.3, z.top * 1.0003, "↑",
+                    color=CHART_STYLE["accent_long"], fontsize=6.5, va="bottom", ha="left",
+                )
+    if direction in {"short", "neutral"} and ta.verdict != "LONG":
+        if direction == "short" or ta.verdict == "WAIT":
+            alpha_dn = 0.9 if direction == "short" else 0.35
+            ax.annotate(
+                "",
+                xy=(x1n + arrow_dx, z.bottom),
+                xytext=(x1n, mid_y),
+                arrowprops=dict(arrowstyle="->", color=CHART_STYLE["accent_short"], lw=1.2, alpha=alpha_dn),
+            )
+            if direction == "short":
+                ax.text(
+                    x1n + arrow_dx * 0.3, z.bottom * 0.9997, "↓",
+                    color=CHART_STYLE["accent_short"], fontsize=6.5, va="top", ha="left",
+                )
 
 
 def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if not bars:
         return
+    direction = primary_forecast_direction(ta)
     last_ts = _idx_to_date(bars, len(bars) - 1)
     x = mdates.date2num(last_ts)
     y = bars[-1].close
     span = max(mdates.date2num(last_ts) - mdates.date2num(_idx_to_date(bars, max(0, len(bars) - 12))), 0.001)
     dx = span * 0.35
 
-    if ta.breakout_level and y <= ta.breakout_level * 1.002:
+    if direction != "short" and ta.breakout_level and y <= ta.breakout_level * 1.002:
         ax.annotate(
             "",
             xy=(x + dx, ta.breakout_level),
@@ -535,7 +552,7 @@ def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             color=CHART_STYLE["accent_long"], fontsize=8, fontweight="bold", ha="center", va="center",
         )
 
-    if ta.breakdown_level and y >= ta.breakdown_level * 0.998:
+    if direction != "long" and ta.breakdown_level and y >= ta.breakdown_level * 0.998:
         ax.annotate(
             "",
             xy=(x + dx, ta.breakdown_level),
@@ -553,7 +570,7 @@ def _draw_breakout_arrows(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             "↓",
             color=CHART_STYLE["accent_short"], fontsize=8, fontweight="bold", ha="center", va="center",
         )
-    elif ta.momentum_label.startswith("импульс вниз") and ta.breakdown_level:
+    elif direction != "long" and ta.momentum_label.startswith("импульс вниз") and ta.breakdown_level:
         ax.text(
             x, y * 1.002, " давление ↓",
             color=CHART_STYLE["accent_short"], fontsize=7, fontweight="bold", ha="left",
@@ -764,7 +781,18 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         draw_elliott_waves(ax, bars, htf_stub, style="htf", max_points=14)
 
     setup_path = getattr(ta, "forecast_path_prices", None) or []
-    if len(setup_path) >= 2 and getattr(ta, "setup_grade", "") in {"A", "B", "C"}:
+    setup_side = (getattr(ta, "setup_side", "") or "").lower()
+    verdict = (getattr(ta, "verdict", "") or "").upper()
+    path_ok = (
+        len(setup_path) >= 2
+        and getattr(ta, "setup_grade", "") in {"A", "B", "C"}
+        and (
+            (verdict == "LONG" and setup_side == "long")
+            or (verdict == "SHORT" and setup_side == "short")
+            or (verdict == "WAIT" and False)
+        )
+    )
+    if path_ok:
         draw_setup_forecast_path(
             ax,
             bars,
@@ -821,21 +849,8 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
             elif direction == "short":
                 _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-            elif direction == "neutral":
-                if ta.action_priority == "short" and ta.bearish_scenario:
-                    _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-                elif ta.action_priority == "long" and ta.bullish_scenario:
-                    _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-                elif ta.bullish_scenario:
-                    _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
-                elif ta.bearish_scenario:
-                    _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-    elif path_kind == "bounce_short" and ta.continuation_path:
-        _draw_zigzag_forecast_path(
-            ax, bars, ta.continuation_path.waypoints,
-            color=CHART_STYLE["accent_long"], label=ta.continuation_path.label,
-            alpha=0.35, lw=1.0,
-        )
+            # WAIT / neutral — без направленных scenario-стрелок
+    # bounce_short: не рисуем бычий continuation поверх SHORT
 
     _draw_signal_markers(ax, bars, ta)
 
@@ -845,6 +860,12 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             linestyle="--", linewidth=1.0, alpha=0.9,
         )
     for j, tp in enumerate(ta.target_prices[:2]):
+        if ta.verdict == "SHORT" and tp >= ta.current_price:
+            continue
+        if ta.verdict == "LONG" and tp <= ta.current_price:
+            continue
+        if ta.verdict == "WAIT":
+            continue
         ax.axhline(tp, color=CHART_STYLE["target"], linestyle=":", linewidth=0.75, alpha=0.65)
     if ta.entry_zone:
         lo, hi = ta.entry_zone
@@ -1599,24 +1620,21 @@ def _draw_tv_forecast_paths(
     ):
         return
 
+    direction = primary_forecast_direction(ta)
+    if direction == "neutral":
+        return
+
     def _draw_zigzag_tv(waypoints: list[float], *, color: str, label: str, alpha: float) -> None:
         _draw_tv_zigzag(ax, x0, span, waypoints, y_at, color=color, label=label, alpha=alpha)
 
-    corr = ta.correction_path
-    cont = ta.continuation_path
-    if corr or cont:
-        if corr and cont:
-            if corr.confidence >= cont.confidence:
-                _draw_zigzag_tv(corr.waypoints, color="#ffa657", label=corr.label, alpha=0.88)
-            else:
-                _draw_zigzag_tv(cont.waypoints, color=CHART_STYLE["accent_long"], label=cont.label, alpha=0.88)
-        elif corr:
-            _draw_zigzag_tv(corr.waypoints, color="#ffa657", label=corr.label, alpha=0.9)
-        elif cont:
-            _draw_zigzag_tv(cont.waypoints, color=CHART_STYLE["accent_long"], label=cont.label, alpha=0.9)
+    corr = ta.correction_path if direction == "short" else None
+    cont = ta.continuation_path if direction == "long" else None
+    if corr:
+        _draw_zigzag_tv(corr.waypoints, color="#ffa657", label=corr.label, alpha=0.9)
         return
-
-    direction = primary_forecast_direction(ta)
+    if cont:
+        _draw_zigzag_tv(cont.waypoints, color=CHART_STYLE["accent_long"], label=cont.label, alpha=0.9)
+        return
 
     def _draw_path(scenario: TradeScenario, *, color: str, label: str, va: str) -> None:
         x1, x2 = x0 + span, min(0.97, x0 + span * 2)
@@ -1636,19 +1654,6 @@ def _draw_tv_forecast_paths(
         _draw_path(ta.bullish_scenario, color=CHART_STYLE["accent_long"], label="прогноз↑", va="bottom")
     elif direction == "short" and ta.bearish_scenario and ta.bearish_scenario.target_prices:
         _draw_path(ta.bearish_scenario, color=CHART_STYLE["accent_short"], label="прогноз↓", va="top")
-    elif direction == "neutral":
-        if ta.bullish_scenario and ta.bullish_scenario.target_prices:
-            bs = ta.bullish_scenario
-            ax.plot(
-                [x0, x0 + span], [y0, y_at(bs.trigger_price)],
-                color=CHART_STYLE["accent_long"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
-            )
-        if ta.bearish_scenario and ta.bearish_scenario.target_prices:
-            bs = ta.bearish_scenario
-            ax.plot(
-                [x0, x0 + span], [y0, y_at(bs.trigger_price)],
-                color=CHART_STYLE["accent_short"], linewidth=0.8, linestyle=":", alpha=0.45, zorder=2,
-            )
 
 
 def _tv_forecast_legend(ta: TAAnalysisResult) -> str:

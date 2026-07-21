@@ -215,6 +215,16 @@ def test_primary_forecast_direction() -> None:
     assert primary_forecast_direction(ta) in {"long", "short", "neutral"}
 
 
+def test_primary_forecast_wait_ignores_priority() -> None:
+    from bot.ta_analysis import TAAnalysisResult
+
+    ta = TAAnalysisResult(verdict="WAIT", action_priority="short", verdict_confidence=8)
+    assert primary_forecast_direction(ta) == "neutral"
+    assert primary_forecast_direction(
+        TAAnalysisResult(verdict="SHORT", action_priority="long")
+    ) == "short"
+
+
 def test_manual_detailed_has_distances() -> None:
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)

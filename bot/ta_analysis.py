@@ -1276,6 +1276,27 @@ def build_market_forecast_paths(
     if correction_path is None and continuation_path is None:
         return None, None, ""
 
+    # Иерархия: вердикт режет противоположный путь (не «и вверх и вниз»)
+    v = (verdict or "").upper()
+    if v == "SHORT":
+        continuation_path = None
+    elif v == "LONG":
+        correction_path = None
+    elif v == "WAIT":
+        # В WAIT направленных стрелок нет — только текст bias
+        primary = "коррекция" if (correction_path and (
+            not continuation_path or correction_path.confidence >= continuation_path.confidence
+        )) else "продолжение"
+        factors = ", ".join(dict.fromkeys(factors_ru[:3])) or "нет явного импульса"
+        summary = (
+            f"WAIT — ждать подтверждение пробоя. Локальный bias: {primary}. "
+            f"Факторы: {factors}."
+        )
+        return None, None, summary
+
+    if correction_path is None and continuation_path is None:
+        return None, None, ""
+
     corr_conf = correction_path.confidence if correction_path else 0
     cont_conf = continuation_path.confidence if continuation_path else 0
 
@@ -2384,6 +2405,44 @@ def run_ta_analysis(
             else "перегретый пик после пампа, высокий риск коррекции"
         )
 
+    # Полka после дампа / post-crash: нет пробоя → WAIT, не SHORT/LONG 8/10
+    post_crash_range = (
+        ms.phase == "post_crash_weak"
+        or (
+            consolidation is not None
+            and ms.drawdown_from_high_pct >= 8.0
+            and ms.phase in {"consolidation", "breakout_setup"}
+        )
+    )
+    if post_crash_range and verdict in {"LONG", "SHORT"}:
+        near_short = (
+            breakdown is not None
+            and current > 0
+            and abs(current - breakdown) / current * 100.0 <= 0.45
+        )
+        near_long = (
+            breakout is not None
+            and current > 0
+            and abs(current - breakout) / current * 100.0 <= 0.45
+        )
+        triggered = (
+            (verdict == "SHORT" and near_short)
+            or (verdict == "LONG" and near_long)
+        )
+        if not triggered:
+            action_priority = (
+                "short" if verdict == "SHORT" else "long" if verdict == "LONG" else action_priority
+            )
+            verdict = "WAIT"
+            conf = min(conf, 6)
+            reason = (
+                f"{reason} · боковик после дампа — ждать пробой уровня"
+                if reason
+                else "боковик после дампа — ждать пробой уровня"
+            )
+        else:
+            conf = min(conf, 7)
+
     if (
         range_trade is not None
         and verdict in {"LONG", "SHORT"}
@@ -2747,7 +2806,13 @@ def run_ta_analysis(
         elliott_entry_price=getattr(wave, "elliott_entry_price", None),
         elliott_stop_price=getattr(wave, "elliott_stop_price", None),
         elliott_tp_prices=list(getattr(wave, "elliott_tp_prices", None) or []),
-        elliott_draw_points=list(getattr(wave, "elliott_draw_points", None) or []),
+        elliott_draw_points=_filter_elliott_draw_points(
+            list(getattr(wave, "elliott_draw_points", None) or []),
+            bars=bars,
+            phase=ms.phase,
+            consolidation=consolidation is not None,
+            confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
+        ),
         fib_status=getattr(wave, "fib_status", "") or "",
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,
@@ -2835,16 +2900,43 @@ def ta_display_score(ta: TAAnalysisResult) -> int:
 
 
 def primary_forecast_direction(ta: TAAnalysisResult) -> str:
-    """Какой сценарий рисовать на графике: long / short / neutral."""
+    """Какой сценарий рисовать на графике: long / short / neutral.
+
+    WAIT → всегда neutral (без стрелок «и вверх и вниз»).
+    """
+    if ta.verdict == "WAIT":
+        return "neutral"
     if ta.verdict == "LONG":
         return "long"
     if ta.verdict == "SHORT":
         return "short"
-    if ta.action_priority == "long":
-        return "long"
-    if ta.action_priority == "short":
-        return "short"
     return "neutral"
+
+
+def _filter_elliott_draw_points(
+    points: list,
+    *,
+    bars: list[KlineBar],
+    phase: str,
+    consolidation: bool,
+    confidence: int,
+) -> list:
+    """Не рисовать микро 1–5 внутри боковика / post-crash — это шум, не структура."""
+    if not points:
+        return []
+    prices = [float(getattr(p, "price", 0) or 0) for p in points]
+    prices = [p for p in prices if p > 0]
+    if len(prices) < 2:
+        return []
+    mid = (max(prices) + min(prices)) / 2.0
+    span_pct = (max(prices) - min(prices)) / mid * 100.0 if mid > 0 else 0.0
+    noisy_phase = phase in {"consolidation", "breakout_setup", "post_crash_weak"} or consolidation
+    if noisy_phase and (span_pct < 4.5 or confidence < 6):
+        return []
+    # Даже вне range — отсечь совсем микро-разметку
+    if span_pct < 2.2 and confidence < 7:
+        return []
+    return list(points)
 
 
 def _manual_now_action_html(ta: TAAnalysisResult) -> str:
