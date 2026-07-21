@@ -211,11 +211,27 @@ def _elliott_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
     return False
 
 
+def _confluence_location_ok(ta: TAAnalysisResult, side: str) -> bool:
+    """Идеальный Pro-сетап (HTF EW + фигура + Fib/SMC) на стороне сигнала."""
+    if not bool(getattr(ta, "setup_ideal_ready", False)):
+        return False
+    grade = (getattr(ta, "setup_grade", "") or "").upper()
+    if grade not in {"A", "B"}:
+        return False
+    setup_side = (getattr(ta, "setup_side", "") or "").lower()
+    if setup_side != side:
+        return False
+    entry = getattr(ta, "setup_entry", None)
+    return entry is not None and float(entry) > 0
+
+
 def detect_location(ta: TAAnalysisResult, side: str) -> str:
     if _fib_location_ok(ta, side):
         return "fib"
     if _elliott_entry_ok(ta, side):
         return "elliott"
+    if _confluence_location_ok(ta, side):
+        return "confluence"
     if _abc_entry_ok(ta, side):
         return "abc"
     if pattern_location_ok(
@@ -328,7 +344,16 @@ def score_trade_setup(
         penalties += 18
         factors.append("конфликт TA")
 
-    loc_map = {"fib": 28, "elliott": 27, "abc": 26, "retest": 24, "pattern": 22, "sr": 16, "none": 0}
+    loc_map = {
+        "fib": 28,
+        "elliott": 27,
+        "confluence": 27,
+        "abc": 26,
+        "retest": 24,
+        "pattern": 22,
+        "sr": 16,
+        "none": 0,
+    }
     loc_pts = loc_map.get(location, 0)
     if location != "none":
         factors.append(f"локация {location}")
@@ -351,6 +376,29 @@ def score_trade_setup(
         factors.append("EW структура")
     if getattr(ta, "wave_has_confluence", False):
         wave += min(12, 4 * int(getattr(ta, "wave_confluence_count", 0) or 0))
+
+    # HTF + фигуры + Fib/SMC (Pro confluence)
+    from .setup_confluence import SetupConfluence, confluence_boosts_gate
+
+    conf_setup = SetupConfluence(
+        score=int(getattr(ta, "setup_score", 0) or 0),
+        grade=(getattr(ta, "setup_grade", "") or "D"),
+        side=(getattr(ta, "setup_side", "") or "neutral"),
+        ideal_ready=bool(getattr(ta, "setup_ideal_ready", False)),
+        htf_bias=(getattr(ta, "htf_elliott_bias", "") or "neutral"),
+    )
+    conf_pts, conf_notes = confluence_boosts_gate(conf_setup, side)
+    if conf_pts >= 0:
+        wave += conf_pts
+    else:
+        penalties += abs(conf_pts)
+    factors.extend(conf_notes)
+    if getattr(ta, "is_ending_diagonal", False):
+        wave += 4
+        factors.append("ending diagonal")
+    if getattr(ta, "is_abcde", False):
+        wave += 4
+        factors.append("ABCDE")
 
     flow, flow_notes = _flow_score(ta, side)
     factors.extend(flow_notes)
@@ -424,7 +472,9 @@ def decide_trade_action(
     )
     location = setup.location_kind
     aligned, align_reason = _side_aligned(ta, side)
-    has_location = location in {"fib", "abc", "elliott", "retest", "sr", "trigger", "pattern"}
+    has_location = location in {
+        "fib", "abc", "elliott", "confluence", "retest", "sr", "trigger", "pattern",
+    }
     st = (signal.signal_type or "").lower()
     details = signal.details or {}
     seed_ext = float(details.get("seed_extension_pct", 99) or 99)
@@ -466,7 +516,7 @@ def decide_trade_action(
 
     # trend_seed раньше WAIT-правила: ранний потенциал не режем бейджем WAIT
     if st == "trend_seed" and watch_allowed:
-        has_loc = location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}
         cvd_miss = float(details.get("seed_cvd_missing", 0) or 0)
         if has_loc and setup.total >= min_entry_score and not chase:
             return TradeDecision(
@@ -515,7 +565,7 @@ def decide_trade_action(
         except (TypeError, ValueError):
             cvd_f = None
         cvd_ok = _cvd_confirms_side(side, cvd_f)
-        has_loc = location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}
         if has_loc and cvd_ok and setup.total >= min_entry_score and not chase:
             return TradeDecision(
                 "entry",
@@ -557,7 +607,7 @@ def decide_trade_action(
         and has_location
         and not chase
     )
-    if can_entry and (ready or location in {"fib", "abc", "elliott", "retest", "sr", "pattern"}):
+    if can_entry and (ready or location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}):
         reason = f"сетап {setup.total}/100"
         if ready_reason:
             reason = f"{reason} · {ready_reason}"

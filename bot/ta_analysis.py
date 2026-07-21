@@ -230,6 +230,25 @@ class TAAnalysisResult:
     fib_reject_reason: str = ""
     chart_patterns: list[ChartPattern] = field(default_factory=list)
     primary_chart_pattern: ChartPattern | None = None
+    # Pro confluence (HTF EW + фигуры + Fib + SMC)
+    setup_score: int = 0
+    setup_grade: str = ""
+    setup_side: str = "neutral"
+    setup_label_ru: str = ""
+    setup_factors: list[str] = field(default_factory=list)
+    setup_ideal_ready: bool = False
+    setup_entry: float | None = None
+    setup_stop: float | None = None
+    setup_tps: list[float] = field(default_factory=list)
+    setup_trigger: str = ""
+    htf_elliott_label: str = ""
+    htf_elliott_phase: str = ""
+    htf_elliott_bias: str = "neutral"
+    is_ending_diagonal: bool = False
+    is_abcde: bool = False
+    forecast_path_prices: list[float] = field(default_factory=list)
+    forecast_path_labels: list[str] = field(default_factory=list)
+    htf_elliott_draw_points: list = field(default_factory=list)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -2153,6 +2172,23 @@ def run_ta_analysis(
     smc = analyze_smc(
         bars, htf_bars=htf_bars, swings=swings, interval_minutes=interval_minutes,
     )
+    # Pro confluence: HTF Elliott + фигуры + Fib + SMC → идеальный вход
+    from .setup_confluence import analyze_setup_confluence
+    from .elliott_wave import ElliottWaveResult
+
+    ew_ltf = getattr(wave, "elliott_result", None)
+    if ew_ltf is not None and not isinstance(ew_ltf, ElliottWaveResult):
+        ew_ltf = None
+    setup = analyze_setup_confluence(
+        bars,
+        swings,
+        htf_bars=htf_bars,
+        wave=wave,
+        ew_ltf=ew_ltf,
+        pattern=primary_chart_pattern,
+        smc=smc,
+        current=bars[-1].close if bars else None,
+    )
     ms = analyze_market_structure(bars, oi_bars, is_long=is_long, hours=hours)
     btc_ctx = ""
     btc_spread: float | None = None
@@ -2716,6 +2752,24 @@ def run_ta_analysis(
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,
         primary_chart_pattern=primary_chart_pattern,
+        setup_score=int(setup.score),
+        setup_grade=setup.grade,
+        setup_side=setup.side,
+        setup_label_ru=setup.label_ru,
+        setup_factors=list(setup.factors[:6]),
+        setup_ideal_ready=bool(setup.ideal_ready),
+        setup_entry=setup.entry_price,
+        setup_stop=setup.stop_price,
+        setup_tps=list(setup.tp_prices[:3]),
+        setup_trigger=setup.trigger,
+        htf_elliott_label=setup.htf_label_ru,
+        htf_elliott_phase=setup.htf_phase,
+        htf_elliott_bias=setup.htf_bias,
+        is_ending_diagonal=bool(setup.is_ending_diagonal),
+        is_abcde=bool(setup.is_abcde),
+        forecast_path_prices=[wp.price for wp in setup.forecast_path],
+        forecast_path_labels=[wp.label for wp in setup.forecast_path],
+        htf_elliott_draw_points=list(setup.htf_draw_points),
     )
 
 
@@ -2731,6 +2785,8 @@ def ta_summary_compact(ta: TAAnalysisResult) -> str:
         parts.append(ta.patterns[-1].label_ru)
     if ta.primary_chart_pattern:
         parts.append(format_chart_pattern_compact(ta.primary_chart_pattern))
+    if getattr(ta, "setup_grade", "") and ta.setup_score:
+        parts.append(f"setup {ta.setup_grade} {ta.setup_score}")
     return " · ".join(parts)
 
 

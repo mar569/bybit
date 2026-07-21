@@ -1,4 +1,4 @@
-"""Отрисовка волн Эллиотта (1–5 + ABC) на matplotlib-графике."""
+"""Отрисовка волн Эллиотта (1–5 + ABC/ABCDE) на matplotlib-графике."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -15,10 +15,16 @@ if TYPE_CHECKING:
 EW_STYLE = {
     "impulse": "#58a6ff",
     "correction": "#ffa657",
+    "htf_impulse": "#79c0ff",
+    "htf_correction": "#d2a8ff",
     "entry": "#7ee787",
     "stop": "#ff7b72",
     "label_bg": "#0d1117",
+    "forecast": "#a5d6ff",
 }
+
+_ABC_LABELS = {"A", "B", "C", "D", "E"}
+_IMPULSE_LABELS = {"0", "1", "2", "3", "4", "5"}
 
 
 def _idx_to_date(bars: list[KlineBar], idx: int) -> datetime:
@@ -36,8 +42,12 @@ def draw_elliott_waves(
     ew: ElliottWaveResult | None,
     *,
     max_points: int = 12,
+    style: str = "ltf",
 ) -> None:
-    """Линии 0-1-2-3-4-5 + A-B-C и метки; зона входа при ready."""
+    """Линии 0-1-2-3-4-5 + A-B-C(-D-E) и метки; зона входа при ready.
+
+    style: ltf (яркий) | htf (пунктир старшего ТФ).
+    """
     if ew is None or not ew.draw_points or not bars:
         return
 
@@ -45,29 +55,37 @@ def draw_elliott_waves(
     if len(pts) < 2:
         return
 
-    # разделить импульс и коррекцию
-    impulse_pts = [p for p in pts if p.label in {"0", "1", "2", "3", "4", "5"}]
-    abc_pts = [p for p in pts if p.label in {"A", "B", "C"}]
+    is_htf = style == "htf"
+    impulse_color = EW_STYLE["htf_impulse"] if is_htf else EW_STYLE["impulse"]
+    corr_color = EW_STYLE["htf_correction"] if is_htf else EW_STYLE["correction"]
+    lw = 0.95 if is_htf else 1.2
+    ls = "--" if is_htf else "-"
+    alpha = 0.55 if is_htf else 0.85
+    fs = 6.0 if is_htf else 7.2
 
-    def _polyline(seq: list[ElliottPoint], color: str, lw: float = 1.15) -> None:
+    impulse_pts = [p for p in pts if p.label in _IMPULSE_LABELS]
+    abc_pts = [p for p in pts if p.label in _ABC_LABELS]
+
+    def _polyline(seq: list[ElliottPoint], color: str, line_w: float = lw) -> None:
         if len(seq) < 2:
             return
         xs = [_x_at(bars, p.index) for p in seq]
         ys = [p.price for p in seq]
-        ax.plot(xs, ys, color=color, linewidth=lw, alpha=0.85, linestyle="-")
+        ax.plot(xs, ys, color=color, linewidth=line_w, alpha=alpha, linestyle=ls)
         for p in seq:
             x = _x_at(bars, p.index)
-            is_abc = p.label in {"A", "B", "C"}
-            c = EW_STYLE["correction"] if is_abc else color
-            ax.plot(x, p.price, marker="o", color=c, markersize=5.5, alpha=0.95)
-            # смещение подписи вверх/вниз
-            y_off = p.price * (1.0025 if p.label in {"1", "3", "5", "B"} else 0.9975)
+            is_abc = p.label in _ABC_LABELS
+            c = corr_color if is_abc else color
+            ax.plot(x, p.price, marker="o", color=c, markersize=4.5 if is_htf else 5.5, alpha=0.95)
+            prefix = "H" if is_htf and p.label in _IMPULSE_LABELS else ""
+            label = f"{prefix}{p.label}" if prefix else p.label
+            y_off = p.price * (1.0025 if p.label in {"1", "3", "5", "B", "D"} else 0.9975)
             ax.text(
                 x,
                 y_off,
-                f" {p.label}",
+                f" {label}",
                 color=c,
-                fontsize=7.2,
+                fontsize=fs,
                 fontweight="bold",
                 va="center",
                 ha="left",
@@ -75,19 +93,21 @@ def draw_elliott_waves(
                     boxstyle="round,pad=0.15",
                     facecolor=EW_STYLE["label_bg"],
                     edgecolor=c,
-                    alpha=0.75,
+                    alpha=0.7,
                     linewidth=0.6,
                 ),
             )
 
-    _polyline(impulse_pts, EW_STYLE["impulse"], lw=1.2)
+    _polyline(impulse_pts, impulse_color, line_w=lw)
     if abc_pts:
-        # соединить конец импульса с A
         bridge: list[ElliottPoint] = []
         if impulse_pts:
             bridge.append(impulse_pts[-1])
         bridge.extend(abc_pts)
-        _polyline(bridge if len(bridge) >= 2 else abc_pts, EW_STYLE["correction"], lw=1.05)
+        _polyline(bridge if len(bridge) >= 2 else abc_pts, corr_color, line_w=lw * 0.9)
+
+    if is_htf:
+        return
 
     plan = ew.entry_plan
     if plan and plan.entry_price and plan.mode in {"conservative", "aggressive"}:
@@ -119,3 +139,72 @@ def draw_elliott_waves(
                 linewidth=0.7,
                 alpha=0.65,
             )
+
+
+def draw_setup_forecast_path(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    prices: list[float],
+    labels: list[str] | None = None,
+) -> None:
+    """Прогнозный путь entry→path→tp (как стрелка на «золотом» примере)."""
+    if not bars or len(prices) < 2:
+        return
+    labels = labels or []
+    # invalidation рисуем отдельно пунктиром вниз/вверх — не в основной стрелке
+    path_prices: list[float] = []
+    path_labels: list[str] = []
+    inv: float | None = None
+    for i, p in enumerate(prices):
+        lab = labels[i] if i < len(labels) else ""
+        if lab == "invalidation":
+            inv = float(p)
+            continue
+        path_prices.append(float(p))
+        path_labels.append(lab)
+
+    if len(path_prices) < 2:
+        return
+
+    start_x = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    # шаг ≈ 4–5 баров вперёд
+    if len(bars) >= 2:
+        step = mdates.date2num(_idx_to_date(bars, -1)) - mdates.date2num(
+            _idx_to_date(bars, max(0, len(bars) - 6))
+        )
+        step = max(step / 5.0, 1e-6)
+    else:
+        step = 5.0 / (24 * 60)
+
+    xs = [start_x + step * i for i in range(len(path_prices))]
+    color = EW_STYLE["forecast"]
+    ax.plot(xs, path_prices, color=color, linestyle="--", linewidth=1.35, alpha=0.9, zorder=5)
+    ax.annotate(
+        "",
+        xy=(xs[-1], path_prices[-1]),
+        xytext=(xs[-2], path_prices[-2]),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.35, linestyle="dashed", alpha=0.9),
+    )
+    for x, y, lab in zip(xs, path_prices, path_labels):
+        if not lab or lab == "path":
+            continue
+        ax.text(
+            x,
+            y,
+            f" {lab}",
+            color=color,
+            fontsize=6.5,
+            fontweight="bold",
+            va="bottom" if path_prices[-1] >= path_prices[0] else "top",
+        )
+    if inv is not None:
+        ax.axhline(inv, color=EW_STYLE["stop"], linestyle=":", linewidth=0.7, alpha=0.55)
+        ax.text(
+            xs[0],
+            inv,
+            " inv ",
+            color=EW_STYLE["stop"],
+            fontsize=6,
+            va="top",
+            alpha=0.8,
+        )

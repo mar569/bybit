@@ -231,6 +231,18 @@ def _resolve_levels(
             targets = [float(t) for t in ta.elliott_tp_prices if t][:4]
         pad = abs(entry) * 0.0015
         zone = (entry - pad, entry + pad)
+    elif (
+        getattr(ta, "setup_ideal_ready", False)
+        and getattr(ta, "setup_entry", None)
+        and (getattr(ta, "setup_side", "") or "").lower() == side
+    ):
+        entry = float(ta.setup_entry)
+        if ta.setup_stop:
+            stop = float(ta.setup_stop)
+        if ta.setup_tps:
+            targets = [float(t) for t in ta.setup_tps if t][:4]
+        pad = abs(entry) * 0.0015
+        zone = (entry - pad, entry + pad)
     elif zone:
         entry = (zone[0] + zone[1]) / 2.0
     elif is_long and ta.breakout_level:
@@ -316,6 +328,10 @@ def build_trade_thesis(
         wave_bits.append(_PHASE_RU.get(ta.wave_phase, ta.wave_phase))
     if ta.abc_label_ru and ta.abc_label_ru not in (ta.elliott_label or ""):
         wave_bits.append(ta.abc_label_ru)
+    if getattr(ta, "htf_elliott_label", ""):
+        wave_bits.append(f"HTF: {ta.htf_elliott_label}")
+    if getattr(ta, "setup_label_ru", ""):
+        wave_bits.append(ta.setup_label_ru)
     if ta.elliott_entry_mode in {"conservative", "aggressive"} and ta.elliott_entry_price:
         mode_ru = "конс." if ta.elliott_entry_mode == "conservative" else "агр."
         wave_bits.append(
@@ -348,6 +364,8 @@ def build_trade_thesis(
         arguments.append(f"Импульс: {ta.momentum_label} ({ta.momentum_pct:+.1f}%)")
     if ta.smc_summary:
         arguments.append(f"SMC: {ta.smc_summary[:60]}")
+    if getattr(ta, "setup_factors", None):
+        arguments.append("Confluence: " + " · ".join(ta.setup_factors[:3]))
     if ta.btc_context:
         arguments.append(f"BTC: {ta.btc_context[:50]}")
     if ta.narrative_basis:
@@ -394,7 +412,17 @@ def build_trade_thesis(
 
     if action == "entry":
         headline = f"🎯 <b>{label}</b> · сетап {conf}/10"
-        if location == "elliott" or (
+        if location == "confluence" or (
+            getattr(ta, "setup_ideal_ready", False)
+            and (getattr(ta, "setup_side", "") or "").lower() == side
+            and getattr(ta, "setup_grade", "") in {"A", "B"}
+        ):
+            thesis = (
+                f"Pro confluence <b>{ta.setup_grade}</b> ({ta.setup_score}/100): "
+                f"{ta.setup_label_ru or 'HTF EW + фигура + Fib/SMC'}. "
+                f"{ta.setup_trigger or 'вход по согласованной структуре'}."
+            )
+        elif location == "elliott" or (
             ta.elliott_entry_ready and ta.elliott_entry_mode in {"conservative", "aggressive"}
         ):
             mode_ru = (

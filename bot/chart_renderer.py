@@ -17,7 +17,7 @@ from matplotlib.patches import Ellipse, Rectangle
 from .bybit_klines import BybitKlineCache, KlineBar
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_pattern_draw import draw_chart_patterns
-from .chart_elliott_draw import draw_elliott_waves
+from .chart_elliott_draw import draw_elliott_waves, draw_setup_forecast_path
 from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
@@ -751,6 +751,26 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 ready=bool(getattr(ta, "elliott_entry_ready", False)),
             )
         draw_elliott_waves(ax, bars, ew_stub)
+
+    # HTF Elliott (пунктир) + прогнозный путь Pro-confluence
+    htf_pts = getattr(ta, "htf_elliott_draw_points", None) or []
+    if htf_pts:
+        htf_stub = ElliottWaveResult(
+            label_ru=getattr(ta, "htf_elliott_label", "") or "",
+            phase=getattr(ta, "htf_elliott_phase", "") or "",
+            draw_points=list(htf_pts),
+            confidence=0,
+        )
+        draw_elliott_waves(ax, bars, htf_stub, style="htf", max_points=14)
+
+    setup_path = getattr(ta, "forecast_path_prices", None) or []
+    if len(setup_path) >= 2 and getattr(ta, "setup_grade", "") in {"A", "B", "C"}:
+        draw_setup_forecast_path(
+            ax,
+            bars,
+            list(setup_path),
+            list(getattr(ta, "forecast_path_labels", None) or []),
+        )
 
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)

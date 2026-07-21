@@ -81,11 +81,13 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 | **conservative** | обновление хая/лоя волны 1 после волны 2 (или пробой 3 после 4) | за основанием 1 / за 4 | R:R ≈ 1:3 |
 | **aggressive** | лимит @ 1.272 / 1.618 × волны B (конец C) | 3×ATR | 3×ATR |
 
-Trade gate локация: `elliott` (после `fib`, до `abc`/`pattern`).
+Trade gate локация: `elliott` / `confluence` (после `fib`, до `abc`/`pattern`).
+
+**Pro confluence** (`bot/setup_confluence.py`): HTF (1h) EW + LTF + фигура + Fib + SMC → грейд A–D, `setup_ideal_ready`, прогнозный путь на графике. ABCDE / ending diagonal усиливают разворотный bias.
 
 **Объединение с фигурами:** двойное дно / треугольники / три индейца и т.д. (`chart_patterns`) работают параллельно; при совпадении направления усиливают score.
 
-**Не пиши** в Telegram Hot тяжёлый жаргон «волна 2/Эллиотт» в заголовке — используй thesis / plan. В Pro и ручном TA — полный `elliott_label`.
+**Не пиши** в Telegram Hot тяжёлый жаргон «волна 2/Эллиотт» в заголовке — используй thesis / plan. В Pro и ручном TA — полный `elliott_label` + `setup_label_ru`.
 
 ### 5 правил входа по сигналу бота
 
