@@ -74,6 +74,10 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 **Elliott 1–5** ищется по свингам отдельно (даже без Fib-ноги) и рисуется на графике;
 микро-разметка внутри consolidation подавляется.
 
+**PPT-структуры (рисуются, если есть):** растяжение 1/3/5, усечение 5, leading/ending
+диагональ, ABC zigzag/flat/triangle, сходящ./расход. △, WXY/WXYXZ, Fib-цели волны 5,
+most-likely path (`elliott_path_*`). Модуль: `bot/elliott_advanced.py`.
+
 ### Чек-лист EW (обязателен)
 1. Волна 2 не за основанием 1
 2. Волна 3 самая длинная и превышает 1
@@ -89,9 +93,14 @@ OI-нарративы: `accumulation`, `aligned_long`, `aligned_short`, `squeeze
 
 Trade gate локация: `elliott` / `confluence` (после `fib`, до `abc`/`pattern`).
 
-**Pro confluence** (`bot/setup_confluence.py`): HTF (1h) EW + LTF + фигура + Fib + SMC → грейд A–D, `setup_ideal_ready`, прогнозный путь на графике. ABCDE / ending diagonal усиливают разворотный bias.
+**Pro confluence** (`bot/setup_confluence.py`): HTF (1h) EW + LTF + фигура + Fib + SMC → грейд A–D.
 
-**Объединение с фигурами:** двойное дно / треугольники / три индейца и т.д. (`chart_patterns`) работают параллельно; при совпадении направления усиливают score.
+**Жёсткие Fib-ворота ENTRY (гайд):**
+- волна 2 ∈ **38.2–61.8%** ×1 (идеал **50–61.8**)
+- волна 4 ∈ **38.2–50%** ×3
+- без `fib_classic_ok` → нет локации `elliott`, только WAIT
+
+**Объединение с фигурами:** при совпадении направления усиливают score.
 
 **Не пиши** в Telegram Hot тяжёлый жаргон «волна 2/Эллиотт» в заголовке — используй thesis / plan. В Pro и ручном TA — полный `elliott_label` + `setup_label_ru`.
 

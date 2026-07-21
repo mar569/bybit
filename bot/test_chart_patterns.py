@@ -338,7 +338,27 @@ def test_pattern_specs_overlap_includes_baskerville() -> None:
 
 
 def test_pattern_location_ok_near_rim() -> None:
+    # ENTRY-локация только на confirmed (forming = не ENTRY)
     pat = ChartPattern(
+        kind="cup_handle",
+        subtype="continuation",
+        status="confirmed",
+        points=(),
+        lines=(),
+        zone_top=110.0,
+        zone_bottom=100.0,
+        neckline=PatternLine(0, 110.0, 50, 110.0, "rim"),
+        pole_height=10.0,
+        target_price=120.0,
+        stop_price=99.0,
+        confidence=0.75,
+        score_breakdown={},
+        source_rule="test",
+        label_ru="test",
+        direction="bullish",
+    )
+    assert pattern_location_ok(pat, side="long", price=109.5, tol_pct=1.0)
+    forming = ChartPattern(
         kind="cup_handle",
         subtype="continuation",
         status="forming",
@@ -356,7 +376,37 @@ def test_pattern_location_ok_near_rim() -> None:
         label_ru="test",
         direction="bullish",
     )
-    assert pattern_location_ok(pat, side="long", price=109.5, tol_pct=1.0)
+    assert pattern_location_ok(forming, side="long", price=109.5, tol_pct=1.0) is False
+
+
+def test_volume_facts_contract_and_spike() -> None:
+    from bot.chart_patterns import _volume_facts
+
+    bars = []
+    for i in range(30):
+        vol = 2000.0 if i < 10 else (800.0 if i < 25 else 1800.0)
+        bars.append(
+            KlineBar(
+                open_time=1_700_000_000 + i * 300,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.5,
+                volume=vol,
+            )
+        )
+    c, b, s, note = _volume_facts(
+        bars,
+        impulse_start=0,
+        impulse_end=9,
+        body_start=10,
+        body_end=24,
+        status="confirmed",
+    )
+    assert c is True
+    assert b is True
+    assert s >= 0.9
+    assert "объём" in note
 
 
 def test_detect_location_pattern() -> None:

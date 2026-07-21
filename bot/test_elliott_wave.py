@@ -24,22 +24,17 @@ def _bar(i: int, o: float, h: float, l: float, c: float) -> KlineBar:
 
 
 def _impulse_up_swings() -> tuple[list[KlineBar], list[SwingPoint]]:
-    """Синтетический бычий 1–5: 0=100 →1=110 →2=104 →3=122 →4=114 →5=120."""
+    """Синтетический бычий 1–5 с классическими Fib:
+    0=100 →1=110 →2=104 (60%×1) →3=122 (1.8×1) →4=114 (44%×3) →5=121.5 (42%×3).
+    """
     prices = [
-        # flat base
         *([100.0] * 8),
-        # wave 1 up
         102, 104, 106, 108, 110,
-        # wave 2 down
         108, 106, 104,
-        # wave 3 up (longest)
         107, 110, 114, 118, 122,
-        # wave 4 down
         120, 117, 114,
-        # wave 5 up
-        116, 118, 120,
-        # mild pullback
-        119, 118,
+        116, 118, 120, 121.5,
+        121, 120.5,
     ]
     bars: list[KlineBar] = []
     for i, p in enumerate(prices):
@@ -51,7 +46,7 @@ def _impulse_up_swings() -> tuple[list[KlineBar], list[SwingPoint]]:
         SwingPoint(15, 104.0, "low"),
         SwingPoint(20, 122.0, "high"),
         SwingPoint(23, 114.0, "low"),
-        SwingPoint(26, 120.0, "high"),
+        SwingPoint(27, 121.5, "high"),
     ]
     return bars, swings
 
@@ -91,6 +86,10 @@ def test_conservative_entry_after_wave2() -> None:
         current_wave="2",
         valid=True,
         quality=70,
+        fib_classic_ok=True,
+        fib_w2_ok=True,
+        fib_w2_gold=True,
+        fib_w2_ratio=0.60,
     )
     bars = [_bar(i, 104 + i * 0.1, 105, 103, 104.5) for i in range(12)]
     # цена у хая волны 1
@@ -182,3 +181,114 @@ def test_find_swings_pipeline_smoke() -> None:
         "abc_complete",
         "abc_forming",
     } or ew.phase.startswith("impulse") or ew.phase.startswith("abc") or ew.phase == "unknown"
+
+
+def test_classic_fib_ratios_on_valid_impulse() -> None:
+    bars, swings = _impulse_up_swings()
+    imp = detect_elliott_impulse(swings, bars)
+    assert imp is not None
+    assert imp.fib_w2_ok
+    assert 0.50 <= imp.fib_w2_ratio <= 0.62
+    assert imp.fib_w4_ok
+    assert 0.38 <= imp.fib_w4_ratio <= 0.52
+    assert imp.fib_classic_ok
+
+
+def test_wave2_outside_fib_blocks_ready_entry() -> None:
+    from bot.elliott_wave import ElliottImpulse
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 8, 108.0),
+    ]
+    imp = ElliottImpulse(
+        direction="up",
+        points=pts,
+        current_wave="2",
+        valid=False,
+        quality=40,
+        fib_classic_ok=False,
+        fib_w2_ok=False,
+        fib_w2_ratio=0.20,
+    )
+    bars = [_bar(i, 108, 109, 107, 108.2) for i in range(12)]
+    plan = build_elliott_entry_plan(imp, None, bars, current=108.2)
+    assert plan is not None
+    assert plan.mode == "wait"
+    assert plan.ready is False
+
+
+def test_classify_extension_wave3() -> None:
+    from bot.elliott_wave import classify_extension
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),  # w1=10
+        ElliottPoint("2", 8, 104.0),
+        ElliottPoint("3", 20, 130.0),  # w3=26 ≥ 1.618×10
+        ElliottPoint("4", 24, 118.0),
+        ElliottPoint("5", 30, 124.0),  # w5=6
+    ]
+    assert classify_extension(pts) == "3"
+
+
+def test_detect_truncation_after_strong_w3() -> None:
+    from bot.elliott_wave import detect_truncation
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 8, 104.0),
+        ElliottPoint("3", 20, 130.0),  # сильная 3
+        ElliottPoint("4", 24, 118.0),
+        ElliottPoint("5", 30, 128.0),  # не выше 130 → усечение
+    ]
+    assert detect_truncation(pts, "up") is True
+
+
+def test_detect_ending_diagonal_overlap() -> None:
+    from bot.elliott_wave import detect_diagonal_type
+
+    # 4 заходит в зону 1 (overlap) + сужение
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 10, 120.0),
+        ElliottPoint("2", 20, 108.0),
+        ElliottPoint("3", 35, 128.0),
+        ElliottPoint("4", 45, 115.0),  # ниже 1.price=120 → overlap up
+        ElliottPoint("5", 55, 124.0),
+    ]
+    bars = [_bar(i, 100, 101, 99, 100) for i in range(60)]
+    assert detect_diagonal_type(pts, "up", bars) == "ending"
+
+
+def test_classify_abc_zigzag_vs_flat() -> None:
+    from bot.elliott_wave import classify_abc_type
+
+    assert classify_abc_type(
+        [ElliottPoint("A", 1, 90.0), ElliottPoint("B", 2, 95.0)],
+        b_retrace=0.50,
+    ) == "zigzag"
+    assert classify_abc_type(
+        [ElliottPoint("A", 1, 90.0), ElliottPoint("B", 2, 99.5)],
+        b_retrace=0.95,
+    ) == "flat"
+
+
+def test_relabel_local_and_multi_scale_fields() -> None:
+    from bot.elliott_wave import _relabel_local, analyze_elliott_waves
+
+    pts = [
+        ElliottPoint("1", 1, 10.0),
+        ElliottPoint("2", 2, 9.0),
+        ElliottPoint("A", 3, 8.5),
+    ]
+    loc = _relabel_local(pts)
+    assert [p.label for p in loc] == ["i", "ii", "a"]
+
+    bars, swings = _impulse_up_swings()
+    ew = analyze_elliott_waves(bars, swings)
+    assert ew.has_structure
+    # хотя бы один слой точек
+    assert ew.draw_points or ew.global_draw_points or ew.local_draw_points

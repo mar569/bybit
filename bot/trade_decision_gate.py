@@ -190,7 +190,7 @@ def _abc_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
 
 
 def _elliott_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
-    """Готовый консервативный/агрессивный вход по полной разметке 1–5+ABC."""
+    """Готовый вход по EW: чек-лист + классические Fib + ready."""
     if not bool(getattr(ta, "elliott_entry_ready", False)):
         return False
     mode = (getattr(ta, "elliott_entry_mode", "") or "").lower()
@@ -199,13 +199,14 @@ def _elliott_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
     entry = getattr(ta, "elliott_entry_price", None)
     if entry is None or float(entry) <= 0:
         return False
+    # Без классических пропорций Fib — не локация elliott
+    if not bool(getattr(ta, "elliott_fib_classic_ok", True)):
+        return False
     bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
-    # side плана из entry mode: long при бычьем импульсе
     if side == "long" and bias in {"long", "neutral"}:
         return True
     if side == "short" and bias in {"short", "neutral"}:
         return True
-    # если bias пустой — доверяем стороне сигнала при ready
     if bias == "neutral" and mode in {"conservative", "aggressive"}:
         return True
     return False

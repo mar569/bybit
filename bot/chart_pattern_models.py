@@ -38,3 +38,9 @@ class ChartPattern:
     source_rule: str
     label_ru: str
     direction: str = "neutral"
+    # Факты для взвешенных сигналов (не декорация)
+    volume_contracted: bool = False   # объём сжимается внутри фигуры
+    volume_breakout: bool = False     # всплеск объёма на пробое
+    volume_score: float = 0.0         # 0..1 вклад объёма в conf
+    entry_mode: str = ""              # breakout | retest | wait
+    psychology_note: str = ""         # краткая логика / манипуляция / продолжение

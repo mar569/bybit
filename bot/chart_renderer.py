@@ -25,7 +25,7 @@ from .chart_pro_layers import (
     draw_rsi_panel,
     draw_volume_panel,
 )
-from .manual_ta import pattern_chart_hours, chart_display_hours
+from .manual_ta import pattern_chart_hours, chart_display_hours, structure_aware_display_hours
 from .chart_screenshot import chart_capture_service
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
@@ -753,6 +753,27 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             phase=getattr(ta, "elliott_phase", "") or "",
             draw_points=list(ew_pts),
             confidence=int(getattr(ta, "elliott_confidence", 0) or 0),
+            extension=str(getattr(ta, "elliott_extension", "") or ""),
+            truncated=bool(getattr(ta, "elliott_truncated", False)),
+            diagonal=str(getattr(ta, "elliott_diagonal", "") or ""),
+            corr_type=str(getattr(ta, "elliott_corr_type", "") or ""),
+            structure_note_ru=str(getattr(ta, "elliott_structure_note", "") or ""),
+            triangle_kind=str(getattr(ta, "elliott_triangle_kind", "") or ""),
+            triangle_bias=str(getattr(ta, "elliott_triangle_bias", "") or ""),
+            complex_kind=str(getattr(ta, "elliott_complex_kind", "") or ""),
+            fib_target_prices=list(getattr(ta, "elliott_fib_targets", None) or []),
+            fib_target_labels=list(getattr(ta, "elliott_fib_target_labels", None) or []),
+            path_bias=str(getattr(ta, "elliott_path_bias", "") or ""),
+            path_prices=list(getattr(ta, "elliott_path_prices", None) or []),
+            path_labels=list(getattr(ta, "elliott_path_labels", None) or []),
+            path_reason_ru=str(getattr(ta, "elliott_path_reason", "") or ""),
+            triangle_obj=getattr(ta, "elliott_triangle_obj", None),
+            global_draw_points=list(getattr(ta, "elliott_global_draw_points", None) or []),
+            local_draw_points=list(getattr(ta, "elliott_local_draw_points", None) or []),
+            global_label_ru=str(getattr(ta, "elliott_global_label", "") or ""),
+            local_label_ru=str(getattr(ta, "elliott_local_label", "") or ""),
+            has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
+            has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
         )
         # восстановить entry plan для линии входа
         if getattr(ta, "elliott_entry_price", None):
@@ -777,6 +798,13 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             phase=getattr(ta, "htf_elliott_phase", "") or "",
             draw_points=list(htf_pts),
             confidence=0,
+            diagonal="ending" if getattr(ta, "is_ending_diagonal", False) else "",
+            corr_type="triangle" if getattr(ta, "is_abcde", False) else "",
+            structure_note_ru=(
+                "конечная диагональ"
+                if getattr(ta, "is_ending_diagonal", False)
+                else ("треугольник ABCDE" if getattr(ta, "is_abcde", False) else "")
+            ),
         )
         draw_elliott_waves(ax, bars, htf_stub, style="htf", max_points=14)
 
@@ -1245,7 +1273,8 @@ async def _fetch_bars(
     interval_minutes: int = 5,
 ) -> list[KlineBar]:
     per_hour = max(1, 60 // interval_minutes)
-    limit = max(24, min(hours * per_hour + 2, 200))
+    # 18ч×5m = 216 баров; запас до ~20ч
+    limit = max(24, min(hours * per_hour + 8, 280))
     bars = await _kline_cache.get_klines(
         symbol,
         limit=limit,
@@ -1870,6 +1899,22 @@ async def render_annotated_chart(
     )
     if verdict_override:
         ta.verdict = verdict_override
+
+    # Зум экрана: ≥12ч на 5m + расширить, если EW/дамп шире окна
+    ew_idxs = [
+        int(getattr(p, "index", -1))
+        for p in (getattr(ta, "elliott_draw_points", None) or [])
+        if getattr(p, "index", -1) >= 0
+    ]
+    elliott_span = (max(ew_idxs) - min(ew_idxs)) if len(ew_idxs) >= 2 else 0
+    zoom_hours = structure_aware_display_hours(
+        interval_minutes=interval_minutes,
+        analysis_hours=analysis_hours,
+        configured=display_hours,
+        drawdown_pct=float(getattr(ta, "drawdown_from_high_pct", 0) or 0),
+        elliott_span_bars=elliott_span,
+        fib_span_bars=0,
+    )
 
     source = (chart_source or "annotated").lower()
     if source in {"tv_annotated", "tradingview"}:

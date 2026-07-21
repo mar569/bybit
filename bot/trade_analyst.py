@@ -448,10 +448,32 @@ def build_trade_thesis(
             thesis = "Ретест уровня пробоя после слома структуры — классический профи-вход."
         elif ta.primary_chart_pattern:
             pat = ta.primary_chart_pattern
+            mode = getattr(pat, "entry_mode", "") or ""
+            psycho = getattr(pat, "psychology_note", "") or ""
+            vol_bits = []
+            if getattr(pat, "volume_contracted", False):
+                vol_bits.append("объём ↓ в фигуре")
+            if getattr(pat, "volume_breakout", False):
+                vol_bits.append("объём ↑ на пробое")
             thesis = (
                 f"Графическая фигура <b>{pat.label_ru}</b> "
-                f"+ структура рынка подтверждают <b>{label}</b>."
+                f"({'подтв.' if pat.status == 'confirmed' else 'форм.'})"
             )
+            if mode:
+                thesis += f" · вход: {mode}"
+            thesis += f" + структура подтверждают <b>{label}</b>."
+            if psycho:
+                thesis += f" {psycho[:90]}"
+            if vol_bits:
+                thesis += " · " + ", ".join(vol_bits)
+            if ta.factor_lines:
+                # CVD/liq факты рядом с фигурой
+                flow_bit = next(
+                    (x for x in ta.factor_lines if "CVD" in x or "liq" in x.lower() or "ликв" in x.lower()),
+                    "",
+                )
+                if flow_bit:
+                    thesis += f" · {flow_bit[:50]}"
         else:
             thesis = (
                 f"Сканер зафиксировал движение, TA подтверждает <b>{label}</b> "

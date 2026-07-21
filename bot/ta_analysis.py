@@ -226,6 +226,29 @@ class TAAnalysisResult:
     elliott_stop_price: float | None = None
     elliott_tp_prices: list[float] = field(default_factory=list)
     elliott_draw_points: list = field(default_factory=list)
+    elliott_fib_classic_ok: bool = False
+    elliott_fib_w2: float = 0.0
+    elliott_fib_w4: float = 0.0
+    # PPT-структуры: растяжение / усечение / диагональ / тип ABC
+    elliott_extension: str = ""
+    elliott_truncated: bool = False
+    elliott_diagonal: str = ""
+    elliott_corr_type: str = ""
+    elliott_structure_note: str = ""
+    elliott_triangle_kind: str = ""
+    elliott_triangle_bias: str = ""
+    elliott_complex_kind: str = ""
+    elliott_fib_targets: list[float] = field(default_factory=list)
+    elliott_fib_target_labels: list[str] = field(default_factory=list)
+    elliott_path_bias: str = ""
+    elliott_path_prices: list[float] = field(default_factory=list)
+    elliott_path_labels: list[str] = field(default_factory=list)
+    elliott_path_reason: str = ""
+    elliott_triangle_obj: object | None = None
+    elliott_global_draw_points: list = field(default_factory=list)
+    elliott_local_draw_points: list = field(default_factory=list)
+    elliott_global_label: str = ""
+    elliott_local_label: str = ""
     fib_status: str = ""
     fib_reject_reason: str = ""
     chart_patterns: list[ChartPattern] = field(default_factory=list)
@@ -2708,6 +2731,22 @@ def run_ta_analysis(
         verdict_reason=reason,
     )
 
+    _ew_conf = int(getattr(wave, "elliott_confidence", 0) or 0)
+    _ew_global_pts = _filter_elliott_draw_points(
+        list(getattr(wave, "elliott_global_draw_points", None) or []),
+        bars=bars,
+        phase=ms.phase,
+        consolidation=consolidation is not None,
+        confidence=_ew_conf,
+    )
+    _ew_local_pts = _filter_elliott_draw_points(
+        list(getattr(wave, "elliott_local_draw_points", None) or []),
+        bars=bars,
+        phase=ms.phase,
+        consolidation=consolidation is not None,
+        confidence=_ew_conf,
+    )
+
     return TAAnalysisResult(
         swings=swings,
         levels=levels,
@@ -2806,13 +2845,39 @@ def run_ta_analysis(
         elliott_entry_price=getattr(wave, "elliott_entry_price", None),
         elliott_stop_price=getattr(wave, "elliott_stop_price", None),
         elliott_tp_prices=list(getattr(wave, "elliott_tp_prices", None) or []),
-        elliott_draw_points=_filter_elliott_draw_points(
-            list(getattr(wave, "elliott_draw_points", None) or []),
-            bars=bars,
-            phase=ms.phase,
-            consolidation=consolidation is not None,
-            confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
+        elliott_draw_points=(
+            list(_ew_global_pts) + list(_ew_local_pts)
+            if (_ew_global_pts or _ew_local_pts)
+            else _filter_elliott_draw_points(
+                list(getattr(wave, "elliott_draw_points", None) or []),
+                bars=bars,
+                phase=ms.phase,
+                consolidation=consolidation is not None,
+                confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
+            )
         ),
+        elliott_fib_classic_ok=bool(getattr(wave, "elliott_fib_classic_ok", False)),
+        elliott_fib_w2=float(getattr(wave, "elliott_fib_w2", 0) or 0),
+        elliott_fib_w4=float(getattr(wave, "elliott_fib_w4", 0) or 0),
+        elliott_extension=str(getattr(wave, "elliott_extension", "") or ""),
+        elliott_truncated=bool(getattr(wave, "elliott_truncated", False)),
+        elliott_diagonal=str(getattr(wave, "elliott_diagonal", "") or ""),
+        elliott_corr_type=str(getattr(wave, "elliott_corr_type", "") or ""),
+        elliott_structure_note=str(getattr(wave, "elliott_structure_note", "") or ""),
+        elliott_triangle_kind=str(getattr(wave, "elliott_triangle_kind", "") or ""),
+        elliott_triangle_bias=str(getattr(wave, "elliott_triangle_bias", "") or ""),
+        elliott_complex_kind=str(getattr(wave, "elliott_complex_kind", "") or ""),
+        elliott_fib_targets=list(getattr(wave, "elliott_fib_targets", None) or []),
+        elliott_fib_target_labels=list(getattr(wave, "elliott_fib_target_labels", None) or []),
+        elliott_path_bias=str(getattr(wave, "elliott_path_bias", "") or ""),
+        elliott_path_prices=list(getattr(wave, "elliott_path_prices", None) or []),
+        elliott_path_labels=list(getattr(wave, "elliott_path_labels", None) or []),
+        elliott_path_reason=str(getattr(wave, "elliott_path_reason", "") or ""),
+        elliott_triangle_obj=getattr(wave, "elliott_triangle_obj", None),
+        elliott_global_draw_points=_ew_global_pts,
+        elliott_local_draw_points=_ew_local_pts,
+        elliott_global_label=str(getattr(wave, "elliott_global_label", "") or ""),
+        elliott_local_label=str(getattr(wave, "elliott_local_label", "") or ""),
         fib_status=getattr(wave, "fib_status", "") or "",
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,
@@ -2830,10 +2895,15 @@ def run_ta_analysis(
         htf_elliott_label=setup.htf_label_ru,
         htf_elliott_phase=setup.htf_phase,
         htf_elliott_bias=setup.htf_bias,
-        is_ending_diagonal=bool(setup.is_ending_diagonal),
-        is_abcde=bool(setup.is_abcde),
-        forecast_path_prices=[wp.price for wp in setup.forecast_path],
-        forecast_path_labels=[wp.label for wp in setup.forecast_path],
+        is_ending_diagonal=bool(setup.is_ending_diagonal)
+        or str(getattr(wave, "elliott_diagonal", "") or "") == "ending",
+        is_abcde=bool(setup.is_abcde)
+        or str(getattr(wave, "elliott_corr_type", "") or "") == "triangle"
+        or bool(getattr(wave, "elliott_triangle_kind", "")),
+        forecast_path_prices=[wp.price for wp in setup.forecast_path]
+        or list(getattr(wave, "elliott_path_prices", None) or []),
+        forecast_path_labels=[wp.label for wp in setup.forecast_path]
+        or list(getattr(wave, "elliott_path_labels", None) or []),
         htf_elliott_draw_points=list(setup.htf_draw_points),
     )
 
@@ -2921,7 +2991,9 @@ def _filter_elliott_draw_points(
     consolidation: bool,
     confidence: int,
 ) -> list:
-    """Не рисовать микро 1–5 внутри боковика / post-crash — это шум, не структура."""
+    """Не рисовать микро 1–5 внутри боковика — шум.
+    Крупный импульс/дамп и локальный слой (i–v) сохраняем мягче.
+    """
     if not points:
         return []
     prices = [float(getattr(p, "price", 0) or 0) for p in points]
@@ -2930,10 +3002,17 @@ def _filter_elliott_draw_points(
         return []
     mid = (max(prices) + min(prices)) / 2.0
     span_pct = (max(prices) - min(prices)) / mid * 100.0 if mid > 0 else 0.0
+    local_labs = {"·0", "i", "ii", "iii", "iv", "v", "a", "b", "c", "d", "e", "w", "x", "y", "z", "x2"}
+    is_local = any(str(getattr(p, "label", "")) in local_labs for p in points)
+    # Крупная структура (DEXE −70% и т.п.) — всегда рисуем
+    if span_pct >= 12.0:
+        return list(points)
+    # Локальный слой: достаточно 1.8% размаха
+    if is_local and span_pct >= 1.8 and confidence >= 4:
+        return list(points)
     noisy_phase = phase in {"consolidation", "breakout_setup", "post_crash_weak"} or consolidation
     if noisy_phase and (span_pct < 4.5 or confidence < 6):
         return []
-    # Даже вне range — отсечь совсем микро-разметку
     if span_pct < 2.2 and confidence < 7:
         return []
     return list(points)

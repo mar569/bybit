@@ -56,17 +56,42 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 
 def pattern_chart_hours(interval_minutes: int) -> int:
-    """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
-    return {5: 18, 10: 12, 15: 24, 60: 72}.get(interval_minutes, 18)
+    """Окно истории для поиска графических фигур / EW (анализ, не зум экрана)."""
+    return {5: 18, 10: 14, 15: 24, 60: 72}.get(interval_minutes, 18)
 
 
 def chart_display_hours(interval_minutes: int, *, configured: int | None = None) -> int:
-    """Сколько часов показывать на графике (свечи читаемее, чем полный lookback)."""
-    defaults = {5: 7, 10: 8, 15: 10, 60: 36}
-    base = defaults.get(interval_minutes, 7)
+    """Сколько часов показывать на графике по умолчанию (~12ч на 5m — весь дневной дамп)."""
+    defaults = {5: 12, 10: 12, 15: 14, 60: 36}
+    base = defaults.get(interval_minutes, 12)
     if configured is None:
         return base
     return max(4, min(int(configured), pattern_chart_hours(interval_minutes)))
+
+
+def structure_aware_display_hours(
+    *,
+    interval_minutes: int,
+    analysis_hours: int,
+    configured: int | None,
+    drawdown_pct: float = 0.0,
+    elliott_span_bars: int = 0,
+    fib_span_bars: int = 0,
+) -> int:
+    """Расширяет зум, чтобы на экране был весь импульс/дамп (как DEXE с 9 утра)."""
+    base = chart_display_hours(interval_minutes, configured=configured)
+    need = base
+    # Крупный дамп/памп — показать больше истории
+    if drawdown_pct >= 40.0:
+        need = max(need, 14 if interval_minutes <= 5 else 16)
+    elif drawdown_pct >= 20.0:
+        need = max(need, 12)
+    # Покрыть размах EW / Fib-ноги (+ запас ~1ч)
+    span = max(elliott_span_bars, fib_span_bars)
+    if span > 0 and interval_minutes > 0:
+        span_h = int(span * interval_minutes / 60.0) + 2
+        need = max(need, min(span_h, analysis_hours))
+    return max(4, min(need, analysis_hours))
 
 
 def manual_ta_hours(interval_minutes: int) -> int:

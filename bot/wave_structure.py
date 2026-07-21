@@ -120,6 +120,28 @@ class WaveStructureResult:
     elliott_tp_prices: list[float] = field(default_factory=list)
     elliott_draw_points: list = field(default_factory=list)
     elliott_result: object | None = None
+    elliott_fib_classic_ok: bool = False
+    elliott_fib_w2: float = 0.0
+    elliott_fib_w4: float = 0.0
+    elliott_extension: str = ""
+    elliott_truncated: bool = False
+    elliott_diagonal: str = ""
+    elliott_corr_type: str = ""
+    elliott_structure_note: str = ""
+    elliott_triangle_kind: str = ""
+    elliott_triangle_bias: str = ""
+    elliott_complex_kind: str = ""
+    elliott_fib_targets: list[float] = field(default_factory=list)
+    elliott_fib_target_labels: list[str] = field(default_factory=list)
+    elliott_path_bias: str = ""
+    elliott_path_prices: list[float] = field(default_factory=list)
+    elliott_path_labels: list[str] = field(default_factory=list)
+    elliott_path_reason: str = ""
+    elliott_triangle_obj: object | None = None
+    elliott_global_draw_points: list = field(default_factory=list)
+    elliott_local_draw_points: list = field(default_factory=list)
+    elliott_global_label: str = ""
+    elliott_local_label: str = ""
     # Понятный статус для сигналов / ручного TA
     fib_status: str = FIB_STATUS_EMPTY
     fib_reject_reason: str = ""
@@ -926,6 +948,30 @@ def analyze_wave_structure(
                 elliott_tp_prices=[p for p in ((plan.tp1, plan.tp2) if plan else ()) if p][:3],
                 elliott_draw_points=list(ew_only.draw_points),
                 elliott_result=ew_only,
+                elliott_fib_classic_ok=bool(
+                    ew_only.impulse.fib_classic_ok if ew_only.impulse else False
+                ),
+                elliott_fib_w2=float(ew_only.impulse.fib_w2_ratio if ew_only.impulse else 0),
+                elliott_fib_w4=float(ew_only.impulse.fib_w4_ratio if ew_only.impulse else 0),
+                elliott_extension=ew_only.extension,
+                elliott_truncated=ew_only.truncated,
+                elliott_diagonal=ew_only.diagonal,
+                elliott_corr_type=ew_only.corr_type,
+                elliott_structure_note=ew_only.structure_note_ru,
+                elliott_triangle_kind=getattr(ew_only, "triangle_kind", "") or "",
+                elliott_triangle_bias=getattr(ew_only, "triangle_bias", "") or "",
+                elliott_complex_kind=getattr(ew_only, "complex_kind", "") or "",
+                elliott_fib_targets=list(getattr(ew_only, "fib_target_prices", None) or []),
+                elliott_fib_target_labels=list(getattr(ew_only, "fib_target_labels", None) or []),
+                elliott_path_bias=getattr(ew_only, "path_bias", "") or "",
+                elliott_path_prices=list(getattr(ew_only, "path_prices", None) or []),
+                elliott_path_labels=list(getattr(ew_only, "path_labels", None) or []),
+                elliott_path_reason=getattr(ew_only, "path_reason_ru", "") or "",
+                elliott_triangle_obj=getattr(ew_only, "triangle_obj", None),
+                elliott_global_draw_points=list(getattr(ew_only, "global_draw_points", None) or []),
+                elliott_local_draw_points=list(getattr(ew_only, "local_draw_points", None) or []),
+                elliott_global_label=str(getattr(ew_only, "global_label_ru", "") or ""),
+                elliott_local_label=str(getattr(ew_only, "local_label_ru", "") or ""),
                 entry_hint_price=plan.entry_price if plan and plan.ready else None,
                 stop_hint_price=plan.stop_price if plan and plan.ready else None,
                 target_hint_prices=[p for p in ((plan.tp1, plan.tp2) if plan else ()) if p][:3]
@@ -1038,14 +1084,16 @@ def analyze_wave_structure(
     ew_entry_price: float | None = None
     ew_stop: float | None = None
     ew_tps: list[float] = []
+    # EW ready только при classic Fib
     if ew_full and ew_full.entry_plan and ew_full.entry_plan.mode != "wait":
         plan = ew_full.entry_plan
+        fib_ok = bool(getattr(ew_full.impulse, "fib_classic_ok", False)) if ew_full.impulse else False
         ew_entry_mode = plan.mode
-        ew_entry_ready = bool(plan.ready)
+        ew_entry_ready = bool(plan.ready) and fib_ok
         ew_entry_price = plan.entry_price
         ew_stop = plan.stop_price
         ew_tps = [p for p in (plan.tp1, plan.tp2) if p]
-        if plan.ready and plan.entry_price:
+        if ew_entry_ready and plan.entry_price:
             entry_hint = plan.entry_price
             if plan.stop_price:
                 stop_hint = plan.stop_price
@@ -1102,6 +1150,34 @@ def analyze_wave_structure(
         elliott_tp_prices=ew_tps[:3],
         elliott_draw_points=list(getattr(ew_full, "draw_points", []) or []) if ew_full else [],
         elliott_result=ew_full,
+        elliott_fib_classic_ok=bool(
+            getattr(getattr(ew_full, "impulse", None), "fib_classic_ok", False)
+        ) if ew_full else False,
+        elliott_fib_w2=float(
+            getattr(getattr(ew_full, "impulse", None), "fib_w2_ratio", 0) or 0
+        ) if ew_full else 0.0,
+        elliott_fib_w4=float(
+            getattr(getattr(ew_full, "impulse", None), "fib_w4_ratio", 0) or 0
+        ) if ew_full else 0.0,
+        elliott_extension=str(getattr(ew_full, "extension", "") or "") if ew_full else "",
+        elliott_truncated=bool(getattr(ew_full, "truncated", False)) if ew_full else False,
+        elliott_diagonal=str(getattr(ew_full, "diagonal", "") or "") if ew_full else "",
+        elliott_corr_type=str(getattr(ew_full, "corr_type", "") or "") if ew_full else "",
+        elliott_structure_note=str(getattr(ew_full, "structure_note_ru", "") or "") if ew_full else "",
+        elliott_triangle_kind=str(getattr(ew_full, "triangle_kind", "") or "") if ew_full else "",
+        elliott_triangle_bias=str(getattr(ew_full, "triangle_bias", "") or "") if ew_full else "",
+        elliott_complex_kind=str(getattr(ew_full, "complex_kind", "") or "") if ew_full else "",
+        elliott_fib_targets=list(getattr(ew_full, "fib_target_prices", None) or []) if ew_full else [],
+        elliott_fib_target_labels=list(getattr(ew_full, "fib_target_labels", None) or []) if ew_full else [],
+        elliott_path_bias=str(getattr(ew_full, "path_bias", "") or "") if ew_full else "",
+        elliott_path_prices=list(getattr(ew_full, "path_prices", None) or []) if ew_full else [],
+        elliott_path_labels=list(getattr(ew_full, "path_labels", None) or []) if ew_full else [],
+        elliott_path_reason=str(getattr(ew_full, "path_reason_ru", "") or "") if ew_full else "",
+        elliott_triangle_obj=getattr(ew_full, "triangle_obj", None) if ew_full else None,
+        elliott_global_draw_points=list(getattr(ew_full, "global_draw_points", None) or []) if ew_full else [],
+        elliott_local_draw_points=list(getattr(ew_full, "local_draw_points", None) or []) if ew_full else [],
+        elliott_global_label=str(getattr(ew_full, "global_label_ru", "") or "") if ew_full else "",
+        elliott_local_label=str(getattr(ew_full, "local_label_ru", "") or "") if ew_full else "",
         fib_status=fib_status,
         fib_reject_reason=fib_reject,
     )

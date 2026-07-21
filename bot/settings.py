@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 47
+SETTINGS_VERSION = 48
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -351,7 +351,7 @@ class ScannerSettings:
     signal_chart_enabled: bool = True
     signal_chart_source: str = "annotated"
     signal_chart_hours: int = 18
-    signal_chart_display_hours: int = 7
+    signal_chart_display_hours: int = 12
     signal_chart_interval_minutes: int = 5
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
@@ -813,7 +813,7 @@ class ScannerSettings:
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
             signal_chart_source=str(base.get("signal_chart_source", "annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
-            signal_chart_display_hours=int(base.get("signal_chart_display_hours", 7)),
+            signal_chart_display_hours=int(base.get("signal_chart_display_hours", 12)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
@@ -1295,6 +1295,12 @@ class SettingsManager:
             if version < 47:
                 merged["scenario_watch_late_cancel_pct"] = 1.5
                 merged["scenario_watch_opposite_cancel_pct"] = 1.2
+            if version < 48:
+                # Полный дневной импульс на графике (~12ч вид, 18ч анализ)
+                merged["signal_chart_hours"] = max(int(merged.get("signal_chart_hours", 5) or 5), 18)
+                merged["signal_chart_display_hours"] = max(
+                    int(merged.get("signal_chart_display_hours", 7) or 7), 12
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

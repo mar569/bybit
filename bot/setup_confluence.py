@@ -95,24 +95,34 @@ def detect_abcde_correction(
     *,
     direction: str | None = None,
 ) -> ElliottAbc | None:
-    """Коррекция A-B-C-D-E (5 касаний) — упрощённо по чередующимся свингам.
+    """Коррекция A-B-C-D-E — сходящийся/расходящийся треугольник (PPT)."""
+    from .elliott_advanced import detect_expanding_triangle, detect_horizontal_triangle
 
-    direction = направление коррекции (down = медвежья ABCDE после роста).
-    """
+    tri = detect_horizontal_triangle(swings, bars, direction=direction)
+    if tri is None:
+        tri = detect_expanding_triangle(swings, bars, direction=direction)
+    if tri and tri.valid and tri.points:
+        return ElliottAbc(
+            direction=tri.direction,
+            points=list(tri.points),
+            phase="complete",
+            valid=True,
+            corr_type="triangle",
+            label_ru=tri.label_ru,
+        )
+
+    # fallback: старая эвристика схождения спанов
     if not swings or not bars or len(swings) < 6:
         return None
     alt = _alternate_swings(swings)[-10:]
     if len(alt) < 6:
         return None
 
-    # Пробуем оба направления, если не задано
     dirs = [direction] if direction in {"up", "down"} else ["down", "up"]
     best: ElliottAbc | None = None
     best_q = 0
 
     for d in dirs:
-        # Медвежья ABCDE (после роста): A low, B high, C low, D high, E low
-        # Бычья ABCDE (после падения): A high, B low, C high, D low, E high
         if d == "down":
             expect = ["low", "high", "low", "high", "low"]
             labels = ["A", "B", "C", "D", "E"]
@@ -122,7 +132,6 @@ def detect_abcde_correction(
 
         for start in range(0, len(alt) - 4):
             points: list[ElliottPoint] | None = None
-            # 0 + A..E
             if start + 6 <= len(alt):
                 chunk = alt[start : start + 6]
                 if all(chunk[i + 1].kind == expect[i] for i in range(5)):
@@ -130,7 +139,6 @@ def detect_abcde_correction(
                         ElliottPoint(labels[i], chunk[i + 1].index, chunk[i + 1].price)
                         for i in range(5)
                     ]
-            # A..E без pre-point
             if points is None and start + 5 <= len(alt):
                 pts5 = alt[start : start + 5]
                 if all(pts5[i].kind == expect[i] for i in range(5)):
@@ -144,7 +152,6 @@ def detect_abcde_correction(
             spans = [abs(points[i + 1].price - points[i].price) for i in range(4)]
             converging = spans[-1] < spans[0] * 0.85 if spans[0] > 0 else False
             if d == "down":
-                # E не выше B сильно; сужающийся треугольник
                 valid = points[4].price <= points[1].price * 1.02
             else:
                 valid = points[4].price >= points[1].price * 0.98
@@ -157,6 +164,7 @@ def detect_abcde_correction(
                     points=points,
                     phase="complete" if valid else "E",
                     valid=valid and converging,
+                    corr_type="triangle",
                     label_ru=(
                         f"ABCDE {'↓' if d == 'down' else '↑'}"
                         + (" · схождение (клин)" if converging else "")
@@ -330,13 +338,30 @@ def analyze_setup_confluence(
     # --- Pattern ---
     if pattern is not None and getattr(pattern, "confidence", 0) >= 0.68:
         result.pattern_kind = pattern.kind
-        conf_pts = int(pattern.confidence * 22)
+        conf_pts = int(pattern.confidence * 18)
+        # Факты: confirmed + объём важнее «красивой геометрии»
+        if pattern.status == "confirmed":
+            conf_pts += 6
+        if getattr(pattern, "volume_contracted", False):
+            conf_pts += 4
+            factors.append("объём сжался в фигуре")
+        if getattr(pattern, "volume_breakout", False):
+            conf_pts += 6
+            factors.append("объём на пробое ↑")
+        elif pattern.status == "confirmed" and pattern.kind in {
+            "flag", "pennant", "triple_bottom", "triple_top", "wedge_rising", "wedge_falling",
+        }:
+            conf_pts -= 4
+            factors.append("пробой без всплеска объёма — осторожно")
         score += conf_pts
-        factors.append(f"фигура: {pattern.label_ru} ({pattern.confidence:.0%})")
+        factors.append(f"фигура: {pattern.label_ru} ({pattern.confidence:.0%} · {pattern.status})")
+        note = getattr(pattern, "psychology_note", "") or ""
+        if note:
+            factors.append(note[:48])
         if pattern.direction == "bullish":
-            side_votes["long"] += 2
+            side_votes["long"] += 2 + (1 if pattern.status == "confirmed" else 0)
         elif pattern.direction == "bearish":
-            side_votes["short"] += 2
+            side_votes["short"] += 2 + (1 if pattern.status == "confirmed" else 0)
 
     # --- Fib confluence ---
     if wave is not None and getattr(wave, "has_confluence", False):

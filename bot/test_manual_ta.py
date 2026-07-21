@@ -43,3 +43,16 @@ def test_mtw_callback_roundtrip() -> None:
 def test_manual_ta_hours() -> None:
     assert manual_ta_hours(5) == 18
     assert manual_ta_hours(15) == 24
+
+
+def test_chart_display_default_12h() -> None:
+    from bot.manual_ta import chart_display_hours, structure_aware_display_hours
+
+    assert chart_display_hours(5) == 12
+    assert structure_aware_display_hours(
+        interval_minutes=5,
+        analysis_hours=18,
+        configured=12,
+        drawdown_pct=70.0,
+        elliott_span_bars=120,
+    ) >= 12

@@ -35,7 +35,12 @@ from .pattern_specs import (
     THREE_INDIANS_FIB,
     THREE_INDIANS_MIN_BARS,
     THREE_INDIANS_TOLERANCE_PCT,
+    TRIPLE_EXTREMUM_TOLERANCE_PCT,
+    TRIPLE_MAX_SPAN_BARS,
+    TRIPLE_MIN_BARS_BETWEEN,
     TRIANGLE_MIN_SWINGS,
+    VOLUME_BREAKOUT_SPIKE,
+    VOLUME_CONTRACT_RATIO,
     WEDGE_MIN_SWINGS,
 )
 
@@ -132,6 +137,53 @@ def _status_from_break(
     if not bullish and close < trigger - buf:
         return "confirmed"
     return "forming"
+
+
+def _avg_volume(bars: list[KlineBar], start: int, end: int) -> float:
+    if not bars or end <= start:
+        return 0.0
+    start = max(0, start)
+    end = min(len(bars) - 1, end)
+    if end < start:
+        return 0.0
+    vols = [max(0.0, float(getattr(b, "volume", 0) or 0)) for b in bars[start : end + 1]]
+    if not vols or sum(vols) <= 0:
+        return 0.0
+    return sum(vols) / len(vols)
+
+
+def _volume_facts(
+    bars: list[KlineBar],
+    *,
+    impulse_start: int,
+    impulse_end: int,
+    body_start: int,
+    body_end: int,
+    status: str,
+) -> tuple[bool, bool, float, str]:
+    """Сжатие объёма в фигуре + всплеск на пробое (классика флаг/вымпел/дно)."""
+    pole_vol = _avg_volume(bars, impulse_start, impulse_end)
+    body_vol = _avg_volume(bars, body_start, body_end)
+    break_vol = _avg_volume(bars, max(0, len(bars) - 3), len(bars) - 1)
+    contracted = bool(pole_vol > 0 and body_vol > 0 and body_vol <= pole_vol * VOLUME_CONTRACT_RATIO)
+    breakout = bool(
+        status == "confirmed"
+        and body_vol > 0
+        and break_vol >= body_vol * VOLUME_BREAKOUT_SPIKE
+    )
+    score = 0.0
+    if contracted:
+        score += 0.5
+    if breakout:
+        score += 0.5
+    note = ""
+    if contracted and breakout:
+        note = "объём сжался в фигуре → всплеск на пробое (классика)"
+    elif contracted:
+        note = "объём сжимается внутри фигуры — ждать пробой"
+    elif breakout:
+        note = "всплеск объёма на пробое"
+    return contracted, breakout, score, note
 
 
 def _score_geometry(base: float, **parts: float) -> tuple[float, dict[str, float]]:
@@ -660,25 +712,50 @@ def _detect_flag_pennant(
 
                 trigger = _line_value(upper, body_end) if bullish else _line_value(lower, body_end)
                 status = _status_from_break(bars, bullish=bullish, trigger=trigger)
+                # Цель = высота флагштока от точки пробоя (measured move)
                 target = (
                     trigger + pole_height * TARGET_POLE_FACTOR
                     if bullish
                     else trigger - pole_height * TARGET_POLE_FACTOR
                 )
-                stop = (
-                    _line_value(lower, body_end) - atr * 0.2
-                    if bullish
-                    else _line_value(upper, body_end) + atr * 0.2
+                # Стоп — за экстремум полотнища (не «ATR от линии»)
+                body_seg = bars[pole_end : body_end + 1]
+                flag_low = min(b.low for b in body_seg) if body_seg else _line_value(lower, body_end)
+                flag_high = max(b.high for b in body_seg) if body_seg else _line_value(upper, body_end)
+                stop = (flag_low - atr * 0.05) if bullish else (flag_high + atr * 0.05)
+
+                vol_c, vol_b, vol_s, vol_note = _volume_facts(
+                    bars,
+                    impulse_start=pole_start,
+                    impulse_end=pole_end,
+                    body_start=pole_end,
+                    body_end=body_end,
+                    status=status,
                 )
+                # Вымпел без сжатия объёма — слабее; флаг терпимее
+                if kind == "pennant" and not vol_c and status == "forming":
+                    continue
+
                 conf, breakdown = _score_geometry(
-                    0.62,
-                    pole=0.16,
+                    0.58,
+                    pole=0.14,
                     compress=0.12 if kind == "pennant" else 0.08,
                     channel=0.10 if kind == "flag" else 0.04,
+                    against=0.06 if against_pole else 0.0,
+                    volume=0.10 * vol_s,
                     breakout=0.14 if status == "confirmed" else 0.0,
+                    vol_confirm=0.08 if (status == "confirmed" and vol_b) else 0.0,
                 )
                 if conf < MIN_PATTERN_CONFIDENCE:
                     continue
+                entry_mode = "breakout" if status == "confirmed" else "wait"
+                psycho = (
+                    "продолжение тренда после паузы (флагшток→полотнище)"
+                    if kind == "flag"
+                    else "пауза в импульсе (вымпел) — пробой по тренду"
+                )
+                if vol_note:
+                    psycho = f"{psycho} · {vol_note}"
                 out.append(
                     ChartPattern(
                         kind=kind,
@@ -701,9 +778,14 @@ def _detect_flag_pennant(
                         stop_price=stop,
                         confidence=conf,
                         score_breakdown=breakdown,
-                        source_rule=f"buyhold:{kind}_ABCD",
+                        source_rule=f"buyhold:{kind}_ABCD+volume",
                         label_ru=PATTERN_LABELS_RU[kind],
                         direction="bullish" if bullish else "bearish",
+                        volume_contracted=vol_c,
+                        volume_breakout=vol_b,
+                        volume_score=vol_s,
+                        entry_mode=entry_mode,
+                        psychology_note=psycho,
                     )
                 )
     return _suppress_overlaps(out)[:1]
@@ -831,11 +913,32 @@ def _detect_triangles_wedges(
         context=0.12 if kind.startswith("wedge") else 0.08,
         breakout=0.14 if status == "confirmed" else 0.0,
     )
+    vol_c, vol_b, vol_s, vol_note = _volume_facts(
+        bars,
+        impulse_start=max(0, pattern_start - 10),
+        impulse_end=pattern_start,
+        body_start=pattern_start,
+        body_end=end_idx,
+        status=status,
+    )
+    if vol_s > 0:
+        conf = min(1.0, conf + 0.06 * vol_s)
+        breakdown["volume"] = round(0.06 * vol_s, 3)
     if conf < MIN_PATTERN_CONFIDENCE:
         return out
     label = PATTERN_LABELS_RU.get(kind, kind)
     if kind.startswith("wedge"):
         label = f"{label} ({'прод.' if subtype == 'continuation' else 'разв.'})"
+    if kind == "wedge_rising":
+        psycho = "восх. клин: обе линии вверх → чаще медвежий разворот/сброс слабых лонгов"
+    elif kind == "wedge_falling":
+        psycho = "нисх. клин: обе линии вниз → чаще бычий разворот/сброс слабых шортов"
+    else:
+        psycho = "треугольник: накопление → пробой по направлению"
+    if subtype == "continuation":
+        psycho += " · в контексте тренда = продолжение"
+    if vol_note:
+        psycho = f"{psycho} · {vol_note}"
     out.append(
         ChartPattern(
             kind=kind,
@@ -856,9 +959,14 @@ def _detect_triangles_wedges(
             stop_price=lower_now - atr * 0.2 if direction != "bearish" else upper_now + atr * 0.2,
             confidence=conf,
             score_breakdown=breakdown,
-            source_rule=f"buyhold:{kind}_ABCD_base_from_breakout",
+            source_rule=f"buyhold:{kind}_ABCD+volume",
             label_ru=label,
             direction=direction,
+            volume_contracted=vol_c,
+            volume_breakout=vol_b,
+            volume_score=vol_s,
+            entry_mode="breakout" if status == "confirmed" else "wait",
+            psychology_note=psycho,
         )
     )
     return out
@@ -1696,7 +1804,7 @@ def pattern_location_ok(
     price: float,
     tol_pct: float = 0.75,
 ) -> bool:
-    """Цена у границы/шеи/триггера фигуры (для Trade Decision Gate)."""
+    """Цена у границы/шеи; confirmed предпочтительнее; без объёма на пробое — жёстче."""
     if pattern is None or pattern.confidence < MIN_TRADE_PATTERN_CONFIDENCE:
         return False
     side = side.lower()
@@ -1704,12 +1812,18 @@ def pattern_location_ok(
         return False
     if side == "short" and pattern.direction == "bullish":
         return False
-    if pattern.status == "confirmed" and pattern.direction in {"bullish", "bearish"}:
-        want = "bullish" if side == "long" else "bearish"
-        if pattern.direction != want:
-            return False
-        # confirmed ≠ вход где угодно: цена должна быть у шеи/зоны
-        # (иначе ENTRY на хае после ГиП «в воздухе»)
+    if pattern.status != "confirmed":
+        # forming — не локация для ENTRY (только WATCH на уровне)
+        return False
+    want = "bullish" if side == "long" else "bearish"
+    if pattern.direction != want:
+        return False
+    # Флаг/вымпел/клин: без всплеска объёма на пробое требуем ближе к уровню
+    need_tight = (
+        pattern.kind in {"flag", "pennant", "wedge_rising", "wedge_falling", "triple_bottom", "triple_top"}
+        and not pattern.volume_breakout
+    )
+    use_tol = tol_pct * (0.55 if need_tight else 1.0)
 
     levels: list[float] = []
     if pattern.neckline:
@@ -1718,15 +1832,231 @@ def pattern_location_ok(
         levels.append(pattern.zone_top)
     if pattern.zone_bottom is not None:
         levels.append(pattern.zone_bottom)
-    if pattern.target_price and pattern.status == "confirmed":
-        # не используем target как локацию входа
-        pass
     for lv in levels:
         if lv <= 0:
             continue
-        if abs(price - lv) / lv * 100.0 <= tol_pct:
+        if abs(price - lv) / lv * 100.0 <= use_tol:
+            return True
+    # confirmed breakout: допускаем вход чуть за шеей в сторону пробоя
+    if pattern.neckline and pattern.status == "confirmed":
+        neck = _line_value(pattern.neckline, pattern.neckline.end_idx)
+        if side == "long" and price >= neck * 0.998 and price <= neck * 1.012:
+            return True
+        if side == "short" and price <= neck * 1.002 and price >= neck * 0.988:
             return True
     return False
+
+
+def _detect_triple_top_bottom(
+    bars: list[KlineBar],
+    swings: list[SwingPoint],
+    atr: float,
+) -> list[ChartPattern]:
+    """Тройное дно / тройная вершина по классике материалов.
+
+    Дно: предшествующий downtrend, 3≈равных лоя, сопротивление между ними,
+    объём часто падает к 3-му дну, пробой сопротивления вверх → цель = высота.
+    """
+    out: list[ChartPattern] = []
+    highs = [s for s in swings if s.kind == "high"]
+    lows = [s for s in swings if s.kind == "low"]
+
+    # --- Тройное дно ---
+    if len(lows) >= 3 and highs:
+        for i in range(len(lows) - 2):
+            l1, l2, l3 = lows[i], lows[i + 1], lows[i + 2]
+            if l2.index - l1.index < TRIPLE_MIN_BARS_BETWEEN:
+                continue
+            if l3.index - l2.index < TRIPLE_MIN_BARS_BETWEEN:
+                continue
+            if l3.index - l1.index > TRIPLE_MAX_SPAN_BARS:
+                continue
+            if max(
+                _pct_diff(l1.price, l2.price),
+                _pct_diff(l2.price, l3.price),
+                _pct_diff(l1.price, l3.price),
+            ) > TRIPLE_EXTREMUM_TOLERANCE_PCT:
+                continue
+            if _prior_trend_bias(bars, l1.index) != "bearish":
+                continue
+            peaks = [s for s in highs if l1.index < s.index < l3.index]
+            if len(peaks) < 2:
+                continue
+            resist = max(p.price for p in peaks)
+            support = (l1.price + l2.price + l3.price) / 3.0
+            height = resist - support
+            if height < atr * 1.0:
+                continue
+            status = _status_from_break(bars, bullish=True, trigger=resist)
+            # объём: сравниваем окна вокруг трёх доньев
+            v1 = _avg_volume(bars, max(0, l1.index - 1), l1.index + 1)
+            v3 = _avg_volume(bars, max(0, l3.index - 1), l3.index + 1)
+            vol_fade = bool(v1 > 0 and v3 > 0 and v3 <= v1 * VOLUME_CONTRACT_RATIO)
+            vol_c, vol_b, vol_s, vol_note = _volume_facts(
+                bars,
+                impulse_start=max(0, l1.index - 12),
+                impulse_end=l1.index,
+                body_start=l1.index,
+                body_end=l3.index,
+                status=status,
+            )
+            vol_c = vol_c or vol_fade
+            conf, breakdown = _score_geometry(
+                0.56,
+                symmetry=0.14,
+                spacing=0.10,
+                context=0.10,
+                volume=0.10 * (0.5 + 0.5 * vol_s + (0.2 if vol_fade else 0)),
+                breakout=0.14 if status == "confirmed" else 0.0,
+                vol_confirm=0.08 if (status == "confirmed" and vol_b) else 0.0,
+            )
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
+            target = resist + height * TARGET_HS_FACTOR
+            stop = support - atr * 0.2
+            # консервативный ретест: после пробоя цена у шеи
+            px = bars[-1].close
+            entry_mode = "wait"
+            if status == "confirmed":
+                if abs(px - resist) / resist * 100.0 <= 0.6:
+                    entry_mode = "retest"
+                else:
+                    entry_mode = "breakout"
+            psycho = (
+                "разворот down→up: 3 равных дна, крупные трясут пассажиров у поддержки"
+            )
+            if vol_note:
+                psycho = f"{psycho} · {vol_note}"
+            out.append(
+                ChartPattern(
+                    kind="triple_bottom",
+                    subtype="reversal",
+                    status=status,
+                    points=(
+                        PatternPoint(l1.index, l1.price, "trough1"),
+                        PatternPoint(l2.index, l2.price, "trough2"),
+                        PatternPoint(l3.index, l3.price, "trough3"),
+                        PatternPoint(peaks[-1].index, resist, "resistance"),
+                    ),
+                    lines=(
+                        PatternLine(l1.index, support, l3.index, support, "support"),
+                        PatternLine(peaks[0].index, resist, peaks[-1].index, resist, "neckline"),
+                    ),
+                    zone_top=resist,
+                    zone_bottom=support,
+                    neckline=PatternLine(peaks[0].index, resist, peaks[-1].index, resist, "neckline"),
+                    pole_height=height,
+                    target_price=target,
+                    stop_price=stop,
+                    confidence=conf,
+                    score_breakdown=breakdown,
+                    source_rule="classic:triple_bottom+volume",
+                    label_ru=PATTERN_LABELS_RU["triple_bottom"],
+                    direction="bullish",
+                    volume_contracted=vol_c,
+                    volume_breakout=vol_b,
+                    volume_score=vol_s,
+                    entry_mode=entry_mode,
+                    psychology_note=psycho,
+                )
+            )
+
+    # --- Тройная вершина (зеркало) ---
+    if len(highs) >= 3 and lows:
+        for i in range(len(highs) - 2):
+            h1, h2, h3 = highs[i], highs[i + 1], highs[i + 2]
+            if h2.index - h1.index < TRIPLE_MIN_BARS_BETWEEN:
+                continue
+            if h3.index - h2.index < TRIPLE_MIN_BARS_BETWEEN:
+                continue
+            if h3.index - h1.index > TRIPLE_MAX_SPAN_BARS:
+                continue
+            if max(
+                _pct_diff(h1.price, h2.price),
+                _pct_diff(h2.price, h3.price),
+                _pct_diff(h1.price, h3.price),
+            ) > TRIPLE_EXTREMUM_TOLERANCE_PCT:
+                continue
+            if _prior_trend_bias(bars, h1.index) != "bullish":
+                continue
+            valleys = [s for s in lows if h1.index < s.index < h3.index]
+            if len(valleys) < 2:
+                continue
+            support = min(v.price for v in valleys)
+            resist = (h1.price + h2.price + h3.price) / 3.0
+            height = resist - support
+            if height < atr * 1.0:
+                continue
+            status = _status_from_break(bars, bullish=False, trigger=support)
+            v1 = _avg_volume(bars, max(0, h1.index - 1), h1.index + 1)
+            v3 = _avg_volume(bars, max(0, h3.index - 1), h3.index + 1)
+            vol_fade = bool(v1 > 0 and v3 > 0 and v3 <= v1 * VOLUME_CONTRACT_RATIO)
+            vol_c, vol_b, vol_s, vol_note = _volume_facts(
+                bars,
+                impulse_start=max(0, h1.index - 12),
+                impulse_end=h1.index,
+                body_start=h1.index,
+                body_end=h3.index,
+                status=status,
+            )
+            vol_c = vol_c or vol_fade
+            conf, breakdown = _score_geometry(
+                0.56,
+                symmetry=0.14,
+                spacing=0.10,
+                context=0.10,
+                volume=0.10 * (0.5 + 0.5 * vol_s + (0.2 if vol_fade else 0)),
+                breakout=0.14 if status == "confirmed" else 0.0,
+                vol_confirm=0.08 if (status == "confirmed" and vol_b) else 0.0,
+            )
+            if conf < MIN_PATTERN_CONFIDENCE:
+                continue
+            target = support - height * TARGET_HS_FACTOR
+            stop = resist + atr * 0.2
+            px = bars[-1].close
+            entry_mode = "wait"
+            if status == "confirmed":
+                if abs(px - support) / support * 100.0 <= 0.6:
+                    entry_mode = "retest"
+                else:
+                    entry_mode = "breakout"
+            psycho = "разворот up→down: 3 равных вершины, выброс слабых лонгов у сопротивления"
+            if vol_note:
+                psycho = f"{psycho} · {vol_note}"
+            out.append(
+                ChartPattern(
+                    kind="triple_top",
+                    subtype="reversal",
+                    status=status,
+                    points=(
+                        PatternPoint(h1.index, h1.price, "peak1"),
+                        PatternPoint(h2.index, h2.price, "peak2"),
+                        PatternPoint(h3.index, h3.price, "peak3"),
+                        PatternPoint(valleys[-1].index, support, "support"),
+                    ),
+                    lines=(
+                        PatternLine(h1.index, resist, h3.index, resist, "resistance"),
+                        PatternLine(valleys[0].index, support, valleys[-1].index, support, "neckline"),
+                    ),
+                    zone_top=resist,
+                    zone_bottom=support,
+                    neckline=PatternLine(valleys[0].index, support, valleys[-1].index, support, "neckline"),
+                    pole_height=height,
+                    target_price=target,
+                    stop_price=stop,
+                    confidence=conf,
+                    score_breakdown=breakdown,
+                    source_rule="classic:triple_top+volume",
+                    label_ru=PATTERN_LABELS_RU["triple_top"],
+                    direction="bearish",
+                    volume_contracted=vol_c,
+                    volume_breakout=vol_b,
+                    volume_score=vol_s,
+                    entry_mode=entry_mode,
+                    psychology_note=psycho,
+                )
+            )
+    return _suppress_overlaps(out)[:1]
 
 
 def detect_chart_patterns(
@@ -1743,9 +2073,9 @@ def detect_chart_patterns(
     found: list[ChartPattern] = []
     hs_patterns = _detect_head_shoulders(bars, swings, atr)
     found.extend(_detect_double_top_bottom(bars, swings, atr))
+    found.extend(_detect_triple_top_bottom(bars, swings, atr))
     found.extend(hs_patterns)
     found.extend(_detect_baskerville(bars, hs_patterns, atr))
-    # чашка отключена по решению пользователя (CUP_ENABLED=False)
     found.extend(_detect_three_indians(bars, swings, atr))
     found.extend(_detect_diamond(swings, bars, atr))
     found.extend(_detect_flag_pennant(bars, atr))
