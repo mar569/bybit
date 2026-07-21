@@ -319,18 +319,36 @@ def _draw_fib_targets(
         return
     x1 = _x_at(bars, len(bars) - 1)
     color = "#e3b341"
+    # Разнести близкие Fib-цели по Y, чтобы tp1/tp2/tp3 не слипались
+    y_lim = ax.get_ylim()
+    span = max(y_lim[1] - y_lim[0], abs(prices[0]) * 0.02, 1e-9)
+    min_gap = span * 0.012
+    order = sorted(range(min(3, len(prices))), key=lambda i: prices[i])
+    display_y = {i: prices[i] for i in order}
+    for k in range(1, len(order)):
+        i_prev, i_cur = order[k - 1], order[k]
+        if display_y[i_cur] - display_y[i_prev] < min_gap:
+            display_y[i_cur] = display_y[i_prev] + min_gap
     for i, (price, lab) in enumerate(zip(prices[:3], (labels + [""] * 3)[:3])):
         ax.axhline(price, color=color, linestyle="--", linewidth=0.75, alpha=0.55 - i * 0.08)
         ax.text(
             x1,
-            price,
+            display_y.get(i, price),
             f" {lab or f'Fib5 #{i+1}'} ",
             color=color,
             fontsize=5.8,
-            va="bottom",
+            va="center",
             ha="left",
-            alpha=0.9,
+            alpha=0.95,
             fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.12",
+                facecolor="#0d1117",
+                edgecolor=color,
+                alpha=0.72,
+                linewidth=0.45,
+            ),
+            zorder=7,
         )
 
 

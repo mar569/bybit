@@ -234,7 +234,8 @@ def _layout_right_label_xs(bars: list[KlineBar], labels: list[_RightLabel]) -> l
     base = mdates.date2num(times[-1])
     bar_w = _bar_width_days(bars)
     ref = labels[0].price
-    min_gap = ref * 0.004
+    # Чуть шире «слипание», чтобы близкие TP/STOP/триггеры не наезжали
+    min_gap = abs(ref) * 0.008
     xs = [0.0] * len(labels)
     col = 0
     prev_price: float | None = None
@@ -243,9 +244,41 @@ def _layout_right_label_xs(bars: list[KlineBar], labels: list[_RightLabel]) -> l
             col += 1
         else:
             col = 0
-        xs[idx] = base + bar_w * (11.0 + col * 4.5)
+        xs[idx] = base + bar_w * (12.0 + col * 5.5)
         prev_price = lbl.price
     return xs
+
+
+def _deconflict_right_label_ys(
+    labels: list[_RightLabel],
+    *,
+    y_min: float | None = None,
+    y_max: float | None = None,
+) -> list[float]:
+    """Разносит подписи по Y, если цены слишком близко (линии остаются на цене)."""
+    if not labels:
+        return []
+    prices = [lbl.price for lbl in labels]
+    lo = min(prices) if y_min is None else min(min(prices), y_min)
+    hi = max(prices) if y_max is None else max(max(prices), y_max)
+    span = max(hi - lo, abs(prices[0]) * 0.02, 1e-9)
+    # Минимальный зазор ~1.1% от видимого диапазона
+    min_gap = span * 0.011
+    order = sorted(range(len(labels)), key=lambda i: labels[i].price)
+    ys = [lbl.price for lbl in labels]
+    for k in range(1, len(order)):
+        i_prev, i_cur = order[k - 1], order[k]
+        if ys[i_cur] - ys[i_prev] < min_gap:
+            ys[i_cur] = ys[i_prev] + min_gap
+    if y_max is not None and ys[order[-1]] > y_max:
+        overflow = ys[order[-1]] - y_max
+        for i in order:
+            ys[i] -= overflow * 0.55
+    for k in range(1, len(order)):
+        i_prev, i_cur = order[k - 1], order[k]
+        if ys[i_cur] - ys[i_prev] < min_gap:
+            ys[i_cur] = ys[i_prev] + min_gap
+    return ys
 
 
 def _draw_right_price_labels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
@@ -253,10 +286,25 @@ def _draw_right_price_labels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisR
     if not labels:
         return
     xs = _layout_right_label_xs(bars, labels)
-    for lbl, x in zip(labels, xs):
+    y_lim = ax.get_ylim()
+    ys = _deconflict_right_label_ys(labels, y_min=y_lim[0], y_max=y_lim[1])
+    for lbl, x, y in zip(labels, xs, ys):
         ax.text(
-            x, lbl.price, lbl.text,
-            color=lbl.color, fontsize=6.9, va=lbl.va, ha="left",
+            x,
+            y,
+            lbl.text,
+            color=lbl.color,
+            fontsize=6.9,
+            va="center",
+            ha="left",
+            bbox=dict(
+                boxstyle="round,pad=0.18",
+                facecolor=CHART_STYLE["bg"],
+                edgecolor=lbl.color,
+                alpha=0.78,
+                linewidth=0.55,
+            ),
+            zorder=8,
         )
 
 
@@ -698,10 +746,20 @@ def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -
         if is_key:
             x1 = mdates.date2num(_bar_times(bars)[-1])
             ratio_lbl = "0.5" if abs(fl.ratio - 0.5) < 1e-9 else "0.618"
+            # Чуть выше линии + фон, чтобы не слипалось с TP/триггерами
+            y_off = abs(fl.price) * 0.0025
             ax.text(
-                x1, fl.price, f" Fib {ratio_lbl} ",
-                color=color, fontsize=7.0, va="center", ha="left", alpha=0.95,
+                x1, fl.price + y_off, f" Fib {ratio_lbl} ",
+                color=color, fontsize=7.0, va="bottom", ha="left", alpha=0.95,
                 fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.12",
+                    facecolor=CHART_STYLE["bg"],
+                    edgecolor=color,
+                    alpha=0.7,
+                    linewidth=0.4,
+                ),
+                zorder=6,
             )
         elif fl.ratio in {0.382, 1.272, 1.618}:
             x0 = mdates.date2num(_bar_times(bars)[0])

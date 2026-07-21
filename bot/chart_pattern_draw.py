@@ -74,7 +74,23 @@ def _draw_line(
         y1 = line.start_price + slope * (end_idx - line.start_idx)
     ax.plot([x0, x1], [line.start_price, y1], color=color, linewidth=1.2, alpha=alpha, linestyle=linestyle)
     if label:
-        ax.text(x1, y1, f" {label}", color=color, fontsize=6.3, va="center")
+        y_span = abs(y1) * 0.004
+        ax.text(
+            x1,
+            y1 + y_span,
+            f" {label}",
+            color=color,
+            fontsize=6.3,
+            va="bottom",
+            bbox=dict(
+                boxstyle="round,pad=0.12",
+                facecolor="#0d1117",
+                edgecolor=color,
+                alpha=0.7,
+                linewidth=0.4,
+            ),
+            zorder=6,
+        )
 
 
 _POINT_LABELS_RU = {
