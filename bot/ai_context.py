@@ -333,6 +333,7 @@ def format_context_text(pack: dict[str, Any]) -> str:
         f"GATES={pack.get('decision_gate')}",
         f"PLAYBOOK={pack.get('playbook')}",
         f"LINKS chart={pack.get('chart_url')} liq_map={pack.get('liq_map_url')}",
+        f"LIQ_MAP_SCREENSHOT={pack.get('liq_map_screenshot', 'unknown')} {pack.get('liq_map_note', '')}",
         "JSON:",
         json.dumps(pack, ensure_ascii=False, separators=(",", ":"))[:14000],
     ]
@@ -407,11 +408,20 @@ async def build_ai_context_pack(
     attach_gates(pack_dict, ta, sym, ex)
 
     liq_png: bytes | None = None
+    liq_capture_ok = False
     if include_liq_map:
         try:
-            liq_png = await chart_capture_service.capture_coinglass(pack_dict["liq_map_url"])
+            liq_png = await chart_capture_service.capture_liquidation_heatmap(sym, ex)
+            liq_capture_ok = bool(liq_png)
         except Exception:
             logger.debug("Liq map capture failed", exc_info=True)
+            liq_png = None
+    pack_dict["liq_map_screenshot"] = "ok" if liq_capture_ok else "unavailable"
+    if not liq_capture_ok:
+        pack_dict["liq_map_note"] = (
+            "Скрин heatmap недоступен (CoinGlass блок/таймаут/пусто). "
+            "Опирайся на LIQ_MAGNET и ссылку liq_map_url; не выдумывай 404-уровни с картинки."
+        )
 
     return AiContextPack(
         symbol=sym,
