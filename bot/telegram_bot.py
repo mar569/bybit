@@ -72,6 +72,7 @@ from .ta_analysis import (
     evaluate_entry_readiness,
     ta_manual_detailed_html,
     ta_analysis_chart_caption_html,
+    ta_scenario_followup_caption_html,
     ta_signal_caption_html,
     should_skip_noise_signal,
     ta_telegram_caption_html,
