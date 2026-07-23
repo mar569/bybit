@@ -17,6 +17,9 @@ class Config(BaseSettings):
     bybit_api_key: str | None = Field(None, env="BYBIT_API_KEY")
     bybit_api_secret: str | None = Field(None, env="BYBIT_API_SECRET")
 
+    gemini_api_key: str | None = Field(None, env="GEMINI_API_KEY")
+    gemini_model: str = Field("gemini-2.5-flash", env="GEMINI_MODEL")
+
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")
     telegram_anomaly_chat_id: int | None = Field(None, env="TELEGRAM_ANOMALY_CHAT_ID")
@@ -45,6 +48,16 @@ class Config(BaseSettings):
         if value is None or value == "":
             return None
         return value
+
+    @validator("gemini_api_key", pre=True)
+    def empty_gemini_api_key(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @property
+    def gemini_configured(self) -> bool:
+        return bool(self.gemini_api_key)
 
     @property
     def notification_chat_id(self) -> int:

@@ -84,9 +84,17 @@ from .test_signals import build_test_signals
 from .liquidation_alerts import (
     LiquidationAlertEvent,
     base_ticker,
+    coinglass_liq_map_url,
     coinglass_url,
     format_liquidation_alert,
 )
+from .ai_analyst import (
+    AiChatMessage,
+    GeminiNotConfiguredError,
+    GeminiRateLimitError,
+    ask_gemini,
+)
+from .ai_context import build_ai_context_pack, parse_hours_from_text
 from .liquidation_analysis import (
     AnalysisFactor,
     LiquidationAnalysisResult,
@@ -203,6 +211,10 @@ class TelegramBot:
         self._pause_snapshot: dict[str, bool] | None = None
         self._last_trend_seed_scan_at: float = 0.0
         self._trend_seed_scan_lock = asyncio.Lock()
+        # AI analyst sessions (admin-only): user_id -> session dict
+        self._ai_sessions: dict[int, dict[str, Any]] = {}
+        self._AI_SESSION_TTL_SEC = 30 * 60
+        self._AI_REDIS_PREFIX = "ai:session:"
 
     _BOT_PAUSE_KEYS: tuple[str, ...] = (
         "signals_enabled",
@@ -399,6 +411,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("chart", self.on_chart))
         self.application.add_handler(CommandHandler("ta", self.on_ta_help))
+        self.application.add_handler(CommandHandler("ai_stop", self.on_ai_stop))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
         self.application.add_handler(CommandHandler("cancel", self.on_cancel))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
@@ -734,6 +747,43 @@ class TelegramBot:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
 
+    def _coinglass_link_buttons(
+        self,
+        symbol: str,
+        exchange: str = "bybit",
+        *,
+        chart_url: str | None = None,
+        include_copy: bool = False,
+        include_ai: bool = True,
+    ) -> list[InlineKeyboardButton]:
+        """TV chart + Liquidation Heatmap Model 3 + optional AI callback."""
+        chart = chart_url or coinglass_url(symbol, exchange)
+        buttons = [
+            InlineKeyboardButton("📊 CoinGlass", url=chart),
+            InlineKeyboardButton(
+                "🔥 Liq Map",
+                url=coinglass_liq_map_url(symbol, exchange),
+            ),
+        ]
+        if include_ai:
+            ex = (exchange or "bybit").lower().replace(" ", "")
+            sym = symbol.upper().replace("/", "")
+            buttons.append(
+                InlineKeyboardButton("🤖 AI", callback_data=f"aiask:{ex}:{sym}"),
+            )
+        if include_copy:
+            sym = symbol.upper()
+            buttons.append(
+                InlineKeyboardButton(f"📋 {sym}", callback_data=f"symcopy:{sym}"),
+            )
+        return buttons
+
+    def _ai_session_keyboard(self, symbol: str, exchange: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            self._coinglass_link_buttons(symbol, exchange, include_ai=False),
+            [InlineKeyboardButton("✖️ Закрыть AI", callback_data="aistop")],
+        ])
+
     def _signal_keyboard(
         self,
         signal: Signal,
@@ -743,37 +793,342 @@ class TelegramBot:
         show_intent: bool = False,
     ) -> InlineKeyboardMarkup:
         rows = [
-            [
-                InlineKeyboardButton("📊 CoinGlass", url=signal.link),
-                InlineKeyboardButton(
-                    f"📋 {signal.symbol}",
-                    callback_data=f"symcopy:{signal.symbol}",
-                ),
-            ],
+            self._coinglass_link_buttons(
+                signal.symbol,
+                signal.exchange or "bybit",
+                chart_url=signal.link,
+                include_copy=True,
+                include_ai=True,
+            ),
         ]
         if pro_token:
             rows.append([InlineKeyboardButton("📖 Подробнее", callback_data=f"sigpro:{pro_token}")])
-        # Кнопки подписки на подтверждённый вход
-        if show_intent or (quality_tier or "").lower() in {"watch", "entry"}:
-            ex = (signal.exchange or "bybit").lower().replace(" ", "")
-            sym = signal.symbol.upper()
-            rows.append([
-                InlineKeyboardButton(
-                    "🟢 Ждать LONG",
-                    callback_data=f"swait:long:{ex}:{sym}",
-                ),
-                InlineKeyboardButton(
-                    "🔴 Ждать SHORT",
-                    callback_data=f"swait:short:{ex}:{sym}",
-                ),
-            ])
-            rows.append([
-                InlineKeyboardButton(
-                    "✖️ Отмена слежки",
-                    callback_data=f"swait:cancel:{ex}:{sym}",
-                ),
-            ])
+        # LONG/SHORT wait buttons removed from Hot signals (AI / manual TA instead)
         return InlineKeyboardMarkup(rows)
+
+    def _ai_history_from_session(self, session: dict[str, Any]) -> list[AiChatMessage]:
+        out: list[AiChatMessage] = []
+        for item in session.get("history") or []:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user")
+            text = str(item.get("text") or "")
+            if role in {"user", "model"} and text:
+                out.append(AiChatMessage(role=role, text=text))
+        return out
+
+    async def _load_ai_session(self, user_id: int) -> dict[str, Any] | None:
+        session = self._ai_sessions.get(user_id)
+        if session is None and self.redis is not None:
+            try:
+                raw = await self.redis.get(f"{self._AI_REDIS_PREFIX}{user_id}")
+                if raw:
+                    session = json.loads(raw)
+                    if isinstance(session, dict):
+                        self._ai_sessions[user_id] = session
+            except Exception:
+                logger.debug("AI session redis load failed", exc_info=True)
+                session = None
+        if not session:
+            return None
+        updated = float(session.get("updated_at") or 0)
+        if time.time() - updated > self._AI_SESSION_TTL_SEC:
+            await self._clear_ai_session(user_id)
+            return None
+        return session
+
+    async def _save_ai_session(self, user_id: int, session: dict[str, Any]) -> None:
+        session["updated_at"] = time.time()
+        # Keep history compact for Redis
+        hist = list(session.get("history") or [])[-16:]
+        session["history"] = hist
+        self._ai_sessions[user_id] = session
+        if self.redis is not None:
+            try:
+                payload = {
+                    k: v for k, v in session.items()
+                    if k not in {"chart_png", "liq_map_png"}
+                }
+                await self.redis.set(
+                    f"{self._AI_REDIS_PREFIX}{user_id}",
+                    json.dumps(payload, ensure_ascii=False),
+                    ex=self._AI_SESSION_TTL_SEC,
+                )
+            except Exception:
+                logger.debug("AI session redis save failed", exc_info=True)
+
+    async def _clear_ai_session(self, user_id: int) -> None:
+        self._ai_sessions.pop(user_id, None)
+        if self.redis is not None:
+            try:
+                await self.redis.delete(f"{self._AI_REDIS_PREFIX}{user_id}")
+            except Exception:
+                logger.debug("AI session redis delete failed", exc_info=True)
+
+    async def on_ai_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update) or update.effective_user is None:
+            return
+        await self._clear_ai_session(update.effective_user.id)
+        if update.message:
+            await update.message.reply_text("🤖 AI-сессия закрыта.")
+
+    async def _handle_ai_callback(
+        self,
+        update: Update,
+        query: Any,
+        payload: str,
+    ) -> bool:
+        if payload == "aistop":
+            if not self._is_admin(update):
+                await query.answer("Только админ.", show_alert=True)
+                return True
+            uid = update.effective_user.id if update.effective_user else 0
+            await self._clear_ai_session(uid)
+            await query.answer("AI закрыт")
+            if query.message:
+                try:
+                    await query.message.reply_text("🤖 AI-сессия закрыта. /ai_stop тоже работает.")
+                except BadRequest:
+                    pass
+            return True
+        if not payload.startswith("aiask:"):
+            return False
+        if not self._is_admin(update):
+            await query.answer("AI только для админа.", show_alert=True)
+            return True
+        if not self.config.gemini_configured:
+            await query.answer(
+                "Добавь GEMINI_API_KEY в .env (бесплатно: aistudio.google.com/apikey)",
+                show_alert=True,
+            )
+            return True
+        parts = payload.split(":")
+        if len(parts) < 3:
+            await query.answer("Некорректный AI-запрос", show_alert=True)
+            return True
+        exchange = parts[1] or "bybit"
+        symbol = parts[2].upper()
+        await query.answer("Собираю анализ…")
+        chat_id = query.message.chat_id if query.message else update.effective_chat.id
+        status = None
+        if query.message:
+            try:
+                status = await query.message.reply_text(
+                    f"🤖 <b>AI</b> · <code>{symbol}</code>\n"
+                    "Собираю TA / паттерны / волны / SMC + график 24h…\n"
+                    "Можно писать вопросы и слать скрины. Горизонт 1–3ч, окно <code>сутки</code>/<code>двое</code>.\n"
+                    "/ai_stop — закрыть.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except BadRequest:
+                status = await query.message.reply_text(f"AI {symbol}: собираю анализ…")
+        await self._run_ai_turn(
+            user_id=update.effective_user.id,
+            chat_id=chat_id,
+            symbol=symbol,
+            exchange=exchange,
+            user_text=(
+                "Сделай полный разбор по пакету бота и картинкам: "
+                "что ждать в ближайшие 1–3 часа и какую позицию рассматривать (LONG/SHORT/WAIT). "
+                "Окно графика 24 часа."
+            ),
+            hours=24,
+            rebuild_context=True,
+            user_images=None,
+            status_message=status,
+        )
+        return True
+
+    async def _download_telegram_photo(self, update: Update) -> bytes | None:
+        if update.message is None or not update.message.photo or self.application is None:
+            return None
+        try:
+            photo = update.message.photo[-1]
+            tg_file = await self.application.bot.get_file(photo.file_id)
+            data = await tg_file.download_as_bytearray()
+            return bytes(data)
+        except Exception:
+            logger.exception("AI photo download failed")
+            return None
+
+    async def _handle_ai_user_message(self, update: Update, *, is_photo: bool = False) -> bool:
+        if not self._is_admin(update) or update.effective_user is None or update.message is None:
+            return False
+        user_id = update.effective_user.id
+        session = await self._load_ai_session(user_id)
+        if session is None:
+            return False
+
+        text = (update.message.caption if is_photo else update.message.text) or ""
+        text = text.strip()
+        if text.lower() in {"/ai_stop", "ai stop", "закрыть ai", "стоп ai"}:
+            await self._clear_ai_session(user_id)
+            await update.message.reply_text("🤖 AI-сессия закрыта.")
+            return True
+
+        images: list[bytes] = []
+        if is_photo:
+            png = await self._download_telegram_photo(update)
+            if png:
+                images.append(png)
+            if not text:
+                text = "Проанализируй этот скрин вместе с пакетом бота."
+
+        hours = int(session.get("hours") or 24)
+        new_hours = parse_hours_from_text(text, default=hours)
+        rebuild = new_hours != hours
+        if rebuild:
+            hours = new_hours
+        # Redis restore drops PNG blobs — refresh pack when chart missing
+        if not isinstance(session.get("chart_png"), (bytes, bytearray)):
+            rebuild = True
+
+        status = await update.message.reply_text(
+            f"🤖 Думаю… ({session.get('symbol')} · {hours}h)"
+        )
+        await self._run_ai_turn(
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
+            symbol=str(session.get("symbol") or ""),
+            exchange=str(session.get("exchange") or "bybit"),
+            user_text=text or "Продолжи.",
+            hours=hours,
+            rebuild_context=rebuild or not session.get("context_text"),
+            user_images=images or None,
+            status_message=status,
+            existing_session=session,
+        )
+        return True
+
+    async def _run_ai_turn(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        symbol: str,
+        exchange: str,
+        user_text: str,
+        hours: int,
+        rebuild_context: bool,
+        user_images: list[bytes] | None,
+        status_message: Any | None,
+        existing_session: dict[str, Any] | None = None,
+    ) -> None:
+        session = existing_session or await self._load_ai_session(user_id) or {}
+        context_text = str(session.get("context_text") or "")
+        chart_png = session.get("chart_png") if isinstance(session.get("chart_png"), (bytes, bytearray)) else None
+        liq_png = session.get("liq_map_png") if isinstance(session.get("liq_map_png"), (bytes, bytearray)) else None
+
+        if rebuild_context or not context_text:
+            try:
+                pack = await build_ai_context_pack(
+                    symbol,
+                    exchange,
+                    hours=hours,
+                    include_chart=True,
+                    include_liq_map=True,
+                )
+            except Exception as exc:
+                logger.exception("AI context build failed")
+                msg = f"Не собрал контекст: {exc}"
+                if status_message is not None:
+                    try:
+                        await status_message.edit_text(msg)
+                    except BadRequest:
+                        await self._send_to_chat(chat_id, msg, None, is_priority=False)
+                else:
+                    await self._send_to_chat(chat_id, msg, None, is_priority=False)
+                return
+            context_text = pack.context_text
+            chart_png = pack.chart_png
+            liq_png = pack.liq_map_png
+            session.update({
+                "symbol": pack.symbol,
+                "exchange": pack.exchange,
+                "hours": pack.hours,
+                "context_text": context_text,
+                "chart_url": pack.chart_url,
+                "liq_map_url": pack.liq_map_url,
+                "chart_png": chart_png,
+                "liq_map_png": liq_png,
+                "chat_id": chat_id,
+            })
+
+        images: list[bytes] = []
+        if chart_png:
+            images.append(bytes(chart_png))
+        if liq_png:
+            images.append(bytes(liq_png))
+        if user_images:
+            images.extend(user_images)
+
+        history = self._ai_history_from_session(session)
+        try:
+            result = await ask_gemini(
+                api_key=self.config.gemini_api_key,
+                model=self.config.gemini_model,
+                context_text=context_text,
+                user_text=user_text,
+                history=history,
+                images=images,
+            )
+        except GeminiNotConfiguredError as exc:
+            text = str(exc)
+            if status_message is not None:
+                try:
+                    await status_message.edit_text(text)
+                except BadRequest:
+                    pass
+            else:
+                await self._send_to_chat(chat_id, text, None, is_priority=False)
+            return
+        except GeminiRateLimitError as exc:
+            text = f"⏳ {exc}"
+            if status_message is not None:
+                try:
+                    await status_message.edit_text(text)
+                except BadRequest:
+                    pass
+            else:
+                await self._send_to_chat(chat_id, text, None, is_priority=False)
+            return
+
+        answer = (result.text or result.error or "Пустой ответ.").strip()
+        hist = list(session.get("history") or [])
+        hist.append({"role": "user", "text": user_text})
+        hist.append({"role": "model", "text": answer})
+        session["history"] = hist
+        session["hours"] = hours
+        session["chat_id"] = chat_id
+        await self._save_ai_session(user_id, session)
+
+        keyboard = self._ai_session_keyboard(symbol, exchange)
+        caption = f"🤖 <b>{html.escape(symbol)}</b> · {hours}h"
+        if result.model:
+            caption += f" · <i>{html.escape(result.model)}</i>"
+        if status_message is not None:
+            try:
+                await status_message.delete()
+            except Exception:
+                pass
+
+        # Preserve newlines for HTML Telegram messages
+        answer_html = html.escape(answer).replace("\n", "\n")
+
+        if chart_png:
+            if len(answer) <= 900:
+                short_cap = f"{caption}\n\n{answer_html}"
+                await self._send_chart(
+                    chat_id, bytes(chart_png), short_cap, is_priority=False, keyboard=keyboard,
+                )
+            else:
+                await self._send_chart(
+                    chat_id, bytes(chart_png), caption, is_priority=False, keyboard=keyboard,
+                )
+                await self._send_to_chat(chat_id, answer_html, keyboard, is_priority=False)
+        else:
+            body = f"{caption}\n\n{answer_html}"
+            await self._send_to_chat(chat_id, body, keyboard, is_priority=False)
 
     def _store_signal_watch_ctx(self, signal: Signal, ta: Any) -> None:
         if ta is None:
@@ -869,7 +1224,11 @@ class TelegramBot:
         if len(caption) > 1020:
             caption = caption[:1017] + "…"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=signal.link)],
+            self._coinglass_link_buttons(
+                signal.symbol,
+                signal.exchange or "bybit",
+                chart_url=signal.link,
+            ),
         ])
         sent = False
         if png:
@@ -1474,7 +1833,7 @@ class TelegramBot:
             show_reversal_hint=settings.liquidation_show_reversal_hint,
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(event.symbol, event.exchange))],
+            self._coinglass_link_buttons(event.symbol, event.exchange),
         ])
         notify_chat_id = self.config.notification_chat_id
         sent = await self._send_to_chat(notify_chat_id, message, keyboard, is_priority=True)
@@ -1501,7 +1860,7 @@ class TelegramBot:
 
         message = format_anomaly_alert(event)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(event.symbol, event.exchange))],
+            self._coinglass_link_buttons(event.symbol, event.exchange),
         ])
         sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
         if sent:
@@ -1545,7 +1904,7 @@ class TelegramBot:
             f"💡 {hint}"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=link)],
+            self._coinglass_link_buttons(sym, exchange, chart_url=link),
         ])
         sent = await self._send_to_chat(
             self.config.notification_chat_id, message, keyboard, is_priority=False,
@@ -1573,9 +1932,7 @@ class TelegramBot:
 
         message = format_liquidation_analysis(result)
         keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(result.symbol, result.exchange)),
-            ],
+            self._coinglass_link_buttons(result.symbol, result.exchange),
         ])
         sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=False)
         if not sent:
@@ -1866,7 +2223,7 @@ class TelegramBot:
         if wizard:
             rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
         else:
-            rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
+            rows.append(self._coinglass_link_buttons(symbol, "bybit"))
         return InlineKeyboardMarkup(rows)
 
     def _manual_ta_chart_source_keyboard(
@@ -1898,7 +2255,7 @@ class TelegramBot:
         if wizard:
             rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
         else:
-            rows.append([InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))])
+            rows.append(self._coinglass_link_buttons(symbol, "bybit"))
         return InlineKeyboardMarkup(rows)
 
     def _manual_ta_result_keyboard(
@@ -2165,7 +2522,11 @@ class TelegramBot:
         elif upd.kind == "expired":
             message = f"⌛ <b>Слежка истекла</b> · <b>{watch.symbol}</b>\n{message}"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=watch.coinglass_url or coinglass_url(watch.symbol, watch.exchange))],
+            self._coinglass_link_buttons(
+                watch.symbol,
+                watch.exchange,
+                chart_url=watch.coinglass_url or None,
+            ),
         ])
 
         notify_chat = watch.chat_id or notify_chat_id
@@ -2910,6 +3271,8 @@ class TelegramBot:
     async def on_manual_ta_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        if await self._handle_ai_user_message(update, is_photo=True):
+            return
         if await self._handle_mta_wizard_photo(update, context):
             return
         if not self._is_manual_ta_chat(update):
@@ -2934,6 +3297,10 @@ class TelegramBot:
     async def on_manual_ta_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        # AI follow-up text is handled in on_text_message (group 0); skip ticker parse if session open
+        if self._is_admin(update) and update.effective_user is not None:
+            if await self._load_ai_session(update.effective_user.id) is not None:
+                return
         if await self._handle_mta_wizard_text(update, context):
             return
         if not self._is_manual_ta_chat(update):
@@ -3025,7 +3392,7 @@ class TelegramBot:
 
         caption = ta_telegram_caption_html(ta)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 CoinGlass", url=coinglass_url(symbol, "bybit"))],
+            self._coinglass_link_buttons(symbol, "bybit"),
         ])
         await self._send_chart(
             update.effective_chat.id,
@@ -3180,6 +3547,8 @@ class TelegramBot:
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update) or update.message is None:
             return
+        if await self._handle_ai_user_message(update, is_photo=False):
+            return
         text = (update.message.text or "").strip()
         if text in {"⏸ Стоп", "Стоп", "⏸ Стоп сигналы", "⏸ Стоп бот", "Стоп бот"}:
             await self._set_bot_paused(update, paused=True)
@@ -3239,6 +3608,7 @@ class TelegramBot:
             "/test — тестовые сигналы LONG + SHORT\n"
             "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
             "/ta — справка по ручному TA-чату\n"
+            "/ai_stop — закрыть AI-сессию (кнопка 🤖 AI на сигнале)\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
             "🌱 <b>Тренды</b> — снимок потенциальных трендов (флет→пробой+OI)\n"
             "Hot: <b>ENTRY</b> + early WATCH (<code>trend_seed</code>/impulse), pulse у хая молчит\n"
@@ -3657,6 +4027,9 @@ class TelegramBot:
                     await query.message.reply_text(sym)
             else:
                 await query.answer("Тикер не найден", show_alert=True)
+            return
+        if payload.startswith("aiask:") or payload == "aistop":
+            await self._handle_ai_callback(update, query, payload)
             return
         if payload.startswith("sigpro:"):
             token = payload.split(":", 1)[1]

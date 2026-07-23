@@ -257,6 +257,26 @@ def coinglass_url(symbol: str, exchange: str) -> str:
     return f"https://www.coinglass.com/Futures/{normalized}"
 
 
+def coinglass_liq_map_url(symbol: str, exchange: str = "") -> str:
+    """CoinGlass Liquidation Heatmap Model 3 (pair view) for the coin."""
+    coin = base_ticker(symbol)
+    exchange_key = (exchange or "").lower()
+    if "bybit" in exchange_key:
+        ex = "Bybit"
+    elif "binance" in exchange_key:
+        ex = "Binance"
+    else:
+        ex = ""
+    # Deep-link: Model 3 + pair mode. Range (12h) is chosen on-site if not in query.
+    url = (
+        "https://www.coinglass.com/pro/futures/LiquidationHeatMapModel3"
+        f"?coin={coin}&type=pair"
+    )
+    if ex:
+        url += f"&exchange={ex}"
+    return url
+
+
 def exchange_trade_url(symbol: str, exchange: str) -> str:
     sym = symbol.upper()
     if "binance" in exchange.lower():
