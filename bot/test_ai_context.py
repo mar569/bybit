@@ -29,3 +29,24 @@ def test_serialize_ta_compact() -> None:
     assert data["elliott"]["label"] == "коррекция ABC"
     assert "fib" in data
     assert "smc" in data
+
+
+def test_meaningful_levels_skips_micro_noise() -> None:
+    from bot.ai_context import build_meaningful_levels
+
+    ta = {
+        "price": 3.475,
+        "support": 3.474,  # ~0.03% — noise
+        "resistance": 3.50,  # ~0.7% — below 1% min
+        "targets": [3.42, 3.35],
+        "liq_magnet": {"above": 3.476, "below": 3.35},
+        "key_levels": [{"label": "day_low", "price": 3.336}],
+        "fib": [{"ratio": 1.272, "price": 3.30, "kind": "extension"}],
+        "elliott": {"tps": [3.25], "entry": 3.52, "stop": 3.58},
+    }
+    levels = build_meaningful_levels(ta, min_pct=1.0)
+    prices = [x["price"] for x in levels["below"] + levels["above"]]
+    assert 3.474 not in prices
+    assert 3.50 not in prices
+    assert any(p <= 3.42 for p in prices)
+    assert any(abs(p - 3.30) < 0.01 for p in prices)

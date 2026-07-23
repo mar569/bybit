@@ -310,12 +310,143 @@ def attach_gates(pack: dict[str, Any], ta: TAAnalysisResult, symbol: str, exchan
         logger.debug("playbook attach failed", exc_info=True)
 
 
+def _dist_pct(price: float, level: float | None) -> float | None:
+    if level is None or price <= 0:
+        return None
+    try:
+        lv = float(level)
+    except (TypeError, ValueError):
+        return None
+    if lv <= 0:
+        return None
+    return abs(lv - price) / price * 100.0
+
+
+def build_meaningful_levels(ta: dict[str, Any], *, min_pct: float = 1.0) -> dict[str, Any]:
+    """Levels far enough for a 1–2%+ trade path (skip micro-noise)."""
+    price = float(ta.get("price") or 0)
+    if price <= 0:
+        return {"min_pct": min_pct, "above": [], "below": []}
+
+    candidates: list[tuple[str, float]] = []
+    for key, label in (
+        ("support", "support"),
+        ("resistance", "resistance"),
+        ("invalidation", "invalidation"),
+    ):
+        v = ta.get(key)
+        if v is not None:
+            candidates.append((label, float(v)))
+    for t in ta.get("targets") or []:
+        try:
+            candidates.append(("target", float(t)))
+        except (TypeError, ValueError):
+            continue
+    magnet = ta.get("liq_magnet") or {}
+    if magnet.get("above") is not None:
+        candidates.append(("magnet_above", float(magnet["above"])))
+    if magnet.get("below") is not None:
+        candidates.append(("magnet_below", float(magnet["below"])))
+    for kl in ta.get("key_levels") or []:
+        try:
+            candidates.append((str(kl.get("label") or "key"), float(kl["price"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+    setup = ta.get("setup_confluence") or {}
+    for t in setup.get("tps") or []:
+        try:
+            candidates.append(("setup_tp", float(t)))
+        except (TypeError, ValueError):
+            continue
+    if setup.get("entry") is not None:
+        try:
+            candidates.append(("setup_entry", float(setup["entry"])))
+        except (TypeError, ValueError):
+            pass
+    if setup.get("stop") is not None:
+        try:
+            candidates.append(("setup_stop", float(setup["stop"])))
+        except (TypeError, ValueError):
+            pass
+    ew = ta.get("elliott") or {}
+    for t in ew.get("tps") or []:
+        try:
+            candidates.append(("ew_tp", float(t)))
+        except (TypeError, ValueError):
+            continue
+    if ew.get("entry") is not None:
+        try:
+            candidates.append(("ew_entry", float(ew["entry"])))
+        except (TypeError, ValueError):
+            pass
+    if ew.get("stop") is not None:
+        try:
+            candidates.append(("ew_stop", float(ew["stop"])))
+        except (TypeError, ValueError):
+            pass
+    # Fib retracements / extensions from wave pack
+    for fl in ta.get("fib") or []:
+        try:
+            ratio = float(fl.get("ratio") or 0)
+            lvl = float(fl.get("price"))
+            kind = str(fl.get("kind") or "fib")
+            candidates.append((f"fib_{kind}_{ratio:g}", lvl))
+        except (TypeError, ValueError, KeyError):
+            continue
+    wave = ta.get("wave") or {}
+    for key, label in (("leg_start", "wave_leg_start"), ("leg_end", "wave_leg_end")):
+        if wave.get(key) is not None:
+            try:
+                candidates.append((label, float(wave[key])))
+            except (TypeError, ValueError):
+                pass
+    primary = ta.get("primary_pattern") or {}
+    for key, label in (("target", "pattern_tp"), ("stop", "pattern_stop")):
+        if primary.get(key) is not None:
+            try:
+                candidates.append((label, float(primary[key])))
+            except (TypeError, ValueError):
+                pass
+
+    above: list[dict[str, Any]] = []
+    below: list[dict[str, Any]] = []
+    seen: set[float] = set()
+    for label, lvl in candidates:
+        dist = _dist_pct(price, lvl)
+        if dist is None or dist < min_pct:
+            continue
+        rounded = round(lvl, 6)
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        item = {"label": label, "price": rounded, "dist_pct": round(dist, 2)}
+        if lvl > price:
+            above.append(item)
+        else:
+            below.append(item)
+    above.sort(key=lambda x: x["dist_pct"])
+    below.sort(key=lambda x: x["dist_pct"])
+    return {
+        "min_pct": min_pct,
+        "guide": (
+            "Первая цель/ход ≥1–2%. Бери Fib/EW/ABC/pattern/magnet из списка. "
+            "Ближе min_pct — шум, не сценарий."
+        ),
+        "above": above[:8],
+        "below": below[:8],
+        "tp1_min_pct": 1.0,
+        "tp1_prefer_pct": 2.0,
+        "tp2_hint_pct": 3.5,
+    }
+
+
 def format_context_text(pack: dict[str, Any]) -> str:
     """Human+JSON hybrid for the model (compact)."""
     sym = pack.get("symbol", "?")
     ex = pack.get("exchange", "?")
     hours = pack.get("hours", 24)
     ta = pack.get("ta") or {}
+    meaningful = pack.get("meaningful_levels") or build_meaningful_levels(ta)
     lines = [
         f"SYMBOL={sym} EXCHANGE={ex} WINDOW={hours}h TF={pack.get('interval_minutes', 5)}m",
         f"PRICE={ta.get('price')} VERDICT={ta.get('verdict')} CONF={ta.get('confidence')}/10",
@@ -330,6 +461,7 @@ def format_context_text(pack: dict[str, Any]) -> str:
         f"FORECAST={ta.get('forecast_summary')}",
         f"CVD={ta.get('cvd_source')} delta={ta.get('cvd_delta')} LIQ_CASCADE={ta.get('liq_cascade')}",
         f"LIQ_MAGNET={ta.get('liq_magnet')}",
+        f"MEANINGFUL_LEVELS={meaningful}",
         f"GATES={pack.get('decision_gate')}",
         f"PLAYBOOK={pack.get('playbook')}",
         f"LINKS chart={pack.get('chart_url')} liq_map={pack.get('liq_map_url')}",
@@ -406,6 +538,7 @@ async def build_ai_context_pack(
         "ta": serialize_ta(ta),
     }
     attach_gates(pack_dict, ta, sym, ex)
+    pack_dict["meaningful_levels"] = build_meaningful_levels(pack_dict["ta"])
 
     liq_png: bytes | None = None
     liq_capture_ok = False
