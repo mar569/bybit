@@ -299,6 +299,55 @@ def _flow_score(ta: TAAnalysisResult, side: str) -> tuple[int, list[str]]:
     return max(-10, min(15, pts)), notes
 
 
+def _liq_magnet_gate_delta(ta: TAAnalysisResult, side: str) -> tuple[int, list[str]]:
+    """Stop-magnet heuristic → score delta for ENTRY/WATCH.
+
+    Align: short toward longs-below / long toward shorts-above → fuel.
+    Against: entry into the magnet first (likely stop-hunt wick against you) → penalty.
+    Far: weak nearby magnets → less fuel, slight caution.
+    """
+    bias = (getattr(ta, "liq_magnet_bias", "") or "neutral").lower()
+    strength = float(getattr(ta, "liq_magnet_strength", 0) or 0)
+    above = getattr(ta, "liq_magnet_above", None)
+    below = getattr(ta, "liq_magnet_below", None)
+    price = float(getattr(ta, "current_price", 0) or 0)
+    notes: list[str] = []
+    if strength < 0.25 and bias in {"", "neutral"}:
+        return -4, ["liq magnet далеко / слабо"]
+
+    dist_above = ((float(above) - price) / price * 100.0) if above and price > 0 else 99.0
+    dist_below = ((price - float(below)) / price * 100.0) if below and price > 0 else 99.0
+    near_above = dist_above <= 2.8
+    near_below = dist_below <= 2.8
+    delta = 0
+
+    if side == "short":
+        if bias == "hunt_longs_below" and near_below and strength >= 0.4:
+            delta += 10
+            notes.append("магнит лонгов снизу по ходу SHORT")
+        elif bias == "hunt_shorts_above" and near_above and strength >= 0.4:
+            delta -= 12
+            notes.append("сначала hunt шортов сверху — рано SHORT")
+        elif not near_below and not near_above and strength < 0.45:
+            delta -= 5
+            notes.append("далеко от liq-зон")
+    elif side == "long":
+        if bias == "hunt_shorts_above" and near_above and strength >= 0.4:
+            delta += 10
+            notes.append("магнит шортов сверху по ходу LONG")
+        elif bias == "hunt_longs_below" and near_below and strength >= 0.4:
+            delta -= 12
+            notes.append("сначала hunt лонгов снизу — рано LONG")
+        elif not near_below and not near_above and strength < 0.45:
+            delta -= 5
+            notes.append("далеко от liq-зон")
+
+    if bias == "both" and near_above and near_below:
+        delta -= 6
+        notes.append("магниты с двух сторон — середина range")
+    return delta, notes
+
+
 def score_trade_setup(
     signal: Signal,
     ta: TAAnalysisResult,
@@ -404,6 +453,13 @@ def score_trade_setup(
     flow, flow_notes = _flow_score(ta, side)
     factors.extend(flow_notes)
 
+    magnet_delta, magnet_notes = _liq_magnet_gate_delta(ta, side)
+    if magnet_delta >= 0:
+        flow += magnet_delta
+    else:
+        penalties += abs(magnet_delta)
+    factors.extend(magnet_notes)
+
     if chase:
         penalties += 22
         factors.append(chase_reason or "погоня")
@@ -427,7 +483,7 @@ def score_trade_setup(
         flow=flow,
         penalties=penalties,
         location_kind=location,
-        factors=tuple(factors[:6]),
+        factors=tuple(factors[:8]),
     )
 
 
@@ -513,6 +569,18 @@ def decide_trade_action(
             location=location,
             chase=True,
             setup_score=setup.total,
+        )
+
+    # Liq magnet против входа: сначала вероятен stop-hunt в другую сторону
+    magnet_delta, magnet_notes = _liq_magnet_gate_delta(ta, side)
+    if magnet_delta <= -10 and watch_allowed:
+        why = magnet_notes[0] if magnet_notes else "liq magnet против входа"
+        return TradeDecision(
+            "watch",
+            why,
+            location=location,
+            chase=False,
+            setup_score=max(setup.total, min_watch_score),
         )
 
     # trend_seed раньше WAIT-правила: ранний потенциал не режем бейджем WAIT

@@ -18,7 +18,7 @@ class Config(BaseSettings):
     bybit_api_secret: str | None = Field(None, env="BYBIT_API_SECRET")
 
     gemini_api_key: str | None = Field(None, env="GEMINI_API_KEY")
-    gemini_model: str = Field("gemini-2.5-flash", env="GEMINI_MODEL")
+    gemini_model: str = Field("gemini-3.6-flash", env="GEMINI_MODEL")
 
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")

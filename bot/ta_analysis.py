@@ -14,6 +14,7 @@ from .ta_range_trade import (
     evaluate_market_flow,
     evaluate_range_trade,
 )
+from .liq_magnet import LiqMagnetContext, analyze_liq_magnet
 from .wave_structure import (
     FibLevel,
     WaveStructureResult,
@@ -203,6 +204,14 @@ class TAAnalysisResult:
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
     cvd_delta: float | None = None
+    # Free liq-map proxy: stop magnets above/below (equal highs/lows + live liq)
+    liq_magnet_bias: str = "neutral"
+    liq_magnet_label: str = ""
+    liq_magnet_above: float | None = None
+    liq_magnet_below: float | None = None
+    liq_magnet_strength: float = 0.0
+    liq_magnet_note: str = ""
+    liq_magnet_hint: str = ""
     # Wave Lite + Fib (график + понятный UX в Hot/Pro)
     fib_levels: list[FibLevel] = field(default_factory=list)
     wave_phase: str = ""
@@ -2385,6 +2394,45 @@ def run_ta_analysis(
         drawdown_pct=ms.drawdown_from_high_pct,
         oi_narrative=ms.oi_narrative,
     )
+    liq_magnet = analyze_liq_magnet(
+        bars,
+        swings,
+        liq_context=liq_context,
+        smc_liquidity=getattr(smc, "liquidity_levels", None) if smc is not None else None,
+    )
+    if liq_magnet.factor_line and liq_magnet.factor_line not in factors.factor_lines:
+        factors.factor_lines.append(liq_magnet.factor_line)
+    # Soft gate for manual/Hot TA: не ENTRY против ближайшего stop-hunt
+    if liq_magnet.strength >= 0.45:
+        price_now = current
+        near_below = (
+            liq_magnet.nearest_below is not None
+            and price_now > 0
+            and (price_now - liq_magnet.nearest_below) / price_now * 100 <= 2.8
+        )
+        near_above = (
+            liq_magnet.nearest_above is not None
+            and price_now > 0
+            and (liq_magnet.nearest_above - price_now) / price_now * 100 <= 2.8
+        )
+        if verdict == "LONG" and liq_magnet.bias == "hunt_longs_below" and near_below:
+            verdict = "WAIT"
+            action_priority = "long"
+            conf = min(conf, 6)
+            reason = (
+                f"{reason} · сначала магнит лонгов снизу"
+                if reason
+                else "сначала магнит лонгов снизу — ждать съём/отскок"
+            )
+        elif verdict == "SHORT" and liq_magnet.bias == "hunt_shorts_above" and near_above:
+            verdict = "WAIT"
+            action_priority = "short"
+            conf = min(conf, 6)
+            reason = (
+                f"{reason} · сначала магнит шортов сверху"
+                if reason
+                else "сначала магнит шортов сверху — ждать съём"
+            )
     cascade_tight_stop: float | None = None
     if liq_cascade.active and liq_cascade.side == "short" and bars:
         lookback = bars[-min(6, len(bars)) :]
@@ -2600,7 +2648,9 @@ def run_ta_analysis(
         risk_notes.extend([f for f in factors.factor_lines if f and f not in risk_notes])
     if repeat_spike_dump_note:
         risk_notes.append(repeat_spike_dump_note)
-    risk_notes = risk_notes[:6]
+    if liq_magnet.plan_hint and liq_magnet.plan_hint not in risk_notes:
+        risk_notes.append(liq_magnet.plan_hint)
+    risk_notes = risk_notes[:7]
     professional_summary = _build_professional_summary(
         verdict=verdict,
         market_bias=market_bias,
@@ -2812,6 +2862,13 @@ def run_ta_analysis(
         narrative_basis=narrative_basis,
         liq_cascade_active=liq_cascade.active and verdict == "SHORT",
         liq_cascade_note=liq_cascade.note if liq_cascade.active else "",
+        liq_magnet_bias=liq_magnet.bias,
+        liq_magnet_label=liq_magnet.bias_label,
+        liq_magnet_above=liq_magnet.nearest_above,
+        liq_magnet_below=liq_magnet.nearest_below,
+        liq_magnet_strength=liq_magnet.strength,
+        liq_magnet_note=liq_magnet.note,
+        liq_magnet_hint=liq_magnet.plan_hint,
         cvd_source=(
             str(getattr(taker_cvd, "source", "proxy") or "proxy")
             if taker_cvd is not None
@@ -4786,6 +4843,14 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     smc_brief = _manual_smc_brief_html(ta.smc) if ta.smc else ""
     if smc_brief:
         lines.append(smc_brief)
+
+    if ta.liq_magnet_bias and ta.liq_magnet_bias != "neutral":
+        bits = [f"🧲 <b>Liq magnet:</b> {ta.liq_magnet_label or ta.liq_magnet_bias}"]
+        if ta.liq_magnet_above is not None:
+            bits.append(f"↑{fmt_price(ta.liq_magnet_above)}")
+        if ta.liq_magnet_below is not None:
+            bits.append(f"↓{fmt_price(ta.liq_magnet_below)}")
+        lines.append(" · ".join(bits))
 
     return "\n".join(lines)
 

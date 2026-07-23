@@ -294,3 +294,51 @@ def test_pattern_location_boosts_setup_score() -> None:
     setup = score_trade_setup(_sig(), ta)
     assert setup.location_kind == "pattern"
     assert setup.location >= 20
+
+
+def test_liq_magnet_against_forces_watch() -> None:
+    ta = TAAnalysisResult(
+        verdict="SHORT",
+        action_priority="short",
+        current_price=100.0,
+        range_position=0.45,
+        momentum_pct=-0.4,
+        nearest_resistance=101.5,
+        liq_magnet_bias="hunt_shorts_above",
+        liq_magnet_strength=0.75,
+        liq_magnet_above=101.5,
+        liq_magnet_below=96.0,
+    )
+    d = decide_trade_action(
+        _sig(side="short", signal_type="impulse_dump", price_change_percent=-3.0),
+        ta,
+        readiness=(True, "armed"),
+        watch_allowed=True,
+        min_entry_score=50,
+    )
+    assert d.action == "watch"
+    assert "hunt" in d.reason.lower() or "магнит" in d.reason.lower() or "шорт" in d.reason.lower()
+
+
+def test_liq_magnet_align_boosts_score() -> None:
+    weak = TAAnalysisResult(
+        verdict="SHORT",
+        action_priority="short",
+        current_price=100.0,
+        range_position=0.4,
+        liq_magnet_bias="neutral",
+        liq_magnet_strength=0.1,
+    )
+    strong = TAAnalysisResult(
+        verdict="SHORT",
+        action_priority="short",
+        current_price=100.0,
+        range_position=0.4,
+        liq_magnet_bias="hunt_longs_below",
+        liq_magnet_strength=0.8,
+        liq_magnet_above=108.0,
+        liq_magnet_below=98.5,
+    )
+    a = score_trade_setup(_sig(side="short"), weak)
+    b = score_trade_setup(_sig(side="short"), strong)
+    assert b.total >= a.total

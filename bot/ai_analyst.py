@@ -23,12 +23,20 @@ Liquidation Heatmap Model 3.
 3. Сначала контекст (символ, цена, фаза), потом конвергенция алгоритмов, потом сценарии на 1–3 часа.
 4. Вердикт: LONG / SHORT / WAIT / NO TRADE + уверенность 1–10 + горизонт.
 5. План: зона входа, стоп, TP1/TP2, инвалидация. WAIT лучше плохого входа.
-6. Heatmap = магнит/ликвидность (оценка), не гарантия разворота.
+6. Heatmap / liq magnet = зоны стопов (equal highs/lows + live liq). Цена часто идёт снять ближайший магнит; после съёма — продолжение ИЛИ разворот. Не путай магнит с гарантией разворота.
 7. В конце одна строка: «⚠️ Не финсовет — решение за трейдером.»
 8. Если пользователь просит сутки/двое — опирайся на окно графика из пакета (hours).
+9. Если в пакете есть LIQ_MAGNET / картинка Liquidation Heatmap — явно скажи куда вероятнее hunt (сверху шорты / снизу лонги) и как это стыкуется с вердиктом.
 """
 
-FALLBACK_MODELS = ("gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-1.5-flash")
+DEFAULT_MODEL = "gemini-3.6-flash"
+FALLBACK_MODELS = (
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+)
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
@@ -65,7 +73,11 @@ def _is_rate_limit_payload(status: int, body: str) -> bool:
 def _is_model_error_payload(status: int, body: str) -> bool:
     low = body.lower()
     return status in {400, 404} and (
-        "not found" in low or "not supported" in low or "invalid" in low and "model" in low
+        "not found" in low
+        or "not_found" in low
+        or "no longer available" in low
+        or "not supported" in low
+        or ("invalid" in low and "model" in low)
     )
 
 
@@ -149,7 +161,7 @@ async def ask_gemini(
         },
     }
 
-    primary = model or "gemini-2.5-flash"
+    primary = model or DEFAULT_MODEL
     candidates = [primary] + [m for m in FALLBACK_MODELS if m != primary]
     last_err = ""
 
