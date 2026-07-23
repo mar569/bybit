@@ -952,6 +952,34 @@ class TelegramBot:
             logger.exception("AI photo download failed")
             return None
 
+    def _is_reply_menu_text(self, text: str) -> bool:
+        """Reply-keyboard / menu labels must not go into an open AI session."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        labels = {
+            "⏸ Стоп", "Стоп", "⏸ Стоп сигналы", "⏸ Стоп бот", "Стоп бот",
+            "▶️ Старт", "Старт", "▶️ Старт сигналы", "▶️ Старт бот", "Старт бот",
+            "🎛 Каналы", "Каналы", "🎛 Уведомления", "Уведомления", "🎲 Каналы",
+            "📊 Биржи", "Биржи",
+            "⚙ Настройки", "🔧 Настройки", "Настройки",
+            "💧 Ликвидация", "Ликвидация",
+            "🧠 Анализ", "Анализ",
+            "📈 Статус", "Статус",
+            "📐 Ручной анализ", "Ручной анализ",
+            "🌱 Тренды", "Тренды", "Потенциал трендов", "🌱 Потенциал трендов",
+            "📋 Команды", "Команды", "❓ Помощь", "Помощь",
+        }
+        if t in labels:
+            return True
+        # Dynamic pause/start button label
+        try:
+            if t == self._signals_toggle_button_label():
+                return True
+        except Exception:
+            pass
+        return False
+
     async def _handle_ai_user_message(self, update: Update, *, is_photo: bool = False) -> bool:
         if not self._is_admin(update) or update.effective_user is None or update.message is None:
             return False
@@ -962,6 +990,9 @@ class TelegramBot:
 
         text = (update.message.caption if is_photo else update.message.text) or ""
         text = text.strip()
+        # Menu buttons while AI session is open → let on_text_message handle them
+        if not is_photo and self._is_reply_menu_text(text):
+            return False
         if text.lower() in {"/ai_stop", "ai stop", "закрыть ai", "стоп ai"}:
             await self._clear_ai_session(user_id)
             await update.message.reply_text("🤖 AI-сессия закрыта.")
