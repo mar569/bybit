@@ -1143,20 +1143,43 @@ class TelegramBot:
                 pass
 
         answer_html = html.escape(answer)
+        header = caption
         if chart_png:
-            if len(answer) <= 900:
-                short_cap = f"{caption}\n\n{answer_html}"
-                await self._send_chart(
-                    chat_id, bytes(chart_png), short_cap, is_priority=False, keyboard=keyboard,
-                )
-            else:
-                await self._send_chart(
-                    chat_id, bytes(chart_png), caption, is_priority=False, keyboard=keyboard,
-                )
-                await self._send_to_chat(chat_id, answer_html, keyboard, is_priority=False)
+            # Never put the full AI essay into photo caption — Telegram truncates ~1024
+            # mid-word (e.g. "5-волновая" → "5-во"). Chart + separate text message.
+            await self._send_chart(
+                chat_id, bytes(chart_png), header, is_priority=False, keyboard=keyboard,
+            )
+            await self._send_ai_text(chat_id, answer_html, keyboard)
         else:
-            body = f"{caption}\n\n{answer_html}"
-            await self._send_to_chat(chat_id, body, keyboard, is_priority=False)
+            body = f"{header}\n\n{answer_html}"
+            await self._send_ai_text(chat_id, body, keyboard)
+
+    async def _send_ai_text(
+        self,
+        chat_id: int,
+        text: str,
+        keyboard: InlineKeyboardMarkup | None,
+    ) -> None:
+        """Send AI reply, splitting if over Telegram message limit."""
+        limit = 3900
+        if len(text) <= limit:
+            await self._send_to_chat(chat_id, text, keyboard, is_priority=False)
+            return
+        chunks: list[str] = []
+        rest = text
+        while rest:
+            if len(rest) <= limit:
+                chunks.append(rest)
+                break
+            cut = rest.rfind("\n", 0, limit)
+            if cut < limit // 2:
+                cut = limit
+            chunks.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip()
+        for i, chunk in enumerate(chunks):
+            kb = keyboard if i == len(chunks) - 1 else None
+            await self._send_to_chat(chat_id, chunk, kb, is_priority=False)
 
     def _store_signal_watch_ctx(self, signal: Signal, ta: Any) -> None:
         if ta is None:
