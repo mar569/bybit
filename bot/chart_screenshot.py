@@ -159,22 +159,22 @@ class ChartScreenshotService:
         *,
         range_label: str = "12hour",
     ) -> bytes | None:
-        """Capture CoinGlass Liquidation Heatmap Model 3; skip error/empty pages."""
+        """Capture CoinGlass Liquidation Heatmap Model 1; skip error/empty pages."""
         from .liquidation_alerts import base_ticker, coinglass_liq_map_url
 
         coin = base_ticker(symbol)
         ex = "Bybit" if "bybit" in (exchange or "").lower() else (
             "Binance" if "binance" in (exchange or "").lower() else "Binance"
         )
-        # Try several deep-links — CoinGlass SPA params drift over time
+        # Model 1 first (near-term); Model 3 as last fallback if page fails
         candidates = [
             coinglass_liq_map_url(symbol, exchange),
             (
-                "https://www.coinglass.com/pro/futures/LiquidationHeatMapModel3"
+                "https://www.coinglass.com/pro/futures/LiquidationHeatMap"
                 f"?coin={coin}&type=pair&exchange={ex}&range={range_label}"
             ),
-            f"https://www.coinglass.com/pro/futures/LiquidationHeatMapModel3?coin={coin}",
-            f"https://www.coinglass.com/pro/futures/LiquidationHeatMap?coin={coin}&type=pair",
+            f"https://www.coinglass.com/pro/futures/LiquidationHeatMap?coin={coin}",
+            f"https://www.coinglass.com/pro/futures/LiquidationHeatMapModel3?coin={coin}&type=pair",
         ]
         if not await self._ensure_browser():
             return None

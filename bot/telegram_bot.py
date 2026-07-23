@@ -757,7 +757,7 @@ class TelegramBot:
         include_copy: bool = False,
         include_ai: bool = True,
     ) -> list[InlineKeyboardButton]:
-        """TV chart + Liquidation Heatmap Model 3 + optional AI callback."""
+        """TV chart + Liquidation Heatmap Model 1 + optional AI callback."""
         chart = chart_url or coinglass_url(symbol, exchange)
         buttons = [
             InlineKeyboardButton("📊 CoinGlass", url=chart),
@@ -780,9 +780,9 @@ class TelegramBot:
         return buttons
 
     def _ai_session_keyboard(self, symbol: str, exchange: str) -> InlineKeyboardMarkup:
+        # Session auto-closes after answer — only keep chart links
         return InlineKeyboardMarkup([
-            self._coinglass_link_buttons(symbol, exchange, include_ai=False),
-            [InlineKeyboardButton("✖️ Закрыть AI", callback_data="aistop")],
+            self._coinglass_link_buttons(symbol, exchange, include_ai=True),
         ])
 
     def _signal_keyboard(
@@ -917,8 +917,7 @@ class TelegramBot:
                 status = await query.message.reply_text(
                     f"🤖 <b>AI</b> · <code>{symbol}</code>\n"
                     "Собираю TA / паттерны / волны / SMC + график 24h…\n"
-                    "Можно писать вопросы и слать скрины. Горизонт 1–3ч, окно <code>сутки</code>/<code>двое</code>.\n"
-                    "/ai_stop — закрыть.",
+                    "После ответа сессия закроется. Новый вопрос — снова 🤖 AI.",
                     parse_mode=ParseMode.HTML,
                 )
             except BadRequest:
@@ -1128,13 +1127,8 @@ class TelegramBot:
         answer = sanitize_ai_reply_for_telegram(
             (result.text or result.error or "Пустой ответ.").strip()
         )
-        hist = list(session.get("history") or [])
-        hist.append({"role": "user", "text": user_text})
-        hist.append({"role": "model", "text": answer})
-        session["history"] = hist
-        session["hours"] = hours
-        session["chat_id"] = chat_id
-        await self._save_ai_session(user_id, session)
+        # One-shot: don't keep session open after the answer (avoids menu hijack)
+        await self._clear_ai_session(user_id)
 
         keyboard = self._ai_session_keyboard(symbol, exchange)
         caption = f"🤖 <b>{html.escape(symbol)}</b> · {hours}h"
