@@ -93,6 +93,7 @@ from .ai_analyst import (
     GeminiNotConfiguredError,
     GeminiRateLimitError,
     ask_gemini,
+    sanitize_ai_reply_for_telegram,
 )
 from .ai_context import build_ai_context_pack, parse_hours_from_text
 from .liquidation_analysis import (
@@ -928,9 +929,9 @@ class TelegramBot:
             symbol=symbol,
             exchange=exchange,
             user_text=(
-                "Сделай полный разбор по пакету бота и картинкам: "
-                "что ждать в ближайшие 1–3 часа и какую позицию рассматривать (LONG/SHORT/WAIT). "
-                "Окно графика 24 часа."
+                "Сделай разбор на 1–3 часа. Сначала строка ВЕРДИКТ и блок ЧТО ДЕЛАТЬ "
+                "(вход/ждать, зона, стоп, TP). Без markdown (** и *). "
+                "Окно графика 24 часа. Если heatmap нет — опирайся на LIQ_MAGNET из пакета."
             ),
             hours=24,
             rebuild_context=True,
@@ -1093,7 +1094,9 @@ class TelegramBot:
                 await self._send_to_chat(chat_id, text, None, is_priority=False)
             return
 
-        answer = (result.text or result.error or "Пустой ответ.").strip()
+        answer = sanitize_ai_reply_for_telegram(
+            (result.text or result.error or "Пустой ответ.").strip()
+        )
         hist = list(session.get("history") or [])
         hist.append({"role": "user", "text": user_text})
         hist.append({"role": "model", "text": answer})
@@ -1112,9 +1115,7 @@ class TelegramBot:
             except Exception:
                 pass
 
-        # Preserve newlines for HTML Telegram messages
-        answer_html = html.escape(answer).replace("\n", "\n")
-
+        answer_html = html.escape(answer)
         if chart_png:
             if len(answer) <= 900:
                 short_cap = f"{caption}\n\n{answer_html}"

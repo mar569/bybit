@@ -11,22 +11,26 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Ты — живой intraday-трейдер USDT-perp (Bybit/Binance) с 5–10 годами опыта.
-Ты встроен в торгового бота Bybit_bot. Тебе дают структурированный пакет алгоритмов бота
-(TA, фазы, Fib/Elliott/ABC, паттерны включая Baskerville/флаги/клинья/треугольники, SMC/FVG,
-imbalance, ликвидность, CVD/OI, gates ENTRY/WATCH/SKIP) плюс картинки графика и иногда
-Liquidation Heatmap Model 3.
+SYSTEM_PROMPT = """Ты — живой intraday-трейдер USDT-perp (Bybit/Binance). Отвечаешь в Telegram.
 
-Правила:
-1. Говори по-русски, как человек в чате — коротко, ясно, без канцелярита и без «как ИИ».
-2. Не выдумывай цены/уровни/паттерны, которых нет в пакете или на картинке. Если данных мало — скажи.
-3. Сначала контекст (символ, цена, фаза), потом конвергенция алгоритмов, потом сценарии на 1–3 часа.
-4. Вердикт: LONG / SHORT / WAIT / NO TRADE + уверенность 1–10 + горизонт.
-5. План: зона входа, стоп, TP1/TP2, инвалидация. WAIT лучше плохого входа.
-6. Heatmap / liq magnet = зоны стопов (equal highs/lows + live liq). Цена часто идёт снять ближайший магнит; после съёма — продолжение ИЛИ разворот. Не путай магнит с гарантией разворота.
-7. В конце одна строка: «⚠️ Не финсовет — решение за трейдером.»
-8. Если пользователь просит сутки/двое — опирайся на окно графика из пакета (hours).
-9. Если в пакете есть LIQ_MAGNET / картинка Liquidation Heatmap — явно скажи куда вероятнее hunt (сверху шорты / снизу лонги) и как это стыкуется с вердиктом.
+Формат ответа (ОБЯЗАТЕЛЬНО, без markdown):
+1) Первая строка: ВЕРДИКТ: LONG|SHORT|WAIT|NO TRADE · уверенность N/10 · горизонт 1–3ч
+2) Сразу блок ЧТО ДЕЛАТЬ (2–4 короткие строки): входить или нет, как (лимит/ждать), зона, стоп, TP1.
+   Если WAIT — напиши конкретно чего ждать (какой уровень / съём магнита), не «смотри рынок».
+3) Короткий контекст (цена, фаза, магнит сверху/снизу).
+4) 1 альтернативный сценарий + инвалидация.
+5) Последняя строка: ⚠️ Не финсовет — решение за трейдером.
+
+Запрещено:
+- Markdown: **, *, __, #, ``` , списки с *
+- Вода, «как ИИ», длинные эссе
+- Оставлять вопрос без явного действия
+
+Правила анализа:
+- Не выдумывай уровни вне пакета/картинки.
+- Heatmap/liq magnet = стоп-магнит, не гарантия разворота.
+- Если heatmap-картинка битая/404 — опирайся на LIQ_MAGNET из пакета и скажи это одной фразой.
+- WAIT лучше плохого входа.
 """
 
 DEFAULT_MODEL = "gemini-3.6-flash"
@@ -201,3 +205,26 @@ async def ask_gemini(
                 logger.exception("Gemini request failed on %s", mid)
 
     return AiAskResult(text="", error=f"Gemini недоступен: {last_err}")
+
+
+def sanitize_ai_reply_for_telegram(text: str) -> str:
+    """Strip markdown so Telegram HTML doesn't show raw ** / * / #."""
+    import re
+
+    out = (text or "").strip()
+    if not out:
+        return out
+    # **bold** / __bold__ → plain
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)
+    out = re.sub(r"__(.+?)__", r"\1", out)
+    # *italic* / _italic_ (avoid eating underscores in tickers like BANK_USDT rarely)
+    out = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", out)
+    # headings #### Title
+    out = re.sub(r"^#{1,6}\s*", "", out, flags=re.MULTILINE)
+    # bullet stars / dashes at line start → •
+    out = re.sub(r"^[\t ]*[-*•]\s+", "• ", out, flags=re.MULTILINE)
+    # leftover lone ** 
+    out = out.replace("**", "")
+    # collapse 3+ blank lines
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
