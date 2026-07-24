@@ -190,14 +190,15 @@ class _RightLabel:
 def _price_near(a: float, b: float, ref: float) -> bool:
     if ref <= 0:
         ref = max(a, b, 1e-9)
-    return abs(a - b) <= ref * 0.0018
+    return abs(a - b) <= ref * 0.0024
 
 
 def _collect_right_labels(ta: TAAnalysisResult) -> list[_RightLabel]:
-    """Подписи справа — без дублей на одной цене."""
+    """Подписи справа — без дублей на одной цене. На WAIT — только ключевые уровни."""
     ref = ta.current_price or 1.0
     seen: list[float] = []
     out: list[_RightLabel] = []
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
 
     def add(price: float | None, text: str, color: str, va: str = "center") -> None:
         if price is None:
@@ -214,17 +215,19 @@ def _collect_right_labels(ta: TAAnalysisResult) -> list[_RightLabel]:
         or not _price_near(ta.breakdown_level, ta.breakout_level, ref)
     ):
         add(ta.breakdown_level, f"SHORT≤{fmt_price(ta.breakdown_level)}", CHART_STYLE["accent_short"], "top")
-    if ta.invalidation_price:
-        add(ta.invalidation_price, f"STOP {fmt_price(ta.invalidation_price)}", CHART_STYLE["inv"])
-    for j, tp in enumerate(ta.target_prices[:2]):
-        add(tp, f"TP{j + 1} {fmt_price(tp)}", CHART_STYLE["target"])
+    # STOP/TP справа — только при направленном вердикте (на WAIT дублируют foresight/path)
+    if not is_wait:
+        if ta.invalidation_price:
+            add(ta.invalidation_price, f"STOP {fmt_price(ta.invalidation_price)}", CHART_STYLE["inv"])
+        for j, tp in enumerate(ta.target_prices[:2]):
+            add(tp, f"TP{j + 1} {fmt_price(tp)}", CHART_STYLE["target"])
     for fl in getattr(ta, "fib_levels", None) or []:
         if fl.ratio in {0.5, 0.618}:
             add(fl.price, fl.label, CHART_STYLE["fib_key"])
     for lv in ta.levels[:2]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         add(lv.price, fmt_price(lv.price), color)
-    if ta.entry_zone:
+    if ta.entry_zone and not is_wait:
         lo, hi = ta.entry_zone
         add(hi, "зона входа", CHART_STYLE["accent_long"], "bottom")
     return out
@@ -238,8 +241,8 @@ def _layout_right_label_xs(bars: list[KlineBar], labels: list[_RightLabel]) -> l
     base = mdates.date2num(times[-1])
     bar_w = _bar_width_days(bars)
     ref = labels[0].price
-    # Чуть шире «слипание», чтобы близкие TP/STOP/триггеры не наезжали
-    min_gap = abs(ref) * 0.008
+    # Шире зона «слипания» + больше колонок вправо
+    min_gap = abs(ref) * 0.012
     xs = [0.0] * len(labels)
     col = 0
     prev_price: float | None = None
@@ -248,7 +251,7 @@ def _layout_right_label_xs(bars: list[KlineBar], labels: list[_RightLabel]) -> l
             col += 1
         else:
             col = 0
-        xs[idx] = base + bar_w * (12.0 + col * 5.5)
+        xs[idx] = base + bar_w * (14.0 + col * 7.0)
         prev_price = lbl.price
     return xs
 
@@ -266,8 +269,8 @@ def _deconflict_right_label_ys(
     lo = min(prices) if y_min is None else min(min(prices), y_min)
     hi = max(prices) if y_max is None else max(max(prices), y_max)
     span = max(hi - lo, abs(prices[0]) * 0.02, 1e-9)
-    # Минимальный зазор ~1.1% от видимого диапазона
-    min_gap = span * 0.011
+    # Минимальный зазор ~1.8% от видимого диапазона (было 1.1%)
+    min_gap = span * 0.018
     order = sorted(range(len(labels)), key=lambda i: labels[i].price)
     ys = [lbl.price for lbl in labels]
     for k in range(1, len(order)):
@@ -792,6 +795,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     if not bars:
         return
 
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+    has_chart_pattern = bool(getattr(ta, "primary_chart_pattern", None))
+
     draw_buy_flat_sell_zones(ax, bars, ta)
     _draw_zones(ax, bars, ta)
     _draw_smc_annotations(ax, bars, ta)
@@ -805,15 +811,25 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         max_patterns=MAX_CHART_PATTERNS,
         min_confidence=MIN_DRAW_CONFIDENCE,
         force_primary=getattr(ta, "primary_chart_pattern", None),
+        draw_target_labels=False,  # цель/SL — только линии; текст справа / path
     )
-    # HTF фигура (уровни) + foresight-путь 1–3ч по BuyHold
+    # HTF фигура (уровни) — без лишнего текста на WAIT оставляем линии
     draw_htf_pattern_levels(
         ax,
         bars,
         getattr(ta, "primary_htf_chart_pattern", None),
         conflict=bool(getattr(ta, "pattern_foresight_htf_conflict", False)),
+        quiet=is_wait,
     )
-    if getattr(ta, "pattern_foresight_summary", ""):
+    # Foresight-стрелка только при LONG/SHORT и если нет setup-path
+    setup_path_preview = getattr(ta, "forecast_path_prices", None) or []
+    setup_grade = getattr(ta, "setup_grade", "") or ""
+    has_setup_path = len(setup_path_preview) >= 2 and setup_grade in {"A", "B", "C"}
+    if (
+        not is_wait
+        and not has_setup_path
+        and getattr(ta, "pattern_foresight_summary", "")
+    ):
         draw_pattern_foresight_path(
             ax,
             bars,
@@ -823,6 +839,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             bias=str(getattr(ta, "pattern_foresight_bias", "neutral") or "neutral"),
             watch_only=bool(getattr(ta, "pattern_foresight_watch_only", False)),
             status=str(getattr(ta, "pattern_foresight_status", "") or ""),
+            quiet_labels=True,
         )
     # Волны Эллиотта (1–5 + ABC) — поверх / рядом с фигурами
     from .elliott_wave import ElliottWaveResult
@@ -856,8 +873,8 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
             has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
         )
-        # восстановить entry plan для линии входа
-        if getattr(ta, "elliott_entry_price", None):
+        # восстановить entry plan для линии входа — не на WAIT (дубли TP/STOP)
+        if not is_wait and getattr(ta, "elliott_entry_price", None):
             from .elliott_wave import ElliottEntryPlan
 
             ew_stub.entry_plan = ElliottEntryPlan(
@@ -869,6 +886,13 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
                 ready=bool(getattr(ta, "elliott_entry_ready", False)),
             )
+        # На WAIT не рисуем EW path-стрелку (структура волн остаётся)
+        if is_wait:
+            ew_stub.path_prices = []
+            ew_stub.path_labels = []
+            ew_stub.path_bias = ""
+            ew_stub.fib_target_prices = []
+            ew_stub.fib_target_labels = []
         draw_elliott_waves(ax, bars, ew_stub)
 
     # HTF Elliott (пунктир) + прогнозный путь Pro-confluence
@@ -893,12 +917,12 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     setup_side = (getattr(ta, "setup_side", "") or "").lower()
     verdict = (getattr(ta, "verdict", "") or "").upper()
     path_ok = (
-        len(setup_path) >= 2
+        not is_wait
+        and len(setup_path) >= 2
         and getattr(ta, "setup_grade", "") in {"A", "B", "C"}
         and (
             (verdict == "LONG" and setup_side == "long")
             or (verdict == "SHORT" and setup_side == "short")
-            or (verdict == "WAIT" and False)
         )
     )
     if path_ok:
@@ -924,7 +948,8 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
     if len(ta.levels) < 2:
         _draw_level_hints(ax, bars, ta)
-    _draw_breakout_arrows(ax, bars, ta)
+    if not is_wait:
+        _draw_breakout_arrows(ax, bars, ta)
 
     for ruler in ta.rulers[:1]:
         x0 = _idx_to_date(bars, ruler.start_idx)
@@ -943,15 +968,17 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             bbox=dict(boxstyle="round,pad=0.2", facecolor=CHART_STYLE["bg"], edgecolor="none", alpha=0.8),
         )
 
-    for pat in ta.patterns[-2:]:
-        bar = bars[pat.index]
-        ts = _idx_to_date(bars, pat.index)
-        y = bar.high * 1.001 if pat.bullish is not False else bar.low * 0.999
-        marker = "^" if pat.bullish else "v" if pat.bullish is False else "o"
-        ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
+    # Свечные маркеры не рисуем, если уже есть графическая фигура (шум справа)
+    if not has_chart_pattern:
+        for pat in ta.patterns[-2:]:
+            bar = bars[pat.index]
+            ts = _idx_to_date(bars, pat.index)
+            y = bar.high * 1.001 if pat.bullish is not False else bar.low * 0.999
+            marker = "^" if pat.bullish else "v" if pat.bullish is False else "o"
+            ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
 
     direction = primary_forecast_direction(ta)
-    path_kind = draw_pro_chart_layers(ax, bars, ta)
+    path_kind = "skip" if is_wait else draw_pro_chart_layers(ax, bars, ta)
     if path_kind == "default":
         if not _draw_market_forecast_paths(ax, bars, ta):
             if direction == "long":
@@ -963,7 +990,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
 
     _draw_signal_markers(ax, bars, ta)
 
-    if ta.invalidation_price:
+    if ta.invalidation_price and not is_wait:
         ax.axhline(
             ta.invalidation_price, color=CHART_STYLE["inv"],
             linestyle="--", linewidth=1.0, alpha=0.9,

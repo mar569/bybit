@@ -134,16 +134,19 @@ def _draw_target_stop(
     pattern: ChartPattern,
     *,
     color: str,
+    draw_labels: bool = True,
 ) -> None:
     if not bars:
         return
     x = _x_at(bars, len(bars) - 1)
     if pattern.target_price is not None:
-        ax.axhline(pattern.target_price, color="#7ee787", linestyle=":", linewidth=0.85, alpha=0.75)
-        ax.text(x, pattern.target_price, " цель", color="#7ee787", fontsize=6.2, va="bottom")
+        ax.axhline(pattern.target_price, color="#7ee787", linestyle=":", linewidth=0.85, alpha=0.55)
+        if draw_labels:
+            ax.text(x, pattern.target_price, " цель", color="#7ee787", fontsize=6.2, va="bottom")
     if pattern.stop_price is not None:
-        ax.axhline(pattern.stop_price, color="#ff7b72", linestyle=":", linewidth=0.75, alpha=0.65)
-        ax.text(x, pattern.stop_price, " SL", color="#ff7b72", fontsize=6.0, va="top")
+        ax.axhline(pattern.stop_price, color="#ff7b72", linestyle=":", linewidth=0.75, alpha=0.50)
+        if draw_labels:
+            ax.text(x, pattern.stop_price, " SL", color="#ff7b72", fontsize=6.0, va="top")
 
 
 def _draw_head_shoulders(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
@@ -410,11 +413,13 @@ def draw_chart_patterns(
     max_patterns: int = 1,
     min_confidence: float = 0.70,
     force_primary: ChartPattern | None = None,
+    draw_target_labels: bool = True,
 ) -> None:
     """Строго: только 1 главная фигура (по материалам, без каши).
 
     force_primary — если foresight выбрал фигуру (в т.ч. forming < min_confidence),
     всё равно рисуем её.
+    draw_target_labels=False — линии цели/SL без текста (текст справа / path).
     """
     if not bars:
         return
@@ -436,18 +441,20 @@ def draw_chart_patterns(
         if not drawer:
             continue
         drawer(ax, bars, pattern, color=color)
-        _draw_target_stop(ax, bars, pattern, color=color)
+        _draw_target_stop(
+            ax, bars, pattern, color=color, draw_labels=draw_target_labels,
+        )
         status = "подтв." if pattern.status == "confirmed" else "форм."
         end_x = _x_at(bars, pattern.points[-1].index if pattern.points else len(bars) - 1)
         label_y = pattern.zone_top or (pattern.points[0].price if pattern.points else bars[-1].close)
         ax.text(
             end_x,
             label_y,
-            f" {pattern.label_ru} ({status}, {pattern.confidence:.0%})",
+            f" {pattern.label_ru} ({status})",
             color=color,
-            fontsize=6.8,
+            fontsize=6.5,
             fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="#0d1117", edgecolor=color, alpha=0.85),
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=color, alpha=0.8),
         )
         shown += 1
         if shown >= max_patterns:
@@ -460,6 +467,7 @@ def draw_htf_pattern_levels(
     pattern: ChartPattern | None,
     *,
     conflict: bool = False,
+    quiet: bool = False,
 ) -> None:
     """HTF-фигура на LTF-графике: уровни шеи/зоны/цели (пунктир), без переноса всех свингов."""
     if not bars or pattern is None:
@@ -473,9 +481,9 @@ def draw_htf_pattern_levels(
         levels.append((float(pattern.zone_top), "HTF пробой"))
     elif pattern.zone_bottom and pattern.direction == "bearish":
         levels.append((float(pattern.zone_bottom), "HTF пробой"))
-    if pattern.target_price:
+    if pattern.target_price and not quiet:
         levels.append((float(pattern.target_price), "HTF цель"))
-    if pattern.stop_price:
+    if pattern.stop_price and not quiet:
         levels.append((float(pattern.stop_price), "HTF SL"))
     # дедуп близких уровней
     drawn: list[float] = []
@@ -483,16 +491,18 @@ def draw_htf_pattern_levels(
         if any(abs(price - d) / max(abs(price), 1e-9) < 0.0008 for d in drawn):
             continue
         drawn.append(price)
-        ax.axhline(price, color=color, linestyle="--", linewidth=0.85, alpha=0.55)
+        ax.axhline(price, color=color, linestyle="--", linewidth=0.85, alpha=0.45 if quiet else 0.55)
+        if quiet:
+            continue
         suffix = " ⚠" if conflict else ""
         ax.text(
             x,
             price,
-            f" {lab}/{pattern.label_ru}{suffix}",
+            f" {lab}{suffix}",
             color=color,
-            fontsize=6.0,
+            fontsize=5.8,
             va="bottom",
-            alpha=0.9,
+            alpha=0.85,
         )
 
 
@@ -506,6 +516,7 @@ def draw_pattern_foresight_path(
     bias: str = "neutral",
     watch_only: bool = False,
     status: str = "",
+    quiet_labels: bool = False,
 ) -> None:
     """Стрелка foresight 1–3ч: цена → триггер → цель фигуры."""
     if not bars or pattern is None or current_price <= 0:
@@ -523,13 +534,13 @@ def draw_pattern_foresight_path(
         return
 
     prices: list[float] = [float(current_price)]
-    labels: list[str] = ["сейчас"]
+    labels: list[str] = [""]
     if trigger is not None and abs(trigger - current_price) / current_price > 0.0003:
         prices.append(trigger)
-        labels.append("триггер")
+        labels.append("триггер" if not quiet_labels else "")
     if target is not None and abs(target - prices[-1]) / max(abs(target), 1e-9) > 0.0003:
         prices.append(target)
-        labels.append("цель")
+        labels.append("цель" if not quiet_labels else "")
     if len(prices) < 2:
         return
 
@@ -539,7 +550,6 @@ def draw_pattern_foresight_path(
         step = max(step / 5.0, 1e-6)
     else:
         step = 5.0 / (24 * 60)
-    # горизонт растягивает путь правее
     hz = max(1.0, float(horizon_hours) or 2.0)
     span = step * (3.0 + hz)
     xs = [start_x + span * (i / max(1, len(prices) - 1)) for i in range(len(prices))]
@@ -551,32 +561,29 @@ def draw_pattern_foresight_path(
     else:
         color = "#d2a8ff"
     ls = "--" if watch_only or status in {"forming", "awaiting_breakout", "conflict"} else "-."
-    ax.plot(xs, prices, color=color, linestyle=ls, linewidth=1.45, alpha=0.92, zorder=6)
+    ax.plot(xs, prices, color=color, linestyle=ls, linewidth=1.35, alpha=0.85, zorder=6)
     ax.annotate(
         "",
         xy=(xs[-1], prices[-1]),
         xytext=(xs[-2], prices[-2]),
-        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.35, linestyle="dashed", alpha=0.9),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.25, linestyle="dashed", alpha=0.85),
     )
+    # Одна компактная метка у конца пути — не у текущей свечи
     hz_lab = f"~{hz:.0f}ч"
     mode = "WATCH" if watch_only else "путь"
     ax.text(
-        xs[0],
-        prices[0],
-        f" foresight {hz_lab} ({mode})",
+        xs[-1],
+        prices[-1],
+        f" {hz_lab} {mode}",
         color=color,
-        fontsize=6.4,
+        fontsize=6.0,
         fontweight="bold",
         va="bottom",
-        bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=color, alpha=0.8),
+        bbox=dict(boxstyle="round,pad=0.12", facecolor="#0d1117", edgecolor=color, alpha=0.75),
     )
-    for x, y, lab in zip(xs[1:], prices[1:], labels[1:]):
-        ax.text(x, y, f" {lab}", color=color, fontsize=6.2, fontweight="bold", va="bottom")
-    if pattern.stop_price:
-        ax.axhline(
-            float(pattern.stop_price),
-            color="#ff7b72",
-            linestyle=":",
-            linewidth=0.7,
-            alpha=0.5,
-        )
+    if not quiet_labels:
+        for x, y, lab in zip(xs[1:], prices[1:], labels[1:]):
+            if not lab:
+                continue
+            ax.text(x, y, f" {lab}", color=color, fontsize=5.8, fontweight="bold", va="bottom")
+    # SL уже рисует фигура / правые лейблы — не дублируем

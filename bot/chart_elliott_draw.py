@@ -630,13 +630,23 @@ def draw_setup_forecast_path(
     path_prices: list[float] = []
     path_labels: list[str] = []
     inv: float | None = None
+    _lab_map = {
+        "entry": "вход",
+        "path": "",
+        "tp1": "TP1",
+        "tp2": "TP2",
+        "tp3": "TP3",
+        "invalidation": "inv",
+        "retest": "ретест",
+        "stop": "STOP",
+    }
     for i, p in enumerate(prices):
         lab = labels[i] if i < len(labels) else ""
         if lab == "invalidation":
             inv = float(p)
             continue
         path_prices.append(float(p))
-        path_labels.append(lab)
+        path_labels.append(_lab_map.get(lab, lab if lab not in {"path", ""} else ""))
 
     if len(path_prices) < 2:
         return
@@ -650,35 +660,43 @@ def draw_setup_forecast_path(
     else:
         step = 5.0 / (24 * 60)
 
-    xs = [start_x + step * i for i in range(len(path_prices))]
+    xs = [start_x + step * (i + 1.2) for i in range(len(path_prices))]
     color = EW_STYLE["forecast"]
-    ax.plot(xs, path_prices, color=color, linestyle="--", linewidth=1.35, alpha=0.9, zorder=5)
+    ax.plot(xs, path_prices, color=color, linestyle="--", linewidth=1.25, alpha=0.85, zorder=5)
     ax.annotate(
         "",
         xy=(xs[-1], path_prices[-1]),
         xytext=(xs[-2], path_prices[-2]),
-        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.35, linestyle="dashed", alpha=0.9),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.25, linestyle="dashed", alpha=0.85),
     )
-    for x, y, lab in zip(xs, path_prices, path_labels):
-        if not lab or lab == "path":
+    # Разнести близкие path-лейблы по Y
+    y_lim = ax.get_ylim()
+    span = max(y_lim[1] - y_lim[0], abs(path_prices[0]) * 0.02, 1e-9)
+    min_gap = span * 0.016
+    order = sorted(range(len(path_prices)), key=lambda i: path_prices[i])
+    display_y = {i: path_prices[i] for i in order}
+    for k in range(1, len(order)):
+        i_prev, i_cur = order[k - 1], order[k]
+        if display_y[i_cur] - display_y[i_prev] < min_gap:
+            display_y[i_cur] = display_y[i_prev] + min_gap
+    for i, (x, y, lab) in enumerate(zip(xs, path_prices, path_labels)):
+        if not lab:
             continue
         ax.text(
             x,
-            y,
+            display_y.get(i, y),
             f" {lab}",
             color=color,
-            fontsize=6.5,
+            fontsize=6.0,
             fontweight="bold",
             va="bottom" if path_prices[-1] >= path_prices[0] else "top",
+            bbox=dict(
+                boxstyle="round,pad=0.1",
+                facecolor="#0d1117",
+                edgecolor=color,
+                alpha=0.7,
+                linewidth=0.4,
+            ),
         )
     if inv is not None:
-        ax.axhline(inv, color=EW_STYLE["stop"], linestyle=":", linewidth=0.7, alpha=0.55)
-        ax.text(
-            xs[0],
-            inv,
-            " inv ",
-            color=EW_STYLE["stop"],
-            fontsize=6,
-            va="top",
-            alpha=0.8,
-        )
+        ax.axhline(inv, color=EW_STYLE["stop"], linestyle=":", linewidth=0.7, alpha=0.5)

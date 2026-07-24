@@ -295,10 +295,15 @@ def draw_swing_liquidity_marks(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysi
     """Метки объёма у swing high/low (ликвидность) — только крупные, с отступом."""
     if not bars or not ta.swings:
         return
+    # На WAIT меньше шума у правого края
+    max_marks = 2 if (getattr(ta, "verdict", "") or "").upper() == "WAIT" else 4
     bar_w = _bar_width_days(bars)
     shown = 0
     for swing in reversed(ta.swings[-6:]):
-        if swing.index >= len(bars) or shown >= 4:
+        if swing.index >= len(bars) or shown >= max_marks:
+            continue
+        # не клеить метки к последним 4 свечам (там path/уровни)
+        if swing.index >= len(bars) - 4:
             continue
         bar = bars[swing.index]
         vol_k = bar.volume / 1000.0
