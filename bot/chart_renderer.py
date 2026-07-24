@@ -16,7 +16,11 @@ from matplotlib.patches import Ellipse, Rectangle
 
 from .bybit_klines import BybitKlineCache, KlineBar
 from .bybit_cvd import get_taker_cvd_cache
-from .chart_pattern_draw import draw_chart_patterns
+from .chart_pattern_draw import (
+    draw_chart_patterns,
+    draw_htf_pattern_levels,
+    draw_pattern_foresight_path,
+)
 from .chart_elliott_draw import draw_elliott_waves, draw_setup_forecast_path
 from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
 from .chart_pro_layers import (
@@ -800,7 +804,26 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         ta.chart_patterns,
         max_patterns=MAX_CHART_PATTERNS,
         min_confidence=MIN_DRAW_CONFIDENCE,
+        force_primary=getattr(ta, "primary_chart_pattern", None),
     )
+    # HTF фигура (уровни) + foresight-путь 1–3ч по BuyHold
+    draw_htf_pattern_levels(
+        ax,
+        bars,
+        getattr(ta, "primary_htf_chart_pattern", None),
+        conflict=bool(getattr(ta, "pattern_foresight_htf_conflict", False)),
+    )
+    if getattr(ta, "pattern_foresight_summary", ""):
+        draw_pattern_foresight_path(
+            ax,
+            bars,
+            current_price=float(getattr(ta, "current_price", 0) or (bars[-1].close if bars else 0)),
+            pattern=getattr(ta, "primary_chart_pattern", None),
+            horizon_hours=float(getattr(ta, "pattern_foresight_horizon", 0) or 0),
+            bias=str(getattr(ta, "pattern_foresight_bias", "neutral") or "neutral"),
+            watch_only=bool(getattr(ta, "pattern_foresight_watch_only", False)),
+            status=str(getattr(ta, "pattern_foresight_status", "") or ""),
+        )
     # Волны Эллиотта (1–5 + ABC) — поверх / рядом с фигурами
     from .elliott_wave import ElliottWaveResult
 

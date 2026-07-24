@@ -31,6 +31,8 @@ PATTERN_STYLE: dict[str, dict[str, float | str]] = {
     "one_two_three": {"color": "#d2a8ff", "fill_alpha": 0.06},
     "cup_handle": {"color": "#3fb950", "fill_alpha": 0.07},
     "inverse_cup_handle": {"color": "#f85149", "fill_alpha": 0.07},
+    "rounded_bottom": {"color": "#3fb950", "fill_alpha": 0.06},
+    "rounded_top": {"color": "#f85149", "fill_alpha": 0.06},
     "baskerville_bullish": {"color": "#58a6ff", "fill_alpha": 0.10},
     "baskerville_bearish": {"color": "#ff6b6b", "fill_alpha": 0.10},
     "three_indians": {"color": "#d2a8ff", "fill_alpha": 0.08},
@@ -290,13 +292,23 @@ def _draw_one_two_three(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPa
 
 def _draw_cup_handle(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
     roles = {p.role: p for p in pattern.points}
-    left = roles.get("cup_left_rim")
-    bottom = roles.get("cup_bottom") or roles.get("cup_top")
-    right = roles.get("cup_right_rim")
+    left = (
+        roles.get("cup_left_rim")
+        or roles.get("rim_left")
+    )
+    bottom = (
+        roles.get("cup_bottom")
+        or roles.get("cup_top")
+        or roles.get("saucer_low")
+        or roles.get("saucer_high")
+    )
+    right = (
+        roles.get("cup_right_rim")
+        or roles.get("rim_right")
+    )
     handle = roles.get("handle_low") or roles.get("handle_high")
     if not left or not bottom or not right:
         return
-    rim_price = max(left.price, right.price) if pattern.direction == "bullish" else min(left.price, right.price)
     arc_x: list[float] = []
     arc_y: list[float] = []
     for idx in range(left.index, right.index + 1):
@@ -379,6 +391,8 @@ PATTERN_DRAWERS = {
     "one_two_three": _draw_one_two_three,
     "cup_handle": _draw_cup_handle,
     "inverse_cup_handle": _draw_cup_handle,
+    "rounded_bottom": _draw_cup_handle,
+    "rounded_top": _draw_cup_handle,
     "baskerville_bullish": _draw_baskerville,
     "baskerville_bearish": _draw_baskerville,
     "three_indians": _draw_three_indians,
@@ -395,15 +409,22 @@ def draw_chart_patterns(
     *,
     max_patterns: int = 1,
     min_confidence: float = 0.70,
+    force_primary: ChartPattern | None = None,
 ) -> None:
-    """Строго: только 1 главная фигура (по материалам, без каши)."""
-    if not bars or not patterns:
+    """Строго: только 1 главная фигура (по материалам, без каши).
+
+    force_primary — если foresight выбрал фигуру (в т.ч. forming < min_confidence),
+    всё равно рисуем её.
+    """
+    if not bars:
         return
     from .chart_patterns import pick_primary_pattern
 
-    primary = pick_primary_pattern(
-        [p for p in patterns if p.confidence >= min_confidence]
-    )
+    primary = force_primary
+    if primary is None:
+        primary = pick_primary_pattern(
+            [p for p in patterns if p.confidence >= min_confidence]
+        )
     if primary is None:
         return
     to_draw = [primary]
@@ -431,3 +452,131 @@ def draw_chart_patterns(
         shown += 1
         if shown >= max_patterns:
             break
+
+
+def draw_htf_pattern_levels(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    pattern: ChartPattern | None,
+    *,
+    conflict: bool = False,
+) -> None:
+    """HTF-фигура на LTF-графике: уровни шеи/зоны/цели (пунктир), без переноса всех свингов."""
+    if not bars or pattern is None:
+        return
+    color = "#f0883e" if conflict else "#8b949e"
+    x = _x_at(bars, len(bars) - 1)
+    levels: list[tuple[float, str]] = []
+    if pattern.neckline:
+        levels.append((float(pattern.neckline.end_price), "HTF шея"))
+    elif pattern.zone_top and pattern.direction == "bullish":
+        levels.append((float(pattern.zone_top), "HTF пробой"))
+    elif pattern.zone_bottom and pattern.direction == "bearish":
+        levels.append((float(pattern.zone_bottom), "HTF пробой"))
+    if pattern.target_price:
+        levels.append((float(pattern.target_price), "HTF цель"))
+    if pattern.stop_price:
+        levels.append((float(pattern.stop_price), "HTF SL"))
+    # дедуп близких уровней
+    drawn: list[float] = []
+    for price, lab in levels:
+        if any(abs(price - d) / max(abs(price), 1e-9) < 0.0008 for d in drawn):
+            continue
+        drawn.append(price)
+        ax.axhline(price, color=color, linestyle="--", linewidth=0.85, alpha=0.55)
+        suffix = " ⚠" if conflict else ""
+        ax.text(
+            x,
+            price,
+            f" {lab}/{pattern.label_ru}{suffix}",
+            color=color,
+            fontsize=6.0,
+            va="bottom",
+            alpha=0.9,
+        )
+
+
+def draw_pattern_foresight_path(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    *,
+    current_price: float,
+    pattern: ChartPattern | None,
+    horizon_hours: float = 0.0,
+    bias: str = "neutral",
+    watch_only: bool = False,
+    status: str = "",
+) -> None:
+    """Стрелка foresight 1–3ч: цена → триггер → цель фигуры."""
+    if not bars or pattern is None or current_price <= 0:
+        return
+    trigger: float | None = None
+    if pattern.neckline:
+        trigger = float(pattern.neckline.end_price)
+    elif pattern.direction == "bullish" and pattern.zone_top:
+        trigger = float(pattern.zone_top)
+    elif pattern.direction == "bearish" and pattern.zone_bottom:
+        trigger = float(pattern.zone_bottom)
+
+    target = float(pattern.target_price) if pattern.target_price else None
+    if target is None and trigger is None:
+        return
+
+    prices: list[float] = [float(current_price)]
+    labels: list[str] = ["сейчас"]
+    if trigger is not None and abs(trigger - current_price) / current_price > 0.0003:
+        prices.append(trigger)
+        labels.append("триггер")
+    if target is not None and abs(target - prices[-1]) / max(abs(target), 1e-9) > 0.0003:
+        prices.append(target)
+        labels.append("цель")
+    if len(prices) < 2:
+        return
+
+    start_x = _x_at(bars, len(bars) - 1)
+    if len(bars) >= 2:
+        step = _x_at(bars, -1) - _x_at(bars, max(0, len(bars) - 6))
+        step = max(step / 5.0, 1e-6)
+    else:
+        step = 5.0 / (24 * 60)
+    # горизонт растягивает путь правее
+    hz = max(1.0, float(horizon_hours) or 2.0)
+    span = step * (3.0 + hz)
+    xs = [start_x + span * (i / max(1, len(prices) - 1)) for i in range(len(prices))]
+
+    if bias == "short" or pattern.direction == "bearish":
+        color = "#ff7b72"
+    elif bias == "long" or pattern.direction == "bullish":
+        color = "#3fb950"
+    else:
+        color = "#d2a8ff"
+    ls = "--" if watch_only or status in {"forming", "awaiting_breakout", "conflict"} else "-."
+    ax.plot(xs, prices, color=color, linestyle=ls, linewidth=1.45, alpha=0.92, zorder=6)
+    ax.annotate(
+        "",
+        xy=(xs[-1], prices[-1]),
+        xytext=(xs[-2], prices[-2]),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.35, linestyle="dashed", alpha=0.9),
+    )
+    hz_lab = f"~{hz:.0f}ч"
+    mode = "WATCH" if watch_only else "путь"
+    ax.text(
+        xs[0],
+        prices[0],
+        f" foresight {hz_lab} ({mode})",
+        color=color,
+        fontsize=6.4,
+        fontweight="bold",
+        va="bottom",
+        bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=color, alpha=0.8),
+    )
+    for x, y, lab in zip(xs[1:], prices[1:], labels[1:]):
+        ax.text(x, y, f" {lab}", color=color, fontsize=6.2, fontweight="bold", va="bottom")
+    if pattern.stop_price:
+        ax.axhline(
+            float(pattern.stop_price),
+            color="#ff7b72",
+            linestyle=":",
+            linewidth=0.7,
+            alpha=0.5,
+        )

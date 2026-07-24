@@ -42,6 +42,8 @@ class TradeThesis:
     arguments: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     fib_action: str = ""  # короткая инструкция: входить / ждать / Fib не строим
+    foresight_line: str = ""  # BuyHold 1–3ч фигуры
+    foresight_pro_html: str = ""
 
 
 def _pick_side(signal: Signal, ta: TAAnalysisResult) -> str:
@@ -316,6 +318,12 @@ def build_trade_thesis(
         structure_line += f" · {pat.label_ru} ({status})"
         if pat.target_price:
             structure_line += f" → цель {fmt_price(pat.target_price)}"
+    if getattr(ta, "primary_htf_chart_pattern", None):
+        hp = ta.primary_htf_chart_pattern
+        hs = "подтв." if hp.status == "confirmed" else "форм."
+        structure_line += f" · HTF {hp.label_ru} ({hs})"
+        if getattr(ta, "pattern_foresight_htf_conflict", False):
+            structure_line += " ⚠"
 
     wave_bits: list[str] = []
     if ta.wave_leg_start and ta.wave_leg_end:
@@ -366,6 +374,10 @@ def build_trade_thesis(
         arguments.append(f"SMC: {ta.smc_summary[:60]}")
     if getattr(ta, "setup_factors", None):
         arguments.append("Confluence: " + " · ".join(ta.setup_factors[:3]))
+    if getattr(ta, "pattern_foresight_summary", ""):
+        hz = getattr(ta, "pattern_foresight_horizon", 0) or 0
+        hz_s = f"~{hz:.0f}ч" if hz else "1–3ч"
+        arguments.append(f"Фигуры {hz_s}: {ta.pattern_foresight_summary[:70]}")
     if ta.btc_context:
         arguments.append(f"BTC: {ta.btc_context[:50]}")
     if ta.narrative_basis:
@@ -373,6 +385,8 @@ def build_trade_thesis(
         arguments.append(plain)
 
     risks: list[str] = []
+    if getattr(ta, "pattern_foresight_htf_conflict", False):
+        risks.append("конфликт LTF/HTF фигур — приоритет 1h")
     if ta.wave_phase == "late_impulse":
         risks.append("финал импульса — вход только после отката")
     if ta.post_pump and ta.range_position >= 0.85:
@@ -381,6 +395,9 @@ def build_trade_thesis(
         risks.append(ta.repeat_spike_dump_note or "риск повторного сброса")
     if "вход невыгоден" in (ta.verdict_reason or "").lower():
         risks.append("плохое R:R")
+
+    foresight_line = getattr(ta, "pattern_foresight_hot", "") or ""
+    foresight_pro = getattr(ta, "pattern_foresight_pro_html", "") or ""
 
     wait_for = ""
     is_chase_watch = (
@@ -395,6 +412,11 @@ def build_trade_thesis(
     if action == "watch":
         # Главный текст ожидания — из Fib action (понятная цена)
         wait_for = fib_action
+        # Forming-фигура BuyHold: ждать пробой, не market
+        if getattr(ta, "pattern_foresight_watch_only", False) and ta.pattern_foresight_trigger:
+            trig = ta.pattern_foresight_trigger
+            if trig not in wait_for:
+                wait_for = f"{wait_for} · {trig}" if wait_for else trig
         if is_chase_watch:
             hint = _pullback_wait_hint(ta, side)
             if hint and hint not in wait_for:
@@ -455,13 +477,15 @@ def build_trade_thesis(
                 vol_bits.append("объём ↓ в фигуре")
             if getattr(pat, "volume_breakout", False):
                 vol_bits.append("объём ↑ на пробое")
+            hz = getattr(ta, "pattern_foresight_horizon", 0) or 0
+            hz_bit = f" · горизонт ~{hz:.0f}ч" if hz else ""
             thesis = (
                 f"Графическая фигура <b>{pat.label_ru}</b> "
                 f"({'подтв.' if pat.status == 'confirmed' else 'форм.'})"
             )
             if mode:
                 thesis += f" · вход: {mode}"
-            thesis += f" + структура подтверждают <b>{label}</b>."
+            thesis += f" + структура подтверждают <b>{label}</b>{hz_bit}."
             if psycho:
                 thesis += f" {psycho[:90]}"
             if vol_bits:
@@ -484,10 +508,18 @@ def build_trade_thesis(
         thesis = decision.reason if decision else (risks[0] if risks else "сетап слабый")
     else:
         headline = f"👀 <b>WATCH</b> · движение {label} · не входить сейчас"
-        thesis = (
-            f"Движение есть, но <b>market-вход запрещён</b>. "
-            f"{wait_for or 'ждать откат к Fib или ретест'}."
-        )
+        if getattr(ta, "pattern_foresight_watch_only", False) and ta.pattern_foresight_summary:
+            thesis = (
+                f"Вырисовывается фигура: <b>{ta.pattern_foresight_summary}</b>. "
+                f"Market запрещён — {ta.pattern_foresight_trigger or 'ждать пробой и закрепление'}."
+            )
+            if ta.pattern_foresight_path:
+                thesis += f" {ta.pattern_foresight_path[:100]}"
+        else:
+            thesis = (
+                f"Движение есть, но <b>market-вход запрещён</b>. "
+                f"{wait_for or 'ждать откат к Fib или ретест'}."
+            )
 
     inv = ""
     if stop:
@@ -512,9 +544,11 @@ def build_trade_thesis(
         target_prices=targets,
         invalidation=inv,
         wait_for=wait_for,
-        arguments=arguments[:4],
+        arguments=arguments[:5],
         risks=risks[:3],
         fib_action=fib_action,
+        foresight_line=foresight_line,
+        foresight_pro_html=foresight_pro,
     )
 
 
@@ -542,9 +576,13 @@ def format_thesis_hot_html(thesis: TradeThesis, *, skip_headline: bool = False) 
         action_txt = thesis.fib_action or thesis.fib_line
         if action_txt and ("Fib" in action_txt or "Вход" in action_txt):
             lines.append(f"📐 {action_txt[:95]}")
+        if thesis.foresight_line:
+            lines.append(thesis.foresight_line[:140])
     elif thesis.action == "watch":
         if not skip_headline:
             lines.append(f"👀 <b>WATCH</b> · движение {label} · не входить сейчас")
+        if thesis.foresight_line:
+            lines.append(thesis.foresight_line[:150])
         if thesis.fib_action:
             lines.append(f"⏳ {thesis.fib_action[:120]}")
         elif thesis.wait_for:
@@ -575,6 +613,10 @@ def format_thesis_pro_html(thesis: TradeThesis) -> str:
         thesis.wave_line,
         f"📐 {thesis.fib_line}",
     ]
+    if thesis.foresight_pro_html:
+        lines.append(thesis.foresight_pro_html)
+    elif thesis.foresight_line:
+        lines.append(thesis.foresight_line)
     if thesis.fib_action and thesis.fib_action not in thesis.fib_line:
         lines.append(f"➡️ <b>Как входить:</b> {thesis.fib_action}")
     if thesis.arguments:

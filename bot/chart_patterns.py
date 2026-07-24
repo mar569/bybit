@@ -13,6 +13,7 @@ from .pattern_specs import (
     FLAG_PARALLEL_SLOPE_RATIO,
     FLAG_POLE_MAX_BARS,
     FLAG_POLE_MIN_BARS,
+    CUP_ENABLED,
     CUP_HANDLE_MAX_BARS,
     CUP_MIN_BARS,
     CUP_RIM_TOLERANCE_PCT,
@@ -28,6 +29,8 @@ from .pattern_specs import (
     PENNANT_BODY_MAX_BARS,
     RECTANGLE_MAX_RANGE_PCT,
     RECTANGLE_MIN_BARS,
+    ROUNDED_MIN_BARS,
+    ROUNDED_RIM_TOLERANCE_PCT,
     TARGET_HS_FACTOR,
     TARGET_POLE_FACTOR,
     TARGET_RECTANGLE_FACTOR,
@@ -1243,11 +1246,15 @@ def _detect_expanding_triangle(
     bars: list[KlineBar],
     atr: float,
 ) -> list[ChartPattern]:
-    """Расходящийся треугольник: HH + LL, на пике/дне → разворот при импульсном пробое."""
+    """Расходящийся треугольник (BuyHold).
+
+    HH↑ + LL↓ у пика/дна → неопределённость → разворот.
+    Отработка: импульсный пробой границы против тренда + предпочтительно ретест.
+    """
     out: list[ChartPattern] = []
     from .pattern_specs import EXPANDING_MIN_SWINGS
 
-    if len(swings) < EXPANDING_MIN_SWINGS:
+    if len(swings) < EXPANDING_MIN_SWINGS or len(bars) < 16:
         return out
     recent = swings[-8:]
     highs = [s for s in recent if s.kind == "high"]
@@ -1267,34 +1274,192 @@ def _detect_expanding_triangle(
     if width < atr * 1.2:
         return out
     start_idx = min(h1.index, l1.index)
-    prior = _prior_trend_bias(bars, start_idx)
-    # статья: на пике роста — пробой нижней; на дне — верхней
     end_idx = max(h2.index, l2.index)
-    upper_now = _line_value(upper, end_idx)
-    lower_now = _line_value(lower, end_idx)
-    close = bars[-1].close
-    if prior == "bullish" and close < lower_now:
-        direction, status = "bearish", "confirmed"
-        target = close - width * TARGET_TRIANGLE_FACTOR
-    elif prior == "bearish" and close > upper_now:
-        direction, status = "bullish", "confirmed"
-        target = close + width * TARGET_TRIANGLE_FACTOR
-    elif prior == "bullish":
-        direction, status = "bearish", "forming"
-        target = lower_now - width * TARGET_TRIANGLE_FACTOR
-    elif prior == "bearish":
-        direction, status = "bullish", "forming"
-        target = upper_now + width * TARGET_TRIANGLE_FACTOR
-    else:
+    prior = _prior_trend_bias(bars, start_idx)
+    if prior not in {"bullish", "bearish"}:
         return out
+
+    # Живые границы на текущем баре
+    last_i = len(bars) - 1
+    upper_now = _line_value(upper, last_i)
+    lower_now = _line_value(lower, last_i)
+    close = bars[-1].close
+
+    # Статья: на росте — пробой нижней; на падении — верхней
+    break_bullish = prior == "bearish"  # пробой вверх → LONG
+    boundary = upper_now if break_bullish else lower_now
+    boundary_line = upper if break_bullish else lower
+    direction = "bullish" if break_bullish else "bearish"
+
+    beyond = (
+        close > boundary * 1.0005 if break_bullish else close < boundary * 0.9995
+    )
+
+    # Импульсный пробой: ищем бар после формирования фигуры
+    search_from = max(end_idx, last_i - 12)
+    body_vol = _avg_volume(bars, start_idx, end_idx)
+    impulse_ok = False
+    vol_spike = False
+    break_bar_i: int | None = None
+    for i in range(search_from, last_i + 1):
+        b = bars[i]
+        bound_i = _line_value(boundary_line, i)
+        closed_beyond = (
+            b.close > bound_i * 1.0005 if break_bullish else b.close < bound_i * 0.9995
+        )
+        if not closed_beyond:
+            continue
+        body = abs(b.close - b.open)
+        rng = b.high - b.low
+        candle_impulse = body >= atr * 0.85 or rng >= atr * 1.15
+        # направление свечи в сторону пробоя
+        dir_ok = (b.close > b.open) if break_bullish else (b.close < b.open)
+        vol = float(getattr(b, "volume", 0) or 0)
+        spike = bool(body_vol > 0 and vol >= body_vol * VOLUME_BREAKOUT_SPIKE)
+        if candle_impulse and dir_ok:
+            impulse_ok = True
+            break_bar_i = i
+            if spike:
+                vol_spike = True
+            # берём самый свежий импульсный бар
+    # если импульс был раньше, а сейчас цена за границей — ок
+    if beyond and break_bar_i is None:
+        # слабый уход за границу без импульсной свечи
+        impulse_ok = False
+
+    vol_c, vol_b_generic, vol_s, vol_note = _volume_facts(
+        bars,
+        impulse_start=max(0, start_idx - 8),
+        impulse_end=start_idx,
+        body_start=start_idx,
+        body_end=end_idx,
+        status="confirmed" if beyond else "forming",
+    )
+    volume_breakout = bool(vol_spike or (beyond and vol_b_generic and impulse_ok))
+
+    # Статус / режим входа (BuyHold: импульс + ретест)
+    status = "forming"
+    entry_mode = "wait"
+    if beyond and impulse_ok:
+        status = "confirmed"
+        # ретест: цена вернулась к пробитой границе
+        retest_tol = 0.65  # %
+        near_boundary = abs(close - boundary) / max(boundary, 1e-9) * 100.0 <= retest_tol
+        # после пробоя был возврат к линии (high/low касался)
+        retest_touch = False
+        if break_bar_i is not None and break_bar_i < last_i:
+            for j in range(break_bar_i + 1, last_i + 1):
+                bj = bars[j]
+                bnd = _line_value(boundary_line, j)
+                if break_bullish:
+                    # ретест сверху: low подходит к бывшей сопротивлению
+                    if bj.low <= bnd * 1.004 and bj.close >= bnd * 0.997:
+                        retest_touch = True
+                        break
+                else:
+                    if bj.high >= bnd * 0.996 and bj.close <= bnd * 1.003:
+                        retest_touch = True
+                        break
+        if near_boundary or retest_touch:
+            entry_mode = "retest"
+        else:
+            entry_mode = "breakout"
+    elif beyond and not impulse_ok:
+        # за границей, но без импульса — не confirmed (как на скрине: ждём импульс)
+        status = "forming"
+        entry_mode = "wait"
+
+    if break_bullish:
+        target = (
+            close + width * TARGET_TRIANGLE_FACTOR
+            if status == "confirmed"
+            else boundary + width * TARGET_TRIANGLE_FACTOR
+        )
+        stop = lower_now - atr * 0.25
+    else:
+        target = (
+            close - width * TARGET_TRIANGLE_FACTOR
+            if status == "confirmed"
+            else boundary - width * TARGET_TRIANGLE_FACTOR
+        )
+        stop = upper_now + atr * 0.25
+
     conf, breakdown = _score_geometry(
-        0.60,
+        0.58,
         divergence=0.16,
         context=0.12,
-        breakout=0.14 if status == "confirmed" else 0.0,
+        impulse=0.14 if impulse_ok else 0.0,
+        volume=0.08 if volume_breakout else (0.04 if vol_c else 0.0),
+        breakout=0.12 if status == "confirmed" else 0.0,
+        retest=0.08 if entry_mode == "retest" else 0.0,
     )
     if conf < MIN_PATTERN_CONFIDENCE:
         return out
+
+    # Psychology как в статье
+    if prior == "bullish":
+        psycho = (
+            "линии расходятся у пика роста — неопределённость; "
+            "разворот вниз после импульсного пробоя нижней границы"
+        )
+        if status == "forming" and not beyond:
+            psycho = (
+                "расходящийся треугольник на пике роста — ждать импульсный пробой "
+                "нижней границы, вход предпочтительно на ретесте"
+            )
+        elif beyond and not impulse_ok:
+            psycho = (
+                "цена ниже нижней границы, но пробой не импульсный — "
+                "BuyHold: не брать, ждать импульс/ретест"
+            )
+        elif entry_mode == "retest":
+            psycho = (
+                "импульсный пробой нижней границы → ретест пробитой поддержки "
+                "как сопротивления — классический SHORT"
+            )
+        elif entry_mode == "breakout":
+            psycho = (
+                "импульсный пробой нижней границы подтверждён — "
+                "консервативно ждать ретест, агрессивно от пробоя"
+            )
+    else:
+        psycho = (
+            "линии расходятся у дна падения — неопределённость; "
+            "разворот вверх после импульсного пробоя верхней границы"
+        )
+        if status == "forming" and not beyond:
+            psycho = (
+                "расходящийся треугольник на дне — ждать импульсный пробой "
+                "верхней границы, вход предпочтительно на ретесте"
+            )
+        elif beyond and not impulse_ok:
+            psycho = (
+                "цена выше верхней границы, но пробой не импульсный — "
+                "ждать импульс/ретест"
+            )
+        elif entry_mode == "retest":
+            psycho = (
+                "импульсный пробой верхней границы → ретест — классический LONG"
+            )
+        elif entry_mode == "breakout":
+            psycho = (
+                "импульсный пробой верхней границы — "
+                "консервативно ретест, агрессивно от пробоя"
+            )
+    if vol_note and entry_mode != "wait":
+        psycho = f"{psycho} · {vol_note}"
+    elif volume_breakout:
+        psycho = f"{psycho} · объём на пробое ↑"
+
+    # neckline = пробиваемая граница (для gate / foresight / отрисовки цели)
+    neck = PatternLine(
+        boundary_line.start_idx,
+        boundary_line.start_price,
+        last_i,
+        boundary,
+        "break_bound",
+    )
+
     out.append(
         ChartPattern(
             kind="expanding_triangle",
@@ -1307,17 +1472,22 @@ def _detect_expanding_triangle(
                 PatternPoint(l2.index, l2.price, "low2"),
             ),
             lines=(upper, lower),
-            zone_top=max(h1.price, h2.price),
-            zone_bottom=min(l1.price, l2.price),
-            neckline=None,
+            zone_top=max(h1.price, h2.price, upper_now),
+            zone_bottom=min(l1.price, l2.price, lower_now),
+            neckline=neck,
             pole_height=width,
             target_price=target,
-            stop_price=upper_now + atr * 0.2 if direction == "bearish" else lower_now - atr * 0.2,
+            stop_price=stop,
             confidence=conf,
             score_breakdown=breakdown,
-            source_rule="buyhold:expanding_triangle",
+            source_rule="buyhold:expanding_triangle+impulse+retest",
             label_ru=PATTERN_LABELS_RU["expanding_triangle"],
             direction=direction,
+            volume_contracted=vol_c,
+            volume_breakout=volume_breakout,
+            volume_score=vol_s + (0.35 if volume_breakout else 0.0),
+            entry_mode=entry_mode,
+            psychology_note=psycho[:220],
         )
     )
     return out
@@ -1493,6 +1663,141 @@ def _detect_cup_with_handle(
                                     direction="bearish",
                                 )
                             )
+    return out
+
+
+def _detect_rounded_saucer(
+    bars: list[KlineBar],
+    atr: float,
+) -> list[ChartPattern]:
+    """Округлое дно / вершина (блюдце) — чаша без ручки по BuyHold."""
+    out: list[ChartPattern] = []
+    n = len(bars)
+    if n < ROUNDED_MIN_BARS + 4:
+        return out
+    lookback_start = max(0, n - int(n * 0.85))
+    segment = bars[lookback_start:]
+    if len(segment) < ROUNDED_MIN_BARS:
+        return out
+
+    # --- Округлое дно ---
+    bottom_idx = min(range(len(segment)), key=lambda j: segment[j].low)
+    bottom_i = lookback_start + bottom_idx
+    if 6 <= bottom_idx <= len(segment) - 5:
+        left = segment[: bottom_idx + 1]
+        right = segment[bottom_idx:]
+        if len(left) >= 5 and len(right) >= 5:
+            left_rim_i = lookback_start + max(range(len(left)), key=lambda j: left[j].high)
+            right_rim_i = lookback_start + bottom_idx + max(
+                range(len(right)), key=lambda j: right[j].high,
+            )
+            if right_rim_i > left_rim_i + 5:
+                left_p = bars[left_rim_i].high
+                right_p = bars[right_rim_i].high
+                bottom_p = bars[bottom_i].low
+                if _pct_diff(left_p, right_p) <= ROUNDED_RIM_TOLERANCE_PCT:
+                    rim = (left_p + right_p) / 2.0
+                    depth = rim - bottom_p
+                    if depth >= atr * 1.1:
+                        # плавность: середина не должна быть V-spike слишком острым
+                        mid_span = bars[left_rim_i: right_rim_i + 1]
+                        if mid_span:
+                            mid_low = min(b.low for b in mid_span)
+                            if mid_low <= bottom_p * 1.004:
+                                trigger = max(left_p, right_p)
+                                status = _status_from_break(bars, bullish=True, trigger=trigger)
+                                target = trigger + depth * TARGET_HS_FACTOR
+                                stop = bottom_p - atr * 0.25
+                                conf, breakdown = _score_geometry(
+                                    0.52,
+                                    roundness=0.16,
+                                    breakout=0.14 if status == "confirmed" else 0.0,
+                                )
+                                out.append(
+                                    ChartPattern(
+                                        kind="rounded_bottom",
+                                        subtype="reversal",
+                                        status=status,
+                                        points=(
+                                            PatternPoint(left_rim_i, left_p, "rim_left"),
+                                            PatternPoint(bottom_i, bottom_p, "saucer_low"),
+                                            PatternPoint(right_rim_i, right_p, "rim_right"),
+                                        ),
+                                        lines=(
+                                            PatternLine(left_rim_i, trigger, n - 1, trigger, "rim"),
+                                        ),
+                                        zone_top=trigger,
+                                        zone_bottom=bottom_p,
+                                        neckline=PatternLine(left_rim_i, trigger, n - 1, trigger, "rim"),
+                                        pole_height=depth,
+                                        target_price=target,
+                                        stop_price=stop,
+                                        confidence=conf,
+                                        score_breakdown=breakdown,
+                                        source_rule="buyhold:rounded_bottom",
+                                        label_ru=PATTERN_LABELS_RU["rounded_bottom"],
+                                        direction="bullish",
+                                        entry_mode="breakout" if status == "confirmed" else "wait",
+                                        psychology_note="плавное дно без резких рывков — разворот после накопления",
+                                    )
+                                )
+
+    # --- Округлая вершина ---
+    top_idx = max(range(len(segment)), key=lambda j: segment[j].high)
+    top_i = lookback_start + top_idx
+    if 6 <= top_idx <= len(segment) - 5:
+        left = segment[: top_idx + 1]
+        right = segment[top_idx:]
+        if len(left) >= 5 and len(right) >= 5:
+            left_rim_i = lookback_start + min(range(len(left)), key=lambda j: left[j].low)
+            right_rim_i = lookback_start + top_idx + min(
+                range(len(right)), key=lambda j: right[j].low,
+            )
+            if right_rim_i > left_rim_i + 5:
+                left_p = bars[left_rim_i].low
+                right_p = bars[right_rim_i].low
+                top_p = bars[top_i].high
+                if _pct_diff(left_p, right_p) <= ROUNDED_RIM_TOLERANCE_PCT:
+                    rim = (left_p + right_p) / 2.0
+                    depth = top_p - rim
+                    if depth >= atr * 1.1:
+                        trigger = min(left_p, right_p)
+                        status = _status_from_break(bars, bullish=False, trigger=trigger)
+                        target = trigger - depth * TARGET_HS_FACTOR
+                        stop = top_p + atr * 0.25
+                        conf, breakdown = _score_geometry(
+                            0.52,
+                            roundness=0.16,
+                            breakout=0.14 if status == "confirmed" else 0.0,
+                        )
+                        out.append(
+                            ChartPattern(
+                                kind="rounded_top",
+                                subtype="reversal",
+                                status=status,
+                                points=(
+                                    PatternPoint(left_rim_i, left_p, "rim_left"),
+                                    PatternPoint(top_i, top_p, "saucer_high"),
+                                    PatternPoint(right_rim_i, right_p, "rim_right"),
+                                ),
+                                lines=(
+                                    PatternLine(left_rim_i, trigger, n - 1, trigger, "rim"),
+                                ),
+                                zone_top=top_p,
+                                zone_bottom=trigger,
+                                neckline=PatternLine(left_rim_i, trigger, n - 1, trigger, "rim"),
+                                pole_height=depth,
+                                target_price=target,
+                                stop_price=stop,
+                                confidence=conf,
+                                score_breakdown=breakdown,
+                                source_rule="buyhold:rounded_top",
+                                label_ru=PATTERN_LABELS_RU["rounded_top"],
+                                direction="bearish",
+                                entry_mode="breakout" if status == "confirmed" else "wait",
+                                psychology_note="плавная вершина — распределение, разворот вниз",
+                            )
+                        )
     return out
 
 
@@ -1818,12 +2123,24 @@ def pattern_location_ok(
     want = "bullish" if side == "long" else "bearish"
     if pattern.direction != want:
         return False
-    # Флаг/вымпел/клин: без всплеска объёма на пробое требуем ближе к уровню
+    # Флаг/вымпел/клин/расходящийся △: без всплеска объёма на пробое требуем ближе к уровню
     need_tight = (
-        pattern.kind in {"flag", "pennant", "wedge_rising", "wedge_falling", "triple_bottom", "triple_top"}
+        pattern.kind in {
+            "flag", "pennant", "wedge_rising", "wedge_falling",
+            "triple_bottom", "triple_top", "expanding_triangle",
+        }
         and not pattern.volume_breakout
     )
+    # BuyHold: расходящийся △ — ENTRY только после импульса; wait запрещён
+    if pattern.kind == "expanding_triangle":
+        if (pattern.entry_mode or "") == "wait":
+            return False
+        if not pattern.volume_breakout and (pattern.entry_mode or "") != "retest":
+            # без объёма/импульса — только если уже на ретесте у границы
+            need_tight = True
     use_tol = tol_pct * (0.55 if need_tight else 1.0)
+    if pattern.kind == "expanding_triangle" and (pattern.entry_mode or "") == "retest":
+        use_tol = min(use_tol, 0.70)
 
     levels: list[float] = []
     if pattern.neckline:
@@ -2064,6 +2381,7 @@ def detect_chart_patterns(
     *,
     min_confidence: float = MIN_PATTERN_CONFIDENCE,
     enabled: bool = True,
+    max_patterns: int | None = None,
 ) -> list[ChartPattern]:
     """Строгий поиск: только фигуры выше порога, без пересекающихся дублей."""
     if not enabled or len(bars) < 24:
@@ -2084,9 +2402,13 @@ def detect_chart_patterns(
     found.extend(_detect_rectangle(bars, atr))
     found.extend(_detect_false_breakout(bars, swings, atr))
     found.extend(_detect_one_two_three(bars, swings, atr))
+    if CUP_ENABLED:
+        found.extend(_detect_cup_with_handle(bars, swings, atr))
+        found.extend(_detect_rounded_saucer(bars, atr))
 
+    limit = MAX_REPORT_PATTERNS if max_patterns is None else max(1, int(max_patterns))
     strong = [p for p in found if p.confidence >= min_confidence]
-    return _suppress_overlaps(strong)[:MAX_REPORT_PATTERNS]
+    return _suppress_overlaps(strong)[:limit]
 
 
 def pick_primary_pattern(patterns: list[ChartPattern]) -> ChartPattern | None:

@@ -262,6 +262,18 @@ class TAAnalysisResult:
     fib_reject_reason: str = ""
     chart_patterns: list[ChartPattern] = field(default_factory=list)
     primary_chart_pattern: ChartPattern | None = None
+    htf_chart_patterns: list[ChartPattern] = field(default_factory=list)
+    primary_htf_chart_pattern: ChartPattern | None = None
+    pattern_foresight_summary: str = ""
+    pattern_foresight_path: str = ""
+    pattern_foresight_trigger: str = ""
+    pattern_foresight_horizon: float = 0.0
+    pattern_foresight_bias: str = "neutral"
+    pattern_foresight_status: str = ""
+    pattern_foresight_htf_conflict: bool = False
+    pattern_foresight_watch_only: bool = False
+    pattern_foresight_hot: str = ""
+    pattern_foresight_pro_html: str = ""
     # Pro confluence (HTF EW + фигуры + Fib + SMC)
     setup_score: int = 0
     setup_grade: str = ""
@@ -2191,6 +2203,48 @@ def run_ta_analysis(
         min_confidence=pattern_min_confidence,
     )
     primary_chart_pattern = pick_primary_pattern(chart_patterns)
+
+    # HTF (1h) фигуры — приоритет старшего ТФ по BuyHold
+    htf_chart_patterns: list[ChartPattern] = []
+    primary_htf_chart_pattern: ChartPattern | None = None
+    if pattern_detection_enabled and htf_bars and len(htf_bars) >= 24:
+        from .pattern_specs import HTF_PATTERN_MIN_CONFIDENCE
+        from .pattern_foresight import tag_patterns_timeframe
+
+        raw_htf = detect_chart_patterns(
+            list(htf_bars),
+            enabled=True,
+            min_confidence=max(pattern_min_confidence, HTF_PATTERN_MIN_CONFIDENCE),
+            max_patterns=2,
+        )
+        htf_chart_patterns = tag_patterns_timeframe(raw_htf, "htf")
+        primary_htf_chart_pattern = pick_primary_pattern(htf_chart_patterns)
+        chart_patterns = tag_patterns_timeframe(chart_patterns, "ltf")
+        if primary_chart_pattern is not None:
+            from dataclasses import replace as _dc_replace
+
+            primary_chart_pattern = _dc_replace(primary_chart_pattern, timeframe="ltf")
+    else:
+        from .pattern_foresight import tag_patterns_timeframe
+
+        chart_patterns = tag_patterns_timeframe(chart_patterns, "ltf")
+        if primary_chart_pattern is not None:
+            from dataclasses import replace as _dc_replace
+
+            primary_chart_pattern = _dc_replace(primary_chart_pattern, timeframe="ltf")
+
+    from .chart_patterns import compute_atr as _compute_pattern_atr
+    from .pattern_foresight import build_pattern_foresight, foresight_enriches_scenario
+
+    _pat_atr = _compute_pattern_atr(pattern_bars) if pattern_bars else 0.0
+    pattern_foresight = build_pattern_foresight(
+        chart_patterns,
+        htf_patterns=htf_chart_patterns,
+        primary=primary_chart_pattern,
+        atr=_pat_atr,
+        interval_minutes=interval_minutes,
+        current_price=float(pattern_bars[-1].close) if pattern_bars else 0.0,
+    )
     rulers = compute_rulers(bars, swings)
     structure = classify_structure(swings)
     key_levels = build_key_levels(bars, levels, zones)
@@ -2239,6 +2293,7 @@ def run_ta_analysis(
         wave=wave,
         ew_ltf=ew_ltf,
         pattern=primary_chart_pattern,
+        htf_pattern=primary_htf_chart_pattern,
         smc=smc,
         current=bars[-1].close if bars else None,
     )
@@ -2681,6 +2736,21 @@ def run_ta_analysis(
     elif action_priority == "short" and breakdown:
         primary_scenario = f"приоритет вниз — пробой {fmt_price(breakdown)}"
 
+    # BuyHold foresight усиливает сценарий, если фигура активна
+    _pf_scene = foresight_enriches_scenario(pattern_foresight)
+    if _pf_scene:
+        if not primary_scenario:
+            primary_scenario = _pf_scene
+        elif pattern_foresight.confidence >= 0.68:
+            primary_scenario = f"{primary_scenario}; {_pf_scene}"
+
+    if pattern_foresight.htf_conflict:
+        risk_notes = ["HTF фигура против LTF — не бить против старшего ТФ"] + risk_notes
+    elif pattern_foresight.watch_only and pattern_foresight.active:
+        risk_notes = [
+            f"фигура форм. — ждать: {pattern_foresight.trigger_text[:60]}"
+        ] + risk_notes
+
     if post_pump:
         risk_notes = ["после пампа — не гнаться, ждать пробой range"] + risk_notes
 
@@ -2757,6 +2827,14 @@ def run_ta_analysis(
         rulers=rulers,
         flow=flow,
     )
+    if pattern_foresight.active:
+        pf_bit = (
+            f"Фигура {pattern_foresight.horizon_hours:.0f}ч: {pattern_foresight.summary}"
+        )
+        if forecast_summary:
+            forecast_summary = f"{forecast_summary} · {pf_bit}"[:280]
+        else:
+            forecast_summary = pf_bit[:280]
 
     narrative_plain, narrative_plan, narrative_basis = build_ta_signal_narrative(
         verdict=verdict,
@@ -2939,6 +3017,18 @@ def run_ta_analysis(
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,
         primary_chart_pattern=primary_chart_pattern,
+        htf_chart_patterns=htf_chart_patterns,
+        primary_htf_chart_pattern=primary_htf_chart_pattern,
+        pattern_foresight_summary=pattern_foresight.summary if pattern_foresight.active else "",
+        pattern_foresight_path=pattern_foresight.path_text if pattern_foresight.active else "",
+        pattern_foresight_trigger=pattern_foresight.trigger_text if pattern_foresight.active else "",
+        pattern_foresight_horizon=float(pattern_foresight.horizon_hours) if pattern_foresight.active else 0.0,
+        pattern_foresight_bias=pattern_foresight.bias if pattern_foresight.active else "neutral",
+        pattern_foresight_status=pattern_foresight.status if pattern_foresight.active else "",
+        pattern_foresight_htf_conflict=bool(pattern_foresight.htf_conflict),
+        pattern_foresight_watch_only=bool(pattern_foresight.watch_only and pattern_foresight.active),
+        pattern_foresight_hot=pattern_foresight.hot_line() if pattern_foresight.active else "",
+        pattern_foresight_pro_html=pattern_foresight.pro_html() if pattern_foresight.active else "",
         setup_score=int(setup.score),
         setup_grade=setup.grade,
         setup_side=setup.side,

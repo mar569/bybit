@@ -309,6 +309,12 @@ def build_pro_detail_html(
     basis = ta_signal_forecast_summary_line(ta)
     body = _append_unique(lines, body, basis)
 
+    foresight = getattr(ta, "pattern_foresight_pro_html", "") or ""
+    if foresight:
+        body = _append_unique(lines, body, foresight)
+    elif getattr(ta, "pattern_foresight_hot", ""):
+        body = _append_unique(lines, body, ta.pattern_foresight_hot)
+
     if ta.smc and ta.smc.smc_score >= 4:
         smc = format_smc_compact_html(ta.smc)
         body = _append_unique(lines, body, smc or "")

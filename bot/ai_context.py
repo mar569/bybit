@@ -74,6 +74,10 @@ def _pattern_brief(p: Any) -> dict[str, Any]:
         "stop": _round(getattr(p, "stop_price", None)),
         "entry_mode": getattr(p, "entry_mode", ""),
         "psychology": getattr(p, "psychology_note", "")[:160],
+        "subtype": getattr(p, "subtype", ""),
+        "timeframe": getattr(p, "timeframe", "ltf"),
+        "volume_contracted": bool(getattr(p, "volume_contracted", False)),
+        "volume_breakout": bool(getattr(p, "volume_breakout", False)),
     }
 
 
@@ -84,6 +88,24 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
     ]
     patterns = [_pattern_brief(p) for p in (ta.chart_patterns or [])[:8]]
     primary = _pattern_brief(ta.primary_chart_pattern) if ta.primary_chart_pattern else None
+    htf_patterns = [_pattern_brief(p) for p in (getattr(ta, "htf_chart_patterns", None) or [])[:4]]
+    htf_primary = (
+        _pattern_brief(ta.primary_htf_chart_pattern)
+        if getattr(ta, "primary_htf_chart_pattern", None)
+        else None
+    )
+    pattern_foresight = None
+    if getattr(ta, "pattern_foresight_summary", ""):
+        pattern_foresight = {
+            "horizon_hours": getattr(ta, "pattern_foresight_horizon", 0) or None,
+            "bias": getattr(ta, "pattern_foresight_bias", "") or None,
+            "status": getattr(ta, "pattern_foresight_status", "") or None,
+            "summary": (ta.pattern_foresight_summary or "")[:200],
+            "path": (getattr(ta, "pattern_foresight_path", "") or "")[:240],
+            "trigger": (getattr(ta, "pattern_foresight_trigger", "") or "")[:160],
+            "htf_conflict": bool(getattr(ta, "pattern_foresight_htf_conflict", False)),
+            "watch_only": bool(getattr(ta, "pattern_foresight_watch_only", False)),
+        }
     key_levels = [
         {"price": _round(getattr(k, "price", None)), "label": getattr(k, "label", "")}
         for k in (ta.key_levels or [])[:10]
@@ -137,6 +159,9 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "candle_patterns": candle_patterns,
         "chart_patterns": patterns,
         "primary_pattern": primary,
+        "htf_chart_patterns": htf_patterns,
+        "primary_htf_pattern": htf_primary,
+        "pattern_foresight": pattern_foresight,
         "fib": fib,
         "wave": {
             "phase": ta.wave_phase,

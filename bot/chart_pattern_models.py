@@ -44,3 +44,4 @@ class ChartPattern:
     volume_score: float = 0.0         # 0..1 вклад объёма в conf
     entry_mode: str = ""              # breakout | retest | wait
     psychology_note: str = ""         # краткая логика / манипуляция / продолжение
+    timeframe: str = "ltf"            # ltf | htf | 5m | 15m | 60m

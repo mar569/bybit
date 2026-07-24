@@ -237,6 +237,7 @@ def analyze_setup_confluence(
     wave: "WaveStructureResult | None" = None,
     ew_ltf: ElliottWaveResult | None = None,
     pattern: "ChartPattern | None" = None,
+    htf_pattern: "ChartPattern | None" = None,
     smc: "SmcContext | None" = None,
     current: float | None = None,
 ) -> SetupConfluence:
@@ -362,6 +363,33 @@ def analyze_setup_confluence(
             side_votes["long"] += 2 + (1 if pattern.status == "confirmed" else 0)
         elif pattern.direction == "bearish":
             side_votes["short"] += 2 + (1 if pattern.status == "confirmed" else 0)
+
+    # --- HTF chart pattern (BuyHold: старший ТФ приоритетнее) ---
+    if htf_pattern is not None and getattr(htf_pattern, "confidence", 0) >= 0.62:
+        factors.append(
+            f"HTF фигура: {htf_pattern.label_ru} "
+            f"({htf_pattern.confidence:.0%} · {htf_pattern.status})"
+        )
+        score += int(htf_pattern.confidence * 10)
+        if htf_pattern.direction == "bullish":
+            side_votes["long"] += 2 + (1 if htf_pattern.status == "confirmed" else 0)
+        elif htf_pattern.direction == "bearish":
+            side_votes["short"] += 2 + (1 if htf_pattern.status == "confirmed" else 0)
+        if (
+            pattern is not None
+            and pattern.direction in {"bullish", "bearish"}
+            and htf_pattern.direction in {"bullish", "bearish"}
+            and pattern.direction != htf_pattern.direction
+        ):
+            score -= 12
+            factors.append("HTF vs LTF фигура — конфликт, приоритет HTF")
+            # голоса HTF сильнее
+            if htf_pattern.direction == "bullish":
+                side_votes["long"] += 2
+                side_votes["short"] = max(0, side_votes["short"] - 2)
+            else:
+                side_votes["short"] += 2
+                side_votes["long"] = max(0, side_votes["long"] - 2)
 
     # --- Fib confluence ---
     if wave is not None and getattr(wave, "has_confluence", False):
