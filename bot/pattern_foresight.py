@@ -85,7 +85,7 @@ class PatternForesight:
     def hot_line(self) -> str:
         if not self.active:
             return ""
-        h = f"{self.horizon_hours:.0f}ч" if self.horizon_hours >= 1 else "1ч"
+        h = format_horizon_label(self.horizon_hours)
         bits = [f"📐 {h}: {self.summary}"]
         if self.trigger_text and self.watch_only:
             bits.append(f"ждать {self.trigger_text}")
@@ -96,7 +96,7 @@ class PatternForesight:
     def pro_html(self) -> str:
         if not self.active:
             return ""
-        h = f"~{self.horizon_hours:.0f}ч"
+        h = format_horizon_label(self.horizon_hours)
         lines = [
             f"📐 <b>Фигуры · foresight {h}</b>",
             f"• {self.summary}",
@@ -129,24 +129,45 @@ def estimate_horizon_hours(
     *,
     atr: float = 0.0,
     interval_minutes: int = 5,
+    current_price: float = 0.0,
 ) -> float:
-    """Оценка горизонта отработки: тип фигуры + высота/ATR, clamp 1–3ч."""
+    """Горизонт отработки: тип фигуры + размер/ATR; на hot-альтах может быть <1ч."""
     if pattern is None:
         return 2.0
     base = _HORIZON_BY_KIND.get(pattern.kind, 2.0)
-    # Уточнение по размеру: большая фигура → ближе к 3ч
     height = float(pattern.pole_height or 0)
     if height <= 0 and pattern.zone_top and pattern.zone_bottom:
         height = abs(float(pattern.zone_top) - float(pattern.zone_bottom))
     if atr > 0 and height > 0:
         bars_est = height / atr
         hours_from_size = bars_est * max(1, interval_minutes) / 60.0
-        # смесь базы и размера
         base = 0.55 * base + 0.45 * hours_from_size
     if pattern.status == "forming":
-        base = min(3.0, base + 0.5)  # ещё ждать пробой
-    return float(max(1.0, min(3.0, round(base * 2) / 2)))  # шаг 0.5
+        base = min(3.0, base + 0.5)
+    # Hot alt: ATR ≥1.2% от цены → сжимаем горизонт (5m ходит быстро)
+    if atr > 0 and current_price > 0:
+        atr_pct = atr / current_price * 100.0
+        if atr_pct >= 2.5:
+            base *= 0.35
+        elif atr_pct >= 1.2:
+            base *= 0.55
+        elif atr_pct >= 0.7:
+            base *= 0.75
+    return float(max(0.25, min(3.0, round(base * 4) / 4)))  # шаг 0.25ч
 
+
+def format_horizon_label(hours: float) -> str:
+    """Человекочитаемый горизонт: минуты для <1ч."""
+    h = float(hours or 0)
+    if h <= 0:
+        return "15–60м"
+    if h < 1.0:
+        lo = max(15, int(round(h * 60)))
+        hi = min(90, lo + 30)
+        return f"{lo}–{hi}м"
+    if h <= 1.5:
+        return "45–90м"
+    return f"~{h:.0f}ч"
 
 def _dir_to_bias(direction: str) -> str:
     if direction == "bullish":
@@ -228,14 +249,15 @@ def _build_path(pattern: "ChartPattern", horizon: float) -> str:
     sub = _subtype_ru(pattern)
     label = pattern.label_ru or PATTERN_LABELS_RU.get(pattern.kind, pattern.kind)
     psycho = (pattern.psychology_note or "").strip()
+    hz = format_horizon_label(horizon)
     if pattern.status == "forming":
         base = (
-            f"вырисовывается {label} ({sub}) — на ~{horizon:.0f}ч ждать пробой "
+            f"вырисовывается {label} ({sub}) — на {hz} ждать пробой "
             f"и отработку как {_dir_to_bias(pattern.direction).upper() or 'нейтраль'}"
         )
     else:
         bias = _dir_to_bias(pattern.direction).upper()
-        base = f"{label} подтверждён → путь {bias} к цели на ~{horizon:.0f}ч"
+        base = f"{label} подтверждён → путь {bias} к цели на {hz}"
     if psycho:
         base = f"{base}. {psycho[:80]}"
     vol = []
@@ -307,7 +329,10 @@ def build_pattern_foresight(
         htf_primary = pick_primary_pattern(htf_patterns)
 
     horizon = estimate_horizon_hours(
-        focus, atr=atr, interval_minutes=interval_minutes,
+        focus,
+        atr=atr,
+        interval_minutes=interval_minutes,
+        current_price=current_price,
     )
     bias = _dir_to_bias(focus.direction) if focus else "neutral"
     htf_bias = _dir_to_bias(htf_primary.direction) if htf_primary else "neutral"
@@ -337,7 +362,10 @@ def build_pattern_foresight(
         bias = htf_bias
         watch_only = status != "confirmed"
         horizon = estimate_horizon_hours(
-            focus, atr=atr, interval_minutes=max(60, interval_minutes),
+            focus,
+            atr=atr,
+            interval_minutes=max(60, interval_minutes),
+            current_price=current_price,
         )
 
     assert focus is not None

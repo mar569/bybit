@@ -30,7 +30,12 @@ from .probability_engine import PROBABILITY_BYPASS_TYPES
 from .scanner_engine import format_oi_usd, SignalEngine
 from .set_parser import SET_HELP, parse_set_command
 from .market_structure import format_market_structure_block, format_market_structure_compact
-from .bybit_market_data import format_bybit_real_data_block, format_bybit_real_data_compact
+from .bybit_market_data import (
+    BybitAccountRatioCache,
+    account_ratio_to_dict,
+    format_bybit_real_data_block,
+    format_bybit_real_data_compact,
+)
 from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart
 from .bybit_klines import BybitKlineCache
 from .manual_ta import (
@@ -96,7 +101,7 @@ from .ai_analyst import (
     ask_gemini,
     sanitize_ai_reply_for_telegram,
 )
-from .ai_context import build_ai_context_pack, parse_hours_from_text
+from .ai_context import build_ai_context_pack, parse_hours_from_text, parse_interval_from_text
 from .liquidation_analysis import (
     AnalysisFactor,
     LiquidationAnalysisResult,
@@ -206,6 +211,7 @@ class TelegramBot:
         self._manual_ta_muted: dict[tuple[int, str], float] = {}
         self._manual_ta_alert_task: asyncio.Task | None = None
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
+        self._account_ratio_cache = BybitAccountRatioCache()
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
         # Контекст последнего сигнала для кнопок «Ждать LONG/SHORT»
@@ -757,6 +763,7 @@ class TelegramBot:
         chart_url: str | None = None,
         include_copy: bool = False,
         include_ai: bool = True,
+        interval_minutes: int | None = None,
     ) -> list[InlineKeyboardButton]:
         """TV chart + Liquidation Heatmap Model 1 + optional AI callback."""
         chart = chart_url or coinglass_url(symbol, exchange)
@@ -770,8 +777,10 @@ class TelegramBot:
         if include_ai:
             ex = (exchange or "bybit").lower().replace(" ", "")
             sym = symbol.upper().replace("/", "")
+            tf = int(interval_minutes) if interval_minutes else 0
+            cb = f"aiask:{ex}:{sym}:{tf}" if tf > 0 else f"aiask:{ex}:{sym}"
             buttons.append(
-                InlineKeyboardButton("🤖 AI", callback_data=f"aiask:{ex}:{sym}"),
+                InlineKeyboardButton("🤖 AI", callback_data=cb),
             )
         if include_copy:
             sym = symbol.upper()
@@ -780,10 +789,18 @@ class TelegramBot:
             )
         return buttons
 
-    def _ai_session_keyboard(self, symbol: str, exchange: str) -> InlineKeyboardMarkup:
+    def _ai_session_keyboard(
+        self,
+        symbol: str,
+        exchange: str,
+        *,
+        interval_minutes: int | None = None,
+    ) -> InlineKeyboardMarkup:
         # Session auto-closes after answer — only keep chart links
         return InlineKeyboardMarkup([
-            self._coinglass_link_buttons(symbol, exchange, include_ai=True),
+            self._coinglass_link_buttons(
+                symbol, exchange, include_ai=True, interval_minutes=interval_minutes,
+            ),
         ])
 
     def _signal_keyboard(
@@ -801,6 +818,7 @@ class TelegramBot:
                 chart_url=signal.link,
                 include_copy=True,
                 include_ai=True,
+                interval_minutes=self.settings_manager.settings.signal_chart_interval_minutes,
             ),
         ]
         if pro_token:
@@ -910,14 +928,24 @@ class TelegramBot:
             return True
         exchange = parts[1] or "bybit"
         symbol = parts[2].upper()
+        interval_minutes = 0
+        if len(parts) >= 4:
+            try:
+                interval_minutes = int(parts[3])
+            except ValueError:
+                interval_minutes = 0
+        if interval_minutes <= 0:
+            interval_minutes = int(
+                self.settings_manager.settings.signal_chart_interval_minutes or 5
+            )
         await query.answer("Собираю анализ…")
         chat_id = query.message.chat_id if query.message else update.effective_chat.id
         status = None
         if query.message:
             try:
                 status = await query.message.reply_text(
-                    f"🤖 <b>AI</b> · <code>{symbol}</code>\n"
-                    "Собираю TA / паттерны / волны / SMC + график 24h…\n"
+                    f"🤖 <b>AI</b> · <code>{symbol}</code> · {interval_minutes}m\n"
+                    "Собираю мульти-ТФ: HTF + working TF + liq/CVD/OI + график…\n"
                     "После ответа сессия закроется. Новый вопрос — снова 🤖 AI.",
                     parse_mode=ParseMode.HTML,
                 )
@@ -929,12 +957,15 @@ class TelegramBot:
             symbol=symbol,
             exchange=exchange,
             user_text=(
-                "Разбери как опытный трейдер на 1–3ч: сначала пойми структуру и confluence "
-                "(Fib/EW/ABC/паттерн/SMC/magnet/CVD), потом скажи куда цена пойдёт и почему. "
-                "Не чеклист индикаторов. Первая цель ≥1–2%. "
-                "ВЕРДИКТ → КУДА ЖДЁМ (с логикой) → ЧТО ДЕЛАТЬ. Без markdown. Окно 24h."
+                f"WORKING_TF={interval_minutes}m. "
+                "Разбери глобально как очень опытный трейдер: "
+                "MULTI_TF (HTF bias + WORKING_TF структура + микро на скрине если есть), "
+                "VOLATILITY_REGIME, liq/объём/CVD/OI, фигуры, confluence. "
+                "Конкретика: куда цена, триггер close на WORKING_TF, стоп, TP1/TP2. "
+                "Не шаблон 1–3ч. Ответ ПОЛНЫЙ — 6 пунктов, без обрыва. Без markdown. Окно 24h."
             ),
             hours=24,
+            interval_minutes=interval_minutes,
             rebuild_context=True,
             user_images=None,
             status_message=status,
@@ -1008,16 +1039,23 @@ class TelegramBot:
                 text = "Проанализируй этот скрин вместе с пакетом бота."
 
         hours = int(session.get("hours") or 24)
+        interval_minutes = int(
+            session.get("interval_minutes")
+            or self.settings_manager.settings.signal_chart_interval_minutes
+            or 5
+        )
         new_hours = parse_hours_from_text(text, default=hours)
-        rebuild = new_hours != hours
+        new_interval = parse_interval_from_text(text, default=interval_minutes)
+        rebuild = new_hours != hours or new_interval != interval_minutes
         if rebuild:
             hours = new_hours
+            interval_minutes = new_interval
         # Redis restore drops PNG blobs — refresh pack when chart missing
         if not isinstance(session.get("chart_png"), (bytes, bytearray)):
             rebuild = True
 
         status = await update.message.reply_text(
-            f"🤖 Думаю… ({session.get('symbol')} · {hours}h)"
+            f"🤖 Думаю… ({session.get('symbol')} · {interval_minutes}m · {hours}h)"
         )
         await self._run_ai_turn(
             user_id=user_id,
@@ -1026,6 +1064,7 @@ class TelegramBot:
             exchange=str(session.get("exchange") or "bybit"),
             user_text=text or "Продолжи.",
             hours=hours,
+            interval_minutes=interval_minutes,
             rebuild_context=rebuild or not session.get("context_text"),
             user_images=images or None,
             status_message=status,
@@ -1046,8 +1085,15 @@ class TelegramBot:
         user_images: list[bytes] | None,
         status_message: Any | None,
         existing_session: dict[str, Any] | None = None,
+        interval_minutes: int | None = None,
     ) -> None:
         session = existing_session or await self._load_ai_session(user_id) or {}
+        tf = int(
+            interval_minutes
+            or session.get("interval_minutes")
+            or self.settings_manager.settings.signal_chart_interval_minutes
+            or 5
+        )
         context_text = str(session.get("context_text") or "")
         chart_png = session.get("chart_png") if isinstance(session.get("chart_png"), (bytes, bytearray)) else None
         liq_png = session.get("liq_map_png") if isinstance(session.get("liq_map_png"), (bytes, bytearray)) else None
@@ -1058,6 +1104,7 @@ class TelegramBot:
                     symbol,
                     exchange,
                     hours=hours,
+                    interval_minutes=tf,
                     include_chart=True,
                     include_liq_map=True,
                 )
@@ -1079,6 +1126,7 @@ class TelegramBot:
                 "symbol": pack.symbol,
                 "exchange": pack.exchange,
                 "hours": pack.hours,
+                "interval_minutes": pack.interval_minutes,
                 "context_text": context_text,
                 "chart_url": pack.chart_url,
                 "liq_map_url": pack.liq_map_url,
@@ -1132,8 +1180,8 @@ class TelegramBot:
         # One-shot: don't keep session open after the answer (avoids menu hijack)
         await self._clear_ai_session(user_id)
 
-        keyboard = self._ai_session_keyboard(symbol, exchange)
-        caption = f"🤖 <b>{html.escape(symbol)}</b> · {hours}h"
+        keyboard = self._ai_session_keyboard(symbol, exchange, interval_minutes=tf)
+        caption = f"🤖 <b>{html.escape(symbol)}</b> · {tf}m · {hours}h"
         if result.model:
             caption += f" · <i>{html.escape(result.model)}</i>"
         if status_message is not None:
@@ -2264,7 +2312,54 @@ class TelegramBot:
     def _can_use_manual_ta(self, update: Update) -> bool:
         return self._is_manual_ta_chat(update) or self._is_admin(update)
 
-    def _manual_ta_tf_keyboard(self, symbol: str, *, wizard: bool = False) -> InlineKeyboardMarkup:
+    async def _fetch_manual_ta_market_details(self, symbol: str) -> dict[str, Any]:
+        """Реальные Bybit L/S + ликвидации — как в обычных сигналах."""
+        details: dict[str, Any] = {}
+        try:
+            snap = await self._account_ratio_cache.get_ratio(symbol)
+            if snap is not None:
+                details["account_ratio"] = account_ratio_to_dict(snap)
+        except Exception:
+            logger.debug("Manual TA account-ratio failed for %s", symbol, exc_info=True)
+        try:
+            if self.scanner is not None:
+                stats = self.scanner._get_liquidation_stats("bybit", symbol, 15)
+                if stats is not None:
+                    details["liquidations"] = stats.to_dict()
+        except Exception:
+            logger.debug("Manual TA liq stats failed for %s", symbol, exc_info=True)
+        return details
+
+    async def _manual_ta_flow_caption_block(self, symbol: str, ta: Any) -> str:
+        """Блок «Баланс и поток» для caption ручного TA."""
+        try:
+            cvd_snap = await get_taker_cvd_cache().get_cvd(
+                symbol,
+                lookback_minutes=float(
+                    self.settings_manager.settings.signal_cvd_lookback_minutes
+                ) * 1.5,
+            )
+        except Exception:
+            cvd_snap = None
+        market_details = await self._fetch_manual_ta_market_details(symbol)
+        flow_html = format_manual_ta_flow_html(
+            ta,
+            cvd_snap=cvd_snap,
+            cvd_short_max=self.settings_manager.settings.signal_cvd_short_max_ratio,
+            cvd_long_min=self.settings_manager.settings.signal_cvd_long_min_ratio,
+            market_details=market_details or None,
+        )
+        if not flow_html:
+            return ""
+        return f"\n\n<b>📊 Баланс и поток</b>\n{flow_html}"
+
+    def _manual_ta_tf_keyboard(
+        self,
+        symbol: str,
+        *,
+        wizard: bool = False,
+        interval_minutes: int | None = None,
+    ) -> InlineKeyboardMarkup:
         builder = build_mtw_callback if wizard else build_mta_callback
         buttons = [
             InlineKeyboardButton(f"{tf}m", callback_data=builder(symbol, tf))
@@ -2274,7 +2369,11 @@ class TelegramBot:
         if wizard:
             rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
         else:
-            rows.append(self._coinglass_link_buttons(symbol, "bybit"))
+            rows.append(
+                self._coinglass_link_buttons(
+                    symbol, "bybit", interval_minutes=interval_minutes,
+                )
+            )
         return InlineKeyboardMarkup(rows)
 
     def _manual_ta_chart_source_keyboard(
@@ -2306,7 +2405,11 @@ class TelegramBot:
         if wizard:
             rows.append([InlineKeyboardButton("❌ Отмена", callback_data=MTW_CANCEL_CALLBACK)])
         else:
-            rows.append(self._coinglass_link_buttons(symbol, "bybit"))
+            rows.append(
+                self._coinglass_link_buttons(
+                    symbol, "bybit", interval_minutes=interval_minutes,
+                )
+            )
         return InlineKeyboardMarkup(rows)
 
     def _manual_ta_result_keyboard(
@@ -2317,7 +2420,9 @@ class TelegramBot:
         *,
         chat_id: int | None = None,
     ) -> InlineKeyboardMarkup:
-        base = self._manual_ta_tf_keyboard(symbol, wizard=False).inline_keyboard
+        base = self._manual_ta_tf_keyboard(
+            symbol, wizard=False, interval_minutes=interval_minutes,
+        ).inline_keyboard
         rows = [list(row) for row in base]
         side = "long"
         if ta_result is not None:
@@ -3094,22 +3199,9 @@ class TelegramBot:
             f"{ta_manual_detailed_html(ta)}"
         )
         try:
-            cvd_snap = await get_taker_cvd_cache().get_cvd(
-                symbol,
-                lookback_minutes=float(
-                    self.settings_manager.settings.signal_cvd_lookback_minutes
-                ) * 1.5,
-            )
-            flow_html = format_manual_ta_flow_html(
-                ta,
-                cvd_snap=cvd_snap,
-                cvd_short_max=self.settings_manager.settings.signal_cvd_short_max_ratio,
-                cvd_long_min=self.settings_manager.settings.signal_cvd_long_min_ratio,
-            )
-            if flow_html:
-                caption += f"\n\n<b>📊 Поток рынка</b>\n{flow_html}"
+            caption += await self._manual_ta_flow_caption_block(symbol, ta)
         except Exception:
-            logger.debug("Manual TA CVD fetch failed for %s", symbol)
+            logger.debug("Manual TA flow block failed for %s", symbol, exc_info=True)
         # Доп. глубина для ручного TA: 24-48ч истории по паттерну spike->dump.
         extra_hours = 24 if interval_minutes <= 10 else 48
         per_hour = max(1, 60 // interval_minutes)
@@ -3273,6 +3365,10 @@ class TelegramBot:
             f"📐 TA сейчас: <b>{ta.verdict}</b> · {score_label} {score}/10 · "
             f"цена <b>{fmt_price(ta.current_price)}</b>"
         )
+        try:
+            caption += await self._manual_ta_flow_caption_block(symbol, ta)
+        except Exception:
+            logger.debug("Manual TA intent flow block failed for %s", symbol, exc_info=True)
 
         plan_breakout = ta.breakout_level
         # Анти-chase: если раньше дали LONG-триггер и цена его взяла / почти взяла —

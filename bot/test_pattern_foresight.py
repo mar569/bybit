@@ -110,7 +110,20 @@ def test_horizon_clamped() -> None:
 
     p = replace(_pat(kind="rectangle"), pole_height=20.0)
     h = estimate_horizon_hours(p, atr=0.1, interval_minutes=5)
-    assert 1.0 <= h <= 3.0
+    assert 0.25 <= h <= 3.0
+
+
+def test_horizon_shrinks_on_hot_atr() -> None:
+    from dataclasses import replace
+
+    from bot.pattern_foresight import format_horizon_label
+
+    p = replace(_pat(kind="flag"), pole_height=2.0)
+    calm = estimate_horizon_hours(p, atr=0.05, interval_minutes=5, current_price=100.0)
+    hot = estimate_horizon_hours(p, atr=2.0, interval_minutes=5, current_price=100.0)
+    assert hot < calm
+    assert hot <= 1.0
+    assert "м" in format_horizon_label(hot) or hot >= 1.0
 
 
 def test_forming_not_entry_location() -> None:

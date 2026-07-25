@@ -132,7 +132,7 @@ Trade gate локация: `elliott` / `confluence` (после `fib`, до `abc
 ## [SYMBOL] · [EXCHANGE] · [TF] · [время если видно]
 
 ### Вердикт
-**[LONG | SHORT | WAIT | NO TRADE]** · уверенность **[1–10]** · горизонт **[5–30 мин | 1–4 ч]**
+**[LONG | SHORT | WAIT | NO TRADE]** · уверенность **[1–10]** · горизонт **[по VOLATILITY_REGIME]** · синтез **HTF + WORKING_TF + микро**
 
 ### Контекст рынка
 - HTF bias: ...
@@ -191,7 +191,7 @@ Trade gate локация: `elliott` / `confluence` (после `fib`, до `abc
 | **15m** | Bias сессии, коррекция vs разворот |
 | **1h** | HTF bias, фильтр «не против старшего ТФ», **HTF фигуры** |
 
-Foresight бота (`pattern_foresight`): горизонт **1–3ч** по фигуре (флаг/вымпел быстрее, прямоугольник/чашка дольше). Forming → WATCH до пробоя; HTF 1h приоритетнее LTF при конфликте.
+Foresight бота (`pattern_foresight`): горизонт фигуры + `VOLATILITY_REGIME` для AI (на hot/extreme — десятки минут, не 1–3ч). Forming → WATCH до пробоя; HTF 1h приоритетнее LTF при конфликте.
 
 Если только 5m — явно укажи: «нужен 1h для HTF bias». Бот подтягивает 1h автоматически при анализе ≤15m.
 

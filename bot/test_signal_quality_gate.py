@@ -155,6 +155,39 @@ def test_manual_ta_flow_warns_on_sweep() -> None:
     assert "отскок" in html or "SHORT" in html
 
 
+def test_manual_ta_flow_includes_ls_balance() -> None:
+    from bot.bybit_cvd import summarize_taker_cvd
+
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        action_priority="short",
+        momentum_pct=0.2,
+        oi_narrative_label="шорты набираются",
+        flow_continuation=40,
+        flow_correction=55,
+    )
+    cvd = summarize_taker_cvd(400, 600, trade_count=200, window_minutes=10)
+    market = {
+        "account_ratio": {
+            "long_short_ratio": 0.72,
+            "long_pct": 42.0,
+            "short_pct": 58.0,
+            "period": "5min",
+        },
+        "liquidations": {
+            "window_minutes": 15,
+            "long_liq_usd": 120_000,
+            "short_liq_usd": 20_000,
+            "event_count": 8,
+        },
+    }
+    html = format_manual_ta_flow_html(ta, cvd_snap=cvd, market_details=market)
+    assert "шортов больше" in html
+    assert "42.0%" in html or "42%" in html
+    assert "смывают лонги" in html
+    assert "OI:" in html
+
+
 def test_reversal_pump_weak_cvd_skipped() -> None:
     signal = Signal(
         exchange="Bybit",

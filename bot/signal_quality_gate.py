@@ -437,13 +437,23 @@ def format_manual_ta_flow_html(
     cvd_snap: Any = None,
     cvd_short_max: float = 0.42,
     cvd_long_min: float = 0.58,
+    market_details: dict[str, Any] | None = None,
 ) -> str:
-    """Блок потока для ручного TA — те же правила, что у сигналов."""
+    """Блок баланса/потока для ручного TA — те же реальные данные, что у сигналов."""
+    from .bybit_market_data import format_bybit_real_data_block
+    from .ta_analysis import format_flow_direction_label
+
     lines: list[str] = []
     side = ta.verdict.lower() if ta.verdict in {"LONG", "SHORT"} else ta.action_priority
     if side not in {"long", "short"}:
         side = "long" if ta.action_priority == "long" else "short" if ta.action_priority == "short" else ""
 
+    # 1) Реальный Bybit L/S + ликвидации (как в обычных сигналах)
+    real = format_bybit_real_data_block(market_details)
+    if real:
+        lines.extend(real.split("\n"))
+
+    # 2) CVD (taker buy/sell)
     if cvd_snap is not None:
         ratio = float(cvd_snap.ratio)
         lines.append(f"📈 {cvd_snap.detail}")
@@ -451,6 +461,13 @@ def format_manual_ta_flow_html(
             lines.append(f"⚠️ CVD {ratio:.0%} buy — SHORT против потока")
         elif side == "long" and ratio <= cvd_short_max:
             lines.append(f"⚠️ CVD {ratio:.0%} buy — LONG против потока")
+
+    # 3) OI narrative + cont/corr matrix
+    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
+        lines.append(f"📉 OI: {ta.oi_narrative_label}")
+    flow_dir = format_flow_direction_label(ta)
+    if flow_dir:
+        lines.append(f"🧭 {flow_dir}")
 
     if ta.smc:
         if ta.smc.liquidity_sweep:

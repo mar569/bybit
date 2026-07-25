@@ -33,6 +33,9 @@ class AiContextPack:
     ta: TAAnalysisResult | None = None
 
 
+ALLOWED_INTERVALS = (1, 3, 5, 10, 15, 30, 60, 240)
+
+
 def parse_hours_from_text(text: str, *, default: int = DEFAULT_HOURS) -> int:
     raw = (text or "").lower()
     if re.search(r"\b(48|двое|двух|2\s*сут|двое\s*суток)\b", raw):
@@ -53,6 +56,46 @@ def parse_hours_from_text(text: str, *, default: int = DEFAULT_HOURS) -> int:
         return 12
     return default if default in ALLOWED_HOURS else DEFAULT_HOURS
 
+
+def parse_interval_from_text(text: str, *, default: int = 5) -> int:
+    """Parse working TF from user text: 15s → 1m pack, 5m/15m/1h etc."""
+    raw = (text or "").lower().replace(" ", "")
+    # micro seconds hint → nearest pack TF 1m (15s candles not always available)
+    if "15s" in raw or "15сек" in raw or "15sec" in raw:
+        return 1 if 1 in ALLOWED_INTERVALS else default
+    m = re.search(r"(\d+)s(ec|ек)?", raw)
+    if m and "m" not in raw[m.start():m.end() + 1]:
+        return 1 if 1 in ALLOWED_INTERVALS else default
+    m = re.search(r"(\d+)m(in|ин)?", raw)
+    if m:
+        val = int(m.group(1))
+        if val in ALLOWED_INTERVALS:
+            return val
+    m = re.search(r"(\d+)h(our|ас)?", raw)
+    if m:
+        mins = int(m.group(1)) * 60
+        if mins in ALLOWED_INTERVALS:
+            return mins
+    if "1h" in raw or "час" in (text or "").lower():
+        return 60
+    return default if default in ALLOWED_INTERVALS else 5
+
+
+def build_multi_tf_map(interval_minutes: int) -> dict[str, Any]:
+    """How the model should stack timeframes for this request."""
+    working = int(interval_minutes) if interval_minutes in ALLOWED_INTERVALS else 5
+    return {
+        "working_tf": f"{working}m",
+        "working_minutes": working,
+        "htf": "1h",
+        "htf_role": "bias / крупные фигуры / конфликт → приоритет HTF",
+        "working_role": "основная структура, триггер close, стоп/TP зоны",
+        "micro_role": (
+            "1m/15s или импульс свечей на скрине — только тайминг входа; "
+            "не подменяет HTF bias"
+        ),
+        "synthesis": "HTF bias → WORKING levels/trigger → micro timing → конкретика",
+    }
 
 def _round(v: Any, nd: int = 6) -> Any:
     if v is None:
@@ -96,8 +139,12 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
     )
     pattern_foresight = None
     if getattr(ta, "pattern_foresight_summary", ""):
+        from .pattern_foresight import format_horizon_label
+
+        _hz = float(getattr(ta, "pattern_foresight_horizon", 0) or 0)
         pattern_foresight = {
-            "horizon_hours": getattr(ta, "pattern_foresight_horizon", 0) or None,
+            "horizon_hours": _hz or None,
+            "horizon_label": format_horizon_label(_hz) if _hz else None,
             "bias": getattr(ta, "pattern_foresight_bias", "") or None,
             "status": getattr(ta, "pattern_foresight_status", "") or None,
             "summary": (ta.pattern_foresight_summary or "")[:200],
@@ -347,11 +394,67 @@ def _dist_pct(price: float, level: float | None) -> float | None:
     return abs(lv - price) / price * 100.0
 
 
-def build_meaningful_levels(ta: dict[str, Any], *, min_pct: float = 1.0) -> dict[str, Any]:
-    """Levels far enough for a 1–2%+ trade path (skip micro-noise)."""
+def build_volatility_regime(ta: dict[str, Any]) -> dict[str, Any]:
+    """Pulse regime for AI: horizon + min TP by recent heat (not fixed 1–3h / 1–2%)."""
+    price = float(ta.get("price") or 0)
+    mom = abs(float(ta.get("momentum_pct") or 0))
+    dd = abs(float(ta.get("drawdown_from_high_pct") or 0))
+    # heat proxy: recent move + how violent the day swing is
+    heat = max(mom, dd / 8.0)
+    if heat >= 4.0 or dd >= 25:
+        regime = "extreme"
+        horizon = "15–45м"
+        tp1_min, tp1_pref, tp2 = 3.0, 4.5, 7.0
+        note = "Альт/памп-дамп: цели 1–2% и горизонт 1–3ч ЗАПРЕЩЕНЫ."
+    elif heat >= 2.0 or dd >= 12:
+        regime = "hot"
+        horizon = "20–60м"
+        tp1_min, tp1_pref, tp2 = 2.5, 3.5, 5.5
+        note = "Горячая монета: TP1 ≥2.5–3.5%, горизонт десятки минут."
+    elif heat >= 0.8:
+        regime = "normal"
+        horizon = "30–90м"
+        tp1_min, tp1_pref, tp2 = 1.5, 2.5, 4.0
+        note = "Обычный intraday: не микро-TP."
+    else:
+        regime = "calm"
+        horizon = "1–3ч"
+        tp1_min, tp1_pref, tp2 = 1.0, 1.5, 3.0
+        note = "Спокойный актив: можно длиннее горизонт."
+    return {
+        "regime": regime,
+        "horizon": horizon,
+        "heat": round(heat, 2),
+        "momentum_pct": round(mom, 2),
+        "drawdown_from_high_pct": round(dd, 2),
+        "tp1_min_pct": tp1_min,
+        "tp1_prefer_pct": tp1_pref,
+        "tp2_hint_pct": tp2,
+        "price": price if price > 0 else None,
+        "note": note,
+    }
+
+
+def build_meaningful_levels(
+    ta: dict[str, Any],
+    *,
+    min_pct: float | None = None,
+) -> dict[str, Any]:
+    """Levels far enough for a trade path sized to volatility (skip micro-noise)."""
+    vol = build_volatility_regime(ta)
+    if min_pct is None:
+        min_pct = float(vol["tp1_min_pct"])
     price = float(ta.get("price") or 0)
     if price <= 0:
-        return {"min_pct": min_pct, "above": [], "below": []}
+        return {
+            "min_pct": min_pct,
+            "above": [],
+            "below": [],
+            "tp1_min_pct": vol["tp1_min_pct"],
+            "tp1_prefer_pct": vol["tp1_prefer_pct"],
+            "tp2_hint_pct": vol["tp2_hint_pct"],
+            "volatility_regime": vol["regime"],
+        }
 
     candidates: list[tuple[str, float]] = []
     for key, label in (
@@ -454,14 +557,17 @@ def build_meaningful_levels(ta: dict[str, Any], *, min_pct: float = 1.0) -> dict
     return {
         "min_pct": min_pct,
         "guide": (
-            "Первая цель/ход ≥1–2%. Бери Fib/EW/ABC/pattern/magnet из списка. "
+            f"Первая цель/ход ≥{vol['tp1_min_pct']}% (режим {vol['regime']}, "
+            f"горизонт {vol['horizon']}). Fib/EW/ABC/pattern/magnet из списка. "
             "Ближе min_pct — шум, не сценарий."
         ),
         "above": above[:8],
         "below": below[:8],
-        "tp1_min_pct": 1.0,
-        "tp1_prefer_pct": 2.0,
-        "tp2_hint_pct": 3.5,
+        "tp1_min_pct": vol["tp1_min_pct"],
+        "tp1_prefer_pct": vol["tp1_prefer_pct"],
+        "tp2_hint_pct": vol["tp2_hint_pct"],
+        "volatility_regime": vol["regime"],
+        "horizon": vol["horizon"],
     }
 
 
@@ -471,15 +577,30 @@ def format_context_text(pack: dict[str, Any]) -> str:
     ex = pack.get("exchange", "?")
     hours = pack.get("hours", 24)
     ta = pack.get("ta") or {}
+    vol = pack.get("volatility_regime") or build_volatility_regime(ta)
     meaningful = pack.get("meaningful_levels") or build_meaningful_levels(ta)
+    multi = pack.get("multi_tf") or build_multi_tf_map(int(pack.get("interval_minutes") or 5))
     lines = [
-        f"SYMBOL={sym} EXCHANGE={ex} WINDOW={hours}h TF={pack.get('interval_minutes', 5)}m",
+        f"SYMBOL={sym} EXCHANGE={ex} WINDOW={hours}h WORKING_TF={multi.get('working_tf')}",
+        (
+            f"MULTI_TF working={multi.get('working_tf')} ({multi.get('working_role')}) | "
+            f"HTF={multi.get('htf')} ({multi.get('htf_role')}) | "
+            f"micro={multi.get('micro_role')} | synth={multi.get('synthesis')}"
+        ),
         f"PRICE={ta.get('price')} VERDICT={ta.get('verdict')} CONF={ta.get('confidence')}/10",
+        (
+            f"VOLATILITY_REGIME={vol.get('regime')} horizon={vol.get('horizon')} "
+            f"heat={vol.get('heat')} tp1_min={vol.get('tp1_min_pct')}% "
+            f"tp1_pref={vol.get('tp1_prefer_pct')}% tp2_hint={vol.get('tp2_hint_pct')}% "
+            f"| {vol.get('note')}"
+        ),
         f"PHASE={ta.get('phase')} ({ta.get('phase_label')}) BIAS={ta.get('market_bias')} OI={ta.get('oi_narrative')}",
         f"STRUCTURE={ta.get('structure')} PRIORITY={ta.get('action_priority')}",
         f"ENTRY_ZONE={ta.get('entry_zone')} INV={ta.get('invalidation')} S={ta.get('support')} R={ta.get('resistance')}",
         f"PRIMARY_PATTERN={ta.get('primary_pattern')}",
-        f"ELLIOTT={ta.get('elliott')}",
+        f"HTF_PATTERNS={ta.get('htf_chart_patterns')} PRIMARY_HTF={ta.get('primary_htf_pattern')}",
+        f"PATTERN_FORESIGHT={ta.get('pattern_foresight')}",
+        f"ELLIOTT={ta.get('elliott')} HTF_ELLIOTT={ta.get('htf_elliott')}",
         f"WAVE={ta.get('wave')} ABC={ta.get('abc')}",
         f"SETUP={ta.get('setup_confluence')}",
         f"SMC={ta.get('smc_summary')} score={ta.get('smc_score')}",
@@ -563,8 +684,9 @@ async def build_ai_context_pack(
         "ta": serialize_ta(ta),
     }
     attach_gates(pack_dict, ta, sym, ex)
+    pack_dict["multi_tf"] = build_multi_tf_map(interval_minutes)
+    pack_dict["volatility_regime"] = build_volatility_regime(pack_dict["ta"])
     pack_dict["meaningful_levels"] = build_meaningful_levels(pack_dict["ta"])
-
     liq_png: bytes | None = None
     liq_capture_ok = False
     if include_liq_map:

@@ -144,6 +144,8 @@ def evaluate_market_flow(
     range_position: float,
     post_pump: bool,
     drawdown_from_high_pct: float,
+    compression: bool = False,
+    green_bias: bool = False,
 ) -> MarketFlowScores:
     """
     Матрица «цена + OI + CVD + ликвидации» для сценария коррекция vs продолжение.
@@ -198,8 +200,12 @@ def evaluate_market_flow(
         cont += 12
         notes.append("цена↑ + CVD↑ + OI поддерживают рост")
     elif momentum == "up" and cvd_ratio <= 0.42:
-        corr += 18
-        notes.append("цена↑ при CVD↓ — слабый рост / distribution")
+        if compression:
+            corr += 8
+            notes.append("CVD↓ в сжатии — distribution возможен, нужен пробой")
+        else:
+            corr += 18
+            notes.append("цена↑ при CVD↓ — слабый рост / distribution")
     elif momentum == "down" and cvd_ratio <= 0.42 and oi_narrative in {"aligned_short", "shorts_building"}:
         corr += 12
         notes.append("цена↓ + CVD↓ + OI шорты")
@@ -212,9 +218,18 @@ def evaluate_market_flow(
     elif oi_context_strength >= 0.82 and oi_narrative in {"aligned_short", "shorts_building"}:
         corr += 6
 
-    # Позиция в range / post-pump
+    # Позиция в range / post-pump / сжатие
     if post_pump or phase == "impulse_up":
-        if range_position > 0.82 and drawdown_from_high_pct < 3.0:
+        if compression:
+            cont += 14
+            notes.append("сжатие свечей — возможен пробой вверх (continuation)")
+            if green_bias:
+                cont += 8
+                notes.append("зелёные свечи в сжатии — риск лонг-пробоя")
+            if range_position > 0.82 and drawdown_from_high_pct < 3.0:
+                corr += 6
+                notes.append("у хая после пампа — возможен и откат к Fib/имбалансам")
+        elif range_position > 0.82 and drawdown_from_high_pct < 3.0:
             corr += 14
             notes.append("перегрев у хая после импульса")
         elif momentum == "up" and liq_long_boost > 0:

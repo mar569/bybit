@@ -12,6 +12,15 @@ def test_parse_hours_from_text() -> None:
     assert parse_hours_from_text("просто вопрос", default=24) == 24
 
 
+def test_parse_interval_from_text() -> None:
+    from bot.ai_context import parse_interval_from_text
+
+    assert parse_interval_from_text("на 15m") == 15
+    assert parse_interval_from_text("таймфрейм 1h") == 60
+    assert parse_interval_from_text("посмотри 15s", default=5) == 1
+    assert parse_interval_from_text("просто вопрос", default=10) == 10
+
+
 def test_serialize_ta_compact() -> None:
     ta = TAAnalysisResult(
         verdict="WAIT",
@@ -50,3 +59,23 @@ def test_meaningful_levels_skips_micro_noise() -> None:
     assert 3.50 not in prices
     assert any(p <= 3.42 for p in prices)
     assert any(abs(p - 3.30) < 0.01 for p in prices)
+
+
+def test_volatility_regime_hot_alt() -> None:
+    from bot.ai_context import build_meaningful_levels, build_volatility_regime
+
+    ta = {
+        "price": 4.64,
+        "momentum_pct": 5.2,
+        "drawdown_from_high_pct": 28.0,
+        "targets": [4.70, 4.90],
+        "support": 4.20,
+        "resistance": 4.73,
+    }
+    vol = build_volatility_regime(ta)
+    assert vol["regime"] in {"hot", "extreme"}
+    assert vol["tp1_min_pct"] >= 2.5
+    assert "1–3ч" not in vol["horizon"] or vol["regime"] == "calm"
+    levels = build_meaningful_levels(ta)
+    assert levels["tp1_min_pct"] >= 2.5
+    assert levels["horizon"] == vol["horizon"]

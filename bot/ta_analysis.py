@@ -185,6 +185,7 @@ class TAAnalysisResult:
     dist_to_long_pct: float | None = None
     dist_to_short_pct: float | None = None
     post_pump: bool = False
+    candle_compression: bool = False
     primary_scenario: str = ""
     smc: SmcContext | None = None
     smc_score: int = 0
@@ -546,6 +547,44 @@ def detect_post_pump_phase(bars: list[KlineBar], *, lookback: int = 30) -> bool:
     pump_pct = (peak - start) / start * 100.0
     off_peak = (peak - current) / peak * 100.0
     return pump_pct >= 6.0 and off_peak <= 12.0 and current >= peak * 0.80
+
+
+def detect_candle_compression(
+    bars: list[KlineBar],
+    *,
+    recent: int = 10,
+    prior: int = 18,
+) -> bool:
+    """Сжатие свечей: средний range резко сузился, цена в узком боксе."""
+    need = recent + prior + 2
+    if len(bars) < need:
+        return False
+    recent_bars = bars[-recent:]
+    prior_bars = bars[-(recent + prior) : -recent]
+
+    def _avg_range(seg: list[KlineBar]) -> float:
+        vals = [b.high - b.low for b in seg if b.high > b.low]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    r_avg = _avg_range(recent_bars)
+    p_avg = _avg_range(prior_bars)
+    if p_avg <= 0 or r_avg <= 0:
+        return False
+    mid = float(bars[-1].close or 0)
+    if mid <= 0:
+        return False
+    span = max(b.high for b in recent_bars) - min(b.low for b in recent_bars)
+    span_pct = span / mid * 100.0
+    return r_avg <= p_avg * 0.58 and span_pct <= 6.0
+
+
+def recent_green_candle_bias(bars: list[KlineBar], *, lookback: int = 8) -> bool:
+    """В сжатии/боксе преобладают зелёные свечи — мягкий сигнал риска лонг-пробоя."""
+    if len(bars) < lookback:
+        return False
+    seg = bars[-lookback:]
+    greens = sum(1 for b in seg if b.close >= b.open)
+    return greens >= max(5, int(lookback * 0.62))
 
 
 def detect_local_consolidation(
@@ -1200,6 +1239,7 @@ def build_market_forecast_paths(
     verdict: str,
     rulers: list[RulerMeasurement],
     flow: MarketFlowScores | None = None,
+    compression: bool = False,
 ) -> tuple[ForecastPath | None, ForecastPath | None, str]:
     """
     Прогноз «коррекция vs продолжение» после импульса/смыва шортов.
@@ -1246,6 +1286,7 @@ def build_market_forecast_paths(
             range_position=range_position,
             post_pump=post_pump,
             drawdown_from_high_pct=drawdown_from_high_pct,
+            compression=compression,
         )
 
     corr_score = flow.correction // 4
@@ -1253,9 +1294,15 @@ def build_market_forecast_paths(
     factors_ru: list[str] = list(flow.notes[:4])
 
     if post_pump:
-        corr_score += 24
-        if "после пампа" not in factors_ru:
-            factors_ru.append("после пампа")
+        if compression:
+            corr_score += 8
+            cont_score += 14
+            if "сжатие после пампа" not in factors_ru:
+                factors_ru.append("сжатие после пампа — оба пробоя")
+        else:
+            corr_score += 24
+            if "после пампа" not in factors_ru:
+                factors_ru.append("после пампа")
     if momentum == "down" and momentum_pct <= -1.0 and (
         post_pump or drawdown_from_high_pct >= 2.5 or repeat_spike_dump_risk
     ):
@@ -1268,12 +1315,12 @@ def build_market_forecast_paths(
         if oi_narrative in {"long_unwind", "aligned_short", "capitulation"}:
             corr_score += 10
             factors_ru.append(f"OI: {oi_narrative}")
-    if phase == "impulse_up" and range_position > 0.75:
+    if phase == "impulse_up" and range_position > 0.75 and not compression:
         corr_score += 18
     if repeat_spike_dump_risk:
         corr_score += 20
         factors_ru.append("паттерн spike→dump")
-    if drawdown_from_high_pct < 2.5 and range_position > 0.82:
+    if drawdown_from_high_pct < 2.5 and range_position > 0.82 and not compression:
         corr_score += 14
         factors_ru.append("у верха range")
     if phase == "correction_down":
@@ -1328,6 +1375,13 @@ def build_market_forecast_paths(
         correction_path = None
     elif v == "WAIT":
         # В WAIT направленных стрелок нет — только текст bias
+        if compression and post_pump:
+            summary = (
+                "WAIT — сжатие после пампа: два равноправных сценария — "
+                "пробой вверх (продолжение) или слив вниз к Fib/имбалансам. "
+                f"Факторы: {', '.join(dict.fromkeys(factors_ru[:3])) or 'сжатие range'}."
+            )
+            return None, None, summary
         primary = "коррекция" if (correction_path and (
             not continuation_path or correction_path.confidence >= continuation_path.confidence
         )) else "продолжение"
@@ -1414,6 +1468,8 @@ def build_ta_signal_narrative(
     range_trade_label: str,
     primary_scenario: str,
     verdict_reason: str,
+    post_pump: bool = False,
+    compression: bool = False,
 ) -> tuple[str, str, str]:
     """
     Единый текст для сигналов: plain / plan / basis.
@@ -1541,7 +1597,17 @@ def build_ta_signal_narrative(
         return plain, plan, basis
 
     # WAIT — сценарий из потока и реальных уровней, без входа
-    if flow.correction > flow.continuation + 10 and correction_path:
+    if post_pump and compression:
+        long_lvl = fmt_price(breakout_level) if breakout_level else "—"
+        short_lvl = fmt_price(breakdown_level) if breakdown_level else "—"
+        plain = (
+            "📐 <b>Простыми словами:</b> WAIT — <b>сжатие после пампа</b>. "
+            "Два сценария равноправны: "
+            f"лонг-пробой выше <b>{long_lvl}</b> (продолжение) "
+            f"или шорт ниже <b>{short_lvl}</b> (откат к Fib/имбалансам). "
+            "Не угадывать середину — только close за границей range."
+        )
+    elif flow.correction > flow.continuation + 10 and correction_path:
         tgt = _path_target(correction_path, correction=True)
         reason = correction_path.reason or ""
         tgt_suffix = ""
@@ -2272,6 +2338,8 @@ def run_ta_analysis(
         local = detect_local_consolidation(bars, lookback=40, max_range_pct=6.5)
         if local:
             consolidation = local
+    candle_compression = bool(post_pump and detect_candle_compression(bars))
+    green_bias = bool(candle_compression and recent_green_candle_bias(bars))
     nearest_resistance, nearest_support = detect_local_swing_levels(
         bars, swings, max_dist_pct=12.0,
     )
@@ -2725,7 +2793,11 @@ def run_ta_analysis(
         dist_to_short_pct = (current - breakdown) / current * 100.0
 
     primary_scenario = ""
-    if post_pump:
+    if post_pump and candle_compression:
+        primary_scenario = (
+            "сжатие после пампа — два сценария: пробой вверх ИЛИ слив к Fib/имбалансам"
+        )
+    elif post_pump:
         primary_scenario = "консолидация после пампа — пробой границ локального range"
     elif verdict == "LONG" and targets:
         primary_scenario = f"рост к {fmt_price(targets[0])}"
@@ -2738,10 +2810,19 @@ def run_ta_analysis(
 
     # BuyHold foresight усиливает сценарий, если фигура активна
     _pf_scene = foresight_enriches_scenario(pattern_foresight)
+    # После пампа у хая не тащить старый 1-2-3 LONG с целью ниже цены
+    if (
+        _pf_scene
+        and post_pump
+        and ms.range_position >= 0.7
+        and pattern_foresight.bias == "long"
+        and pattern_foresight.primary_kind in {"one_two_three", "double_bottom", "inverse_head_shoulders"}
+    ):
+        _pf_scene = ""
     if _pf_scene:
         if not primary_scenario:
             primary_scenario = _pf_scene
-        elif pattern_foresight.confidence >= 0.68:
+        elif pattern_foresight.confidence >= 0.68 and not candle_compression:
             primary_scenario = f"{primary_scenario}; {_pf_scene}"
 
     if pattern_foresight.htf_conflict:
@@ -2751,7 +2832,11 @@ def run_ta_analysis(
             f"фигура форм. — ждать: {pattern_foresight.trigger_text[:60]}"
         ] + risk_notes
 
-    if post_pump:
+    if post_pump and candle_compression:
+        risk_notes = [
+            "сжатие после пампа — не угадывать направление, ждать close за range"
+        ] + risk_notes
+    elif post_pump:
         risk_notes = ["после пампа — не гнаться, ждать пробой range"] + risk_notes
 
     flow = evaluate_market_flow(
@@ -2766,6 +2851,8 @@ def run_ta_analysis(
         range_position=ms.range_position,
         post_pump=post_pump,
         drawdown_from_high_pct=ms.drawdown_from_high_pct,
+        compression=candle_compression,
+        green_bias=green_bias,
     )
     w_cont, w_corr = wave_flow_adjustments(wave, action_priority=action_priority)
     if w_cont or w_corr:
@@ -2776,10 +2863,24 @@ def run_ta_analysis(
             notes=list(flow.notes),
         )
     if verdict == "WAIT" and action_priority == "neutral":
-        if flow.continuation >= flow.correction + 18 and momentum in {"up", "flat"}:
+        # Сжатие после пампа: не форсировать SHORT/LONG при близких cont/corr
+        if candle_compression and abs(flow.continuation - flow.correction) < 22:
+            action_priority = "neutral"
+        elif flow.continuation >= flow.correction + 18 and momentum in {"up", "flat"}:
             action_priority = "long"
         elif flow.correction >= flow.continuation + 18:
-            action_priority = "short"
+            # При сжатии нужен более жёсткий перевес для SHORT-bias
+            if candle_compression and flow.correction < flow.continuation + 28:
+                action_priority = "neutral"
+            else:
+                action_priority = "short"
+    elif verdict == "WAIT" and candle_compression and action_priority == "short":
+        # Ранее выставленный SHORT-bias смягчаем, если сжатие и нет жёсткого перевеса corr
+        if flow.correction < flow.continuation + 28:
+            action_priority = "neutral"
+            conf = min(conf, 7)
+            soft = "сжатие — оба пробоя равноправны, без жёсткого SHORT-bias"
+            reason = f"{reason} · {soft}" if reason else soft
     for note in flow.notes:
         if note not in risk_notes and note not in (reason or ""):
             risk_notes.append(note)
@@ -2826,6 +2927,7 @@ def run_ta_analysis(
         verdict=verdict,
         rulers=rulers,
         flow=flow,
+        compression=candle_compression,
     )
     if pattern_foresight.active:
         pf_bit = (
@@ -2857,6 +2959,8 @@ def run_ta_analysis(
         range_trade_label=range_trade.label if range_aligned else "",
         primary_scenario=primary_scenario,
         verdict_reason=reason,
+        post_pump=post_pump,
+        compression=candle_compression,
     )
 
     _ew_conf = int(getattr(wave, "elliott_confidence", 0) or 0)
@@ -2923,6 +3027,7 @@ def run_ta_analysis(
         dist_to_long_pct=dist_to_long_pct,
         dist_to_short_pct=dist_to_short_pct,
         post_pump=post_pump,
+        candle_compression=candle_compression,
         primary_scenario=primary_scenario,
         smc=smc,
         smc_score=smc.smc_score,
@@ -4791,6 +4896,8 @@ def _manual_signal_status(ta: TAAnalysisResult) -> str:
             return "цена ниже триггера — ждите ретест"
 
     if ta.verdict == "WAIT":
+        if getattr(ta, "candle_compression", False) and ta.post_pump:
+            return "WAIT · сжатие — LONG↑ или SHORT↓ только по close за range"
         if ta.action_priority == "long":
             return "WAIT · bias LONG — только по пробою вверх"
         if ta.action_priority == "short":
@@ -4822,6 +4929,15 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         p_short, p_long = 62, 20
     elif ta.verdict == "LONG":
         p_long, p_short = 62, 20
+    elif getattr(ta, "candle_compression", False) and ta.post_pump and ta.verdict == "WAIT":
+        # Сжатие: оба пробоя — не рисовать 52/24 как «почти SHORT»
+        cont = int(ta.flow_continuation or 50)
+        corr = int(ta.flow_correction or 50)
+        total = max(1, cont + corr)
+        p_long = int(round(38 + 12 * (cont - corr) / total))
+        p_short = int(round(38 + 12 * (corr - cont) / total))
+        p_long = max(28, min(48, p_long))
+        p_short = max(28, min(48, p_short))
     elif ta.action_priority == "short":
         p_short, p_long = 52, 24
     elif ta.action_priority == "long":
@@ -4832,7 +4948,7 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         _manual_verdict_headline(ta),
         f"📍 <b>Сейчас:</b> цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст'}",
         f"🧭 <b>Статус:</b> {signal_status}.",
-        f"📊 <b>Сценарии:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
+        f"📊 <b>Сценарии TA:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
     ]
 
     try:
@@ -4896,13 +5012,19 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         lines.append(f"⏱ <b>Протухание идеи:</b> если 3 свечи 5m без подтверждения — отменить вход.")
 
     risk_bits: list[str] = []
-    if ta.post_pump:
+    if getattr(ta, "candle_compression", False) and ta.post_pump:
+        risk_bits.append("сжатие после пампа — оба направления до пробоя")
+    elif ta.post_pump:
         risk_bits.append("перегрев после пампа")
     if ta.repeat_spike_dump_risk:
         risk_bits.append("повторяемый spike→dump")
-    if ta.post_pump and ta.flow_correction > ta.flow_continuation + 8:
+    if (
+        ta.post_pump
+        and ta.flow_correction > ta.flow_continuation + 8
+        and not getattr(ta, "candle_compression", False)
+    ):
         risk_bits.append("базовый сценарий — откат")
-    elif ta.action_priority == "short":
+    elif ta.action_priority == "short" and not getattr(ta, "candle_compression", False):
         risk_bits.append("приоритет short")
     elif ta.action_priority == "long":
         risk_bits.append("приоритет long")

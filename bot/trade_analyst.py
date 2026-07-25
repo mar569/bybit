@@ -156,6 +156,16 @@ def build_fib_action_text(
         return " · ".join(parts)
 
     if action == "watch":
+        if getattr(ta, "candle_compression", False) and getattr(ta, "post_pump", False):
+            bo = getattr(ta, "breakout_level", None)
+            bd = getattr(ta, "breakdown_level", None)
+            bits = ["Сжатие после пампа — WAIT, не угадывать середину"]
+            if bo:
+                bits.append(f"LONG close ≥{fmt_price(bo)}")
+            if bd:
+                bits.append(f"SHORT close ≤{fmt_price(bd)}")
+            bits.append("Fib-откат тоже возможен")
+            return " · ".join(bits)
         if wait_px:
             ratio_lbl = "0.618" if f618 else "0.5"
             return (
@@ -163,6 +173,11 @@ def build_fib_action_text(
                 f"({ratio_lbl}) или ретест"
             )
         if status in {"late_impulse", "late"} or ta.wave_phase == "late_impulse":
+            if getattr(ta, "post_pump", False):
+                return (
+                    "Не входить сейчас · после пампа возможен Fib-откат "
+                    "ИЛИ continuation-пробой вверх — ждать close за range"
+                )
             return "Не входить сейчас · финал импульса — ждать откат к Fib 0.5–0.618"
         if status == "chart_only" or (ta.fib_levels and not ta.wave_has_confluence):
             return (
@@ -375,8 +390,10 @@ def build_trade_thesis(
     if getattr(ta, "setup_factors", None):
         arguments.append("Confluence: " + " · ".join(ta.setup_factors[:3]))
     if getattr(ta, "pattern_foresight_summary", ""):
+        from .pattern_foresight import format_horizon_label
+
         hz = getattr(ta, "pattern_foresight_horizon", 0) or 0
-        hz_s = f"~{hz:.0f}ч" if hz else "1–3ч"
+        hz_s = format_horizon_label(hz) if hz else "15–60м"
         arguments.append(f"Фигуры {hz_s}: {ta.pattern_foresight_summary[:70]}")
     if ta.btc_context:
         arguments.append(f"BTC: {ta.btc_context[:50]}")
@@ -478,7 +495,9 @@ def build_trade_thesis(
             if getattr(pat, "volume_breakout", False):
                 vol_bits.append("объём ↑ на пробое")
             hz = getattr(ta, "pattern_foresight_horizon", 0) or 0
-            hz_bit = f" · горизонт ~{hz:.0f}ч" if hz else ""
+            from .pattern_foresight import format_horizon_label
+
+            hz_bit = f" · горизонт {format_horizon_label(hz)}" if hz else ""
             thesis = (
                 f"Графическая фигура <b>{pat.label_ru}</b> "
                 f"({'подтв.' if pat.status == 'confirmed' else 'форм.'})"

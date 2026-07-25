@@ -93,6 +93,25 @@ class BybitAccountRatioCache:
         )
 
 
+def account_ratio_to_dict(snap: AccountRatioSnapshot) -> dict[str, object]:
+    return {
+        "buy_ratio": round(snap.buy_ratio, 4),
+        "sell_ratio": round(snap.sell_ratio, 4),
+        "long_short_ratio": snap.long_short_ratio,
+        "period": snap.period,
+        "long_pct": round(snap.buy_ratio * 100, 1),
+        "short_pct": round(snap.sell_ratio * 100, 1),
+    }
+
+
+def ls_crowd_bias(ls_ratio: float) -> str:
+    if ls_ratio < 0.95:
+        return "шортов больше"
+    if ls_ratio > 1.05:
+        return "лонгов больше"
+    return "баланс"
+
+
 def format_bybit_real_data_block(details: dict[str, object] | None) -> str:
     if not details:
         return ""
@@ -101,11 +120,14 @@ def format_bybit_real_data_block(details: dict[str, object] | None) -> str:
     ar = details.get("account_ratio")
     if isinstance(ar, dict) and ar.get("long_short_ratio") is not None:
         period = ar.get("period", "5min")
+        ratio = float(ar["long_short_ratio"])
+        long_pct = ar.get("long_pct", "?")
+        short_pct = ar.get("short_pct", "?")
+        bias = ls_crowd_bias(ratio)
         lines.append(
-            f"📊 <b>Bybit L/S</b> ({period}): "
-            f"ratio <b>{float(ar['long_short_ratio']):.2f}</b> | "
-            f"лонг <b>{ar.get('long_pct', '?')}%</b> / "
-            f"шорт <b>{ar.get('short_pct', '?')}%</b> аккаунтов"
+            f"⚖️ <b>Баланс L/S</b> ({period}): <b>{bias}</b> — "
+            f"лонг <b>{long_pct}%</b> / шорт <b>{short_pct}%</b> аккаунтов "
+            f"(ratio <b>{ratio:.2f}</b>)"
         )
 
     liq = details.get("liquidations")
@@ -114,12 +136,19 @@ def format_bybit_real_data_block(details: dict[str, object] | None) -> str:
         long_usd = float(liq.get("long_liq_usd", 0) or 0)
         short_usd = float(liq.get("short_liq_usd", 0) or 0)
         events = int(liq.get("event_count", 0) or 0)
-        lines.append(
-            f"💥 <b>Ликвидации {window}м</b>: "
-            f"лонги <b>{long_usd:,.0f}$</b> | шорты <b>{short_usd:,.0f}$</b> "
-            f"({events} событ.)"
-            .replace(",", " ")
-        )
+        if events > 0 or long_usd > 0 or short_usd > 0:
+            if long_usd > short_usd * 1.15:
+                liq_bias = "смывают лонги"
+            elif short_usd > long_usd * 1.15:
+                liq_bias = "смывают шорты"
+            else:
+                liq_bias = "ликв. смешанные"
+            lines.append(
+                f"💥 <b>Ликвидации {window}м</b>: {liq_bias} — "
+                f"лонги <b>{long_usd:,.0f}$</b> | шорты <b>{short_usd:,.0f}$</b> "
+                f"({events} событ.)"
+                .replace(",", " ")
+            )
 
     if not lines:
         return ""
@@ -135,7 +164,7 @@ def format_bybit_real_data_compact(details: dict[str, object] | None) -> str:
         ratio = float(ar["long_short_ratio"])
         short_pct = ar.get("short_pct", "?")
         long_pct = ar.get("long_pct", "?")
-        bias = "шортов больше" if ratio < 0.95 else ("лонгов больше" if ratio > 1.05 else "баланс")
+        bias = ls_crowd_bias(ratio)
         parts.append(f"L/S <b>{ratio:.2f}</b> ({long_pct}/{short_pct}%) {bias}")
 
     liq = details.get("liquidations")
