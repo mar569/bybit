@@ -34,6 +34,33 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 300
+SYMBOL_PRELOAD_ATTEMPTS = 3
+SYMBOL_PRELOAD_RETRY_DELAY_SEC = 2.0
+
+
+async def _preload_exchange_symbols(name: str, load: Any) -> int:
+    """Загрузка символов одной биржи: retry, без влияния на другую биржу."""
+    last_exc: BaseException | None = None
+    for attempt in range(1, SYMBOL_PRELOAD_ATTEMPTS + 1):
+        try:
+            symbols = await load()
+            count = len(symbols) if symbols is not None else 0
+            if count <= 0:
+                raise RuntimeError(f"{name} returned 0 symbols")
+            return count
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "%s symbol preload failed (attempt %d/%d): %s",
+                name,
+                attempt,
+                SYMBOL_PRELOAD_ATTEMPTS,
+                exc,
+            )
+            if attempt < SYMBOL_PRELOAD_ATTEMPTS:
+                await asyncio.sleep(SYMBOL_PRELOAD_RETRY_DELAY_SEC * attempt)
+    logger.error("%s symbol preload gave up: %s", name, last_exc)
+    return 0
 
 
 async def _scanner_heartbeat_loop(scanner: SignalEngine) -> None:
@@ -234,13 +261,23 @@ async def main() -> None:
     analysis_heartbeat_task: asyncio.Task | None = None
     try:
         await telegram.start()
-        try:
-            if not binance.symbols:
-                await binance.load_symbols()
-            if not bybit.symbols:
-                await bybit.load_symbols()
-        except Exception:
-            logger.exception("Symbol preload failed")
+        # Каждая биржа отдельно: timeout Binance больше не обнуляет Bybit.
+        bybit_n = len(bybit.symbols)
+        binance_n = len(binance.symbols)
+        if not bybit.symbols:
+            bybit_n = await _preload_exchange_symbols("Bybit", bybit.load_symbols)
+        if not binance.symbols:
+            binance_n = await _preload_exchange_symbols("Binance", binance.load_symbols)
+        if bybit_n <= 0 and binance_n <= 0:
+            logger.error(
+                "Symbol preload: both exchanges empty — scanner will have pairs=0 until refresh"
+            )
+        elif bybit_n <= 0 or binance_n <= 0:
+            logger.warning(
+                "Symbol preload partial: Bybit=%d Binance=%d — running on available exchange(s)",
+                bybit_n,
+                binance_n,
+            )
         s = settings.settings
         logger.info(
             "Startup: signals=%s liq=%s analysis=%s anomaly=%s | Bybit %d | Binance %d",
