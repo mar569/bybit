@@ -958,11 +958,11 @@ class TelegramBot:
             exchange=exchange,
             user_text=(
                 f"WORKING_TF={interval_minutes}m. "
-                "Разбери глобально как очень опытный трейдер: "
-                "MULTI_TF (HTF bias + WORKING_TF структура + микро на скрине если есть), "
-                "VOLATILITY_REGIME, liq/объём/CVD/OI, фигуры, confluence. "
-                "Конкретика: куда цена, триггер close на WORKING_TF, стоп, TP1/TP2. "
-                "Не шаблон 1–3ч. Ответ ПОЛНЫЙ — 6 пунктов, без обрыва. Без markdown. Окно 24h."
+                "По POSITION_CALL и всему пакету алгоритмов бота дай мнение о позиции: "
+                "что открывать (LONG/SHORT) или WAIT, почему (волны/фигуры/EW/RSI/liq/gate), "
+                "как войти (триггер close), стоп, TP1/TP2. "
+                "Не выдумывай уровни вне пакета. "
+                "Ответ ПОЛНЫЙ — 7 пунктов, без обрыва. Без markdown. Окно 24h."
             ),
             hours=24,
             interval_minutes=interval_minutes,

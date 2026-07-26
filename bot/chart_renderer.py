@@ -978,6 +978,13 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             ax.plot(ts, y, marker=marker, color=CHART_STYLE["pattern"], markersize=6, linestyle="None")
 
     direction = primary_forecast_direction(ta)
+    # RSI divergence lines on price — always (even WAIT)
+    try:
+        from .chart_pro_layers import draw_rsi_divergence_on_price
+
+        draw_rsi_divergence_on_price(ax, bars, ta)
+    except Exception:
+        pass
     path_kind = "skip" if is_wait else draw_pro_chart_layers(ax, bars, ta)
     if path_kind == "default":
         if not _draw_market_forecast_paths(ax, bars, ta):
@@ -1289,7 +1296,7 @@ def _render_chart_figure(
     if use_enhanced:
         # Шире область свечей (~+13%): боковые панели остаются, но уже
         fig = plt.figure(figsize=(19.2, 10.8), dpi=120)
-        gs = fig.add_gridspec(3, 1, height_ratios=[4.2, 1.0, 0.9], hspace=0.04)
+        gs = fig.add_gridspec(3, 1, height_ratios=[4.0, 0.95, 1.15], hspace=0.04)
         ax = fig.add_subplot(gs[0])
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
@@ -1312,7 +1319,13 @@ def _render_chart_figure(
     _draw_ta_annotations(ax, bars, ta)
     if use_enhanced and ax_vol is not None and ax_rsi is not None:
         draw_volume_panel(ax_vol, bars)
-        draw_rsi_panel(ax_rsi, bars)
+        draw_rsi_panel(
+            ax_rsi,
+            bars,
+            divergences=getattr(ta, "rsi_divergences", None) or [],
+            rsi_values=getattr(ta, "rsi_values", None) or None,
+            rsi_sma=getattr(ta, "rsi_sma", None) or None,
+        )
         plt.setp(ax.get_xticklabels(), visible=False)
         plt.setp(ax_vol.get_xticklabels(), visible=False)
 

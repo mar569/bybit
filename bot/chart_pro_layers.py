@@ -335,23 +335,115 @@ def draw_volume_panel(ax: plt.Axes, bars: list[KlineBar]) -> None:
     ax.grid(True, color=CHART_GRID, linewidth=0.35, alpha=0.6)
 
 
-def draw_rsi_panel(ax: plt.Axes, bars: list[KlineBar]) -> None:
+def draw_rsi_panel(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    *,
+    divergences: list | None = None,
+    rsi_values: list[float] | None = None,
+    rsi_sma: list[float] | None = None,
+) -> None:
+    """RSI 14 + SMA + divergence; TV-style purple 30–70 band + white line."""
     if not bars:
         return
+    from .rsi_divergence import RsiDivergence, compute_rsi_wilder, compute_sma
+
     times = _bar_times(bars)
-    rsi = _compute_rsi(bars)
-    ax.plot(times, rsi, color="#a371f7", linewidth=1.0, alpha=0.9)
-    ax.axhline(70, color="#f85149", linestyle=":", linewidth=0.6, alpha=0.5)
-    ax.axhline(30, color="#3fb950", linestyle=":", linewidth=0.6, alpha=0.5)
-    ax.fill_between(times, rsi, 70, where=[v >= 70 for v in rsi], color="#f85149", alpha=0.12)
-    ax.fill_between(times, rsi, 30, where=[v <= 30 for v in rsi], color="#3fb950", alpha=0.12)
+    rsi = list(rsi_values) if rsi_values and len(rsi_values) == len(bars) else compute_rsi_wilder(
+        [b.close for b in bars], 14,
+    )
+    sma = list(rsi_sma) if rsi_sma and len(rsi_sma) == len(bars) else compute_sma(rsi, 14)
+
+    # TradingView-like mid band (30–70) — main visual anchor
+    ax.axhspan(30, 70, facecolor="#5c4a8a", alpha=0.42, zorder=0, linewidth=0)
+    # Soft OB/OS tint outside the band
+    ax.axhspan(70, 100, facecolor="#f85149", alpha=0.07, zorder=0, linewidth=0)
+    ax.axhspan(0, 30, facecolor="#3fb950", alpha=0.07, zorder=0, linewidth=0)
+
+    # Boundary + mid dashed levels (like TV dashed grid)
+    for lvl, lw, alpha in (
+        (70, 0.95, 0.75),
+        (60, 0.55, 0.40),
+        (50, 0.75, 0.55),
+        (40, 0.55, 0.40),
+        (30, 0.95, 0.75),
+    ):
+        ax.axhline(
+            lvl,
+            color="#c9b8f0" if lvl in (30, 70) else "#8b949e",
+            linestyle=(0, (3.5, 2.8)),
+            linewidth=lw,
+            alpha=alpha,
+            zorder=1,
+        )
+
+    ax.plot(times, sma, color="#e3b341", linewidth=0.9, alpha=0.55, label="SMA", zorder=2)
+    # High-contrast RSI line (white, thicker)
+    ax.plot(times, rsi, color="#ffffff", linewidth=1.55, alpha=1.0, label="RSI", zorder=3, solid_capstyle="round")
+
+    # Divergence lines + Bull/Bear labels (last few for clarity)
+    divs = [d for d in (divergences or []) if isinstance(d, RsiDivergence)]
+    for d in divs[-5:]:
+        if d.idx_a < 0 or d.idx_b >= len(times) or d.idx_a >= len(times):
+            continue
+        color = "#3fb950" if d.is_bullish else "#f85149"
+        ax.plot(
+            [times[d.idx_a], times[d.idx_b]],
+            [d.rsi_a, d.rsi_b],
+            color=color,
+            linewidth=1.25,
+            alpha=0.95,
+            zorder=4,
+        )
+        ax.scatter(
+            [times[d.idx_a], times[d.idx_b]],
+            [d.rsi_a, d.rsi_b],
+            color=color,
+            s=14,
+            zorder=5,
+        )
+        va = "bottom" if d.is_bullish else "top"
+        y_off = 3.5 if d.is_bullish else -3.5
+        ax.text(
+            times[d.idx_b],
+            min(97, max(3, d.rsi_b + y_off)),
+            d.label,
+            color=color,
+            fontsize=6.2,
+            fontweight="bold",
+            ha="center",
+            va=va,
+            zorder=6,
+            bbox=dict(
+                boxstyle="round,pad=0.15",
+                facecolor="#0d1117",
+                edgecolor=color,
+                alpha=0.88,
+                linewidth=0.7,
+            ),
+        )
+
     ax.set_ylim(0, 100)
-    ax.set_ylabel("RSI", color=CHART_TEXT, fontsize=7)
-    last = rsi[-1]
-    ax.text(times[-1], last, f" {last:.0f}", color="#a371f7", fontsize=6, va="center")
+    ax.set_yticks([0, 30, 50, 70, 100])
+    last = float(rsi[-1])
+    ax.text(
+        0.01,
+        0.96,
+        f"RSI 14  {last:.2f}".replace(".", ","),
+        transform=ax.transAxes,
+        color="#e6edf3",
+        fontsize=7.2,
+        fontweight="bold",
+        va="top",
+        ha="left",
+        zorder=7,
+    )
     ax.tick_params(colors=CHART_TEXT, labelsize=6)
     ax.set_facecolor(CHART_BG)
-    ax.grid(True, color=CHART_GRID, linewidth=0.35, alpha=0.6)
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color("#30363d")
+        spine.set_linewidth(0.6)
 
 
 def draw_htf_inset(
@@ -387,6 +479,41 @@ def draw_htf_inset(
     axins.grid(True, color=CHART_GRID, linewidth=0.3, alpha=0.5)
     for spine in axins.spines.values():
         spine.set_color("#30363d")
+
+
+def draw_rsi_divergence_on_price(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """Connecting lines on price between divergence pivots (TV-style)."""
+    from .rsi_divergence import RsiDivergence
+
+    divs = getattr(ta, "rsi_divergences", None) or []
+    if not bars or not divs:
+        return
+    times = _bar_times(bars)
+    for d in divs[-4:]:
+        if not isinstance(d, RsiDivergence):
+            continue
+        if d.idx_a < 0 or d.idx_b >= len(times):
+            continue
+        color = "#3fb950" if d.is_bullish else "#f85149"
+        ax.plot(
+            [times[d.idx_a], times[d.idx_b]],
+            [d.price_a, d.price_b],
+            color=color,
+            linewidth=1.0,
+            linestyle="--",
+            alpha=0.75,
+            zorder=3,
+        )
+        ax.scatter(
+            [times[d.idx_a], times[d.idx_b]],
+            [d.price_a, d.price_b],
+            color=color,
+            s=18,
+            zorder=4,
+            marker="o",
+            edgecolors="white",
+            linewidths=0.4,
+        )
 
 
 def draw_pro_chart_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> str:

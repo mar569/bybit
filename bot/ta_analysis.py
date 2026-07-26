@@ -213,6 +213,13 @@ class TAAnalysisResult:
     liq_magnet_strength: float = 0.0
     liq_magnet_note: str = ""
     liq_magnet_hint: str = ""
+    # RSI 14 + calculative divergence (TradingView-style)
+    rsi_last: float | None = None
+    rsi_values: list[float] = field(default_factory=list)
+    rsi_sma: list[float] = field(default_factory=list)
+    rsi_divergences: list = field(default_factory=list)  # list[RsiDivergence]
+    rsi_divergence_summary: str = ""
+    rsi_divergence_bias: str = "neutral"  # long | short | neutral
     # Wave Lite + Fib (график + понятный UX в Hot/Pro)
     fib_levels: list[FibLevel] = field(default_factory=list)
     wave_phase: str = ""
@@ -2839,6 +2846,9 @@ def run_ta_analysis(
     elif post_pump:
         risk_notes = ["после пампа — не гнаться, ждать пробой range"] + risk_notes
 
+    from .rsi_divergence import detect_rsi_divergences, rsi_divergence_flow_adjust
+
+    rsi_div = detect_rsi_divergences(bars)
     flow = evaluate_market_flow(
         momentum=momentum,
         momentum_pct=momentum_pct,
@@ -2854,6 +2864,14 @@ def run_ta_analysis(
         compression=candle_compression,
         green_bias=green_bias,
     )
+    r_cont, r_corr, r_notes = rsi_divergence_flow_adjust(rsi_div)
+    if r_cont or r_corr:
+        flow = MarketFlowScores(
+            continuation=int(_clamp(flow.continuation + r_cont, 0, 100)),
+            correction=int(_clamp(flow.correction + r_corr, 0, 100)),
+            convergence=flow.convergence,
+            notes=list(flow.notes) + r_notes,
+        )
     w_cont, w_corr = wave_flow_adjustments(wave, action_priority=action_priority)
     if w_cont or w_corr:
         flow = MarketFlowScores(
@@ -2884,6 +2902,24 @@ def run_ta_analysis(
     for note in flow.notes:
         if note not in risk_notes and note not in (reason or ""):
             risk_notes.append(note)
+    # RSI calculative divergence → soft bias / confluence for entries
+    if rsi_div.active and rsi_div.bias in {"long", "short"} and rsi_div.last and rsi_div.last.strength >= 0.42:
+        if rsi_div.summary and rsi_div.summary not in risk_notes:
+            risk_notes.insert(0, rsi_div.summary[:90])
+        if verdict == "WAIT" and action_priority == "neutral":
+            action_priority = rsi_div.bias
+            tip = f"RSI {rsi_div.last.label} → bias {rsi_div.bias.upper()}"
+            reason = f"{reason} · {tip}" if reason else tip
+        elif verdict == "WAIT" and action_priority != rsi_div.bias and rsi_div.last.is_regular:
+            conf = min(conf, 6)
+            tip = f"RSI {rsi_div.last.label} против bias {action_priority}"
+            reason = f"{reason} · {tip}" if reason else tip
+        else:
+            aligned = (verdict == "LONG" and rsi_div.bias == "long") or (
+                verdict == "SHORT" and rsi_div.bias == "short"
+            )
+            if aligned and rsi_div.last.is_regular:
+                conf = min(10, conf + 1)
     risk_notes = risk_notes[:7]
 
     verdict, conf, reason, action_priority = _apply_post_pump_trigger_wait_guard(
@@ -3052,6 +3088,12 @@ def run_ta_analysis(
         liq_magnet_strength=liq_magnet.strength,
         liq_magnet_note=liq_magnet.note,
         liq_magnet_hint=liq_magnet.plan_hint,
+        rsi_last=rsi_div.rsi_last,
+        rsi_values=list(rsi_div.rsi),
+        rsi_sma=list(rsi_div.rsi_sma),
+        rsi_divergences=list(rsi_div.divergences),
+        rsi_divergence_summary=rsi_div.summary,
+        rsi_divergence_bias=rsi_div.bias,
         cvd_source=(
             str(getattr(taker_cvd, "source", "proxy") or "proxy")
             if taker_cvd is not None
@@ -5035,6 +5077,22 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
 
     if ta.forecast_summary:
         lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
+
+    if ta.rsi_divergences:
+        from .rsi_divergence import RsiDivergenceResult, format_rsi_divergence_html
+
+        pack = RsiDivergenceResult(
+            rsi_last=float(ta.rsi_last or 50),
+            divergences=list(ta.rsi_divergences),
+            last=ta.rsi_divergences[-1],
+            summary=ta.rsi_divergence_summary,
+            bias=ta.rsi_divergence_bias,
+        )
+        rsi_html = format_rsi_divergence_html(pack)
+        if rsi_html:
+            lines.append(rsi_html)
+    elif ta.rsi_last is not None:
+        lines.append(f"📉 <b>RSI</b> {ta.rsi_last:.0f}")
 
     if ta.cvd_delta is not None and ta.cvd_delta < 0 and (
         ta.verdict == "LONG" or ta.action_priority == "long"

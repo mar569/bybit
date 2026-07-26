@@ -41,6 +41,20 @@ description: >-
 | **CVD** | Агрессивный поток (market buy vs sell); расхождение с ценой = дивергенция |
 | **Open Interest** | Новые деньги vs закрытие позиций; всегда в паре с направлением цены |
 
+### RSI Calculate Divergence (как в TradingView)
+
+Бот: `bot/rsi_divergence.py` — Wilder RSI(14) + confirmed pivots (left/right).
+
+| Тип | Цена | RSI | Смысл |
+|-----|------|-----|--------|
+| **Regular Bull** | LL | HL | ослабление продаж → confluence к LONG |
+| **Regular Bear** | HH | LH | ослабление покупок → confluence к SHORT |
+| **Hidden Bull** | HL | LL | продолжение вверх (Cardwell) |
+| **Hidden Bear** | LH | HH | продолжение вниз |
+
+На графике: линия на RSI + метки **Bull/Bear**, пунктир на цене между пивотами.
+Дивергенция — **confluence**, не вход в середине без триггера close.
+
 Полная матрица «цена + OI + CVD + liq» — в [reference.md](reference.md).
 
 ## Фазы рынка (согласовано с `bot/market_structure.py`)

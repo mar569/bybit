@@ -193,6 +193,8 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "market_bias": ta.market_bias,
         "oi_narrative": ta.oi_narrative_label,
         "action_priority": ta.action_priority,
+        "post_pump": bool(getattr(ta, "post_pump", False)),
+        "candle_compression": bool(getattr(ta, "candle_compression", False)),
         "range_position": _round(ta.range_position, 3),
         "drawdown_from_high_pct": _round(ta.drawdown_from_high_pct, 2),
         "momentum": ta.momentum_label,
@@ -270,6 +272,21 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "narrative_basis": (ta.narrative_basis or "")[:280],
         "cvd_source": ta.cvd_source,
         "cvd_delta": _round(ta.cvd_delta, 4),
+        "rsi": {
+            "last": _round(getattr(ta, "rsi_last", None), 2),
+            "bias": getattr(ta, "rsi_divergence_bias", "neutral") or "neutral",
+            "summary": (getattr(ta, "rsi_divergence_summary", "") or "")[:200],
+            "divergences": [
+                {
+                    "kind": getattr(d, "kind", ""),
+                    "label": getattr(d, "label", ""),
+                    "strength": _round(getattr(d, "strength", 0), 3),
+                    "rsi_a": _round(getattr(d, "rsi_a", None), 2),
+                    "rsi_b": _round(getattr(d, "rsi_b", None), 2),
+                }
+                for d in (getattr(ta, "rsi_divergences", None) or [])[-4:]
+            ],
+        },
         "liq_cascade": ta.liq_cascade_active,
         "liq_cascade_note": (ta.liq_cascade_note or "")[:200],
         "liq_magnet": {
@@ -392,6 +409,177 @@ def _dist_pct(price: float, level: float | None) -> float | None:
     if lv <= 0:
         return None
     return abs(lv - price) / price * 100.0
+
+
+def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
+    """Сводка «какую позицию» строго из алгоритмов бота (не выдумка модели)."""
+    ta = pack.get("ta") or {}
+    gate = pack.get("decision_gate") or {}
+    pb = pack.get("playbook") or {}
+    vol = pack.get("volatility_regime") or {}
+    foresight = ta.get("pattern_foresight") or {}
+    setup = ta.get("setup_confluence") or {}
+    elliott = ta.get("elliott") or {}
+    rsi = ta.get("rsi") or {}
+    primary = ta.get("primary_pattern") or {}
+    htf_pat = ta.get("primary_htf_pattern") or {}
+
+    verdict = str(ta.get("verdict") or "WAIT").upper()
+    priority = str(ta.get("action_priority") or "neutral").lower()
+    gate_action = str(gate.get("action") or "").upper()  # ENTRY/WATCH/SKIP
+    pb_side = str(pb.get("side") or "").lower()
+    foresight_bias = str(foresight.get("bias") or "neutral").lower()
+    setup_side = str(setup.get("side") or "neutral").lower()
+    rsi_bias = str(rsi.get("bias") or "neutral").lower()
+    ew_bias = str(elliott.get("path_bias") or elliott.get("bias") or "").lower()
+    if ew_bias in {"up", "bull", "bullish"}:
+        ew_bias = "long"
+    elif ew_bias in {"down", "bear", "bearish"}:
+        ew_bias = "short"
+
+    votes: dict[str, int] = {"long": 0, "short": 0}
+    reasons: list[str] = []
+
+    def _vote(side: str, w: int, why: str) -> None:
+        if side not in {"long", "short"} or w <= 0:
+            return
+        votes[side] += w
+        reasons.append(f"{why}→{side.upper()}(+{w})")
+
+    if verdict == "LONG":
+        _vote("long", 3, "TA_verdict")
+    elif verdict == "SHORT":
+        _vote("short", 3, "TA_verdict")
+    if priority in {"long", "short"}:
+        _vote(priority, 2, "action_priority")
+    if gate_action == "ENTRY" and pb_side in {"long", "short"}:
+        _vote(pb_side, 3, "decision_gate_ENTRY")
+    elif gate_action == "WATCH" and pb_side in {"long", "short"}:
+        _vote(pb_side, 1, "decision_gate_WATCH")
+    if pb.get("aligned") and pb_side in {"long", "short"}:
+        _vote(pb_side, 2, "playbook_aligned")
+    if foresight_bias in {"long", "short"} and not foresight.get("watch_only"):
+        _vote(foresight_bias, 2, f"pattern_foresight:{foresight.get('status')}")
+    elif foresight_bias in {"long", "short"}:
+        _vote(foresight_bias, 1, "pattern_forming_WATCH")
+    if setup_side in {"long", "short"} and str(setup.get("grade") or "") in {"A", "B"}:
+        _vote(setup_side, 2, f"setup_{setup.get('grade')}")
+    elif setup_side in {"long", "short"}:
+        _vote(setup_side, 1, f"setup_{setup.get('grade') or 'C'}")
+    if ew_bias in {"long", "short"}:
+        _vote(ew_bias, 2 if elliott.get("entry_ready") else 1, "elliott")
+    if rsi_bias in {"long", "short"}:
+        _vote(rsi_bias, 1, "rsi_divergence")
+
+    cont = int(ta.get("flow_continuation") or 0)
+    corr = int(ta.get("flow_correction") or 0)
+    if cont >= corr + 15:
+        _vote("long", 1, f"flow_cont{cont}")
+    elif corr >= cont + 15:
+        _vote("short", 1, f"flow_corr{corr}")
+
+    pat_dir = str(primary.get("direction") or "").lower()
+    if pat_dir in {"bullish", "long"}:
+        _vote("long", 1, f"LTF_pattern:{primary.get('kind')}")
+    elif pat_dir in {"bearish", "short"}:
+        _vote("short", 1, f"LTF_pattern:{primary.get('kind')}")
+    htf_dir = str(htf_pat.get("direction") or "").lower()
+    if htf_dir in {"bullish", "long"}:
+        _vote("long", 2, f"HTF_pattern:{htf_pat.get('kind')}")
+    elif htf_dir in {"bearish", "short"}:
+        _vote("short", 2, f"HTF_pattern:{htf_pat.get('kind')}")
+
+    # Compression after pump → dual, no forced side
+    if ta.get("candle_compression") and ta.get("post_pump"):
+        votes["long"] = max(0, votes["long"] - 1)
+        votes["short"] = max(0, votes["short"] - 1)
+        reasons.append("compression_post_pump→dual_breakout(-1 each)")
+
+    long_v, short_v = votes["long"], votes["short"]
+    spread = abs(long_v - short_v)
+    lean = "NONE"
+    if long_v == 0 and short_v == 0:
+        position = "NO_TRADE"
+        mode = "wait"
+    elif spread <= 1 and max(long_v, short_v) < 4:
+        position = "WAIT"
+        mode = "watch_both"
+        lean = "LONG" if long_v > short_v else ("SHORT" if short_v > long_v else "NONE")
+    elif long_v > short_v:
+        position = "LONG"
+        mode = "entry" if gate_action == "ENTRY" or (verdict == "LONG" and spread >= 3) else "watch"
+        lean = "LONG"
+    else:
+        position = "SHORT"
+        mode = "entry" if gate_action == "ENTRY" or (verdict == "SHORT" and spread >= 3) else "watch"
+        lean = "SHORT"
+
+    # Levels from playbook / ta
+    price = ta.get("price")
+    entry = pb.get("entry")
+    zone = ta.get("entry_zone")
+    if entry is None and isinstance(zone, list) and zone:
+        entry = zone[0]
+    stop = pb.get("stop") or ta.get("invalidation")
+    tp1 = pb.get("tp1")
+    tp2 = pb.get("tp2")
+    targets = ta.get("targets") or []
+    if tp1 is None and targets:
+        tp1 = targets[0]
+    if tp2 is None and len(targets) > 1:
+        tp2 = targets[1]
+    breakout = ta.get("resistance") if (position == "LONG" or lean == "LONG") else None
+    breakdown = ta.get("support") if (position == "SHORT" or lean == "SHORT") else None
+
+    conf = min(10, max(1, 4 + spread + (1 if gate_action == "ENTRY" else 0)))
+    if position in {"WAIT", "NO_TRADE"}:
+        conf = min(conf, 6)
+
+    thesis_bits = reasons[:8]
+    if foresight.get("summary"):
+        thesis_bits.append(f"foresight:{str(foresight.get('summary'))[:80]}")
+    if setup.get("label_ru"):
+        thesis_bits.append(f"setup:{setup.get('label_ru')}")
+    if elliott.get("label"):
+        thesis_bits.append(f"EW:{elliott.get('label')}")
+
+    how = "market_now"
+    if mode == "watch" or position == "WAIT":
+        how = "trigger_close"
+    if gate_action == "WATCH" or foresight.get("watch_only"):
+        how = "trigger_close"
+    if ta.get("candle_compression") and ta.get("post_pump"):
+        how = "dual_breakout_close"
+        position = "WAIT" if position != "NO_TRADE" else position
+        mode = "watch_both"
+
+    return {
+        "position": position,  # LONG|SHORT|WAIT|NO_TRADE
+        "mode": mode,  # entry|watch|watch_both|wait
+        "lean": lean if position in {"WAIT", "NO_TRADE"} else position,
+        "how": how,
+        "confidence": conf,
+        "votes": {"long": long_v, "short": short_v, "spread": spread},
+        "gate_action": gate_action or None,
+        "horizon": vol.get("horizon"),
+        "tp1_min_pct": vol.get("tp1_min_pct"),
+        "levels": {
+            "price": price,
+            "entry": entry,
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "breakout_hint": breakout,
+            "breakdown_hint": breakdown,
+            "entry_op": pb.get("entry_op") or (">=" if lean == "LONG" else "<="),
+        },
+        "why": thesis_bits,
+        "instruction": (
+            "Используй POSITION_CALL как базу своего мнения о позиции. "
+            "Не противоречь сильному перевесу голосов алгоритмов без явной причины с графика. "
+            "Если mode=watch/watch_both — НЕ советуй market сейчас, только триггер close."
+        ),
+    }
 
 
 def build_volatility_regime(ta: dict[str, Any]) -> dict[str, Any]:
@@ -606,10 +794,12 @@ def format_context_text(pack: dict[str, Any]) -> str:
         f"SMC={ta.get('smc_summary')} score={ta.get('smc_score')}",
         f"FORECAST={ta.get('forecast_summary')}",
         f"CVD={ta.get('cvd_source')} delta={ta.get('cvd_delta')} LIQ_CASCADE={ta.get('liq_cascade')}",
+        f"RSI_DIVERGENCE={ta.get('rsi')}",
         f"LIQ_MAGNET={ta.get('liq_magnet')}",
         f"MEANINGFUL_LEVELS={meaningful}",
         f"GATES={pack.get('decision_gate')}",
         f"PLAYBOOK={pack.get('playbook')}",
+        f"POSITION_CALL={pack.get('position_call')}",
         f"LINKS chart={pack.get('chart_url')} liq_map={pack.get('liq_map_url')}",
         f"LIQ_MAP_SCREENSHOT={pack.get('liq_map_screenshot', 'unknown')} {pack.get('liq_map_note', '')}",
         "JSON:",
@@ -687,6 +877,7 @@ async def build_ai_context_pack(
     pack_dict["multi_tf"] = build_multi_tf_map(interval_minutes)
     pack_dict["volatility_regime"] = build_volatility_regime(pack_dict["ta"])
     pack_dict["meaningful_levels"] = build_meaningful_levels(pack_dict["ta"])
+    pack_dict["position_call"] = build_bot_position_call(pack_dict)
     liq_png: bytes | None = None
     liq_capture_ok = False
     if include_liq_map:

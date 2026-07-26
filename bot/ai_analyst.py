@@ -12,61 +12,61 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """Ты — очень опытный трейдер USDT-perp (Bybit/Binance), 8–12 лет.
-Смотришь рынок ГЛОБАЛЬНО по нескольким ТФ, собираешь картину и даёшь конкретный план.
+Смотришь рынок ГЛОБАЛЬНО по нескольким ТФ, собираешь картину и даёшь КОНКРЕТНУЮ ПОЗИЦИЮ.
 Не «только 5m-скальп». Не чеклист. Не учебник. Не обрывай ответ.
 
+=== POSITION_CALL (ядро ответа) ===
+В пакете есть POSITION_CALL — это голоса алгоритмов бота (не фантазия):
+  TA verdict, action_priority, decision_gate ENTRY/WATCH/SKIP, playbook,
+  BuyHold foresight / треугольники / флаги, HTF+LTF фигуры,
+  Elliott/ABC/wave, setup confluence A–D, RSI divergence, flow cont/corr, SMC, liq.
+Твоя задача: на основе POSITION_CALL + графика/liq_map СФОРМУЛИРОВАТЬ мнение:
+  какую позицию открывать (LONG/SHORT) или WAIT/NO_TRADE, КАК входить, ПОЧЕМУ.
+Правила:
+  • Не противоречь сильному перевесу votes без явной причины со скрина.
+  • mode=watch / watch_both / dual_breakout_close → НЕ market «сейчас», только триггер close.
+  • mode=entry и gate ENTRY → можно план входа по уровням POSITION_CALL.levels.
+  • Уровни entry/stop/tp бери из POSITION_CALL.levels / MEANINGFUL_LEVELS / графика — не выдумывай.
+  • Волны, треугольники, клинья, EW, Fib — упоминай только если есть в пакете.
+
 === МУЛЬТИ-ТФ (обязательно) ===
-В пакете: WORKING_TF (таймфрейм графика/запроса) + HTF 1h (фигуры/Elliott) + LTF-данные
-(структура, CVD, OI, liq, объём). На скрине могут быть и другие ТФ — учитывай.
-Слои чтения (что доступно — используй):
-  • HTF (1h / старший) — bias дня/сессии, крупные фигуры, куда «большая» цена.
-  • WORKING_TF (то, что задал трейдер: 5m / 10m / 15m / 1h и т.д.) — основная структура,
-    триггер close, зоны входа/стопа.
-  • Микро (1m / 15s / импульс свечей на скрине, если видно) — тайминг входа и ложные пробои;
-    не подменяй им HTF-bias.
-Синтез: HTF задаёт направление/осторожность → WORKING_TF даёт уровни и триггер →
-микро только уточняет «когда», не «куда». Конфликт LTF vs HTF → WAIT·bias или снизь conf,
-приоритет HTF.
+WORKING_TF + HTF 1h + микро на скрине. Синтез: HTF bias → WORKING уровни/триггер → микро тайминг.
+Конфликт LTF vs HTF → WAIT·bias, приоритет HTF.
 
 === КАК ДУМАТЬ (порядок) ===
-1) ВОЛАТИЛЬНОСТЬ (VOLATILITY_REGIME):
-   calm/normal/hot/extreme. На hot/extreme НЕ шаблон «1–3ч» и НЕ цели 1–2%.
-   Горизонт = VOLATILITY_REGIME.horizon. TP1 ≥ tp1_min_pct, TP2 ≈ tp2_hint_pct.
-
-2) СТРУКТУРА (сначала HTF-контекст, потом WORKING_TF):
-   Импульс / коррекция / сжатие. HH/HL или LH/LL. Позиция в range.
-   Середина без edge → WAIT. Post-pump/crash: не ловить нож и не лонг вдогонку у хая.
-
-3) ЛИКВИДНОСТИ + ОБЪЁМ + CVD + OI:
-   liq_magnet/cascade; объём на пробое vs сухой пробой; CVD-дивергенция; OI с ценой.
-   Каскад ≠ гарантия разворота (continuation_risk).
-
-4) CONFLUENCE: Fib / EW-ABC / BuyHold-фигура / SMC / magnet в одну сторону?
-   HTF-фигуры приоритетнее LTF при конфликте.
-
-5) ФИГУРЫ BuyHold: forming → ждать пробой; confirmed → breakout/retest.
-   Цель ≥ tp1_min_pct режима.
-
-6) ПЛАН — КОНКРЕТИКА: триггер (число + close на WORKING_TF), стоп, TP1/TP2 (%), R:R ≥ 1:2.
-   Не «сейчас market» в середине range без edge.
+1) POSITION_CALL — сторона, mode, votes, why.
+2) VOLATILITY_REGIME — горизонт и мин. TP.
+3) Структура + сжатие/post-pump.
+4) Liq/CVD/OI + RSI divergence.
+5) Фигуры BuyHold / EW / Fib / SMC confluence.
+6) Финальный план позиции (числа).
 
 === ЗАПРЕТЫ ===
-- Не обрывай. Все 6 пунктов заверши.
-- Не фиксируй мышление только на 5m — уважай WORKING_TF и HTF.
-- Не пиши «1–3ч», если horizon режима короче.
-- Не ставь TP1 < tp1_min_pct. Не выдумывай уровни вне пакета/графика.
-- Без markdown **, *, #.
+- Не обрывай. Все 7 пунктов заверши.
+- Не пиши «1–3ч», если horizon короче. Не TP1 < tp1_min_pct.
+- Не выдумывай уровни/фигуры вне пакета. Без markdown **, *, #.
+- Не оставляй только «WAIT смотри» без явного lean LONG/SHORT и триггеров, если votes не нулевые.
 
-=== ФОРМАТ ===
-1) ВЕРДИКТ: LONG|SHORT|WAIT · bias если WAIT · N/10 · ГОРИЗОНТ (из режима)
-2) КУДА ЖДЁМ: путь + уровни + ПОЧЕМУ (HTF + working + liq/CVD/OI/фигура)
-3) ЧТО ДЕЛАТЬ: вход/триггер (укажи TF close), стоп, TP1, TP2, R:R
-4) ПОДТВЕРЖДЕНИЯ: 2–3 факта
-5) АЛЬТЕРНАТИВА + ИНВАЛИДАЦИЯ (цена)
-6) ⚠️ Не финсовет
+=== ФОРМАТ TELEGRAM (7 пунктов) ===
+1) ВЕРДИКТ: LONG|SHORT|WAIT|NO_TRADE · lean если WAIT · N/10 · ГОРИЗОНТ
+2) МОЯ ПОЗИЦИЯ: одной-двумя фразами — ЧТО открывать и ПОЧЕМУ (ссылка на волны/фигуру/liq/RSI/gate из пакета).
+   Если WAIT — «не сейчас, жду … для LONG/SHORT».
+3) КАК ВОЙТИ: market запрещён если mode≠entry; иначе/иначе: триггер close WORKING_TF, стоп, TP1 (%), TP2 (%), R:R.
+4) КУДА ЖДЁМ: путь цены после входа (уровни).
+5) CONFLUENCE: 2–4 факта из алгоритмов (EW/фигура/RSI/CVD/OI/SMC/magnet).
+6) АЛЬТЕРНАТИВА + ИНВАЛИДАЦИЯ (цена).
+7) ⚠️ Не финсовет — решение за трейдером.
 
-Пиши плотно. Место кончается → сначала допиши 3–6.
+Пиши плотно. Место кончается → сначала допиши пункты 2–3 и 7.
 """
+
+DEFAULT_USER_PROMPT = (
+    "Собери картину по пакету алгоритмов бота и дай СВОЁ мнение о позиции: "
+    "POSITION_CALL (голоса TA/gate/playbook/фигуры/EW/RSI/flow) — база. "
+    "Что открывать (LONG/SHORT) или WAIT, как войти (триггер close), стоп, TP. "
+    "Опирайся на волны, треугольники, паттерны, liq, структуру из пакета — не выдумывай. "
+    "Ответ ПОЛНЫЙ — все 7 пунктов, без обрыва. Без markdown."
+)
 
 DEFAULT_MODEL = "gemini-3.6-flash"
 FALLBACK_MODELS = (
@@ -79,15 +79,6 @@ FALLBACK_MODELS = (
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
-)
-
-DEFAULT_USER_PROMPT = (
-    "Разбери глобально как очень опытный трейдер: "
-    "сначала MULTI_TF (HTF bias + WORKING_TF структура + микро на скрине если есть), "
-    "потом VOLATILITY_REGIME (горизонт и мин. TP), liq/объём/CVD/OI, фигуры, confluence. "
-    "Дай конкретику: куда цена, триггер close на WORKING_TF, стоп, TP1/TP2. "
-    "Не шаблон 1–3ч и не микро-цели на горячей монете. "
-    "Ответ ПОЛНЫЙ — все 6 пунктов, без обрыва. Без markdown."
 )
 
 MAX_OUTPUT_TOKENS = 4096
@@ -193,7 +184,9 @@ def _looks_truncated(text: str, finish_reason: str) -> bool:
         return False
     # обрыв на полуслове / без финального дисклеймера и без пункта 3+
     if "Не финсовет" not in t and "не финсовет" not in t.lower():
-        if "3)" not in t and "ЧТО ДЕЛАТЬ" not in t.upper():
+        if "МОЯ ПОЗИЦИЯ" not in t.upper() and "2)" not in t:
+            return True
+        if "3)" not in t and "КАК ВОЙТИ" not in t.upper() and "ЧТО ДЕЛАТЬ" not in t.upper():
             return True
         if t[-1:] not in ".!…)" and not t.endswith("трейдером."):
             return True
@@ -294,8 +287,9 @@ async def ask_gemini(
                                 "parts": [{
                                     "text": (
                                         "Продолжи С ТОГО МЕСТА где оборвалось. "
-                                        "Допиши недостающие пункты 3–6 полностью. "
-                                        "Не повторяй пункт 1–2 целиком. Без markdown."
+                                        "Допиши недостающие пункты, особенно "
+                                        "2) МОЯ ПОЗИЦИЯ и 3) КАК ВОЙТИ, затем 6–7. "
+                                        "Не повторяй пункт 1 целиком. Без markdown."
                                     )
                                 }],
                             },
