@@ -166,6 +166,29 @@ def build_fib_action_text(
                 bits.append(f"SHORT close ≤{fmt_price(bd)}")
             bits.append("Fib-откат тоже возможен")
             return " · ".join(bits)
+        # PRO: bias SHORT → sell-the-rally к Fib ИЛИ пробой вниз; не «жди Fib для лонга»
+        if side == "short":
+            bd = getattr(ta, "breakdown_level", None)
+            bits = ["Не входить сейчас · bias SHORT"]
+            if wait_px and wait_px > (ta.current_price or 0):
+                ratio_lbl = "0.618" if f618 else "0.5"
+                bits.append(f"sell-откат к Fib ~{fmt_price(wait_px)} ({ratio_lbl})")
+            if bd:
+                bits.append(f"или close ≤{fmt_price(bd)}")
+            else:
+                bits.append("ждать пробой поддержки")
+            return " · ".join(bits)
+        if side == "long":
+            bo = getattr(ta, "breakout_level", None)
+            bits = ["Не входить сейчас · bias LONG"]
+            if wait_px and wait_px < (ta.current_price or 0) * 1.001:
+                ratio_lbl = "0.618" if f618 else "0.5"
+                bits.append(f"откат к Fib ~{fmt_price(wait_px)} ({ratio_lbl})")
+            if bo:
+                bits.append(f"или close ≥{fmt_price(bo)}")
+            else:
+                bits.append("ждать пробой сопротивления")
+            return " · ".join(bits)
         if wait_px:
             ratio_lbl = "0.618" if f618 else "0.5"
             return (

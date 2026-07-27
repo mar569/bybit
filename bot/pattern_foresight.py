@@ -225,10 +225,15 @@ def _build_trigger(pattern: "ChartPattern") -> str:
     return mode or "подтверждённый пробой"
 
 
-def _build_target(pattern: "ChartPattern") -> str:
-    if pattern.target_price:
-        return f"{_fmt_price(pattern.target_price)} (высота фигуры / шток)"
-    return ""
+def _build_target(pattern: "ChartPattern", *, current_price: float = 0.0) -> str:
+    tp = pattern.target_price
+    if not tp:
+        return ""
+    from .pro_invariants import pattern_target_ok
+
+    if current_price > 0 and not pattern_target_ok(pattern.direction, current_price, float(tp)):
+        return ""  # не клеим цель против направления / выше цены на SHORT
+    return f"{_fmt_price(tp)} (высота фигуры / шток)"
 
 
 def _build_invalidation(pattern: "ChartPattern") -> str:
@@ -369,6 +374,15 @@ def build_pattern_foresight(
         )
 
     assert focus is not None
+
+    # Уровни/цель — только от паттерна в сторону итогового bias (не LTF-цель при HTF SHORT)
+    level_src = focus
+    if htf_conflict and htf_primary and _dir_to_bias(htf_primary.direction) == bias:
+        level_src = htf_primary
+    elif focus and _dir_to_bias(focus.direction) != bias and htf_primary:
+        if _dir_to_bias(htf_primary.direction) == bias:
+            level_src = htf_primary
+
     sub = _subtype_ru(focus)
     summary = (
         f"{focus.label_ru} ({_status_label(focus)}"
@@ -381,7 +395,7 @@ def build_pattern_foresight(
             f"приоритет HTF → {bias.upper()}, без market"
         )
 
-    path = _build_path(focus, horizon)
+    path = _build_path(level_src, horizon)
     if htf_conflict and htf_primary:
         path = (
             f"на LTF {focus.label_ru}, на 1h {htf_primary.label_ru} — "
@@ -401,24 +415,21 @@ def build_pattern_foresight(
     if htf_primary:
         htf_label = f"{htf_primary.label_ru} ({_status_label(htf_primary)})"
 
-    # Если confirmed далеко от цели — всё равно foresight
-    _ = current_price  # reserved for dist-to-target refinements
-
     return PatternForesight(
         horizon_hours=horizon,
         bias=bias,
         status=status,
         summary=summary,
         path_text=path,
-        trigger_text=_build_trigger(focus),
-        target_text=_build_target(focus),
-        invalidation_text=_build_invalidation(focus),
+        trigger_text=_build_trigger(level_src),
+        target_text=_build_target(level_src, current_price=current_price),
+        invalidation_text=_build_invalidation(level_src),
         ltf_label=ltf_label,
         htf_label=htf_label,
         htf_conflict=htf_conflict,
         watch_only=watch_only,
-        confidence=float(focus.confidence),
-        primary_kind=focus.kind,
+        confidence=float(level_src.confidence if level_src else focus.confidence),
+        primary_kind=level_src.kind if level_src else focus.kind,
     )
 
 
@@ -427,7 +438,8 @@ def foresight_enriches_scenario(foresight: PatternForesight) -> str:
     if not foresight.active:
         return ""
     parts = [foresight.summary]
-    if foresight.target_text:
+    # Цель только если строка валидна (уже direction-safe в _build_target)
+    if foresight.target_text and foresight.bias in {"long", "short"}:
         parts.append(f"цель {foresight.target_text.split('(')[0].strip()}")
     return " — ".join(parts)[:120]
 

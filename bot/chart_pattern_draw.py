@@ -139,10 +139,16 @@ def _draw_target_stop(
     if not bars:
         return
     x = _x_at(bars, len(bars) - 1)
-    if pattern.target_price is not None:
-        ax.axhline(pattern.target_price, color="#7ee787", linestyle=":", linewidth=0.85, alpha=0.55)
+    current = float(bars[-1].close)
+    from .pro_invariants import pattern_target_ok
+
+    if pattern.target_price is not None and pattern_target_ok(
+        pattern.direction, current, float(pattern.target_price)
+    ):
+        tcol = "#7ee787" if pattern.direction == "bullish" else "#ff7b72"
+        ax.axhline(pattern.target_price, color=tcol, linestyle=":", linewidth=0.85, alpha=0.55)
         if draw_labels:
-            ax.text(x, pattern.target_price, " цель", color="#7ee787", fontsize=6.2, va="bottom")
+            ax.text(x, pattern.target_price, " цель", color=tcol, fontsize=6.2, va="bottom")
     if pattern.stop_price is not None:
         ax.axhline(pattern.stop_price, color="#ff7b72", linestyle=":", linewidth=0.75, alpha=0.50)
         if draw_labels:
@@ -530,6 +536,15 @@ def draw_pattern_foresight_path(
         trigger = float(pattern.zone_bottom)
 
     target = float(pattern.target_price) if pattern.target_price else None
+    from .pro_invariants import pattern_target_ok
+
+    if target is not None and not pattern_target_ok(pattern.direction, current_price, target):
+        target = None
+    if bias in {"long", "short"}:
+        want = "bullish" if bias == "long" else "bearish"
+        if pattern.direction and pattern.direction != want and pattern.direction != "neutral":
+            # не рисуем foresight-путь против объявленного bias
+            return
     if target is None and trigger is None:
         return
 

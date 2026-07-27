@@ -204,6 +204,8 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "invalidation": _round(ta.invalidation_price),
         "support": _round(ta.nearest_support),
         "resistance": _round(ta.nearest_resistance),
+        "breakout_level": _round(getattr(ta, "breakout_level", None)),
+        "breakdown_level": _round(getattr(ta, "breakdown_level", None)),
         "key_levels": key_levels,
         "candle_patterns": candle_patterns,
         "chart_patterns": patterns,
@@ -520,7 +522,9 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
         mode = "entry" if gate_action == "ENTRY" or (verdict == "SHORT" and spread >= 3) else "watch"
         lean = "SHORT"
 
-    # Levels from playbook / ta
+    # Levels from playbook / ta — PRO: tp только в сторону lean/position
+    from .pro_invariants import pick_directional_tp, sanitize_targets, stop_matches_side
+
     price = ta.get("price")
     entry = pb.get("entry")
     zone = ta.get("entry_zone")
@@ -529,16 +533,38 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
     stop = pb.get("stop") or ta.get("invalidation")
     tp1 = pb.get("tp1")
     tp2 = pb.get("tp2")
-    targets = ta.get("targets") or []
+    targets = list(ta.get("targets") or [])
     if tp1 is None and targets:
         tp1 = targets[0]
     if tp2 is None and len(targets) > 1:
         tp2 = targets[1]
+    side = "long" if (position == "LONG" or lean == "LONG") else (
+        "short" if (position == "SHORT" or lean == "SHORT") else "neutral"
+    )
+    px = float(price or 0)
+    if side in {"long", "short"} and px > 0:
+        cleaned = sanitize_targets(
+            side, px, [t for t in [tp1, tp2, *targets] if t is not None],
+        )
+        tp1 = cleaned[0] if cleaned else None
+        tp2 = cleaned[1] if len(cleaned) > 1 else None
+        if stop is not None and not stop_matches_side(side, px, float(stop)):
+            stop = None
+        if tp1 is None:
+            tp1 = pick_directional_tp(side=side, current=px, target_prices=targets)
     breakout = ta.get("resistance") if (position == "LONG" or lean == "LONG") else None
     breakdown = ta.get("support") if (position == "SHORT" or lean == "SHORT") else None
+    # Также явные breakout/breakdown из TA
+    if breakout is None and (position == "LONG" or lean == "LONG"):
+        breakout = ta.get("breakout") or ta.get("breakout_level")
+    if breakdown is None and (position == "SHORT" or lean == "SHORT"):
+        breakdown = ta.get("breakdown") or ta.get("breakdown_level")
 
     conf = min(10, max(1, 4 + spread + (1 if gate_action == "ENTRY" else 0)))
     if position in {"WAIT", "NO_TRADE"}:
+        conf = min(conf, 6)
+    # смешанный flow → ещё ниже на WAIT
+    if position == "WAIT" and abs(cont - corr) < 12:
         conf = min(conf, 6)
 
     thesis_bits = reasons[:8]
@@ -583,7 +609,9 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
         "instruction": (
             "Используй POSITION_CALL как базу своего мнения о позиции. "
             "Не противоречь сильному перевесу голосов алгоритмов без явной причины с графика. "
-            "Если mode=watch/watch_both — НЕ советуй market сейчас, только триггер close."
+            "Если mode=watch/watch_both — НЕ советуй market сейчас, только триггер close. "
+            "PRO: SHORT-TP только ниже price, LONG-TP только выше; TP≠триггер; "
+            "не клеить цель бычьей фигуры к SHORT и наоборот."
         ),
     }
 

@@ -913,12 +913,16 @@ def build_scenarios(
         bull_targets = [breakout * 1.01, breakout * 1.02, breakout * 1.035]
     if not bull_targets:
         bull_targets = [current * 1.015, current * 1.03, current * 1.045, current * 1.06]
+    from .pro_invariants import sanitize_targets
+
+    bull_targets = sanitize_targets("long", current, bull_targets, trigger=breakout)
 
     bear_targets = [p for p in supports if breakdown and p < breakdown * 0.9995][:4]
     if not bear_targets and breakdown:
         bear_targets = [breakdown * 0.99, breakdown * 0.98, breakdown * 0.965]
     if not bear_targets:
         bear_targets = [current * 0.985, current * 0.97, current * 0.955, current * 0.94]
+    bear_targets = sanitize_targets("short", current, bear_targets, trigger=breakdown)
 
     stop_long = (breakdown or current * 0.98) * 0.995
     stop_short = (breakout or current * 1.02) * 1.005
@@ -2712,6 +2716,22 @@ def run_ta_analysis(
         breakdown=breakdown,
         wave=wave,
     )
+    # PRO: цели строго в сторону плана (SHORT ниже / LONG выше; TP ≠ триггер)
+    from .pro_invariants import bias_side, sanitize_targets, stop_matches_side
+
+    _plan_side = bias_side(verdict, action_priority)
+    _trig = breakdown if _plan_side == "short" else breakout if _plan_side == "long" else None
+    if _plan_side in {"long", "short"}:
+        targets = sanitize_targets(_plan_side, current, targets, trigger=_trig)
+        if inv is not None and not stop_matches_side(_plan_side, current, float(inv)):
+            inv = None
+        if not targets:
+            # fallback от scenario, чтобы подпись/план не остались пустыми
+            sc = bearish if _plan_side == "short" else bullish
+            if sc and sc.target_prices:
+                targets = sanitize_targets(
+                    _plan_side, current, sc.target_prices, trigger=sc.trigger_price,
+                )
     if (
         wave.valid
         and wave.has_confluence
@@ -2940,6 +2960,11 @@ def run_ta_analysis(
         momentum=momentum,
         drawdown_from_high_pct=ms.drawdown_from_high_pct,
     )
+    # PRO: WAIT при смешанном потоке — не рисовать 9/10 как «готовый вход»
+    if verdict == "WAIT" and abs(int(flow.continuation) - int(flow.correction)) < 12:
+        conf = min(int(conf), 7)
+        if setup_clarity >= 8:
+            conf = min(conf, max(5, int(setup_clarity) - 1))
 
     correction_path, continuation_path, forecast_summary = build_market_forecast_paths(
         current=current,
@@ -5029,9 +5054,12 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
     bo_lvl, bd_lvl = _effective_breakout_breakdown(ta)
     long_lvl = fmt_price(bo_lvl) if bo_lvl else "—"
     short_lvl = fmt_price(bd_lvl) if bd_lvl else "—"
-    inv = _display_invalidation(ta)
+    from .pro_invariants import resolve_wait_plan_levels
+
+    plan_stop, plan_tp, _plan_trig = resolve_wait_plan_levels(ta)
+    inv = plan_stop if plan_stop is not None else _display_invalidation(ta)
     stop_lvl = fmt_price(inv) if inv else "—"
-    tp1 = fmt_price(ta.target_prices[0]) if ta.target_prices else "—"
+    tp1 = fmt_price(plan_tp) if plan_tp else "—"
 
     if rr_bad:
         lines.append("⛔ <b>Решение:</b> <b>NO TRADE</b> (пропуск до лучшей точки входа).")
@@ -5058,8 +5086,14 @@ def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
         lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> + ретест сверху.")
 
     lines.append(f"🎯 <b>План:</b> вход по факту · отмена <b>{stop_lvl}</b> · TP1 <b>{tp1}</b>.")
-    if ta.verdict_reason:
-        lines.append(f"⏱ <b>Протухание идеи:</b> если 3 свечи 5m без подтверждения — отменить вход.")
+    if ta.verdict == "WAIT":
+        lines.append(
+            "⏱ <b>Протухание идеи:</b> если 12 свечей 5m (~1ч) без пробоя границ — пересмотреть."
+        )
+    elif ta.verdict_reason:
+        lines.append(
+            "⏱ <b>Протухание идеи:</b> если 3 свечи 5m без подтверждения — отменить вход."
+        )
 
     risk_bits: list[str] = []
     if getattr(ta, "candle_compression", False) and ta.post_pump:
@@ -5327,7 +5361,12 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
         lines.append(f"SHORT от: {fmt_price(ta.breakdown_level)}{extra}")
     if ta.invalidation_price:
         lines.append(f"стоп: {fmt_price(ta.invalidation_price)}")
-    if ta.target_prices:
+    from .pro_invariants import resolve_wait_plan_levels
+
+    _, plan_tp, _ = resolve_wait_plan_levels(ta)
+    if plan_tp:
+        lines.append(f"цель bias: {fmt_price(plan_tp)}")
+    elif ta.verdict in {"LONG", "SHORT"} and ta.target_prices:
         tps = " → ".join(fmt_price(t) for t in ta.target_prices[:3])
         lines.append(f"цели: {tps}")
     if ta.primary_scenario:

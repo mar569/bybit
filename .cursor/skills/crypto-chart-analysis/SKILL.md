@@ -196,6 +196,16 @@ Trade gate локация: `elliott` / `confluence` (после `fib`, до `abc
 6. **BTC/ETH** — для альтов: если не видно, предупреди о риске корреляции.
 7. **Связь с ботом:** при наличии данных `LiquidationAnalysisResult` — учитывай `confidence`, `invalidation_price`, `continuation_risk`.
 
+### PRO-инварианты (график + текст + AI)
+
+Код: `bot/pro_invariants.py`.
+
+- SHORT-цель / TP **только ниже** цены; LONG — **только выше**.
+- TP ≠ триггер входа (цель за уровнем пробоя).
+- При HTF/LTF конфликте цель берётся от паттерна в сторону HTF bias.
+- На WAIT: path/TP по `action_priority`; confidence ≤7 при смешанном flow.
+- AI system prompt и POSITION_CALL повторяют те же правила.
+
 ## Таймфреймы
 
 | TF | Назначение |

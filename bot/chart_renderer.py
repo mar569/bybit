@@ -876,6 +876,31 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
             has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
         )
+        # PRO: path только в сторону path_bias / action_priority
+        from .pro_invariants import bias_side, sanitize_path_prices
+
+        _side = bias_side(
+            getattr(ta, "verdict", "") or "",
+            getattr(ta, "action_priority", "") or "",
+            getattr(ew_stub, "path_bias", "") or "",
+        )
+        if _side in {"long", "short"} and ew_stub.path_prices:
+            cur = float(getattr(ta, "current_price", 0) or (bars[-1].close if bars else 0))
+            pp, pl = sanitize_path_prices(
+                _side, cur, ew_stub.path_prices, ew_stub.path_labels,
+            )
+            ew_stub.path_prices = pp
+            ew_stub.path_labels = pl
+            if not pp:
+                ew_stub.path_bias = ""
+            elif (ew_stub.path_bias or "") not in {"long", "short"}:
+                ew_stub.path_bias = _side
+        # На WAIT: path 1–3ч только если совпадает с bias; чужой path гасим
+        if is_wait and ew_stub.path_bias and _side in {"long", "short"}:
+            if ew_stub.path_bias != _side:
+                ew_stub.path_prices = []
+                ew_stub.path_labels = []
+                ew_stub.path_bias = ""
         # восстановить entry plan для линии входа — не на WAIT (дубли TP/STOP)
         if not is_wait and getattr(ta, "elliott_entry_price", None):
             from .elliott_wave import ElliottEntryPlan
@@ -1132,14 +1157,26 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
 
     show_bull = (
         ta.bullish_scenario is not None
-        and (ta.verdict == "LONG" or ta.action_priority == "long" or ta.bearish_scenario is None)
+        and (
+            ta.verdict == "LONG"
+            or (ta.verdict == "WAIT" and ta.action_priority == "long")
+            or (ta.verdict != "WAIT" and ta.action_priority == "long" and ta.bearish_scenario is None)
+        )
     )
     show_bear = (
         ta.bearish_scenario is not None
-        and (ta.verdict == "SHORT" or ta.action_priority == "short" or ta.bullish_scenario is None)
+        and (
+            ta.verdict == "SHORT"
+            or (ta.verdict == "WAIT" and ta.action_priority == "short")
+            or (ta.verdict != "WAIT" and ta.action_priority == "short" and ta.bullish_scenario is None)
+        )
     )
+    # WAIT dual-breakout без явного lean — оба бокса не рисуем (шум); уровни уже слева
+    if ta.verdict == "WAIT" and ta.action_priority not in {"long", "short"}:
+        show_bull = False
+        show_bear = False
     scenario_y = 0.36
-    if show_bull and ta.bullish_scenario:
+    if show_bull and ta.bullish_scenario and not show_bear:
         bull = ta.bullish_scenario
         bull_lines = [
             "БЫЧИЙ СЦЕНАРИЙ",

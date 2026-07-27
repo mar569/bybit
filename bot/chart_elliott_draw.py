@@ -953,6 +953,13 @@ def draw_wave_horizon_path(
     if not bars or len(prices) < 2:
         return
     labels = list(labels or [])
+    from .pro_invariants import sanitize_path_prices
+
+    current = float(bars[-1].close)
+    if bias in {"long", "short"}:
+        prices, labels = sanitize_path_prices(bias, current, prices, labels)
+        if len(prices) < 2:
+            return
     # отфильтровать invalidation из цен если вдруг попал
     path_p: list[float] = []
     path_l: list[str] = []
