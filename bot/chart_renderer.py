@@ -1332,6 +1332,25 @@ def _style_axes(ax: plt.Axes, bars: list[KlineBar]) -> None:
             ax.set_ylim(trough - pad, peak + pad)
 
 
+def _resolve_chart_height_scale(height_scale: float | None) -> float:
+    return max(0.85, min(1.6, float(height_scale if height_scale is not None else 1.0)))
+
+
+def _chart_figure_layout(
+    *,
+    enhanced: bool,
+    pro_mode: bool,
+    height_scale: float | None = None,
+) -> tuple[tuple[float, float], list[float] | None]:
+    scale = _resolve_chart_height_scale(height_scale)
+    if enhanced:
+        candle_ratio = 4.0 + (scale - 1.0) * 3.0
+        return (19.2, 10.8 * scale), [candle_ratio, 0.95, 1.15]
+    if pro_mode:
+        return (20.4, 10.2 * scale), None
+    return (19.0, 8.5 * scale), None
+
+
 def _render_chart_figure(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
@@ -1343,19 +1362,24 @@ def _render_chart_figure(
     pro_mode: bool = False,
     enhanced: bool = True,
     display_hours: int | None = None,
+    height_scale: float | None = None,
 ) -> bytes:
     use_enhanced = enhanced
+    fig_size, height_ratios = _chart_figure_layout(
+        enhanced=use_enhanced,
+        pro_mode=pro_mode,
+        height_scale=height_scale,
+    )
     if use_enhanced:
         # Шире область свечей (~+13%): боковые панели остаются, но уже
-        fig = plt.figure(figsize=(19.2, 10.8), dpi=120)
-        gs = fig.add_gridspec(3, 1, height_ratios=[4.0, 0.95, 1.15], hspace=0.04)
+        fig = plt.figure(figsize=fig_size, dpi=120)
+        gs = fig.add_gridspec(3, 1, height_ratios=height_ratios, hspace=0.04)
         ax = fig.add_subplot(gs[0])
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
         fig.subplots_adjust(left=0.130, right=0.805, top=0.92, bottom=0.08)
     else:
-        fig_size = (20.4, 10.2) if pro_mode else (19.0, 8.5)
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
         ax_vol = None
         ax_rsi = None
@@ -2025,6 +2049,7 @@ async def render_annotated_chart(
     pattern_detection_enabled: bool = True,
     pattern_min_confidence: float = 0.55,
     display_hours: int | None = None,
+    height_scale: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     # Полный lookback для паттернов/EW; на экране — зум display_hours
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
@@ -2128,6 +2153,7 @@ async def render_annotated_chart(
         pro_mode=pro_mode,
         display_hours=zoom_hours,
         enhanced=source in {"annotated", "annotated_pro"},
+        height_scale=height_scale,
     )
     return png, ta
 
@@ -2145,6 +2171,7 @@ async def render_signal_chart(
     chart_source: str = "annotated",
     exchange: str = "bybit",
     display_hours: int | None = None,
+    height_scale: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     png, ta = await render_annotated_chart(
         symbol,
@@ -2158,6 +2185,7 @@ async def render_signal_chart(
         chart_source=chart_source,
         exchange=exchange,
         display_hours=display_hours,
+        height_scale=height_scale,
     )
     if png is None:
         return None, None
@@ -2179,6 +2207,7 @@ async def render_analysis_chart(
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
     exchange: str = "bybit",
+    height_scale: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     is_long = direction != "short"
     verdict_override = "WAIT" if direction == "wait" else None
@@ -2193,6 +2222,7 @@ async def render_analysis_chart(
         neutral=True,
         exchange=exchange,
         verdict_override=verdict_override,
+        height_scale=height_scale,
     )
 
 
@@ -2210,6 +2240,7 @@ async def get_signal_chart_png(
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
     display_hours: int | None = None,
+    height_scale: float | None = None,
 ) -> tuple[bytes | None, str, TAAnalysisResult | None, str]:
     source = (chart_source or "annotated").lower()
     fail_reason = ""
@@ -2227,6 +2258,7 @@ async def get_signal_chart_png(
             chart_source=source,
             exchange=signal_exchange,
             display_hours=display_hours,
+            height_scale=height_scale,
         )
         if png:
             return png, source, ta, ""

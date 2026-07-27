@@ -33,6 +33,7 @@ SET_HELP = (
     "/set chart annotated — TA-график к сигналам (рекомендуется)\n"
     "/set chart on — включить графики к сигналам\n"
     "/set chart off — только текст без картинки\n"
+    "/set chart_height 1.3 — высота графика (0.85–1.6, 1.0 = стандарт)\n"
     "/set manual_chart tv_annotated — ручной TA: TradingView + уровни\n"
     "/set manual_chart annotated — ручной TA: matplotlib\n"
     "Ликвидации (REKT-алерты в обычный чат):\n"
@@ -98,6 +99,7 @@ GLOBAL_ALIASES: dict[str, str] = {
     "mega_cooldown": "mega_cooldown_seconds",
     "chart": "signal_chart_source",
     "chart_src": "signal_chart_source",
+    "chart_height": "signal_chart_height_scale",
     "manual_chart": "manual_ta_chart_source",
     "manual_ta_chart": "manual_ta_chart_source",
     "compact": "signal_message_compact",
@@ -204,6 +206,7 @@ FLOAT_FIELDS = {
     "analysis_min_price_move_pct",
     "analysis_min_trend_pct",
     "analysis_min_confidence",
+    "signal_chart_height_scale",
 }
 
 
@@ -318,6 +321,14 @@ def parse_set_command(args: list[str]) -> SetResult:
                     False,
                     "Ручной TA: <code>tv_annotated</code> | <code>tradingview</code> | "
                     "<code>annotated</code>",
+                    {},
+                )
+        elif field == "signal_chart_height_scale":
+            value = float(raw_value)
+            if not 0.85 <= value <= 1.6:
+                return SetResult(
+                    False,
+                    "Высота графика: от <b>0.85</b> до <b>1.6</b> (1.0 = стандарт).",
                     {},
                 )
         elif field in INT_FIELDS or field.endswith("_period_minutes"):

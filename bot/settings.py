@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 49
+SETTINGS_VERSION = 50
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -412,6 +412,8 @@ class ScannerSettings:
     signal_chart_hours: int = 18
     signal_chart_display_hours: int = 12
     signal_chart_interval_minutes: int = 5
+    # Множитель высоты PNG (1.0 = стандарт, 1.3 = свечи выше на ~30%)
+    signal_chart_height_scale: float = 1.0
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
     pattern_detection_enabled: bool = True
@@ -874,6 +876,7 @@ class ScannerSettings:
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_display_hours=int(base.get("signal_chart_display_hours", 12)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
+            signal_chart_height_scale=float(base.get("signal_chart_height_scale", 1.0)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
             manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
@@ -1367,6 +1370,10 @@ class SettingsManager:
                 )
                 for override_key in EXCHANGE_OVERRIDE_KEYS:
                     merged[override_key] = None
+            if version < 50:
+                merged["signal_chart_height_scale"] = float(
+                    merged.get("signal_chart_height_scale", 1.0) or 1.0
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

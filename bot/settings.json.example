@@ -1,5 +1,5 @@
 {
-  "settings_version": 49,
+  "settings_version": 50,
   "signals_enabled": true,
   "enabled_binance": true,
   "enabled_bybit": true,
@@ -164,6 +164,7 @@
   "signal_chart_source": "annotated",
   "signal_chart_hours": 5,
   "signal_chart_interval_minutes": 5,
+  "signal_chart_height_scale": 1.0,
   "manual_ta_chart_source": "tv_annotated",
   "signal_message_compact": true,
 

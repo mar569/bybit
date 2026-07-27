@@ -1553,6 +1553,9 @@ class TelegramBot:
                             display_hours=int(
                                 getattr(settings, "signal_chart_display_hours", 7) or 7
                             ),
+                            height_scale=float(
+                                getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
+                            ),
                         ),
                         timeout=35.0,
                     )
@@ -1579,6 +1582,9 @@ class TelegramBot:
                             pattern_min_confidence=settings.pattern_min_confidence,
                             display_hours=int(
                                 getattr(settings, "signal_chart_display_hours", 7) or 7
+                            ),
+                            height_scale=float(
+                                getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
                             ),
                         ),
                         timeout=35.0,
@@ -2699,6 +2705,9 @@ class TelegramBot:
                         liq_context=liq_context,
                         chart_source=settings.signal_chart_source,
                         exchange=watch.exchange.lower(),
+                        height_scale=float(
+                            getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
+                        ),
                     ),
                     timeout=35.0,
                 )
@@ -4067,7 +4076,8 @@ class TelegramBot:
             f"🏷 Бейдж готовности: <b>{'ON' if s.actionable_show_readiness_badge else 'OFF'}</b> "
             f"(по TA, без ⏱ ранности сканера)\n"
             f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
-            f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч\n"
+            f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч "
+            f"· высота ×<b>{getattr(s, 'signal_chart_height_scale', 1.0):g}</b>\n"
             f"📋 Playbook (Hot): <b>{'ON' if s.signal_playbook_enabled else 'OFF'}</b> · "
             f"Pro → анализ: <b>{'ON' if s.signal_pro_to_analysis_chat else 'OFF'}</b> · "
             f"Цели ✅: <b>{'ON' if s.target_watcher_enabled else 'OFF'}</b>\n"
