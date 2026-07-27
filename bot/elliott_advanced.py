@@ -65,6 +65,306 @@ class ElliottPathForecast:
     labels: list[str] = field(default_factory=list)
     confidence: int = 0
     reason_ru: str = ""
+    horizon_hours: float = 2.0
+    invalidation: float | None = None
+    scenario: str = ""  # abc_correction | wave3 | wave5 | triangle_break | resume_impulse
+
+
+def _estimate_path_horizon_hours(
+    *,
+    impulse: ElliottImpulse | None,
+    bars: list["KlineBar"] | None,
+    current: float,
+) -> float:
+    """Горизонт пути 1–3ч: крупная глобальная волна → ближе к 3ч, мелкая → ~1ч."""
+    hz = 2.0
+    if impulse and impulse.points and current > 0:
+        prices = [p.price for p in impulse.points]
+        span_pct = (max(prices) - min(prices)) / current * 100.0
+        if span_pct >= 8.0:
+            hz = 3.0
+        elif span_pct >= 4.0:
+            hz = 2.5
+        elif span_pct >= 2.0:
+            hz = 2.0
+        else:
+            hz = 1.25
+    # ATR hot → чуть короче
+    if bars and len(bars) >= 20 and current > 0:
+        recent = bars[-20:]
+        atr = sum(b.high - b.low for b in recent) / len(recent)
+        atr_pct = atr / current * 100.0
+        if atr_pct >= 1.5:
+            hz = max(1.0, hz * 0.7)
+        elif atr_pct >= 0.9:
+            hz = max(1.0, hz * 0.85)
+    return max(1.0, min(3.0, hz))
+
+
+def _zigzag(prices: list[float], labels: list[str]) -> tuple[list[float], list[str]]:
+    """Убрать подряд одинаковые точки."""
+    out_p: list[float] = []
+    out_l: list[str] = []
+    for p, lab in zip(prices, labels):
+        if out_p and abs(p - out_p[-1]) / max(abs(out_p[-1]), 1e-9) < 0.0008:
+            continue
+        out_p.append(float(p))
+        out_l.append(lab)
+    return out_p, out_l
+
+
+def build_most_likely_path(
+    *,
+    impulse: ElliottImpulse | None,
+    abc: ElliottAbc | None,
+    triangle: ElliottTriangle | None,
+    complex_corr: ElliottComplexCorrection | None,
+    fib_targets: list[ElliottFibTarget],
+    current: float,
+    bars: list["KlineBar"] | None = None,
+    fib_clusters: list | None = None,
+) -> ElliottPathForecast:
+    """Вероятный путь цены на 1–3ч — зигзаг как «как пойдёт график» по правилам волн.
+
+    Не просто entry→tp, а сценарий: откат A-B-C / дожим W3 / пробой треугольника /
+    возобновление импульса после C. Уровни из Fib TradeRev + кластеров.
+    """
+    if current <= 0:
+        return ElliottPathForecast(bias="neutral")
+
+    hz = _estimate_path_horizon_hours(impulse=impulse, bars=bars, current=current)
+    cluster_mid = None
+    if fib_clusters:
+        c0 = fib_clusters[0]
+        cluster_mid = getattr(c0, "mid", None) or (
+            (getattr(c0, "price_lo", 0) + getattr(c0, "price_hi", 0)) / 2.0
+        )
+
+    # --- 1) Треугольник у E → пробой на высоту A-B ---
+    if triangle and triangle.valid and triangle.breakout_bias in {"long", "short"}:
+        e = triangle.points[-1] if triangle.points else None
+        now = e.price if e else current
+        bias = triangle.breakout_bias
+        height = (
+            abs(triangle.points[1].price - triangle.points[0].price)
+            if len(triangle.points) >= 2
+            else current * 0.02
+        )
+        sign = 1.0 if bias == "long" else -1.0
+        # retest границы → импульс пробоя
+        retest = now - sign * height * 0.12
+        mid = now + sign * height * 0.55
+        tp = now + sign * height
+        inv = now - sign * height * 0.35
+        prices, labels = _zigzag(
+            [current, now, retest, mid, tp],
+            ["сейчас", "E", "ретест", "путь", "цель △"],
+        )
+        return ElliottPathForecast(
+            bias=bias,
+            prices=prices,
+            labels=labels,
+            confidence=7 if triangle.kind == "contracting" else 6,
+            reason_ru=f"{triangle.label_ru} · горизонт ~{hz:.1f}ч",
+            horizon_hours=hz,
+            invalidation=inv,
+            scenario="triangle_break",
+        )
+
+    # --- 2) Сложная коррекция WXY → возобновление тренда ---
+    if complex_corr and complex_corr.valid and complex_corr.resume_bias in {"long", "short"}:
+        end = complex_corr.points[-1]
+        bias = complex_corr.resume_bias
+        span = abs(complex_corr.points[0].price - end.price) or current * 0.015
+        sign = 1.0 if bias == "long" else -1.0
+        p1 = end.price + sign * span * 0.35
+        pull = p1 - sign * span * 0.15
+        tp = end.price + sign * span * 1.2
+        prices, labels = _zigzag(
+            [current, end.price, p1, pull, tp],
+            ["сейчас", "Y/Z", "i", "ii", "iii"],
+        )
+        return ElliottPathForecast(
+            bias=bias,
+            prices=prices,
+            labels=labels,
+            confidence=6,
+            reason_ru=f"{complex_corr.label_ru} · ~{hz:.1f}ч",
+            horizon_hours=hz,
+            invalidation=end.price - sign * span * 0.4,
+            scenario="resume_impulse",
+        )
+
+    if impulse and impulse.points:
+        by = {p.label: p for p in impulse.points}
+        direction = impulse.direction
+        sign_imp = 1.0 if direction == "up" else -1.0
+
+        # --- 3) Конец ABC → новый импульс (1-2-3) ---
+        if abc and abc.points and abc.phase in {"C", "complete"}:
+            last = abc.points[-1]
+            depth = abs(last.price - (by.get("5") or impulse.points[-1]).price) or current * 0.02
+            # После C — продолжение исходного импульса
+            if abc.at_aggressive_zone or abc.phase == "complete":
+                bias = "long" if direction == "up" else "short"
+                sign = sign_imp
+                w1 = last.price + sign * depth * 0.55
+                w2 = w1 - sign * depth * 0.22
+                w3 = last.price + sign * depth * 1.15
+                if cluster_mid and (
+                    (bias == "long" and cluster_mid > last.price)
+                    or (bias == "short" and cluster_mid < last.price)
+                ):
+                    w3 = cluster_mid
+                prices, labels = _zigzag(
+                    [current, last.price, w1, w2, w3],
+                    ["сейчас", "C", "1", "2", "3"],
+                )
+                return ElliottPathForecast(
+                    bias=bias,
+                    prices=prices,
+                    labels=labels,
+                    confidence=7,
+                    reason_ru=f"конец ABC → импульс · ~{hz:.1f}ч",
+                    horizon_hours=hz,
+                    invalidation=(by.get("4") or last).price,
+                    scenario="resume_impulse",
+                )
+            # C ещё формируется — добить C, потом разворот
+            bias_corr = "short" if direction == "up" else "long"
+            sign_c = -sign_imp
+            c_tgt = last.price + sign_c * depth * 0.35
+            # Fib 61.8 импульса как магнит конца C
+            if "0" in by and "5" in by:
+                span = by["5"].price - by["0"].price
+                fib618 = by["5"].price - span * 0.618
+                c_tgt = fib618
+            then_w1 = c_tgt - sign_c * depth * 0.5
+            prices, labels = _zigzag(
+                [current, last.price, c_tgt, c_tgt - sign_c * depth * 0.12, then_w1],
+                ["сейчас", "C?", "C fib", "разворот", "1"],
+            )
+            return ElliottPathForecast(
+                bias=bias_corr if abs(c_tgt - current) > abs(then_w1 - current) * 0.4 else (
+                    "long" if direction == "up" else "short"
+                ),
+                prices=prices,
+                labels=labels,
+                confidence=6,
+                reason_ru=f"добить C → разворот · ~{hz:.1f}ч",
+                horizon_hours=hz,
+                invalidation=by.get("5", last).price,
+                scenario="abc_correction",
+            )
+
+        # --- 4) Формируется W3 (после W2) ---
+        if impulse.current_wave in {"2", "3", "forming"} and "2" in by and "5" not in by:
+            bias = "long" if direction == "up" else "short"
+            p0, p1, p2 = by.get("0"), by.get("1"), by["2"]
+            w1 = abs(p1.price - p0.price) if p0 and p1 else current * 0.02
+            # лёгкий дожим/ретест W2 → W3 к FE 100 → FE 161.8
+            fe100 = p2.price + sign_imp * w1 * 1.0
+            fe161 = p2.price + sign_imp * w1 * 1.618
+            mid = p2.price + sign_imp * w1 * 0.55
+            retest = p2.price - sign_imp * w1 * 0.08
+            tp = fe161 if impulse.extension == "3" or (fib_targets and "1.618" in (fib_targets[0].label or "")) else fe100
+            if cluster_mid:
+                # ближайший кластер в сторону импульса
+                if (sign_imp > 0 and cluster_mid > p2.price) or (sign_imp < 0 and cluster_mid < p2.price):
+                    tp = cluster_mid
+            prices, labels = _zigzag(
+                [current, p2.price, retest, mid, tp],
+                ["сейчас", "2", "ретест", "3 mid", "3 FE"],
+            )
+            return ElliottPathForecast(
+                bias=bias,
+                prices=prices,
+                labels=labels,
+                confidence=7 if impulse.fib_w2_ok else 5,
+                reason_ru=f"ожидаем волну 3 · FE · ~{hz:.1f}ч",
+                horizon_hours=hz,
+                invalidation=p0.price if p0 else p2.price - sign_imp * w1 * 0.15,
+                scenario="wave3",
+            )
+
+        # --- 5) После W4 → волна 5 ---
+        if "4" in by and "5" not in by:
+            bias = "long" if direction == "up" else "short"
+            p4 = by["4"]
+            p0, p1 = by.get("0"), by.get("1")
+            w1 = abs(p1.price - p0.price) if p0 and p1 else current * 0.015
+            tp1 = fib_targets[0].price if fib_targets else (p4.price + sign_imp * w1)
+            tp2 = fib_targets[1].price if len(fib_targets) > 1 else (p4.price + sign_imp * w1 * 1.0)
+            mid = p4.price + (tp1 - p4.price) * 0.45
+            prices, labels = _zigzag(
+                [current, p4.price, mid, tp1, tp2],
+                ["сейчас", "4", "5 mid", "5 Fib", "5 ext"],
+            )
+            return ElliottPathForecast(
+                bias=bias,
+                prices=prices,
+                labels=labels,
+                confidence=6 if fib_targets else 4,
+                reason_ru=f"ожидаем волну 5 · ~{hz:.1f}ч",
+                horizon_hours=hz,
+                invalidation=p4.price - sign_imp * w1 * 0.25,
+                scenario="wave5",
+            )
+
+        # --- 6) Импульс завершён → ABC коррекция на 1–3ч ---
+        if impulse.current_wave == "complete" or "5" in by:
+            bias = "short" if direction == "up" else "long"  # направление коррекции
+            p5 = by.get("5") or impulse.points[-1]
+            p0 = by.get("0")
+            w = abs(p5.price - p0.price) if p0 else current * 0.03
+            # A ≈ 50–61.8% от хода / от W5; B ≈ 38–50% A; C ≈ 100% A или Fib 61.8 всего
+            a_depth = w * 0.50
+            a_px = p5.price - sign_imp * a_depth
+            b_px = a_px + sign_imp * a_depth * 0.40
+            c_px = p5.price - sign_imp * w * 0.618  # TradeRev глубокая коррекция
+            if cluster_mid:
+                # если кластер в зоне коррекции — цель C
+                if (sign_imp > 0 and cluster_mid < p5.price) or (sign_imp < 0 and cluster_mid > p5.price):
+                    c_px = cluster_mid
+            prices, labels = _zigzag(
+                [current, p5.price, a_px, b_px, c_px],
+                ["сейчас", "5", "A", "B", "C 61.8"],
+            )
+            return ElliottPathForecast(
+                bias=bias,
+                prices=prices,
+                labels=labels,
+                confidence=6,
+                reason_ru=f"после 5 → ABC к Fib 61.8 · ~{hz:.1f}ч",
+                horizon_hours=hz,
+                invalidation=p5.price + sign_imp * w * 0.05,
+                scenario="abc_correction",
+            )
+
+        # --- 7) Ранний импульс (только 0-1) ---
+        if "1" in by and "2" not in by:
+            bias = "short" if direction == "up" else "long"  # ждём W2
+            p0, p1 = by["0"], by["1"]
+            w1 = abs(p1.price - p0.price)
+            w2_618 = p1.price - sign_imp * w1 * 0.618
+            w2_50 = p1.price - sign_imp * w1 * 0.50
+            then3 = w2_618 + sign_imp * w1 * 1.0
+            prices, labels = _zigzag(
+                [current, p1.price, w2_50, w2_618, then3],
+                ["сейчас", "1", "2 50%", "2 61.8", "3"],
+            )
+            return ElliottPathForecast(
+                bias=bias,  # сначала коррекция W2
+                prices=prices,
+                labels=labels,
+                confidence=5,
+                reason_ru=f"волна 2 к 50–61.8 → потом 3 · ~{hz:.1f}ч",
+                horizon_hours=hz,
+                invalidation=p0.price,
+                scenario="wave3",
+            )
+
+    return ElliottPathForecast(bias="neutral", reason_ru="", horizon_hours=hz)
 
 
 def _pct(a: float, b: float) -> float:
@@ -157,6 +457,77 @@ def detect_horizontal_triangle(
                 if d == "up":
                     best.lower_a, best.lower_c = b, dd
                     best.upper_b, best.upper_d = a, c
+
+    return best if best_q >= 60 else None
+
+
+def detect_ascending_triangle(
+    swings: list["SwingPoint"],
+    bars: list["KlineBar"],
+    *,
+    direction: str | None = None,
+) -> ElliottTriangle | None:
+    """Восходящий треугольник по TradeRevolution.
+
+    C не за A, D ≈ B (прямая верхняя линия), E около линии A-C.
+    """
+    if not swings or not bars or len(swings) < 5:
+        return None
+    alt = _alternate_swings(swings)[-12:]
+    if len(alt) < 5:
+        return None
+
+    dirs = [direction] if direction in {"up", "down"} else ["down", "up"]
+    best: ElliottTriangle | None = None
+    best_q = 0
+
+    for d in dirs:
+        if d == "down":
+            expect = ["low", "high", "low", "high", "low"]
+        else:
+            expect = ["high", "low", "high", "low", "high"]
+        labels = ["A", "B", "C", "D", "E"]
+
+        for start in range(0, len(alt) - 4):
+            chunk = alt[start : start + 5]
+            if not all(chunk[i].kind == expect[i] for i in range(5)):
+                continue
+            pts = [
+                ElliottPoint(labels[i], chunk[i].index, chunk[i].price)
+                for i in range(5)
+            ]
+            a, b, c, dd, e = pts
+            if d == "down":
+                # Ascending: higher lows (C > A), D ≈ B (flat top)
+                higher_lows = c.price > a.price * 0.998
+                flat_top = abs(dd.price - b.price) / max(abs(b.price), 1e-9) < 0.008
+                e_ok = e.price >= a.price * 0.97
+                c_not_past_a = True  # C > A for ascending (not past = higher)
+            else:
+                higher_lows = dd.price > b.price * 0.998
+                flat_top = abs(c.price - a.price) / max(abs(a.price), 1e-9) < 0.008
+                e_ok = e.price <= a.price * 1.03
+                c_not_past_a = True
+
+            if not (higher_lows and flat_top and e_ok):
+                continue
+
+            q = 60 + (10 if e_ok else 0)
+            bias = "long" if d == "down" else "short"
+            if q > best_q:
+                best_q = q
+                best = ElliottTriangle(
+                    kind="ascending",
+                    direction=d,
+                    points=pts,
+                    valid=True,
+                    breakout_bias=bias,
+                    label_ru=f"восход. треугольник ABCDE → {'LONG' if bias == 'long' else 'SHORT'}",
+                    lower_a=a if d == "down" else b,
+                    lower_c=c if d == "down" else dd,
+                    upper_b=b if d == "down" else a,
+                    upper_d=dd if d == "down" else c,
+                )
 
     return best if best_q >= 60 else None
 
@@ -428,112 +799,96 @@ def project_wave5_fib_targets(impulse: ElliottImpulse | None) -> list[ElliottFib
     return ranked[:4]
 
 
-def build_most_likely_path(
-    *,
+@dataclass
+class FibCluster:
+    """Кластер Fib: зона где сходятся 2-3 уровня от разных измерений."""
+    price_lo: float
+    price_hi: float
+    levels: list[str] = field(default_factory=list)  # descriptions
+    strength: int = 0  # how many levels converge
+
+    @property
+    def mid(self) -> float:
+        return (self.price_lo + self.price_hi) / 2.0
+
+
+def build_fib_clusters(
     impulse: ElliottImpulse | None,
-    abc: ElliottAbc | None,
-    triangle: ElliottTriangle | None,
-    complex_corr: ElliottComplexCorrection | None,
-    fib_targets: list[ElliottFibTarget],
-    current: float,
-) -> ElliottPathForecast:
-    """Наиболее вероятный путь цены по найденным структурам PPT."""
-    if current <= 0:
-        return ElliottPathForecast(bias="neutral")
+    abc: "ElliottAbc | None" = None,
+    *,
+    tolerance_pct: float = 0.6,
+) -> list[FibCluster]:
+    """Build Fib clusters from grid + extension measurements per TradeRevolution.
 
-    # Приоритет: треугольник E → complex Y/Z → ABC C → импульс волна 5 / после 5
-    if triangle and triangle.valid and triangle.breakout_bias in {"long", "short"}:
-        e = triangle.points[-1] if triangle.points else None
-        entry = e.price if e else current
-        bias = triangle.breakout_bias
-        # цель ≈ высота треугольника (A→B)
-        if len(triangle.points) >= 2:
-            height = abs(triangle.points[1].price - triangle.points[0].price)
-        else:
-            height = current * 0.02
-        tp = entry + height if bias == "long" else entry - height
-        inv = entry - height * 0.35 if bias == "long" else entry + height * 0.35
-        return ElliottPathForecast(
-            bias=bias,
-            prices=[entry, entry + (tp - entry) * 0.4, tp, inv],
-            labels=["entry", "path", "tp1", "invalidation"],
-            confidence=7 if triangle.kind == "contracting" else 6,
-            reason_ru=triangle.label_ru,
-        )
+    Кластер = зона, где сходятся уровни от различных измерений (сетка + расширение).
+    Наиболее вероятный кластер — из наиболее вероятных значений.
+    """
+    if impulse is None:
+        return []
+    by = {p.label: p for p in impulse.points}
+    if not all(k in by for k in ("0", "1", "2")):
+        return []
 
-    if complex_corr and complex_corr.valid and complex_corr.resume_bias in {"long", "short"}:
-        end = complex_corr.points[-1]
-        bias = complex_corr.resume_bias
-        span = abs(complex_corr.points[0].price - end.price) or current * 0.015
-        tp = end.price + span * 1.2 if bias == "long" else end.price - span * 1.2
-        inv = end.price - span * 0.4 if bias == "long" else end.price + span * 0.4
-        return ElliottPathForecast(
-            bias=bias,
-            prices=[end.price, end.price + (tp - end.price) * 0.45, tp, inv],
-            labels=["entry", "path", "tp1", "invalidation"],
-            confidence=6,
-            reason_ru=complex_corr.label_ru,
-        )
+    levels: list[tuple[float, str]] = []  # (price, description)
+    p0, p1, p2 = by["0"], by["1"], by["2"]
+    w1 = _leg_size(p0, p1)
+    sign = 1.0 if impulse.direction == "up" else -1.0
 
-    if impulse and impulse.points:
-        by = {p.label: p for p in impulse.points}
-        # формирующаяся 5 — цель Fib
-        if impulse.current_wave in {"3", "4", "forming"} or (
-            "4" in by and "5" not in by
-        ):
-            bias = "long" if impulse.direction == "up" else "short"
-            base = by["4"].price if "4" in by else current
-            tps = [t.price for t in fib_targets[:2]] or [
-                base + (abs(by["1"].price - by["0"].price) if "0" in by and "1" in by else current * 0.02)
-                * (1 if bias == "long" else -1)
-            ]
-            tp1 = tps[0]
-            inv = by["4"].price if "4" in by else (
-                by["2"].price if "2" in by else current * (0.99 if bias == "long" else 1.01)
-            )
-            return ElliottPathForecast(
-                bias=bias,
-                prices=[current, current + (tp1 - current) * 0.5, tp1, inv],
-                labels=["entry", "path", "tp1", "invalidation"],
-                confidence=6 if fib_targets else 4,
-                reason_ru=(
-                    f"ожидаем волну 5 · {fib_targets[0].label}"
-                    if fib_targets
-                    else "ожидаем волну 5"
-                ),
-            )
+    # Grid levels for W3 target (from W2 base)
+    for fib, label in ((1.618, "W3 сетка 161.8%"), (2.0, "W3 сетка 200%"), (2.618, "W3 сетка 261.8%")):
+        levels.append((p2.price + sign * w1 * fib, label))
 
-        # импульс завершён → ABC / разворот
-        if impulse.current_wave == "complete" or "5" in by:
-            bias = "short" if impulse.direction == "up" else "long"
-            p5 = by.get("5") or impulse.points[-1]
-            w = abs(p5.price - by["0"].price) if "0" in by else current * 0.03
-            # типичная глубина A ≈ 0.5–0.618 × 5
-            depth = w * 0.55
-            tp = p5.price - depth if bias == "short" else p5.price + depth
-            if abc and abc.points:
-                last = abc.points[-1]
-                entry = last.price
-                if abc.phase in {"C", "complete"} and abc.at_aggressive_zone:
-                    # конец C → возобновление импульсного направления
-                    bias = "long" if impulse.direction == "up" else "short"
-                    tp = entry + depth * 0.8 if bias == "long" else entry - depth * 0.8
-                    return ElliottPathForecast(
-                        bias=bias,
-                        prices=[entry, entry + (tp - entry) * 0.4, tp, by.get("4", p5).price],
-                        labels=["entry", "path", "tp1", "invalidation"],
-                        confidence=7,
-                        reason_ru="конец ABC → продолжение тренда",
-                    )
-            return ElliottPathForecast(
-                bias=bias,
-                prices=[current, current + (tp - current) * 0.45, tp, p5.price],
-                labels=["entry", "path", "tp1", "invalidation"],
-                confidence=5,
-                reason_ru="после 5 → коррекция ABC",
-            )
+    if "3" in by:
+        p3 = by["3"]
+        w3 = _leg_size(p2, p3)
+        # W4 retracement targets
+        for fib, label in ((0.382, "W4 сетка 38.2%"), (0.50, "W4 сетка 50%")):
+            levels.append((p3.price - sign * w3 * fib, label))
 
-    return ElliottPathForecast(bias="neutral", reason_ru="")
+        if "4" in by:
+            p4 = by["4"]
+            # W5 extension targets
+            for fib, label in (
+                (0.618, "W5 расш. 61.8%"), (0.786, "W5 расш. 78.6%"),
+                (1.0, "W5 расш. 100%"), (1.618, "W5 расш. 161.8%"),
+            ):
+                levels.append((p4.price + sign * w1 * fib, label))
+
+            # W5 from W3: extension ratios
+            span03 = abs(p3.price - p0.price)
+            if span03 > 0:
+                total = span03 / 0.618
+                levels.append((p0.price + sign * total, "W5 total 61.8%"))
+
+    if not levels:
+        return []
+
+    # Cluster: group nearby levels
+    levels.sort(key=lambda x: x[0])
+    clusters: list[FibCluster] = []
+    used = [False] * len(levels)
+    for i, (price_i, label_i) in enumerate(levels):
+        if used[i]:
+            continue
+        group = [(price_i, label_i)]
+        used[i] = True
+        for j in range(i + 1, len(levels)):
+            if used[j]:
+                continue
+            if abs(levels[j][0] - price_i) / max(abs(price_i), 1e-9) * 100 <= tolerance_pct:
+                group.append(levels[j])
+                used[j] = True
+        if len(group) >= 2:
+            prices = [g[0] for g in group]
+            clusters.append(FibCluster(
+                price_lo=min(prices),
+                price_hi=max(prices),
+                levels=[g[1] for g in group],
+                strength=len(group),
+            ))
+
+    clusters.sort(key=lambda c: c.strength, reverse=True)
+    return clusters[:3]
 
 
 def analyze_elliott_advanced(
@@ -549,6 +904,8 @@ def analyze_elliott_advanced(
 
     tri = detect_horizontal_triangle(swings, bars)
     if tri is None:
+        tri = detect_ascending_triangle(swings, bars)
+    if tri is None:
         tri = detect_expanding_triangle(swings, bars)
 
     complex_corr = detect_double_triple_three(swings, bars, prior_trend=prior)
@@ -557,6 +914,7 @@ def analyze_elliott_advanced(
         impulse.alternating_2_4 = True
 
     fib_targets = project_wave5_fib_targets(impulse)
+    fib_clusters = build_fib_clusters(impulse, abc)
     current = bars[-1].close if bars else 0.0
     path = build_most_likely_path(
         impulse=impulse,
@@ -565,6 +923,8 @@ def analyze_elliott_advanced(
         complex_corr=complex_corr,
         fib_targets=fib_targets,
         current=current,
+        bars=bars,
+        fib_clusters=fib_clusters,
     )
 
     notes: list[str] = []
@@ -576,8 +936,13 @@ def analyze_elliott_advanced(
         notes.append(alt_note)
     if fib_targets:
         notes.append(f"Fib цель 5: {fib_targets[0].label} @ {fib_targets[0].price:.6g}")
+    if fib_clusters:
+        c = fib_clusters[0]
+        notes.append(f"Fib кластер ({c.strength} уровней) @ {c.mid:.6g}")
     if path.reason_ru:
         notes.append(path.reason_ru)
+    elif path.scenario:
+        notes.append(f"путь {path.scenario} ~{path.horizon_hours:.1f}ч")
 
     # draw extras
     extra_pts: list[ElliottPoint] = []
@@ -590,6 +955,7 @@ def analyze_elliott_advanced(
         "triangle": tri,
         "complex_corr": complex_corr,
         "fib_targets": fib_targets,
+        "fib_clusters": fib_clusters,
         "path": path,
         "alternation_ok": alt_ok,
         "alternation_note": alt_note,

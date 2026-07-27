@@ -137,6 +137,10 @@ class WaveStructureResult:
     elliott_path_prices: list[float] = field(default_factory=list)
     elliott_path_labels: list[str] = field(default_factory=list)
     elliott_path_reason: str = ""
+    elliott_path_horizon_hours: float = 0.0
+    elliott_path_scenario: str = ""
+    elliott_path_invalidation: float | None = None
+    elliott_fib_clusters: list = field(default_factory=list)
     elliott_triangle_obj: object | None = None
     elliott_global_draw_points: list = field(default_factory=list)
     elliott_local_draw_points: list = field(default_factory=list)
@@ -967,6 +971,10 @@ def analyze_wave_structure(
                 elliott_path_prices=list(getattr(ew_only, "path_prices", None) or []),
                 elliott_path_labels=list(getattr(ew_only, "path_labels", None) or []),
                 elliott_path_reason=getattr(ew_only, "path_reason_ru", "") or "",
+                elliott_path_horizon_hours=float(getattr(ew_only, "path_horizon_hours", 0) or 0),
+                elliott_path_scenario=str(getattr(ew_only, "path_scenario", "") or ""),
+                elliott_path_invalidation=getattr(ew_only, "path_invalidation", None),
+                elliott_fib_clusters=list(getattr(ew_only, "fib_cluster_zones", None) or []),
                 elliott_triangle_obj=getattr(ew_only, "triangle_obj", None),
                 elliott_global_draw_points=list(getattr(ew_only, "global_draw_points", None) or []),
                 elliott_local_draw_points=list(getattr(ew_only, "local_draw_points", None) or []),
@@ -1173,6 +1181,10 @@ def analyze_wave_structure(
         elliott_path_prices=list(getattr(ew_full, "path_prices", None) or []) if ew_full else [],
         elliott_path_labels=list(getattr(ew_full, "path_labels", None) or []) if ew_full else [],
         elliott_path_reason=str(getattr(ew_full, "path_reason_ru", "") or "") if ew_full else "",
+        elliott_path_horizon_hours=float(getattr(ew_full, "path_horizon_hours", 0) or 0) if ew_full else 0.0,
+        elliott_path_scenario=str(getattr(ew_full, "path_scenario", "") or "") if ew_full else "",
+        elliott_path_invalidation=getattr(ew_full, "path_invalidation", None) if ew_full else None,
+        elliott_fib_clusters=list(getattr(ew_full, "fib_cluster_zones", None) or []) if ew_full else [],
         elliott_triangle_obj=getattr(ew_full, "triangle_obj", None) if ew_full else None,
         elliott_global_draw_points=list(getattr(ew_full, "global_draw_points", None) or []) if ew_full else [],
         elliott_local_draw_points=list(getattr(ew_full, "local_draw_points", None) or []) if ew_full else [],

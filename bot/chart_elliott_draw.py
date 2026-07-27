@@ -1,6 +1,11 @@
 """Отрисовка волн Эллиотта (1–5 + ABC/ABCDE) на matplotlib-графике.
 
-Включает PPT-структуры: растяжения 1/3/5, усечение 5, диагонали, тип ABC.
+TradeRevolution (частые визуалы из lovepdf):
+- Сетка коррекции: Fib 23.6/38.2/50/61.8/78.6 от импульса 0→5
+- Расширение импульса: FE 61.8/78.6/100/127.2/161.8 от точек 0-1-2
+- Диагональ: сходящиеся границы 0-2-4 / 1-3-5
+- Треугольник ABCDE: границы + заливка
+- Импульс синий / коррекция оранжевая
 """
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import matplotlib.dates as mdates
+from matplotlib.patches import Polygon
 
 from .bybit_klines import KlineBar
 from .elliott_wave import ElliottPoint, ElliottWaveResult
@@ -28,7 +34,18 @@ EW_STYLE = {
     "truncation": "#f85149",
     "diagonal": "#a371f7",
     "corr_type": "#ffa657",
+    "fib_grid": "#79c0ff",
+    "fib_gold": "#ff7b72",  # 38.2 / 61.8 как в TradeRev
+    "fib_ext": "#e3b341",
 }
+
+# TradeRevolution — сетка коррекции (от импульса)
+FIB_CORR_LEVELS = (0.0, 0.236, 0.382, 0.50, 0.618, 0.786, 1.0)
+FIB_CORR_GOLD = {0.382, 0.618}  # чаще всего: плоская / глубокая
+
+# TradeRevolution — расширение импульса (цели W3 / C)
+FIB_IMP_EXT_LEVELS = (0.618, 0.786, 1.0, 1.272, 1.618)
+FIB_IMP_EXT_GOLD = {1.0, 1.618}  # 1:1 чаще всего; 161.8 для сильной 3
 
 _ABC_LABELS = {"A", "B", "C", "D", "E", "a", "b", "c", "d", "e"}
 _IMPULSE_LABELS = {"0", "1", "2", "3", "4", "5", "·0", "i", "ii", "iii", "iv", "v"}
@@ -163,7 +180,7 @@ def _draw_diagonal_guides(
     *,
     is_htf: bool,
 ) -> None:
-    """Границы клина 0-2-4 и 1-3-5 + подпись leading/ending."""
+    """Границы клина 0-2-4 и 1-3-5 (TradeRev конечная/начальная диагональ)."""
     color = EW_STYLE["diagonal"]
     lower_labs = ["0", "2", "4"]
     upper_labs = ["1", "3", "5"]
@@ -175,11 +192,33 @@ def _draw_diagonal_guides(
             [_x_at(bars, p.index) for p in seq],
             [p.price for p in seq],
             color=color,
-            linestyle="-.",
-            linewidth=0.95 if is_htf else 1.15,
-            alpha=0.7,
+            linestyle=(0, (4.0, 2.5)),
+            linewidth=1.25 if is_htf else 1.45,
+            alpha=0.85,
             zorder=3,
         )
+    # Лёгкая заливка клина
+    if all(k in by for k in ("0", "1", "2", "3")):
+        poly: list[tuple[float, float]] = []
+        for lab in ("0", "1", "3", "2"):
+            p = by[lab]
+            if 0 <= p.index < len(bars):
+                poly.append((_x_at(bars, p.index), p.price))
+        if "4" in by and 0 <= by["4"].index < len(bars):
+            poly.append((_x_at(bars, by["4"].index), by["4"].price))
+        if "5" in by and 0 <= by["5"].index < len(bars):
+            poly.append((_x_at(bars, by["5"].index), by["5"].price))
+        if len(poly) >= 3:
+            ax.add_patch(
+                Polygon(
+                    poly,
+                    closed=True,
+                    facecolor=color,
+                    edgecolor="none",
+                    alpha=0.08,
+                    zorder=2,
+                )
+            )
     title = "конечная диагональ" if diagonal == "ending" else "начальная диагональ"
     anchor = by.get("5") or by.get("4") or by.get("3")
     if anchor is None or not (0 <= anchor.index < len(bars)):
@@ -217,7 +256,13 @@ def _draw_corr_type_badge(
     p = abc_pts[-1]
     if not (0 <= p.index < len(bars)):
         return
-    names = {"zigzag": "зигзаг", "flat": "плоская", "triangle": "треугольник"}
+    names = {
+        "zigzag": "зигзаг",
+        "flat": "флет",
+        "expanded_flat": "расш.флет",
+        "running_flat": "бегущий флет",
+        "triangle": "треугольник",
+    }
     name = names.get(corr_type, corr_type)
     color = EW_STYLE["corr_type"]
     ax.text(
@@ -248,12 +293,33 @@ def _draw_triangle_boundaries(
     *,
     is_htf: bool,
 ) -> None:
-    """Красные границы треугольника A–C и B–D (как на слайде PPT)."""
+    """Границы треугольника A–C / B–D + заливка (как на TradeRev слайде)."""
     color = "#ff7b72"
+    fill = "#ffa657"
     la = getattr(tri, "lower_a", None)
     lc = getattr(tri, "lower_c", None)
     ub = getattr(tri, "upper_b", None)
     ud = getattr(tri, "upper_d", None)
+    pts = list(getattr(tri, "points", None) or [])
+
+    # Заливка по вершинам A-B-C-D-E
+    if len(pts) >= 4:
+        poly_xy = []
+        for p in pts[:5]:
+            if 0 <= p.index < len(bars):
+                poly_xy.append((_x_at(bars, p.index), p.price))
+        if len(poly_xy) >= 3:
+            ax.add_patch(
+                Polygon(
+                    poly_xy,
+                    closed=True,
+                    facecolor=fill,
+                    edgecolor="none",
+                    alpha=0.12,
+                    zorder=2,
+                )
+            )
+
     for a, b in ((la, lc), (ub, ud)):
         if a is None or b is None:
             continue
@@ -263,30 +329,31 @@ def _draw_triangle_boundaries(
             [_x_at(bars, a.index), _x_at(bars, b.index)],
             [a.price, b.price],
             color=color,
-            linewidth=1.35 if not is_htf else 1.0,
-            alpha=0.85,
+            linewidth=1.45 if not is_htf else 1.05,
+            alpha=0.9,
             zorder=4,
         )
-        # продлить чуть вперёд к E
-        last = getattr(tri, "points", None)
-        if last and len(last) >= 5:
-            e = last[4]
+        if pts and len(pts) >= 5:
+            e = pts[4]
             if 0 <= e.index < len(bars) and b.index != a.index:
-                # экстраполяция линии до индекса E
                 t = (e.index - a.index) / max(1, b.index - a.index)
                 y = a.price + (b.price - a.price) * t
                 ax.plot(
                     [_x_at(bars, b.index), _x_at(bars, e.index)],
                     [b.price, y],
                     color=color,
-                    linewidth=1.0,
-                    alpha=0.55,
+                    linewidth=1.05,
+                    alpha=0.6,
                     linestyle="--",
                     zorder=3,
                 )
     kind = getattr(tri, "kind", "") or ""
-    title = "сходящ. △" if kind == "contracting" else ("расход. △" if kind == "expanding" else "△ ABCDE")
-    pts = getattr(tri, "points", None) or []
+    titles = {
+        "contracting": "симм. △",
+        "expanding": "расход. △",
+        "ascending": "восход. △",
+    }
+    title = titles.get(kind, "△ ABCDE")
     if pts:
         p = pts[0]
         if 0 <= p.index < len(bars):
@@ -307,6 +374,231 @@ def _draw_triangle_boundaries(
                 ),
                 zorder=6,
             )
+
+
+def _impulse_anchor_points(ew: ElliottWaveResult) -> dict[str, ElliottPoint]:
+    """Точки 0..5 из impulse или global/draw_points."""
+    by: dict[str, ElliottPoint] = {}
+    if ew.impulse is not None:
+        by.update({p.label: p for p in ew.impulse.points if p.label in {"0", "1", "2", "3", "4", "5"}})
+    if len(by) < 3:
+        for src in (
+            getattr(ew, "global_draw_points", None) or [],
+            getattr(ew, "draw_points", None) or [],
+        ):
+            for p in src:
+                if p.label in {"0", "1", "2", "3", "4", "5"} and p.label not in by:
+                    by[p.label] = p
+            if len(by) >= 3:
+                break
+    return by
+
+
+def _draw_correction_grid(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    by: dict[str, ElliottPoint],
+    *,
+    abc_pts: list[ElliottPoint] | None = None,
+) -> None:
+    """Сетка коррекции TradeRev: Fib от Точка1(0) → Точка2(конец импульса).
+
+    Чаще всего: глубокая на 61.8%, плоская на 38.2%.
+    """
+    p0 = by.get("0")
+    p_end = by.get("5") or by.get("3") or by.get("1")
+    if p0 is None or p_end is None:
+        return
+    if not (0 <= p0.index < len(bars) and 0 <= p_end.index < len(bars)):
+        return
+    span = p_end.price - p0.price
+    if abs(span) < 1e-12:
+        return
+
+    x0 = _x_at(bars, p_end.index)
+    x1 = _x_at(bars, len(bars) - 1)
+    # сетка только справа от конца импульса
+    if x1 <= x0:
+        x1 = x0 + max(abs(x1 - _x_at(bars, max(0, len(bars) - 20))), 1e-6)
+
+    # Точка касания ABC с уровнем — подсветить
+    touch_level: float | None = None
+    if abc_pts:
+        last = abc_pts[-1]
+        for lvl in FIB_CORR_GOLD:
+            price = p_end.price - span * lvl  # 0% = end, 100% = start
+            if abs(last.price - price) / max(abs(p_end.price), 1e-9) <= 0.012:
+                touch_level = lvl
+                break
+
+    for lvl in FIB_CORR_LEVELS:
+        # TradeRev: 0% у Точки 2 (пик), 100% у Точки 1 (старт)
+        price = p_end.price - span * lvl
+        is_gold = lvl in FIB_CORR_GOLD
+        is_touch = touch_level is not None and abs(lvl - touch_level) < 1e-9
+        color = EW_STYLE["fib_gold"] if (is_gold or is_touch) else EW_STYLE["fib_grid"]
+        lw = 1.15 if is_gold or is_touch else 0.65
+        alpha = 0.85 if is_gold or is_touch else 0.40
+        ax.hlines(
+            price,
+            xmin=x0,
+            xmax=x1,
+            colors=color,
+            linestyles="-",
+            linewidth=lw,
+            alpha=alpha,
+            zorder=2,
+        )
+        pct = f"{lvl * 100:.1f}".rstrip("0").rstrip(".")
+        label = f" {pct}%"
+        if is_touch:
+            label += " ← ABC"
+        elif is_gold:
+            label += " ★"
+        ax.text(
+            x1,
+            price,
+            label,
+            color=color,
+            fontsize=5.6 if is_gold else 5.2,
+            fontweight="bold" if is_gold or is_touch else "normal",
+            va="center",
+            ha="left",
+            alpha=0.95 if is_gold else 0.7,
+            zorder=6,
+        )
+
+    # Метки Точка 1 / Точка 2
+    ax.text(
+        _x_at(bars, p0.index),
+        p0.price,
+        " Т1 ",
+        color=EW_STYLE["fib_grid"],
+        fontsize=5.5,
+        fontweight="bold",
+        va="top",
+        ha="left",
+        alpha=0.8,
+        zorder=6,
+    )
+    ax.text(
+        _x_at(bars, p_end.index),
+        p_end.price,
+        " Т2 ",
+        color=EW_STYLE["fib_grid"],
+        fontsize=5.5,
+        fontweight="bold",
+        va="bottom",
+        ha="left",
+        alpha=0.8,
+        zorder=6,
+    )
+
+
+def _draw_impulse_extension(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    by: dict[str, ElliottPoint],
+) -> None:
+    """Расширение импульса TradeRev: точки 0-1-2 → цели FE для волны 3/C.
+
+    Чаще всего работает 100% (1:1), затем 127.2 / 161.8.
+    """
+    p0, p1, p2 = by.get("0"), by.get("1"), by.get("2")
+    if p0 is None or p1 is None or p2 is None:
+        return
+    if not all(0 <= p.index < len(bars) for p in (p0, p1, p2)):
+        return
+    # Уже есть полная 5 — сетка коррекции важнее; extension для формирующейся 3
+    if "5" in by and "4" in by:
+        return
+    w1 = p1.price - p0.price
+    if abs(w1) < 1e-12:
+        return
+
+    x0 = _x_at(bars, p2.index)
+    x1 = _x_at(bars, len(bars) - 1)
+    if x1 <= x0:
+        x1 = x0 + max(abs(x1 - _x_at(bars, max(0, len(bars) - 20))), 1e-6)
+
+    p3 = by.get("3")
+    touch_fe: float | None = None
+    for fe in FIB_IMP_EXT_GOLD:
+        price = p2.price + w1 * fe
+        if p3 is not None and abs(p3.price - price) / max(abs(p3.price), 1e-9) <= 0.012:
+            touch_fe = fe
+            break
+
+    for fe in FIB_IMP_EXT_LEVELS:
+        price = p2.price + w1 * fe
+        is_gold = fe in FIB_IMP_EXT_GOLD
+        is_touch = touch_fe is not None and abs(fe - touch_fe) < 1e-9
+        color = EW_STYLE["fib_gold"] if (is_gold or is_touch) else EW_STYLE["fib_ext"]
+        ax.hlines(
+            price,
+            xmin=x0,
+            xmax=x1,
+            colors=color,
+            linestyles="--",
+            linewidth=1.1 if is_gold or is_touch else 0.7,
+            alpha=0.8 if is_gold else 0.45,
+            zorder=2,
+        )
+        pct = f"{fe * 100:.1f}".rstrip("0").rstrip(".")
+        label = f" FE {pct}%"
+        if is_touch:
+            label += " ← W3"
+        ax.text(
+            x1,
+            price,
+            label,
+            color=color,
+            fontsize=5.5 if is_gold else 5.1,
+            fontweight="bold" if is_gold or is_touch else "normal",
+            va="center",
+            ha="left",
+            alpha=0.95 if is_gold else 0.7,
+            zorder=6,
+        )
+
+
+def _draw_abc_channel(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    abc_pts: list[ElliottPoint],
+    impulse_end: ElliottPoint | None,
+) -> None:
+    """Канал зигзага: линия start–B параллельна A–C (TradeRev рекомендация)."""
+    by = {p.label: p for p in abc_pts}
+    if not all(k in by for k in ("A", "B", "C")):
+        return
+    a, b, c = by["A"], by["B"], by["C"]
+    if not all(0 <= p.index < len(bars) for p in (a, b, c)):
+        return
+    start = impulse_end
+    if start is None or not (0 <= start.index < len(bars)):
+        start = a
+    color = EW_STYLE["correction"]
+    # A–C
+    ax.plot(
+        [_x_at(bars, a.index), _x_at(bars, c.index)],
+        [a.price, c.price],
+        color=color,
+        linestyle=":",
+        linewidth=0.9,
+        alpha=0.55,
+        zorder=3,
+    )
+    # start–B
+    ax.plot(
+        [_x_at(bars, start.index), _x_at(bars, b.index)],
+        [start.price, b.price],
+        color=color,
+        linestyle=":",
+        linewidth=0.9,
+        alpha=0.55,
+        zorder=3,
+    )
 
 
 def _draw_fib_targets(
@@ -415,6 +707,26 @@ def draw_elliott_waves(
 
 
 def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveResult) -> None:
+    by = _impulse_anchor_points(ew)
+    abc_pts = [
+        p for p in (getattr(ew, "global_draw_points", None) or getattr(ew, "draw_points", None) or [])
+        if p.label in {"A", "B", "C", "D", "E"}
+    ]
+    if ew.abc is not None:
+        abc_pts = [p for p in ew.abc.points if p.label in {"A", "B", "C", "D", "E"}] or abc_pts
+
+    # TradeRev: сетка коррекции после импульса (самое частое)
+    if "0" in by and ("5" in by or "3" in by):
+        _draw_correction_grid(ax, bars, by, abc_pts=abc_pts)
+
+    # TradeRev: расширение импульса для формирующейся волны 3
+    if "0" in by and "1" in by and "2" in by:
+        _draw_impulse_extension(ax, bars, by)
+
+    # Канал зигзага A–C // start–B
+    if len(abc_pts) >= 3:
+        _draw_abc_channel(ax, bars, abc_pts, by.get("5") or by.get("3"))
+
     tri = getattr(ew, "triangle_obj", None)
     if tri and getattr(tri, "valid", False):
         _draw_triangle_boundaries(ax, bars, tri, is_htf=False)
@@ -425,7 +737,16 @@ def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveRes
     path_p = list(getattr(ew, "path_prices", None) or [])
     path_l = list(getattr(ew, "path_labels", None) or [])
     if len(path_p) >= 2 and getattr(ew, "path_bias", "") in {"long", "short"}:
-        draw_setup_forecast_path(ax, bars, path_p, path_l)
+        draw_wave_horizon_path(
+            ax,
+            bars,
+            path_p,
+            path_l,
+            bias=str(getattr(ew, "path_bias", "") or "neutral"),
+            horizon_hours=float(getattr(ew, "path_horizon_hours", 0) or 2.0),
+            reason=str(getattr(ew, "path_reason_ru", "") or ""),
+            invalidation=getattr(ew, "path_invalidation", None),
+        )
     plan = ew.entry_plan
     if plan and plan.entry_price and plan.mode in {"conservative", "aggressive"}:
         ax.axhline(
@@ -613,6 +934,126 @@ def _draw_ew_layer(
                 alpha=0.65,
                 linewidth=0.5,
             ),
+            zorder=6,
+        )
+
+
+def draw_wave_horizon_path(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    prices: list[float],
+    labels: list[str] | None = None,
+    *,
+    bias: str = "neutral",
+    horizon_hours: float = 2.0,
+    reason: str = "",
+    invalidation: float | None = None,
+) -> None:
+    """Жирный прогнозный зигзаг на 1–3ч — «как скорее всего пойдёт график» по волнам."""
+    if not bars or len(prices) < 2:
+        return
+    labels = list(labels or [])
+    # отфильтровать invalidation из цен если вдруг попал
+    path_p: list[float] = []
+    path_l: list[str] = []
+    for i, p in enumerate(prices):
+        lab = labels[i] if i < len(labels) else ""
+        if lab == "invalidation":
+            if invalidation is None:
+                invalidation = float(p)
+            continue
+        path_p.append(float(p))
+        path_l.append(lab)
+    if len(path_p) < 2:
+        return
+
+    hz = max(1.0, min(3.0, float(horizon_hours) or 2.0))
+    start_x = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    span_days = hz / 24.0
+    n = len(path_p)
+    xs = [start_x + span_days * (i / max(1, n - 1)) for i in range(n)]
+
+    color = "#3fb950" if bias == "long" else ("#f85149" if bias == "short" else EW_STYLE["forecast"])
+    # тень + основная линия
+    ax.plot(xs, path_p, color=color, linestyle="-", linewidth=3.4, alpha=0.22, zorder=5, solid_capstyle="round")
+    ax.plot(xs, path_p, color=color, linestyle=(0, (5.5, 2.8)), linewidth=2.0, alpha=0.95, zorder=6, solid_capstyle="round")
+    ax.annotate(
+        "",
+        xy=(xs[-1], path_p[-1]),
+        xytext=(xs[-2], path_p[-2]),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.8, alpha=0.95),
+        zorder=7,
+    )
+    for x, y in zip(xs, path_p):
+        ax.plot(x, y, marker="o", color=color, markersize=5.5, alpha=0.95, zorder=7)
+
+    # лейблы точек пути
+    y_lim = ax.get_ylim()
+    span_y = max(y_lim[1] - y_lim[0], abs(path_p[0]) * 0.02, 1e-9)
+    min_gap = span_y * 0.018
+    order = sorted(range(len(path_p)), key=lambda i: path_p[i])
+    display_y = {i: path_p[i] for i in order}
+    for k in range(1, len(order)):
+        i_prev, i_cur = order[k - 1], order[k]
+        if display_y[i_cur] - display_y[i_prev] < min_gap:
+            display_y[i_cur] = display_y[i_prev] + min_gap
+
+    for i, (x, y, lab) in enumerate(zip(xs, path_p, path_l)):
+        if not lab or lab in {"сейчас", "entry", "path"}:
+            continue
+        ax.text(
+            x,
+            display_y.get(i, y),
+            f" {lab}",
+            color=color,
+            fontsize=6.2,
+            fontweight="bold",
+            va="bottom" if path_p[-1] >= path_p[0] else "top",
+            bbox=dict(
+                boxstyle="round,pad=0.12",
+                facecolor="#0d1117",
+                edgecolor=color,
+                alpha=0.78,
+                linewidth=0.5,
+            ),
+            zorder=8,
+        )
+
+    # горизонт + сценарий
+    hz_txt = f"{hz:.0f}ч" if hz >= 1.95 else f"{int(hz * 60)}м"
+    title = reason[:42] if reason else f"путь ~{hz_txt}"
+    if reason and "ч" not in reason and "м" not in reason:
+        title = f"{reason[:36]} · ~{hz_txt}"
+    ax.text(
+        xs[-1],
+        path_p[-1],
+        f" ▶ {title} ",
+        color=color,
+        fontsize=6.8,
+        fontweight="bold",
+        va="bottom" if bias == "long" else "top",
+        ha="left",
+        bbox=dict(
+            boxstyle="round,pad=0.18",
+            facecolor="#0d1117",
+            edgecolor=color,
+            alpha=0.88,
+            linewidth=0.7,
+        ),
+        zorder=9,
+    )
+
+    if invalidation is not None and invalidation > 0:
+        ax.axhline(invalidation, color=EW_STYLE["stop"], linestyle=":", linewidth=0.75, alpha=0.55, zorder=3)
+        ax.text(
+            xs[-1],
+            invalidation,
+            " inv ",
+            color=EW_STYLE["stop"],
+            fontsize=5.5,
+            va="center",
+            ha="left",
+            alpha=0.8,
             zorder=6,
         )
 

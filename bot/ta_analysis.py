@@ -261,6 +261,10 @@ class TAAnalysisResult:
     elliott_path_prices: list[float] = field(default_factory=list)
     elliott_path_labels: list[str] = field(default_factory=list)
     elliott_path_reason: str = ""
+    elliott_path_horizon_hours: float = 0.0
+    elliott_path_scenario: str = ""
+    elliott_path_invalidation: float | None = None
+    elliott_fib_clusters: list = field(default_factory=list)
     elliott_triangle_obj: object | None = None
     elliott_global_draw_points: list = field(default_factory=list)
     elliott_local_draw_points: list = field(default_factory=list)
@@ -3155,6 +3159,10 @@ def run_ta_analysis(
         elliott_path_prices=list(getattr(wave, "elliott_path_prices", None) or []),
         elliott_path_labels=list(getattr(wave, "elliott_path_labels", None) or []),
         elliott_path_reason=str(getattr(wave, "elliott_path_reason", "") or ""),
+        elliott_path_horizon_hours=float(getattr(wave, "elliott_path_horizon_hours", 0) or 0),
+        elliott_path_scenario=str(getattr(wave, "elliott_path_scenario", "") or ""),
+        elliott_path_invalidation=getattr(wave, "elliott_path_invalidation", None),
+        elliott_fib_clusters=list(getattr(wave, "elliott_fib_clusters", None) or []),
         elliott_triangle_obj=getattr(wave, "elliott_triangle_obj", None),
         elliott_global_draw_points=_ew_global_pts,
         elliott_local_draw_points=_ew_local_pts,

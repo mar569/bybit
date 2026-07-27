@@ -865,6 +865,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             path_prices=list(getattr(ta, "elliott_path_prices", None) or []),
             path_labels=list(getattr(ta, "elliott_path_labels", None) or []),
             path_reason_ru=str(getattr(ta, "elliott_path_reason", "") or ""),
+            path_horizon_hours=float(getattr(ta, "elliott_path_horizon_hours", 0) or 0),
+            path_scenario=str(getattr(ta, "elliott_path_scenario", "") or ""),
+            path_invalidation=getattr(ta, "elliott_path_invalidation", None),
             triangle_obj=getattr(ta, "elliott_triangle_obj", None),
             global_draw_points=list(getattr(ta, "elliott_global_draw_points", None) or []),
             local_draw_points=list(getattr(ta, "elliott_local_draw_points", None) or []),
@@ -886,11 +889,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
                 ready=bool(getattr(ta, "elliott_entry_ready", False)),
             )
-        # На WAIT не рисуем EW path-стрелку (структура волн остаётся)
+        # На WAIT: путь 1–3ч рисуем всегда (это «куда пойдёт»), вход/Fib-цели — нет
         if is_wait:
-            ew_stub.path_prices = []
-            ew_stub.path_labels = []
-            ew_stub.path_bias = ""
+            ew_stub.entry_plan = None
             ew_stub.fib_target_prices = []
             ew_stub.fib_target_labels = []
         draw_elliott_waves(ax, bars, ew_stub)

@@ -1,25 +1,61 @@
-"""Полные волны Эллиотта (1–5 + ABC) — практические правила.
+"""Полные волны Эллиотта (1–5 + ABC) — правила по TradeRevolution + PPT.
 
-Основано на классике + практическом гайде (BTC/USD):
-https://tradingsworld.com/base/prakticheskoe-rukovodstvo-po-volnam-elliotta-na-primere-btc-usd/
+Источник: https://traderevolution.by/elliott-wave-principle-basics/motive-wave/impuls-pravila/
 
-Чек-лист импульса:
-- волна 2 не заходит за основание волны 1
-- волна 3 самая длинная из 1/3/5 и превышает вершину волны 1
-- волны 1 и 5 примерно равны
-- волна 4 не пересекает территорию волны 1
-- волна B не обновляет основание волны A
-- ABC не обновляет основание 5-волновки
+=== ПРАВИЛА ИМПУЛЬСА ===
+- Импульс = 5 подволн: структура 5-3-5-3-5 (21 волна), затем коррекция 5-3-5 (13 волн).
+- Волна 3 — чаще всего самая длинная и НИКОГДА самая короткая.
+- Волна 2 НИКОГДА не заходит за основание волны 1.
+- Волна 3 должна заходить за окончание волны 1.
+- Волна 4 не должна заходить в зону волны 1 (правило перекрытия).
+- Волна 5 чаще всего пробивает максимум волны 3 (кроме усечения).
 
-Fib-пропорции (ориентиры):
-  2 = 0.382–0.618 × 1;  3 = 1.618–2.618 × 1;
-  4 = 0.382–0.50 × 3;   5 = 0.382–0.618 × 3;
-  A ≈ 0.50–0.618 × 5;   B ≈ 0.382–0.50 × A;
-  C часто @ 1.272 / 1.618 × B (агрессивный вход)
+=== ЧЕРЕДОВАНИЕ ===
+- W2 глубокая (зигзаг/двойной зигзаг) → W4 плоская (флет/треугольник/комбинация) и наоборот.
+- W2 чаще зигзаг: откат 50/61.8/78.6% от W1.
+- W4 чаще треугольник/флет: откат 38.2/50% от W3.
+- W4 обычно заканчивается в зоне iv внутри W3.
 
-Входы:
-  conservative — обновление хая/лоя волны 1 после ABC (волна 2/4)
-  aggressive — лимит у 1.272/1.618 волны B, стоп 3×ATR, TP 3×ATR (R:R ≈ 1:3)
+=== РАСТЯЖЕНИЕ ===
+- Только одна из 1/3/5 растянута (в суперциклах м.б. 3+5).
+- Растяжение W3 → W1≈W5 пропорциональны.
+- Растяжение W1 → W5 ≈ 61.8% расширения Fib от W1.
+- Растяжение W5 → W5 ≈ 161.8% расширения Fib от W3.
+
+=== ДИАГОНАЛИ ===
+- Начальная (W1/A): структура 3-3-3-3-3 или 5-3-5-3-5; W4 заходит в зону W1, но НЕ за W2.
+- Конечная (W5/C): структура 3-3-3-3-3; W4 заходит в зону W1, но НЕ за W2; возможно усечение W5.
+- Сужающаяся: W3<W1, W4<W2, W5<W3.
+- Расширяющаяся: W3>W1, W4>W2, W5>W3.
+
+=== УСЕЧЕНИЕ ===
+- Только в W5 импульса или конечной сужающейся диагонали.
+- Формирует двойную вершину/дно.
+- Крайне редко.
+
+=== КОРРЕКЦИИ ===
+- Зигзаг 5-3-5: B никогда за начало A, C всегда за окончание A. A≈C по длине.
+- Двойной зигзаг 3-3-3: X не за начало W, Y за окончание W.
+- Расширенный флет 3-3-5: B всегда пробивает макс. A, C всегда пробивает мин. A. C ≈ 100–161.8% Fib от A.
+- Бегущий флет 3-3-5: B пробивает макс. A, C НЕ пробивает мин. A. A≈C.
+- Обычный флет 3-3-5: B ≈ 90%+ от A. На практике почти не встречается.
+
+=== ТРЕУГОЛЬНИКИ ===
+- В W4, B зигзага, X комбинации. Всегда предпоследняя волна.
+- Симметричный: C не за A, D не за B, E около линии A-C.
+- Восходящий: C не за A, D ≈ B (прямая линия), E около A-C.
+- Расширяющийся: C за A, D за B, E за C. Самый редкий.
+
+=== ДИВЕРГЕНЦИЯ ===
+- Пик MACD/AO = W3 (или растянутая W5).
+- Дивергенция между W3 и W5 — сильнейший сигнал разворота.
+
+=== ФИБОНАЧЧИ (кластеры) ===
+- W2: 50%, 61.8%, реже 78.6% от W1.
+- W4: 38.2%, реже 50% от W3.
+- W3 target: 161.8%, 200%, 261.8% × W1.
+- W5 target: 61.8%, 78.6%, 100%, 161.8% × расширение.
+- Кластер = 2-3 уровня Fib от разных измерений, сходящихся в одной зоне.
 """
 from __future__ import annotations
 
@@ -43,18 +79,23 @@ ATR_TP_MULT = 3.0
 C_EXT_SOFT = 1.272
 C_EXT_HARD = 1.618
 
-# Классика Fib (гайд TradingsWorld / analiz.md) — жёсткие коридоры
-FIB_W2_OF_W1 = (0.382, 0.618)       # волна 2 = 38.2–61.8% × волны 1
-FIB_W2_GOLD = (0.50, 0.618)         # идеальная зона входа после волны 2
-FIB_W3_OF_W1 = (1.618, 2.618)       # волна 3 = 161.8–261.8% × волны 1
-FIB_W3_SOFT = (1.40, 2.80)          # чуть шире для детекта (рыночный шум)
-FIB_W4_OF_W3 = (0.382, 0.50)        # волна 4 = 38.2–50% × волны 3
-FIB_W5_OF_W3 = (0.382, 0.618)       # волна 5 = 38.2–61.8% × волны 3
+# TradeRevolution Fib — правила импульса
+FIB_W2_OF_W1 = (0.50, 0.786)        # W2 = 50/61.8/78.6% × W1
+FIB_W2_GOLD = (0.50, 0.618)         # идеальная зона
+FIB_W2_DEEP = 0.786                 # максимальный допустимый откат
+FIB_W3_OF_W1 = (1.618, 2.618)       # W3 target = 161.8–261.8% × W1
+FIB_W3_SOFT = (1.40, 3.00)          # шире для детекта
+FIB_W4_OF_W3 = (0.382, 0.50)        # W4 = 38.2–50% × W3
+FIB_W5_OF_W3 = (0.382, 0.618)       # W5 = 38.2–61.8% × W3 (classic)
+FIB_W5_EXT = (0.618, 1.618)         # W5 расширение: 61.8/78.6/100/161.8%
 FIB_A_OF_W5 = (0.50, 0.618)         # A ≈ 50–61.8% × 5
 FIB_B_OF_A = (0.382, 0.50)          # B ≈ 38.2–50% × A
-# Растяжение (PPT Elliott): волна ≥1.618× меньшей из двух других импульсных
+# Flat rules (TradeRevolution)
+FIB_FLAT_B_MIN = 0.90               # обычный флет: B ≥ 90% от A
+FIB_EXPANDED_FLAT_C = (1.00, 1.618) # расширенный: C = 100–161.8% от A
+# Растяжение
 EXT_MIN_VS_PEER = 1.618
-EXT_MIN_VS_W1 = 1.618               # растяжение 3 часто ≥1.618× волны 1
+EXT_MIN_VS_W1 = 1.618
 
 
 @dataclass(frozen=True)
@@ -155,6 +196,10 @@ class ElliottWaveResult:
     path_prices: list[float] = field(default_factory=list)
     path_labels: list[str] = field(default_factory=list)
     path_reason_ru: str = ""
+    path_horizon_hours: float = 0.0
+    path_scenario: str = ""
+    path_invalidation: float | None = None
+    fib_cluster_zones: list[str] = field(default_factory=list)  # "price_lo–price_hi (N levels)"
     # сырые объекты для отрисовки линий треугольника
     triangle_obj: object | None = None
     complex_obj: object | None = None
@@ -271,71 +316,113 @@ def detect_diagonal_type(
     direction: str,
     bars: list["KlineBar"],
 ) -> str:
-    """leading | ending | '' — клиновидная 5-волновка (PPT диагональные треугольники)."""
+    """leading | ending | '' — диагональный треугольник по TradeRevolution.
+
+    Правила:
+    - W2 НИКОГДА не заходит за основание W1.
+    - W3 заходит за окончание W1.
+    - W4 ДОЛЖНА заходить в зону W1 (перекрытие обязательно), но НЕ за окончание W2.
+    - Начальная: W5 обязана пробить W3 (без усечения).
+    - Конечная: W5 может не дойти до W3 (усечение допустимо).
+    - Сужающаяся: W3<W1, W4<W2, W5<W3.
+    - Расширяющаяся: W3>W1, W4>W2, W5>W3.
+    """
     by = {p.label: p for p in pts}
     if not all(k in by for k in ("0", "1", "2", "3", "4")):
         return ""
-    # Нужны хотя бы 0–4; для ending желательно 5
     p0, p1, p2, p3, p4 = by["0"], by["1"], by["2"], by["3"], by["4"]
-    # Перекрытие 4 в зону 1 — типично для диагонали
+
+    # Required: W4 заходит в зону W1 (перекрытие)
     overlap = (
         (direction == "up" and p4.price <= p1.price)
         or (direction == "down" and p4.price >= p1.price)
     )
-    # Схождение границ 0–2–4 и 1–3–(5)
-    channel_converge = False
+
+    # Required: W4 НЕ за окончание W2
+    w4_past_w2 = (
+        (direction == "up" and p4.price < p2.price)
+        or (direction == "down" and p4.price > p2.price)
+    )
+    if w4_past_w2:
+        return ""
+
+    # Determine contracting vs expanding
+    w1 = _leg_size(p0, p1)
+    w2 = _leg_size(p1, p2)
+    w3 = _leg_size(p2, p3)
+    w4 = _leg_size(p3, p4)
+    contracting = w3 < w1 * 1.02 and w4 < w2 * 1.02
+    expanding = w3 > w1 * 0.98 and w4 > w2 * 0.98
+
     if "5" in by:
         p5 = by["5"]
-        # Длины каналов: |1-0| vs |5-4|, |3-2| — сужение
-        leg02 = abs(p2.price - p0.price)
-        leg24 = abs(p4.price - p2.price)
-        leg13 = abs(p3.price - p1.price)
-        leg35 = abs(p5.price - p3.price)
-        if leg02 > 0 and leg13 > 0:
-            channel_converge = leg24 < leg02 * 0.92 and leg35 < leg13 * 0.92
+        w5 = _leg_size(p4, p5)
+        if contracting:
+            contracting = contracting and w5 < w3 * 1.02
+        if expanding:
+            expanding = expanding and w5 > w3 * 0.98
+
+        # Ending diagonal: W5/C position; усечение W5 допустимо
+        if overlap or contracting or expanding:
+            return "ending"
     else:
-        leg02 = abs(p2.price - p0.price)
-        leg24 = abs(p4.price - p2.price)
-        channel_converge = leg02 > 0 and leg24 < leg02 * 0.85
+        # Leading: early structure with overlap
+        if overlap or contracting:
+            return "leading"
 
-    # Временной «клин»: волны 2 и 4 относительно короткие по барам
-    bars_24_ok = True
-    if bars:
-        b2 = abs(p2.index - p1.index)
-        b4 = abs(p4.index - p3.index)
-        b3 = abs(p3.index - p2.index)
-        if b3 > 0:
-            bars_24_ok = b2 <= b3 * 1.35 and b4 <= b3 * 1.35
+    # Fallback: channel convergence
+    leg02 = abs(p2.price - p0.price)
+    leg24 = abs(p4.price - p2.price)
+    if leg02 > 0 and leg24 < leg02 * 0.85 and overlap:
+        return "leading" if "5" not in by else "ending"
 
-    if not (overlap or channel_converge):
-        return ""
-    if not bars_24_ok and not overlap:
-        return ""
-
-    # Ending: полный импульс + сужение/overlap у волны 5
-    if "5" in by and (overlap or channel_converge):
-        return "ending"
-    # Leading: ранняя структура (до 5) с overlap — как волна 1
-    if "5" not in by and overlap:
-        return "leading"
-    if channel_converge and "5" not in by:
-        return "leading"
     return ""
 
 
-def classify_abc_type(abc_pts: list[ElliottPoint], b_retrace: float) -> str:
-    """zigzag | flat | unknown по глубине B и соотношению C/A (PPT)."""
+def classify_abc_type(
+    abc_pts: list[ElliottPoint],
+    b_retrace: float,
+    *,
+    impulse_direction: str = "",
+) -> str:
+    """zigzag | flat | expanded_flat | running_flat | unknown по TradeRevolution.
+
+    - Зигзаг: B = 38–78% от A, C всегда за окончание A.
+    - Обычный флет: B ≈ 90%+ от A, C ≈ окончание A. (На практике почти не встречается.)
+    - Расширенный флет: B пробивает начало A (>100%), C пробивает окончание A. C ≈ 100–161.8% Fib от A.
+    - Бегущий флет: B пробивает начало A (>100%), C НЕ пробивает окончание A.
+    """
     by = {p.label: p for p in abc_pts}
     if not all(k in by for k in ("A", "B")):
         return "unknown"
-    # Flat: B ≈ 90–105% A
-    if b_retrace >= 0.88:
+
+    # Определяем пробои для C
+    has_c = "C" in by
+    if has_c and impulse_direction:
+        pa, pc = by["A"], by["C"]
+        if impulse_direction == "up":
+            c_beyond_a = pc.price < pa.price  # C ниже A (коррекция вниз)
+        else:
+            c_beyond_a = pc.price > pa.price  # C выше A (коррекция вверх)
+    else:
+        c_beyond_a = None
+
+    # Expanded/Running: B > 100% от A
+    if b_retrace >= 1.00:
+        if has_c and c_beyond_a is True:
+            return "expanded_flat"
+        if has_c and c_beyond_a is False:
+            return "running_flat"
+        return "expanded_flat" if b_retrace >= 1.05 else "flat"
+
+    # Flat: B ≈ 90%+ от A
+    if b_retrace >= FIB_FLAT_B_MIN - 0.02:
         return "flat"
-    # Zigzag: B ≈ 38–78% A
-    if 0.30 <= b_retrace <= 0.78:
-        if "C" in by:
-            a_sz = abs(by["A"].price - by["B"].price)  # rough; better use start
+
+    # Zigzag: B = 38–78% от A
+    if 0.30 <= b_retrace <= 0.80:
         return "zigzag"
+
     return "unknown"
 
 
@@ -361,6 +448,10 @@ def _structure_note_ru(
         parts.append("начальная диагональ")
     if corr_type == "zigzag":
         parts.append("ABC зигзаг")
+    elif corr_type == "expanded_flat":
+        parts.append("ABC расширенный флет")
+    elif corr_type == "running_flat":
+        parts.append("ABC бегущий флет")
     elif corr_type == "flat":
         parts.append("ABC плоская")
     elif corr_type == "triangle":
@@ -445,8 +536,18 @@ def _validate_impulse_rules(
                     if direction == "up"
                     else "волна 5 не обновила лой 3"
                 )
-        if w3 < w1 * 0.98 or w3 < w5 * 0.98:
-            violations.append("волна 3 не самая длинная")
+        # TradeRev: W3 НИКОГДА самая короткая (fatal)
+        if w3 < w1 * 0.98 and w3 < w5 * 0.98:
+            violations.append("волна 3 самая короткая (запрещено)")
+        elif w3 < w1 * 0.98 or w3 < w5 * 0.98:
+            violations.append("волна 3 не самая длинная (допуск)")
+    elif "3" in by:
+        # Partial: check W3 vs W1 even without W5
+        p0, p1, p3 = by["0"], by["1"], by["3"]
+        w1 = _leg_size(p0, p1)
+        w3 = _leg_size(by["2"], p3)
+        if w1 > 0 and w3 > 0 and w3 < w1 * 0.65:
+            violations.append("волна 3 слишком мала относительно 1")
 
     fatal_keys = (
         "зашла за основание",
@@ -455,6 +556,7 @@ def _validate_impulse_rules(
         "не вверх",
         "не вниз",
         "не обновила",
+        "самая короткая",
     )
     fatal = [
         v
@@ -497,11 +599,19 @@ def _fib_proportion_check(pts: list[ElliottPoint]) -> dict:
     out["w2"] = r2
     out["w2_ok"] = _in_band(r2, FIB_W2_OF_W1, slack=0.03)
     out["w2_gold"] = _in_band(r2, FIB_W2_GOLD, slack=0.02)
+    # TradeRev: допуск 38.2% как минимум (плоская коррекция)
+    if not out["w2_ok"] and _in_band(r2, (0.382, 0.50), slack=0.03):
+        out["w2_ok"] = True  # shallow W2 допустима
     if out["w2_ok"]:
-        tag = "золото 50–61.8" if out["w2_gold"] else "Fib 38.2–61.8"
+        if out["w2_gold"]:
+            tag = "золото 50–61.8"
+        elif r2 >= 0.72:
+            tag = "глубокая 78.6"
+        else:
+            tag = f"Fib {r2:.0%}"
         out["notes"].append(f"2={r2:.0%}×1 ({tag})")
     else:
-        out["notes"].append(f"2={r2:.0%}×1 ✗ не 38.2–61.8")
+        out["notes"].append(f"2={r2:.0%}×1 ✗ вне 38–78.6")
 
     if "3" in by:
         w3 = _leg_size(by["2"], by["3"])
@@ -1433,7 +1543,10 @@ def analyze_elliott_waves(
     abc = abc_l or abc_g
     if abc is not None:
         abc_pts = [p for p in abc.points if p.label in {"A", "B", "C"}]
-        abc.corr_type = classify_abc_type(abc_pts, abc.b_retrace)
+        abc.corr_type = classify_abc_type(
+            abc_pts, abc.b_retrace,
+            impulse_direction=impulse.direction,
+        )
         impulse.structure_note_ru = _structure_note_ru(
             extension=impulse.extension,
             truncated=impulse.truncated,
@@ -1455,6 +1568,7 @@ def analyze_elliott_waves(
     tri = adv.get("triangle") or adv_g.get("triangle")
     complex_corr = adv.get("complex_corr") or adv_g.get("complex_corr")
     fib_targets = list(adv.get("fib_targets") or adv_g.get("fib_targets") or [])
+    fib_clusters = list(adv.get("fib_clusters") or adv_g.get("fib_clusters") or [])
     path = adv.get("path") or adv_g.get("path")
 
     g_draw = _build_draw_bundle(
@@ -1569,6 +1683,12 @@ def analyze_elliott_waves(
         path_prices=list(getattr(path, "prices", []) or []) if path else [],
         path_labels=list(getattr(path, "labels", []) or []) if path else [],
         path_reason_ru=getattr(path, "reason_ru", "") if path else "",
+        path_horizon_hours=float(getattr(path, "horizon_hours", 0) or 0) if path else 0.0,
+        path_scenario=str(getattr(path, "scenario", "") or "") if path else "",
+        path_invalidation=getattr(path, "invalidation", None) if path else None,
+        fib_cluster_zones=[
+            f"{c.mid:.6g} ({c.strength} ур.)" for c in fib_clusters[:3]
+        ],
         triangle_obj=tri,
         complex_obj=complex_corr,
         global_draw_points=g_draw,
