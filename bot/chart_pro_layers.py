@@ -239,8 +239,43 @@ def draw_flat_breakout_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
             target = ta.breakout_level * 1.008
         waypoints = [px, z.bottom, mid, z.top, ta.breakout_level, target]
         label = "flat→long"
+    elif ta.verdict == "WAIT" and ta.breakdown_level and ta.breakout_level:
+        px = bars[-1].close
+        short_tgt = ta.bearish_scenario.target_prices[0] if (
+            ta.bearish_scenario and ta.bearish_scenario.target_prices
+        ) else ta.breakdown_level * 0.995
+        long_tgt = ta.bullish_scenario.target_prices[0] if (
+            ta.bullish_scenario and ta.bullish_scenario.target_prices
+        ) else ta.breakout_level * 1.008
+        if short_tgt >= px:
+            short_tgt = ta.breakdown_level * 0.995
+        if long_tgt <= px:
+            long_tgt = ta.breakout_level * 1.008
+        short_wp = [px, z.top, mid, z.bottom, ta.breakdown_level, short_tgt]
+        long_wp = [px, z.bottom, mid, z.top, ta.breakout_level, long_tgt]
+        _draw_zigzag_path(ax, bars, short_wp, color="#f85149", label="flat→short", alpha=0.42, lw=1.1)
+        _draw_zigzag_path(ax, bars, long_wp, color="#3fb950", label="flat→long", alpha=0.42, lw=1.1)
+        return True
+    elif ta.verdict == "WAIT" and ta.breakdown_level:
+        target = ta.bearish_scenario.target_prices[0] if (
+            ta.bearish_scenario and ta.bearish_scenario.target_prices
+        ) else ta.breakdown_level * 0.995
+        if target >= px:
+            target = ta.breakdown_level * 0.995
+        waypoints = [px, z.top, mid, z.bottom, ta.breakdown_level, target]
+        _draw_zigzag_path(ax, bars, waypoints, color="#8b949e", label="flat→short", alpha=0.55, lw=1.1)
+        return True
+    elif ta.verdict == "WAIT" and ta.breakout_level:
+        target = ta.bullish_scenario.target_prices[0] if (
+            ta.bullish_scenario and ta.bullish_scenario.target_prices
+        ) else ta.breakout_level * 1.008
+        if target <= px:
+            target = ta.breakout_level * 1.008
+        waypoints = [px, z.bottom, mid, z.top, ta.breakout_level, target]
+        _draw_zigzag_path(ax, bars, waypoints, color="#8b949e", label="flat→long", alpha=0.55, lw=1.1)
+        return True
     else:
-        # WAIT / без стороны — не рисуем «путь в никуда»
+        # без уровней пробоя — не рисуем «путь в никуда»
         return False
     _draw_zigzag_path(ax, bars, waypoints, color="#8b949e", label=label, alpha=0.75, lw=1.2)
     return True

@@ -9,8 +9,67 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 48
+SETTINGS_VERSION = 49
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
+
+# Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
+BALANCED_PRO_SCANNER_PRESET: dict[str, Any] = {
+    "oi_period_minutes": 10,
+    "long_period_minutes": 10,
+    "short_period_minutes": 10,
+    "oi_rise_percent": 3.5,
+    "oi_drop_percent": 3.5,
+    "price_rise_percent": 1.8,
+    "price_drop_percent": 1.8,
+    "min_oi_change_usd": 50_000.0,
+    "min_oi_change_soft_usd": 25_000.0,
+    "require_both_oi_and_price": True,
+    "min_signal_score": 2.0,
+    "standard_min_signal_score": 2.0,
+    "alt_min_signal_score": 3.0,
+    "major_min_signal_score": 1.5,
+    "min_probability_percent": 72.0,
+    "major_min_probability_percent": 68.0,
+    "alt_min_probability_percent": 74.0,
+    "probability_filter_enabled": True,
+    "actionable_signals_only": True,
+    "actionable_min_ta_score": 8,
+    "actionable_max_trigger_dist_pct": 2.5,
+    "actionable_min_signal_score": 3,
+    "actionable_max_signal_score": 8,
+    "signal_quality_gate_enabled": True,
+    "signal_cvd_gate_enabled": True,
+    "signal_sweep_guard_enabled": True,
+    "signal_htf_gate_enabled": True,
+    "signal_flow_matrix_enabled": True,
+    "signal_skip_noise": True,
+    "trade_decision_gate_enabled": True,
+    "trade_decision_block_chase_watch": True,
+    "signal_watch_mode_enabled": False,
+    "signal_cooldown_seconds": 120,
+    "priority_score_max": 3,
+}
+
+# Ultra strict — ещё меньше сигналов, только «идеальные» входы.
+ULTRA_STRICT_SCANNER_PRESET: dict[str, Any] = {
+    **BALANCED_PRO_SCANNER_PRESET,
+    "oi_rise_percent": 4.0,
+    "oi_drop_percent": 4.0,
+    "price_rise_percent": 2.2,
+    "price_drop_percent": 2.2,
+    "min_oi_change_usd": 60_000.0,
+    "min_signal_score": 3.0,
+    "standard_min_signal_score": 3.0,
+    "alt_min_signal_score": 3.5,
+    "major_min_signal_score": 2.0,
+    "min_probability_percent": 76.0,
+    "major_min_probability_percent": 72.0,
+    "alt_min_probability_percent": 78.0,
+    "actionable_min_ta_score": 9,
+    "actionable_max_trigger_dist_pct": 2.0,
+    "actionable_min_signal_score": 4,
+    "signal_cooldown_seconds": 150,
+}
 
 
 def clamp_cooldown_seconds(value: int | float | None, *, default: int = 120) -> int:
@@ -126,14 +185,14 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной LONG/SHORT-профиль (база для tier: мейджоры ниже, альты выше)
-    oi_period_minutes: int = 5
-    long_period_minutes: int = 5
-    short_period_minutes: int = 5
-    oi_rise_percent: float = 2.5
-    oi_drop_percent: float = 2.5
-    price_rise_percent: float = 1.5
-    price_drop_percent: float = 1.5
+    # Основной LONG/SHORT-профиль (Balanced PRO: 10м, OI 3.5%, цена 1.8%)
+    oi_period_minutes: int = 10
+    long_period_minutes: int = 10
+    short_period_minutes: int = 10
+    oi_rise_percent: float = 3.5
+    oi_drop_percent: float = 3.5
+    price_rise_percent: float = 1.8
+    price_drop_percent: float = 1.8
 
     # Ранний пульс — чувствительнее основного (respect_global_floors=False)
     pulse_period_minutes: int = 5
@@ -151,8 +210,8 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 10.0
 
     # Качество сигнала: деньги в OI, не просто цена
-    min_oi_change_usd: float = 45_000.0
-    min_oi_change_soft_usd: float = 20_000.0
+    min_oi_change_usd: float = 50_000.0
+    min_oi_change_soft_usd: float = 25_000.0
     min_oi_change_strong_price_mult: float = 1.35
     short_squeeze_min_price: float = 3.5
     short_squeeze_max_oi_change: float = -0.8
@@ -207,8 +266,8 @@ class ScannerSettings:
     major_oi_multiplier: float = 0.55
     major_min_open_interest: float = 3_000_000.0
     major_min_oi_change_usd: float = 150_000.0
-    major_min_probability_percent: float = 65.0
-    major_min_signal_score: float = 1.0
+    major_min_probability_percent: float = 68.0
+    major_min_signal_score: float = 1.5
     major_breakout_min_spike_percent: float = 0.55
     major_breakout_min_dump_percent: float = 0.55
     major_reversal_min_prior_pct: float = 0.9
@@ -217,8 +276,8 @@ class ScannerSettings:
     alt_oi_multiplier: float = 1.1
     alt_min_open_interest: float = 180_000.0
     alt_min_oi_change_usd: float = 40_000.0
-    alt_min_probability_percent: float = 66.0
-    alt_min_signal_score: float = 2.0
+    alt_min_probability_percent: float = 74.0
+    alt_min_signal_score: float = 3.0
     standard_min_signal_score: float = 2.0
 
     # Liq-cascade: крупные ликвидации + движение цены (ловит ETH −0.7% + $194K liq)
@@ -276,7 +335,7 @@ class ScannerSettings:
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
-    min_signal_score: float = 1.0
+    min_signal_score: float = 2.0
     top_n_symbols: int | None = 150
     priority_score_max: int = 3
     signals_enabled: bool = True
@@ -285,15 +344,15 @@ class ScannerSettings:
     telegram_max_per_minute: int = 10
     telegram_min_interval_seconds: float = 2.0
 
-    min_probability_percent: float = 66.0
+    min_probability_percent: float = 72.0
     probability_filter_enabled: bool = True
 
-    # Только ENTRY без WATCH — false = чаще алерты с планом (WATCH + ENTRY)
+    # Только ENTRY без WATCH — Balanced PRO
     actionable_signals_only: bool = True
-    actionable_min_ta_score: int = 7
-    actionable_max_trigger_dist_pct: float = 3.0
-    actionable_min_signal_score: int = 2
-    actionable_max_signal_score: int = 9
+    actionable_min_ta_score: int = 8
+    actionable_max_trigger_dist_pct: float = 2.5
+    actionable_min_signal_score: int = 3
+    actionable_max_signal_score: int = 8
     actionable_require_smc: bool = False
     actionable_show_readiness_badge: bool = True
     actionable_accept_armed: bool = True
@@ -651,7 +710,7 @@ class ScannerSettings:
             major_oi_multiplier=float(base.get("major_oi_multiplier", 0.55)),
             major_min_open_interest=float(base.get("major_min_open_interest", 3_000_000.0)),
             major_min_oi_change_usd=float(base.get("major_min_oi_change_usd", 150_000.0)),
-            major_min_probability_percent=float(base.get("major_min_probability_percent", 65.0)),
+            major_min_probability_percent=float(base.get("major_min_probability_percent", 68.0)),
             major_min_signal_score=float(base.get("major_min_signal_score", 1.0)),
             major_breakout_min_spike_percent=float(
                 base.get("major_breakout_min_spike_percent", 0.55)
@@ -665,7 +724,7 @@ class ScannerSettings:
             alt_oi_multiplier=float(base.get("alt_oi_multiplier", 1.15)),
             alt_min_open_interest=float(base.get("alt_min_open_interest", 750_000.0)),
             alt_min_oi_change_usd=float(base.get("alt_min_oi_change_usd", 120_000.0)),
-            alt_min_probability_percent=float(base.get("alt_min_probability_percent", 76.0)),
+            alt_min_probability_percent=float(base.get("alt_min_probability_percent", 74.0)),
             alt_min_signal_score=float(base.get("alt_min_signal_score", 3.0)),
             standard_min_signal_score=float(base.get("standard_min_signal_score", 2.0)),
             liq_cascade_enabled=bool(base.get("liq_cascade_enabled", True)),
@@ -758,10 +817,10 @@ class ScannerSettings:
             min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
             actionable_signals_only=bool(base.get("actionable_signals_only", True)),
-            actionable_min_ta_score=int(base.get("actionable_min_ta_score", 7)),
+            actionable_min_ta_score=int(base.get("actionable_min_ta_score", 8)),
             actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 2.5)),
-            actionable_min_signal_score=int(base.get("actionable_min_signal_score", 2)),
-            actionable_max_signal_score=int(base.get("actionable_max_signal_score", 9)),
+            actionable_min_signal_score=int(base.get("actionable_min_signal_score", 3)),
+            actionable_max_signal_score=int(base.get("actionable_max_signal_score", 8)),
             actionable_require_smc=bool(base.get("actionable_require_smc", False)),
             actionable_show_readiness_badge=bool(base.get("actionable_show_readiness_badge", True)),
             actionable_accept_armed=bool(base.get("actionable_accept_armed", True)),
@@ -1301,6 +1360,13 @@ class SettingsManager:
                 merged["signal_chart_display_hours"] = max(
                     int(merged.get("signal_chart_display_hours", 7) or 7), 12
                 )
+            if version < 49:
+                merged.update(BALANCED_PRO_SCANNER_PRESET)
+                merged["signal_cooldown_seconds"] = clamp_cooldown_seconds(
+                    merged.get("signal_cooldown_seconds"), default=120,
+                )
+                for override_key in EXCHANGE_OVERRIDE_KEYS:
+                    merged[override_key] = None
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1308,7 +1374,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v47: user intent wait LONG/SHORT; preserved: %s)",
+                "Settings migrated v%d → v%d (v49: Balanced PRO preset; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

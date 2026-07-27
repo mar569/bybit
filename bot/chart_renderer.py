@@ -414,6 +414,7 @@ def _draw_scenario_path(
     scenario: TradeScenario | None,
     *,
     color: str,
+    alpha: float = 0.75,
 ) -> None:
     if scenario is None or not bars or not scenario.target_prices:
         return
@@ -433,12 +434,55 @@ def _draw_scenario_path(
                 color=color,
                 lw=1.1,
                 linestyle="dashed",
-                alpha=0.75,
+                alpha=alpha,
                 shrinkA=0,
                 shrinkB=0,
             ),
         )
         x, y = next_x, tp
+
+
+def _draw_wait_chart_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """WAIT: алгоритмические пути обоих триггеров (основной ярче, альтернатива полупрозрачно)."""
+    if (getattr(ta, "verdict", "") or "").upper() != "WAIT":
+        return
+    lean = (getattr(ta, "action_priority", "") or "").lower()
+    if ta.bullish_scenario and ta.bullish_scenario.target_prices:
+        _draw_scenario_path(
+            ax,
+            bars,
+            ta.bullish_scenario,
+            color=CHART_STYLE["scenario_bull"],
+            alpha=0.88 if lean == "long" else 0.40,
+        )
+    if ta.bearish_scenario and ta.bearish_scenario.target_prices:
+        _draw_scenario_path(
+            ax,
+            bars,
+            ta.bearish_scenario,
+            color=CHART_STYLE["scenario_bear"],
+            alpha=0.88 if lean == "short" else 0.40,
+        )
+    if ta.correction_path and ta.correction_path.waypoints:
+        _draw_zigzag_forecast_path(
+            ax,
+            bars,
+            ta.correction_path.waypoints,
+            color="#ffa657",
+            label=ta.correction_path.label,
+            alpha=0.45 if lean != "short" else 0.72,
+            lw=1.2,
+        )
+    if ta.continuation_path and ta.continuation_path.waypoints:
+        _draw_zigzag_forecast_path(
+            ax,
+            bars,
+            ta.continuation_path.waypoints,
+            color=CHART_STYLE["accent_long"],
+            label=ta.continuation_path.label,
+            alpha=0.45 if lean != "long" else 0.72,
+            lw=1.2,
+        )
 
 
 def _draw_zigzag_forecast_path(
@@ -826,8 +870,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     setup_grade = getattr(ta, "setup_grade", "") or ""
     has_setup_path = len(setup_path_preview) >= 2 and setup_grade in {"A", "B", "C"}
     if (
-        not is_wait
-        and not has_setup_path
+        not has_setup_path
         and getattr(ta, "pattern_foresight_summary", "")
     ):
         draw_pattern_foresight_path(
@@ -837,7 +880,7 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             pattern=getattr(ta, "primary_chart_pattern", None),
             horizon_hours=float(getattr(ta, "pattern_foresight_horizon", 0) or 0),
             bias=str(getattr(ta, "pattern_foresight_bias", "neutral") or "neutral"),
-            watch_only=bool(getattr(ta, "pattern_foresight_watch_only", False)),
+            watch_only=bool(getattr(ta, "pattern_foresight_watch_only", False)) or is_wait,
             status=str(getattr(ta, "pattern_foresight_status", "") or ""),
             quiet_labels=True,
         )
@@ -876,33 +919,23 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
             has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
         )
-        # PRO: path только в сторону path_bias / action_priority
-        from .pro_invariants import bias_side, sanitize_path_prices
+        # EW path: санитизация по собственному path_bias алгоритма (не гасим на WAIT)
+        from .pro_invariants import sanitize_path_prices
 
-        _side = bias_side(
-            getattr(ta, "verdict", "") or "",
-            getattr(ta, "action_priority", "") or "",
-            getattr(ew_stub, "path_bias", "") or "",
-        )
-        if _side in {"long", "short"} and ew_stub.path_prices:
+        path_side = str(getattr(ew_stub, "path_bias", "") or "").lower()
+        if path_side in {"long", "short"} and ew_stub.path_prices:
             cur = float(getattr(ta, "current_price", 0) or (bars[-1].close if bars else 0))
             pp, pl = sanitize_path_prices(
-                _side, cur, ew_stub.path_prices, ew_stub.path_labels,
+                path_side, cur, ew_stub.path_prices, ew_stub.path_labels,
             )
             ew_stub.path_prices = pp
             ew_stub.path_labels = pl
             if not pp:
                 ew_stub.path_bias = ""
-            elif (ew_stub.path_bias or "") not in {"long", "short"}:
-                ew_stub.path_bias = _side
-        # На WAIT: path 1–3ч только если совпадает с bias; чужой path гасим
-        if is_wait and ew_stub.path_bias and _side in {"long", "short"}:
-            if ew_stub.path_bias != _side:
-                ew_stub.path_prices = []
-                ew_stub.path_labels = []
-                ew_stub.path_bias = ""
-        # восстановить entry plan для линии входа — не на WAIT (дубли TP/STOP)
-        if not is_wait and getattr(ta, "elliott_entry_price", None):
+        # На WAIT: без линии market-входа; Fib-цели EW остаются (алгоритм)
+        if is_wait:
+            ew_stub.entry_plan = None
+        elif getattr(ta, "elliott_entry_price", None):
             from .elliott_wave import ElliottEntryPlan
 
             ew_stub.entry_plan = ElliottEntryPlan(
@@ -914,11 +947,6 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
                 tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
                 ready=bool(getattr(ta, "elliott_entry_ready", False)),
             )
-        # На WAIT: путь 1–3ч рисуем всегда (это «куда пойдёт»), вход/Fib-цели — нет
-        if is_wait:
-            ew_stub.entry_plan = None
-            ew_stub.fib_target_prices = []
-            ew_stub.fib_target_labels = []
         draw_elliott_waves(ax, bars, ew_stub)
 
     # HTF Elliott (пунктир) + прогнозный путь Pro-confluence
@@ -1011,14 +1039,15 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         draw_rsi_divergence_on_price(ax, bars, ta)
     except Exception:
         pass
-    path_kind = "skip" if is_wait else draw_pro_chart_layers(ax, bars, ta)
-    if path_kind == "default":
+    path_kind = draw_pro_chart_layers(ax, bars, ta)
+    if is_wait:
+        _draw_wait_chart_paths(ax, bars, ta)
+    elif path_kind == "default":
         if not _draw_market_forecast_paths(ax, bars, ta):
             if direction == "long":
                 _draw_scenario_path(ax, bars, ta.bullish_scenario, color=CHART_STYLE["scenario_bull"])
             elif direction == "short":
                 _draw_scenario_path(ax, bars, ta.bearish_scenario, color=CHART_STYLE["scenario_bear"])
-            # WAIT / neutral — без направленных scenario-стрелок
     # bounce_short: не рисуем бычий continuation поверх SHORT
 
     _draw_signal_markers(ax, bars, ta)
@@ -1081,8 +1110,9 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
         fig.text(rx, scenario_y, bull_text, va="top", ha="right", **bull_style)
 
     bear_text = ta_chart_scenario_text(ta.bearish_scenario, title="МЕДВЕЖИЙ СЦЕНАРИЙ")
-    if bear_text and ta.verdict == "SHORT":
-        fig.text(rx, scenario_y, bear_text, va="top", ha="right", **bear_style)
+    if bear_text and ta.verdict in {"SHORT", "WAIT"}:
+        bear_y = scenario_y - 0.22 if bull_text and ta.verdict == "WAIT" else scenario_y
+        fig.text(rx, bear_y, bear_text, va="top", ha="right", **bear_style)
 
     summary = ta_chart_summary_text(ta)
     if summary:
@@ -1155,55 +1185,39 @@ def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpane
         **base,
     )
 
-    show_bull = (
-        ta.bullish_scenario is not None
-        and (
-            ta.verdict == "LONG"
-            or (ta.verdict == "WAIT" and ta.action_priority == "long")
-            or (ta.verdict != "WAIT" and ta.action_priority == "long" and ta.bearish_scenario is None)
-        )
-    )
-    show_bear = (
-        ta.bearish_scenario is not None
-        and (
-            ta.verdict == "SHORT"
-            or (ta.verdict == "WAIT" and ta.action_priority == "short")
-            or (ta.verdict != "WAIT" and ta.action_priority == "short" and ta.bullish_scenario is None)
-        )
-    )
-    # WAIT dual-breakout без явного lean — оба бокса не рисуем (шум); уровни уже слева
-    if ta.verdict == "WAIT" and ta.action_priority not in {"long", "short"}:
-        show_bull = False
+    show_bull = ta.bullish_scenario is not None and ta.verdict in {"LONG", "WAIT"}
+    show_bear = ta.bearish_scenario is not None and ta.verdict in {"SHORT", "WAIT"}
+    if ta.verdict == "LONG":
         show_bear = False
-    scenario_y = 0.36
-    if show_bull and ta.bullish_scenario and not show_bear:
-        bull = ta.bullish_scenario
-        bull_lines = [
-            "БЫЧИЙ СЦЕНАРИЙ",
-            f"Триггер: ≥ {fmt_price(bull.trigger_price)}",
-            f"TP1/TP2: {' / '.join(fmt_price(t) for t in bull.target_prices[:2])}",
-            f"SL: {fmt_price(bull.stop_price)}",
+    elif ta.verdict == "SHORT":
+        show_bull = False
+
+    def _scenario_box(side: str, scenario, y: float) -> None:
+        is_bull = side == "bull"
+        lines = [
+            "БЫЧИЙ СЦЕНАРИЙ" if is_bull else "МЕДВЕЖИЙ СЦЕНАРИЙ",
+            f"Триггер: {'≥' if is_bull else '≤'} {fmt_price(scenario.trigger_price)}",
+            f"TP1/TP2: {' / '.join(fmt_price(t) for t in scenario.target_prices[:2])}",
+            f"SL: {fmt_price(scenario.stop_price)}",
         ]
+        color = CHART_STYLE["accent_long"] if is_bull else CHART_STYLE["accent_short"]
+        fc = "#0f1f17" if is_bull else "#231417"
         fig.text(
-            right_x, scenario_y, "\n".join(bull_lines),
-            ha="right", va="top", fontsize=8.0, color=CHART_STYLE["accent_long"],
+            right_x, y, "\n".join(lines),
+            ha="right", va="top", fontsize=8.0, color=color,
             transform=fig.transFigure, linespacing=1.36,
-            bbox=dict(boxstyle="round,pad=0.52", facecolor="#0f1f17", edgecolor=CHART_STYLE["accent_long"], alpha=0.96),
+            bbox=dict(boxstyle="round,pad=0.52", facecolor=fc, edgecolor=color, alpha=0.96),
         )
-    if show_bear and ta.bearish_scenario and not show_bull:
-        bear = ta.bearish_scenario
-        bear_lines = [
-            "МЕДВЕЖИЙ СЦЕНАРИЙ",
-            f"Триггер: ≤ {fmt_price(bear.trigger_price)}",
-            f"TP1/TP2: {' / '.join(fmt_price(t) for t in bear.target_prices[:2])}",
-            f"SL: {fmt_price(bear.stop_price)}",
-        ]
-        fig.text(
-            right_x, scenario_y, "\n".join(bear_lines),
-            ha="right", va="top", fontsize=8.0, color=CHART_STYLE["accent_short"],
-            transform=fig.transFigure, linespacing=1.36,
-            bbox=dict(boxstyle="round,pad=0.52", facecolor="#231417", edgecolor=CHART_STYLE["accent_short"], alpha=0.96),
-        )
+
+    if show_bull and show_bear and ta.verdict == "WAIT":
+        if ta.bullish_scenario:
+            _scenario_box("bull", ta.bullish_scenario, 0.50)
+        if ta.bearish_scenario:
+            _scenario_box("bear", ta.bearish_scenario, 0.22)
+    elif show_bull and ta.bullish_scenario:
+        _scenario_box("bull", ta.bullish_scenario, 0.36)
+    elif show_bear and ta.bearish_scenario:
+        _scenario_box("bear", ta.bearish_scenario, 0.36)
 
 
 def _draw_pro_market_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:

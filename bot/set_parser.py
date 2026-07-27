@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from bot.settings import BALANCED_PRO_SCANNER_PRESET, ULTRA_STRICT_SCANNER_PRESET
+
 
 SET_HELP = (
     "<b>Команда /set</b> (применяется сразу)\n\n"
@@ -64,7 +66,10 @@ SET_HELP = (
     "/set binance price 2\n"
     "/set bybit oi_drop 4\n"
     "/set bybit price_drop 1.5\n"
-    "/set binance reset — сбросить свои пороги"
+    "/set binance reset — сбросить свои пороги\n\n"
+    "Профили (сразу пакетом):\n"
+    "/set preset — Balanced PRO (10м · OI 3.5% · prob 72% · TA≥8)\n"
+    "/set preset ultra — Ultra strict (OI 4% · prob 76% · TA≥9)"
 )
 
 
@@ -215,6 +220,22 @@ def parse_set_command(args: list[str]) -> SetResult:
 
     if args[0].lower() in {"help", "?"}:
         return SetResult(True, SET_HELP, {})
+
+    if args[0].lower() in {"preset", "profile", "профиль"}:
+        name = args[1].lower() if len(args) > 1 else "balanced"
+        if name in {"balanced", "pro", "balanced_pro", "default"}:
+            return SetResult(
+                True,
+                "✅ Профиль <b>Balanced PRO</b>: 10м · OI 3.5% · prob 72% · TA≥8 · только ENTRY",
+                dict(BALANCED_PRO_SCANNER_PRESET),
+            )
+        if name in {"ultra", "strict", "ultra_strict", "ultra-strict"}:
+            return SetResult(
+                True,
+                "✅ Профиль <b>Ultra strict</b>: OI 4% · prob 76% · TA≥9 · timing 4–8",
+                dict(ULTRA_STRICT_SCANNER_PRESET),
+            )
+        return SetResult(False, "Профили: <code>balanced</code> (дефолт) · <code>ultra</code>", {})
 
     exchange = None
     if args[0].lower() in {"binance", "bybit"}:
