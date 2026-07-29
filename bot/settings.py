@@ -492,6 +492,7 @@ class ScannerSettings:
     wave_require_fib_classic: bool = True
     wave_require_entry_ready: bool = False
     wave_require_impulse_valid: bool = True
+    wave_allow_diagonal_signals: bool = False
     wave_allow_structure_watch: bool = False
     wave_allow_path_alerts: bool = False
     wave_allow_complete_alerts: bool = False
@@ -997,6 +998,9 @@ class ScannerSettings:
             wave_require_entry_ready=bool(base.get("wave_require_entry_ready", False)),
             wave_require_impulse_valid=bool(
                 base.get("wave_require_impulse_valid", True)
+            ),
+            wave_allow_diagonal_signals=bool(
+                base.get("wave_allow_diagonal_signals", False)
             ),
             wave_allow_structure_watch=bool(base.get("wave_allow_structure_watch", False)),
             wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", False)),

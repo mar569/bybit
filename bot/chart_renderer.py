@@ -903,10 +903,10 @@ def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
                 tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
                 ready=bool(getattr(ta, "elliott_entry_ready", False)),
             )
-        draw_elliott_waves(ax, bars, ew_stub)
+        draw_elliott_waves(ax, bars, ew_stub, emphasis=bool(getattr(ta, "_wave_focus", False)))
 
     htf_pts = getattr(ta, "htf_elliott_draw_points", None) or []
-    if htf_pts:
+    if htf_pts and not getattr(ta, "_wave_focus", False):
         htf_stub = ElliottWaveResult(
             label_ru=getattr(ta, "htf_elliott_label", "") or "",
             phase=getattr(ta, "htf_elliott_phase", "") or "",
@@ -924,49 +924,38 @@ def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
 
 
 def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    """Только волны + Fib + зона входа — без Hot/боковик/BOS/фигур."""
+    """Только волны + ключевые Fib + зона входа — крупные метки, без шума."""
     setattr(ta, "_wave_focus", True)
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
     _draw_elliott_from_ta(ax, bars, ta, is_wait=is_wait)
-    _draw_fib_levels(ax, bars, ta)
 
-    # 1–2 ключевых уровня без «зоны премии / боковик»
-    for lv in (ta.levels or [])[:2]:
-        color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
-        ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.85, alpha=0.55)
-
+    # Не дублируем Fib из wave_structure — уже золотая сетка EW
     inv = getattr(ta, "elliott_path_invalidation", None) or getattr(ta, "invalidation_price", None)
     if inv:
-        ax.axhline(float(inv), color=CHART_STYLE["inv"], linestyle="--", linewidth=1.1, alpha=0.9)
+        ax.axhline(float(inv), color=CHART_STYLE["inv"], linestyle="--", linewidth=1.25, alpha=0.95)
         ax.text(
             _x_after_last_bar(bars, 10),
             float(inv),
-            f"inv {fmt_price(float(inv))}",
+            f" INV {fmt_price(float(inv))} ",
             color=CHART_STYLE["inv"],
-            fontsize=7,
+            fontsize=8.5,
             va="bottom",
             ha="left",
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=CHART_STYLE["inv"], alpha=0.85),
         )
 
-    stop = getattr(ta, "elliott_stop_price", None)
-    if stop and (inv is None or abs(float(stop) - float(inv)) / max(ta.current_price, 1e-9) > 0.001):
-        ax.axhline(float(stop), color=CHART_STYLE["accent_short"], linestyle=":", linewidth=0.9, alpha=0.75)
-
-    for tp in (getattr(ta, "elliott_tp_prices", None) or [])[:3]:
+    for i, tp in enumerate((getattr(ta, "elliott_tp_prices", None) or [])[:2]):
         if not tp:
             continue
-        ax.axhline(float(tp), color=CHART_STYLE["target"], linestyle=":", linewidth=0.85, alpha=0.7)
-
-    entry = getattr(ta, "elliott_entry_price", None)
-    if entry:
-        ax.axhline(float(entry), color=CHART_STYLE["entry"], linestyle="-", linewidth=1.15, alpha=0.9)
+        ax.axhline(float(tp), color=CHART_STYLE["target"], linestyle=":", linewidth=1.0, alpha=0.8)
         ax.text(
             _x_after_last_bar(bars, 10),
-            float(entry),
-            f"вход {fmt_price(float(entry))}",
-            color=CHART_STYLE["entry"],
-            fontsize=7.5,
-            va="bottom",
+            float(tp),
+            f" TP{i+1} {fmt_price(float(tp))} ",
+            color=CHART_STYLE["target"],
+            fontsize=8.0,
+            va="center",
             ha="left",
             fontweight="bold",
         )
@@ -1200,7 +1189,7 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
 
 
 def _draw_wave_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
-    """Панели только про волны — без Hot ИТОГ/ПЛАН/боковик."""
+    """Простые панели: что видим → что делать. Без жаргона Hot."""
     base_bbox = dict(
         boxstyle="round,pad=0.55",
         facecolor=CHART_STYLE["panel"],
@@ -1210,88 +1199,61 @@ def _draw_wave_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpan
     style = dict(
         transform=fig.transFigure,
         color=CHART_STYLE["text"],
-        fontsize=7.8,
-        linespacing=1.4,
+        fontsize=8.2,
+        linespacing=1.45,
         bbox=base_bbox,
     )
     lx, rx = 0.018, 0.982
     verdict = (getattr(ta, "verdict", "") or "WAIT").upper()
-    conf = int(getattr(ta, "elliott_confidence", 0) or getattr(ta, "verdict_confidence", 0) or 0)
     side_color = (
         CHART_STYLE["accent_long"] if verdict == "LONG"
         else CHART_STYLE["accent_short"] if verdict == "SHORT"
         else CHART_STYLE["warning"]
     )
 
-    g = str(getattr(ta, "elliott_global_label", "") or "").strip()
-    loc = str(getattr(ta, "elliott_local_label", "") or "").strip()
+    phase = str(getattr(ta, "elliott_phase", "") or "")
     label = str(getattr(ta, "elliott_label", "") or "").strip()
-    phase = str(getattr(ta, "elliott_phase", "") or "").strip()
-    left_lines = ["ВОЛНЫ"]
-    if g:
-        left_lines.append(f"G: {g[:70]}")
-    if loc:
-        left_lines.append(f"L: {loc[:70]}")
-    if not g and not loc and label:
-        left_lines.append(label[:90])
-    if phase:
-        left_lines.append(f"фаза: {phase}")
-    note = str(getattr(ta, "elliott_structure_note", "") or "").strip()
-    if note:
-        left_lines.append(note[:70])
-    fib_bits: list[str] = []
-    if getattr(ta, "elliott_fib_classic_ok", False):
-        fib_bits.append("classic OK")
-    w2 = getattr(ta, "elliott_fib_w2", None)
-    w4 = getattr(ta, "elliott_fib_w4", None)
-    if w2:
-        fib_bits.append(f"W2 {float(w2):.0%}")
-    if w4:
-        fib_bits.append(f"W4 {float(w4):.0%}")
-    if fib_bits:
-        left_lines.append("Fib: " + " · ".join(fib_bits))
-    fig.text(lx, 0.975, "\n".join(left_lines), va="top", ha="left", **style)
+    left = ["ЧТО НА ГРАФИКЕ"]
+    if "impulse" in phase or "1-5" in label.lower() or "импульс" in label.lower():
+        left.append("• импульс 1-2-3-4-5 (синие круги)")
+    if "abc" in phase or "ABC" in label or "abc" in label.lower():
+        left.append("• коррекция A-B-C (оранжевые)")
+    if getattr(ta, "elliott_fib_classic_ok", False) or getattr(ta, "elliott_fib_w2", 0):
+        left.append("• Fib 38.2 / 50 / 61.8% — зона отката")
+    if not label:
+        left.append("• волны Эллиотта по правилам бота")
+    else:
+        left.append(f"• {label[:70]}")
+    fig.text(lx, 0.975, "\n".join(left), va="top", ha="left", **style)
 
-    right_lines = [f"WAVE · {verdict} {conf}/9" if conf else f"WAVE · {verdict}"]
+    right = [f"ЧТО ДЕЛАТЬ · {verdict}"]
     expect = str(getattr(ta, "elliott_path_reason", "") or getattr(ta, "verdict_reason", "") or "").strip()
     if expect:
-        right_lines.append(f"➡️ {expect[:110]}")
-    mode = str(getattr(ta, "elliott_entry_mode", "") or "")
+        right.append(f"1) {expect[:100]}")
     entry = getattr(ta, "elliott_entry_price", None)
-    if entry:
-        ready = " ✓" if getattr(ta, "elliott_entry_ready", False) else ""
-        right_lines.append(f"вход {fmt_price(float(entry))} ({mode or '—'}){ready}")
     stop = getattr(ta, "elliott_stop_price", None)
+    tps = list(getattr(ta, "elliott_tp_prices", None) or [])[:2]
+    if entry:
+        right.append(f"2) Вход ≈ {fmt_price(float(entry))}")
     if stop:
-        right_lines.append(f"стоп {fmt_price(float(stop))}")
-    tps = list(getattr(ta, "elliott_tp_prices", None) or [])[:3]
+        right.append(f"3) Стоп ≈ {fmt_price(float(stop))}")
     if tps:
-        right_lines.append("TP " + " / ".join(fmt_price(float(t)) for t in tps))
+        right.append("4) Цели: " + " → ".join(fmt_price(float(t)) for t in tps))
     inv = getattr(ta, "elliott_path_invalidation", None) or getattr(ta, "invalidation_price", None)
     if inv:
-        right_lines.append(f"inv {fmt_price(float(inv))}")
-    htf = str(getattr(ta, "htf_elliott_label", "") or "").strip()
-    if htf:
-        right_lines.append(f"HTF: {htf[:60]}")
-    fig.text(
-        rx, 0.975, "\n".join(right_lines), va="top", ha="right",
-        **{**style, "color": side_color},
-    )
+        right.append(f"✗ Отмена если пробой {fmt_price(float(inv))}")
+    fig.text(rx, 0.975, "\n".join(right), va="top", ha="right", **{**style, "color": side_color})
 
-    banner = (
-        f"Волновой график · без Hot-ИТОГ · "
-        f"{'глобальный+локальный' if (g and loc) else 'структура EW+Fib'}"
-    )
     fig.text(
         0.50, 0.018 if not with_subpanels else 0.125,
-        banner,
-        va="bottom", ha="center", fontsize=7.4, color=CHART_STYLE["text"],
+        "Синие круги = волны импульса  ·  Оранжевые = коррекция ABC  ·  Зелёный = вход",
+        va="bottom", ha="center", fontsize=7.6, color=CHART_STYLE["text"],
         transform=fig.transFigure,
         bbox=dict(
             boxstyle="round,pad=0.4",
             facecolor=CHART_STYLE["panel"],
             edgecolor=CHART_STYLE["entry"],
-            alpha=0.90,
+            alpha=0.92,
         ),
     )
 
@@ -2316,6 +2278,11 @@ async def render_annotated_chart(
         elliott_span_bars=elliott_span,
         fib_span_bars=0,
     )
+    # Wave-chart: зум обязан покрыть ВСЕ точки волн, иначе меток не видно
+    if wave_focus and ew_idxs:
+        span_bars = max(ew_idxs) - min(ew_idxs) + 16
+        need_h = (span_bars * interval_minutes) / 60.0 + 1.0
+        zoom_hours = min(float(analysis_hours), max(float(zoom_hours), need_h, 8.0))
 
     source = (chart_source or "annotated").lower()
     # Wave chart — всегда matplotlib wave_focus (не TradingView Hot-overlay)

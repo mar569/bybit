@@ -400,10 +400,12 @@ def _draw_correction_grid(
     by: dict[str, ElliottPoint],
     *,
     abc_pts: list[ElliottPoint] | None = None,
+    gold_only: bool = False,
 ) -> None:
     """Сетка коррекции TradeRev: Fib от Точка1(0) → Точка2(конец импульса).
 
     Чаще всего: глубокая на 61.8%, плоская на 38.2%.
+    gold_only: только 38.2 / 50 / 61.8 — для читаемого wave-chart.
     """
     p0 = by.get("0")
     p_end = by.get("5") or by.get("3") or by.get("1")
@@ -425,20 +427,21 @@ def _draw_correction_grid(
     touch_level: float | None = None
     if abc_pts:
         last = abc_pts[-1]
-        for lvl in FIB_CORR_GOLD:
+        for lvl in FIB_CORR_GOLD | {0.50}:
             price = p_end.price - span * lvl  # 0% = end, 100% = start
             if abs(last.price - price) / max(abs(p_end.price), 1e-9) <= 0.012:
                 touch_level = lvl
                 break
 
-    for lvl in FIB_CORR_LEVELS:
+    levels = (0.382, 0.50, 0.618) if gold_only else FIB_CORR_LEVELS
+    for lvl in levels:
         # TradeRev: 0% у Точки 2 (пик), 100% у Точки 1 (старт)
         price = p_end.price - span * lvl
-        is_gold = lvl in FIB_CORR_GOLD
+        is_gold = lvl in FIB_CORR_GOLD or lvl == 0.50
         is_touch = touch_level is not None and abs(lvl - touch_level) < 1e-9
         color = EW_STYLE["fib_gold"] if (is_gold or is_touch) else EW_STYLE["fib_grid"]
-        lw = 1.15 if is_gold or is_touch else 0.65
-        alpha = 0.85 if is_gold or is_touch else 0.40
+        lw = 1.35 if gold_only else (1.15 if is_gold or is_touch else 0.65)
+        alpha = 0.9 if gold_only or is_gold or is_touch else 0.40
         ax.hlines(
             price,
             xmin=x0,
@@ -450,49 +453,48 @@ def _draw_correction_grid(
             zorder=2,
         )
         pct = f"{lvl * 100:.1f}".rstrip("0").rstrip(".")
-        label = f" {pct}%"
+        label = f" Fib {pct}%"
         if is_touch:
-            label += " ← ABC"
-        elif is_gold:
-            label += " ★"
+            label += " ← сюда"
         ax.text(
             x1,
             price,
             label,
             color=color,
-            fontsize=5.6 if is_gold else 5.2,
-            fontweight="bold" if is_gold or is_touch else "normal",
+            fontsize=7.2 if gold_only else (5.6 if is_gold else 5.2),
+            fontweight="bold" if is_gold or is_touch or gold_only else "normal",
             va="center",
             ha="left",
-            alpha=0.95 if is_gold else 0.7,
+            alpha=0.95 if is_gold or gold_only else 0.7,
             zorder=6,
         )
 
-    # Метки Точка 1 / Точка 2
-    ax.text(
-        _x_at(bars, p0.index),
-        p0.price,
-        " Т1 ",
-        color=EW_STYLE["fib_grid"],
-        fontsize=5.5,
-        fontweight="bold",
-        va="top",
-        ha="left",
-        alpha=0.8,
-        zorder=6,
-    )
-    ax.text(
-        _x_at(bars, p_end.index),
-        p_end.price,
-        " Т2 ",
-        color=EW_STYLE["fib_grid"],
-        fontsize=5.5,
-        fontweight="bold",
-        va="bottom",
-        ha="left",
-        alpha=0.8,
-        zorder=6,
-    )
+    if not gold_only:
+        # Метки Точка 1 / Точка 2
+        ax.text(
+            _x_at(bars, p0.index),
+            p0.price,
+            " Т1 ",
+            color=EW_STYLE["fib_grid"],
+            fontsize=5.5,
+            fontweight="bold",
+            va="top",
+            ha="left",
+            alpha=0.8,
+            zorder=6,
+        )
+        ax.text(
+            _x_at(bars, p_end.index),
+            p_end.price,
+            " Т2 ",
+            color=EW_STYLE["fib_grid"],
+            fontsize=5.5,
+            fontweight="bold",
+            va="bottom",
+            ha="left",
+            alpha=0.8,
+            zorder=6,
+        )
 
 
 def _draw_impulse_extension(
@@ -651,10 +653,12 @@ def draw_elliott_waves(
     *,
     max_points: int = 24,
     style: str = "ltf",
+    emphasis: bool = False,
 ) -> None:
     """Линии 0-1-2-3-4-5 + A-B-C(-D-E)/WXY; глобальный + локальный слой.
 
     style: ltf | htf | global | local
+    emphasis: крупные метки для wave-chat (читаемый график).
     """
     if ew is None or not bars:
         return
@@ -663,25 +667,42 @@ def draw_elliott_waves(
     # Явные слои, если переданы
     g_pts = list(getattr(ew, "global_draw_points", None) or [])
     l_pts = list(getattr(ew, "local_draw_points", None) or [])
+
+    # Fallback: точки импульса из объекта, если draw_points пустые
+    if not g_pts and not l_pts and not (ew.draw_points or []):
+        if ew.impulse is not None and ew.impulse.points:
+            g_pts = list(ew.impulse.points)
+        if ew.abc is not None and ew.abc.points:
+            # ABC дописываем в global слой для видимости
+            g_pts = list(g_pts) + list(ew.abc.points)
+
     if style == "global" and g_pts:
         pts = [p for p in g_pts if 0 <= p.index < len(bars)][:max_points]
-        _draw_ew_layer(ax, bars, ew, pts, layer="global", is_htf=False)
+        _draw_ew_layer(ax, bars, ew, pts, layer="global", is_htf=False, emphasis=emphasis)
         return
     if style == "local" and l_pts:
         pts = [p for p in l_pts if 0 <= p.index < len(bars)][:max_points]
-        _draw_ew_layer(ax, bars, ew, pts, layer="local", is_htf=False)
+        _draw_ew_layer(ax, bars, ew, pts, layer="local", is_htf=False, emphasis=emphasis)
         return
 
     # Авто: если есть оба слоя — рисуем оба
     if g_pts or l_pts:
         if g_pts:
             pts_g = [p for p in g_pts if 0 <= p.index < len(bars)][:max_points]
-            _draw_ew_layer(ax, bars, ew, pts_g, layer="global", is_htf=is_htf)
-        if l_pts and not is_htf:
+            _draw_ew_layer(
+                ax, bars, ew, pts_g, layer="global", is_htf=is_htf, emphasis=emphasis,
+            )
+        if l_pts and not is_htf and not emphasis:
+            # На wave-chart локальный слой часто шумит — только global крупно
             pts_l = [p for p in l_pts if 0 <= p.index < len(bars)][:max_points]
-            _draw_ew_layer(ax, bars, ew, pts_l, layer="local", is_htf=False)
+            _draw_ew_layer(ax, bars, ew, pts_l, layer="local", is_htf=False, emphasis=False)
+        elif l_pts and not is_htf and emphasis and not g_pts:
+            pts_l = [p for p in l_pts if 0 <= p.index < len(bars)][:max_points]
+            _draw_ew_layer(
+                ax, bars, ew, pts_l, layer="local", is_htf=False, emphasis=True,
+            )
         if not is_htf:
-            _draw_ew_overlays(ax, bars, ew)
+            _draw_ew_overlays(ax, bars, ew, simple=emphasis)
         return
 
     # Fallback: единый draw_points
@@ -697,16 +718,27 @@ def draw_elliott_waves(
     ]
     global_pts = [p for p in pts if p not in local_pts]
     if global_pts:
-        _draw_ew_layer(ax, bars, ew, global_pts, layer="global" if not is_htf else "htf", is_htf=is_htf)
-    if local_pts and not is_htf:
-        _draw_ew_layer(ax, bars, ew, local_pts, layer="local", is_htf=False)
+        _draw_ew_layer(
+            ax, bars, ew, global_pts,
+            layer="global" if not is_htf else "htf",
+            is_htf=is_htf,
+            emphasis=emphasis,
+        )
+    if local_pts and not is_htf and not emphasis:
+        _draw_ew_layer(ax, bars, ew, local_pts, layer="local", is_htf=False, emphasis=False)
     if not global_pts and not local_pts:
-        _draw_ew_layer(ax, bars, ew, pts, layer="ltf", is_htf=is_htf)
+        _draw_ew_layer(ax, bars, ew, pts, layer="ltf", is_htf=is_htf, emphasis=emphasis)
     if not is_htf:
-        _draw_ew_overlays(ax, bars, ew)
+        _draw_ew_overlays(ax, bars, ew, simple=emphasis)
 
 
-def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveResult) -> None:
+def _draw_ew_overlays(
+    ax: "maxes.Axes",
+    bars: list[KlineBar],
+    ew: ElliottWaveResult,
+    *,
+    simple: bool = False,
+) -> None:
     by = _impulse_anchor_points(ew)
     abc_pts = [
         p for p in (getattr(ew, "global_draw_points", None) or getattr(ew, "draw_points", None) or [])
@@ -715,16 +747,17 @@ def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveRes
     if ew.abc is not None:
         abc_pts = [p for p in ew.abc.points if p.label in {"A", "B", "C", "D", "E"}] or abc_pts
 
-    # TradeRev: сетка коррекции после импульса (самое частое)
+    # Wave-chart: только золотые Fib 38.2/50/61.8 — без сетки на весь экран
     if "0" in by and ("5" in by or "3" in by):
-        _draw_correction_grid(ax, bars, by, abc_pts=abc_pts)
+        if simple:
+            _draw_correction_grid(ax, bars, by, abc_pts=abc_pts, gold_only=True)
+        else:
+            _draw_correction_grid(ax, bars, by, abc_pts=abc_pts)
 
-    # TradeRev: расширение импульса для формирующейся волны 3
-    if "0" in by and "1" in by and "2" in by:
+    if not simple and "0" in by and "1" in by and "2" in by:
         _draw_impulse_extension(ax, bars, by)
 
-    # Канал зигзага A–C // start–B
-    if len(abc_pts) >= 3:
+    if len(abc_pts) >= 3 and not simple:
         _draw_abc_channel(ax, bars, abc_pts, by.get("5") or by.get("3"))
 
     tri = getattr(ew, "triangle_obj", None)
@@ -732,7 +765,7 @@ def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveRes
         _draw_triangle_boundaries(ax, bars, tri, is_htf=False)
     fib_p = list(getattr(ew, "fib_target_prices", None) or [])
     fib_l = list(getattr(ew, "fib_target_labels", None) or [])
-    if fib_p:
+    if fib_p and not simple:
         _draw_fib_targets(ax, bars, fib_p, fib_l)
     path_p = list(getattr(ew, "path_prices", None) or [])
     path_l = list(getattr(ew, "path_labels", None) or [])
@@ -753,29 +786,46 @@ def _draw_ew_overlays(ax: "maxes.Axes", bars: list[KlineBar], ew: ElliottWaveRes
             plan.entry_price,
             color=EW_STYLE["entry"],
             linestyle="--",
-            linewidth=0.9,
-            alpha=0.75,
+            linewidth=1.35 if simple else 0.9,
+            alpha=0.85,
         )
         x1 = _x_at(bars, len(bars) - 1)
         mode_ru = "конс." if plan.mode == "conservative" else "агр."
         ax.text(
             x1,
             plan.entry_price,
-            f" EW {mode_ru} вход ",
+            f" ВХОД {mode_ru} ",
             color=EW_STYLE["entry"],
-            fontsize=6.5,
+            fontsize=9.0 if simple else 6.5,
             va="bottom",
             ha="left",
-            alpha=0.95,
+            alpha=0.98,
             fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor=EW_STYLE["label_bg"],
+                edgecolor=EW_STYLE["entry"],
+                alpha=0.85,
+                linewidth=0.7,
+            ),
         )
         if plan.stop_price:
             ax.axhline(
                 plan.stop_price,
                 color=EW_STYLE["stop"],
                 linestyle=":",
-                linewidth=0.7,
-                alpha=0.65,
+                linewidth=1.1 if simple else 0.7,
+                alpha=0.8,
+            )
+            ax.text(
+                x1,
+                plan.stop_price,
+                " СТОП ",
+                color=EW_STYLE["stop"],
+                fontsize=8.5 if simple else 6.0,
+                va="top",
+                ha="left",
+                fontweight="bold",
             )
 
 
@@ -787,26 +837,36 @@ def _draw_ew_layer(
     *,
     layer: str,
     is_htf: bool,
+    emphasis: bool = False,
 ) -> None:
     if len(pts) < 2:
         return
 
-    if layer == "global":
+    if emphasis and layer == "global":
+        impulse_color = "#58a6ff"
+        corr_color = "#ffa657"
+        lw, ls, alpha, fs = 2.4, "-", 0.95, 11.5
+        marker_size = 11.0
+    elif layer == "global":
         impulse_color = "#388bfd"
         corr_color = "#d29922"
         lw, ls, alpha, fs = 1.55, "-", 0.75, 7.0
+        marker_size = 5.5
     elif layer == "local":
         impulse_color = "#7ee787"
         corr_color = "#ffa657"
-        lw, ls, alpha, fs = 1.05, "--", 0.9, 6.4
+        lw, ls, alpha, fs = (1.8, "-", 0.95, 10.5) if emphasis else (1.05, "--", 0.9, 6.4)
+        marker_size = 9.0 if emphasis else 4.2
     elif is_htf or layer == "htf":
         impulse_color = EW_STYLE["htf_impulse"]
         corr_color = EW_STYLE["htf_correction"]
         lw, ls, alpha, fs = 0.95, "--", 0.55, 6.0
+        marker_size = 4.5
     else:
         impulse_color = EW_STYLE["impulse"]
         corr_color = EW_STYLE["correction"]
-        lw, ls, alpha, fs = 1.2, "-", 0.85, 7.2
+        lw, ls, alpha, fs = (2.2, "-", 0.95, 11.0) if emphasis else (1.2, "-", 0.85, 7.2)
+        marker_size = 10.0 if emphasis else 5.5
 
     impulse_pts = [p for p in pts if p.label in _IMPULSE_LABELS]
     abc_pts = [p for p in pts if p.label in _ABC_LABELS]
@@ -822,7 +882,7 @@ def _draw_ew_layer(
         truncated = truncated or ew.impulse.truncated
         diagonal = diagonal or ew.impulse.diagonal
 
-    if layer == "global" and not is_htf:
+    if layer == "global" and not is_htf and not emphasis:
         if extension:
             _draw_extension_highlight(ax, bars, by, extension, is_htf=False)
         if diagonal:
@@ -840,43 +900,46 @@ def _draw_ew_layer(
             x = _x_at(bars, p.index)
             is_abc = p.label in _ABC_LABELS or p.label in _COMPLEX_LABELS
             c = corr_color if is_abc else color
+            # Читаемая метка: круг + номер/буква
+            pretty = {
+                "0": "0", "1": "1", "2": "2", "3": "3", "4": "4", "5": "5",
+                "A": "A", "B": "B", "C": "C", "D": "D", "E": "E",
+                "i": "i", "ii": "ii", "iii": "iii", "iv": "iv", "v": "v",
+                "a": "a", "b": "b", "c": "c",
+            }.get(p.label, p.label)
+            if is_htf and p.label in {"0", "1", "2", "3", "4", "5"}:
+                pretty = f"H{pretty}"
             ax.plot(
                 x,
                 p.price,
                 marker="o",
                 color=c,
-                markersize=4.2 if layer == "local" else (4.5 if is_htf else 5.5),
-                alpha=0.95,
-                zorder=5,
+                markersize=marker_size,
+                markeredgecolor="#0d1117",
+                markeredgewidth=1.2 if emphasis else 0.6,
+                alpha=0.98,
+                zorder=8,
             )
-            prefix = ""
-            if is_htf and p.label in {"0", "1", "2", "3", "4", "5"}:
-                prefix = "H"
-            elif layer == "global" and p.label in {"0", "1", "2", "3", "4", "5", "A", "B", "C", "D", "E"}:
-                prefix = ""  # чистые 1–5 / A–E
-            label = f"{prefix}{p.label}" if prefix else p.label
             y_off = p.price * (
-                1.0025
-                if p.label in {"1", "3", "5", "B", "D", "X", "X2", "i", "iii", "v", "b", "d", "x"}
-                else 0.9975
+                1.004 if p.label in {"1", "3", "5", "B", "D", "i", "iii", "v", "b"} else 0.996
             )
             ax.text(
                 x,
-                y_off,
-                f" {label}",
-                color=c,
+                y_off if not emphasis else p.price,
+                pretty,
+                color="#ffffff" if emphasis else c,
                 fontsize=fs,
                 fontweight="bold",
                 va="center",
-                ha="left",
+                ha="center",
                 bbox=dict(
-                    boxstyle="round,pad=0.12",
-                    facecolor=EW_STYLE["label_bg"],
-                    edgecolor=c,
-                    alpha=0.7,
-                    linewidth=0.55,
+                    boxstyle="circle,pad=0.28" if emphasis else "round,pad=0.12",
+                    facecolor=c if emphasis else EW_STYLE["label_bg"],
+                    edgecolor="#0d1117" if emphasis else c,
+                    alpha=0.95 if emphasis else 0.7,
+                    linewidth=1.1 if emphasis else 0.55,
                 ),
-                zorder=6,
+                zorder=9,
             )
 
     _polyline(impulse_pts, impulse_color, line_w=lw)
@@ -886,12 +949,37 @@ def _draw_ew_layer(
             bridge.append(impulse_pts[-1])
         bridge.extend(abc_pts)
         _polyline(bridge if len(bridge) >= 2 else abc_pts, corr_color, line_w=lw * 0.9)
-        if layer != "local":
+        if layer != "local" and not emphasis:
             _draw_corr_type_badge(ax, bars, abc_pts, corr_type, is_htf=is_htf)
     if complex_pts and not abc_pts:
         _polyline(complex_pts, corr_color, line_w=lw * 0.9)
 
-    if layer == "global" and not is_htf:
+    if layer == "global" and not is_htf and impulse_pts and emphasis:
+        # Короткая подпись над первой точкой
+        note = "импульс 1–5" if any(p.label == "5" for p in impulse_pts) else "волны"
+        if abc_pts:
+            note += " + ABC"
+        p0 = impulse_pts[0]
+        ax.text(
+            _x_at(bars, p0.index),
+            p0.price,
+            f" {note} ",
+            color=impulse_color,
+            fontsize=8.5,
+            fontweight="bold",
+            va="bottom",
+            ha="left",
+            alpha=0.95,
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor=EW_STYLE["label_bg"],
+                edgecolor=impulse_color,
+                alpha=0.8,
+                linewidth=0.7,
+            ),
+            zorder=7,
+        )
+    elif layer == "global" and not is_htf:
         note = getattr(ew, "global_label_ru", "") or getattr(ew, "structure_note_ru", "") or ""
         if note and impulse_pts:
             p0 = impulse_pts[0]
@@ -914,7 +1002,7 @@ def _draw_ew_layer(
                 ),
                 zorder=6,
             )
-    if layer == "local" and impulse_pts:
+    if layer == "local" and impulse_pts and not emphasis:
         note = getattr(ew, "local_label_ru", "") or "локально"
         p0 = impulse_pts[0]
         ax.text(
@@ -932,7 +1020,7 @@ def _draw_ew_layer(
                 facecolor=EW_STYLE["label_bg"],
                 edgecolor=impulse_color,
                 alpha=0.65,
-                linewidth=0.5,
+                linewidth=0.45,
             ),
             zorder=6,
         )

@@ -252,21 +252,38 @@ def build_wave_event(
     min_quality = int(getattr(settings, "wave_min_impulse_quality", 58))
     min_conf = int(getattr(settings, "wave_min_confidence", 5))
     require_valid = bool(getattr(settings, "wave_require_impulse_valid", True))
+    allow_diagonal = bool(getattr(settings, "wave_allow_diagonal_signals", False))
 
     if require_valid and not imp.valid and not (plan and plan.ready and imp.quality >= 70):
+        return None
+    # Диагональ с overlap 4↔1 — не «чистый» импульс; в wave-чат только по флагу
+    if imp.diagonal and not allow_diagonal:
         return None
     if imp.quality < min_quality and not (plan and plan.ready):
         return None
     if int(ew.confidence or 0) < min_conf and not (plan and plan.ready):
         return None
 
-    # Нарушения чек-листа EW (перекрытие 4↔1, волна 2 за основанием, 3 короткая)
+    # Нарушения чек-листа EW — блокируют торговые алерты
     hard_violations = [
         v for v in (imp.violations or [])
         if any(
             key in v.lower()
-            for key in ("перекрыт", "заходит", "коротк", "не превыш", "наруш")
+            for key in (
+                "пересекла",
+                "пробила",
+                "зашла за",
+                "коротк",
+                "не превыш",
+                "не вверх",
+                "не вниз",
+                "не обновила",
+                "не откат",
+            )
         )
+        and "диагональ" not in v.lower()
+        and "усечение" not in v.lower()
+        and "допуск" not in v.lower()
     ]
     setup_kind, side = _classify_setup(ew)
 
@@ -323,9 +340,18 @@ def build_wave_event(
     inv = ew.path_invalidation
     if inv is None and stop is not None:
         inv = stop
-
     fib_note = _fib_zone_note(ew)
     expect = _expect_ru(ew, setup_kind, side)
+
+    # Опоздавший сетап: цена уже далеко от входа в сторону цели — не шлём
+    if entry and entry > 0 and side in {"long", "short"}:
+        dist_pct = abs(px - entry) / entry * 100.0
+        max_late = float(getattr(settings, "wave_max_late_entry_pct", 1.2))
+        already_past = (
+            (side == "short" and px < entry) or (side == "long" and px > entry)
+        )
+        if already_past and dist_pct > max_late:
+            return None
 
     detail_parts = [
         ew.label_ru or "EW структура",
@@ -428,49 +454,39 @@ def format_wave_alert(event: WaveEvent) -> str:
     ex_url = exchange_trade_url(event.symbol, event.exchange)
     ts = datetime.fromtimestamp(event.timestamp, tz=timezone.utc).strftime("%H:%M")
 
+    how_read = (
+        "Как читать график:\n"
+        "• синие круги <b>1–5</b> — импульс\n"
+        "• оранжевые <b>A–C</b> — коррекция\n"
+        "• зелёный <b>ВХОД</b> / красный <b>СТОП</b> / жёлтый <b>TP</b>"
+    )
+
     lines = [
-        f"<b>{title}</b> · <b>{side_tag}</b> · важн. <b>{event.importance:.0f}</b>",
+        f"<b>{title}</b> · <b>{side_tag}</b>",
         f'{exchange_emoji} <a href="{ex_url}">{exchange_name}</a> '
         f'<a href="{cg_url}">#{ticker}</a> · ${event.price:.6g}',
+        "",
+        how_read,
+        "",
     ]
-    if event.global_label or event.local_label:
-        g = event.global_label or "—"
-        loc = event.local_label or "—"
-        lines.append(f"G: <i>{g}</i>\nL: <i>{loc}</i>")
-    elif event.label_ru:
-        lines.append(f"<i>{event.label_ru}</i>")
-
-    if event.fib_note:
-        lines.append(f"Fib: {event.fib_note}")
     if event.expect_ru:
-        lines.append(f"➡️ {event.expect_ru}")
+        lines.append(f"<b>Дальше:</b> {event.expect_ru}")
 
     plan_bits: list[str] = []
     if event.entry_price:
-        mode = "конс." if event.entry_mode == "conservative" else (
-            "агр." if event.entry_mode == "aggressive" else event.entry_mode
-        )
-        ready = " ✓" if event.entry_ready else ""
-        plan_bits.append(f"вход ≈ {fmt_price(event.entry_price)} ({mode}){ready}")
+        ready = " ✓ готов" if event.entry_ready else ""
+        plan_bits.append(f"вход {fmt_price(event.entry_price)}{ready}")
     if event.stop_price:
         plan_bits.append(f"стоп {fmt_price(event.stop_price)}")
     if event.tp_prices:
-        tps = " / ".join(fmt_price(t) for t in event.tp_prices[:3])
-        plan_bits.append(f"TP {tps}")
-    if event.invalidation and (
-        event.stop_price is None
-        or abs(event.invalidation - event.stop_price) / max(event.price, 1e-9) > 0.001
-    ):
-        plan_bits.append(f"inv {fmt_price(event.invalidation)}")
+        tps = " → ".join(fmt_price(t) for t in event.tp_prices[:2])
+        plan_bits.append(f"цели {tps}")
     if plan_bits:
         lines.append(" · ".join(plan_bits))
+    if event.invalidation:
+        lines.append(f"отмена &lt;пробой&gt; {fmt_price(event.invalidation)}")
 
-    if event.path_reason and event.path_reason not in (event.expect_ru or ""):
-        lines.append(f"Path: {event.path_reason[:120]}")
-
-    lines.append(
-        f"<i>{ts} UTC · conf {event.confidence}/9 · только EW+Fib, не OI-алерт</i>"
-    )
+    lines.append(f"<i>{ts} UTC · conf {event.confidence}/9</i>")
     return "\n".join(lines)
 
 

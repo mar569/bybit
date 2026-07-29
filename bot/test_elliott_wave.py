@@ -250,17 +250,33 @@ def test_detect_truncation_after_strong_w3() -> None:
 def test_detect_ending_diagonal_overlap() -> None:
     from bot.elliott_wave import detect_diagonal_type
 
-    # 4 заходит в зону 1 (overlap) + сужение
+    # Overlap 4↔1 + сужающийся клин (W3<W1, W4<W2, W5<W3)
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 10, 120.0),  # w1=20
+        ElliottPoint("2", 20, 110.0),  # w2=10
+        ElliottPoint("3", 35, 125.0),  # w3=15 < w1, выше вершины 1
+        ElliottPoint("4", 45, 115.0),  # w4=10 ≈ w2; overlap (115<120), выше W2
+        ElliottPoint("5", 55, 122.0),  # w5=7 < w3
+    ]
+    bars = [_bar(i, 100, 101, 99, 100) for i in range(60)]
+    assert detect_diagonal_type(pts, "up", bars) == "ending"
+
+
+def test_overlap_without_wedge_is_not_diagonal() -> None:
+    from bot.elliott_wave import detect_diagonal_type
+
+    # Overlap есть, но нет клина — не диагональ
     pts = [
         ElliottPoint("0", 0, 100.0),
         ElliottPoint("1", 10, 120.0),
         ElliottPoint("2", 20, 108.0),
-        ElliottPoint("3", 35, 128.0),
-        ElliottPoint("4", 45, 115.0),  # ниже 1.price=120 → overlap up
-        ElliottPoint("5", 55, 124.0),
+        ElliottPoint("3", 35, 145.0),  # сильная 3, не клин
+        ElliottPoint("4", 45, 115.0),  # overlap
+        ElliottPoint("5", 55, 150.0),
     ]
     bars = [_bar(i, 100, 101, 99, 100) for i in range(60)]
-    assert detect_diagonal_type(pts, "up", bars) == "ending"
+    assert detect_diagonal_type(pts, "up", bars) == ""
 
 
 def test_classify_abc_zigzag_vs_flat() -> None:

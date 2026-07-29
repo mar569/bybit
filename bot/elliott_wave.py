@@ -332,13 +332,15 @@ def detect_diagonal_type(
         return ""
     p0, p1, p2, p3, p4 = by["0"], by["1"], by["2"], by["3"], by["4"]
 
-    # Required: W4 заходит в зону W1 (перекрытие)
+    # Required: W4 заходит в зону W1 (перекрытие) — иначе это не диагональ
     overlap = (
         (direction == "up" and p4.price <= p1.price)
         or (direction == "down" and p4.price >= p1.price)
     )
+    if not overlap:
+        return ""
 
-    # Required: W4 НЕ за окончание W2
+    # Required: W4 НЕ за окончание W2 (жёстко)
     w4_past_w2 = (
         (direction == "up" and p4.price < p2.price)
         or (direction == "down" and p4.price > p2.price)
@@ -361,21 +363,14 @@ def detect_diagonal_type(
             contracting = contracting and w5 < w3 * 1.02
         if expanding:
             expanding = expanding and w5 > w3 * 0.98
-
-        # Ending diagonal: W5/C position; усечение W5 допустимо
-        if overlap or contracting or expanding:
+        # Ending: overlap + (клин или усечение/канал)
+        if contracting or expanding:
             return "ending"
-    else:
-        # Leading: early structure with overlap
-        if overlap or contracting:
-            return "leading"
-
-    # Fallback: channel convergence
-    leg02 = abs(p2.price - p0.price)
-    leg24 = abs(p4.price - p2.price)
-    if leg02 > 0 and leg24 < leg02 * 0.85 and overlap:
-        return "leading" if "5" not in by else "ending"
-
+        # overlap есть, но без клина — слабая диагональ, не помечаем
+        return ""
+    # Leading: overlap + сужение
+    if contracting:
+        return "leading"
     return ""
 
 
@@ -464,10 +459,19 @@ def _validate_impulse_rules(
     direction: str,
     *,
     allow_overlap_4_1: bool = False,
+    strict_w4_vs_w2: bool = True,
 ) -> tuple[list[str], bool]:
-    """Классический чек-лист. pts = [0,1,2,3,4,5] или префикс.
+    """Жёсткий чек-лист Эллиотта (импульс вверх и вниз одинаково).
 
-    allow_overlap_4_1: для диагоналей (PPT) волна 4 может заходить в зону 1.
+    Правила (Prechter / TradeRevolution / analiz.md):
+    1. Волна 2 НИКОГДА не заходит за начало волны 1 (основание 0).
+    2. Волна 3 всегда проходит за окончание волны 1; никогда не самая короткая.
+    3. Волна 4 НЕ заходит в территорию волны 1 (кроме настоящей диагонали).
+    4. Волна 4 НЕ пробивает экстремум волны 2 (в диагонали — обязательно;
+       в обычном импульсе — тоже держим как правило «чистой» разметки).
+    5. Волна 5 обычно обновляет экстремум 3 (усечение — отдельный флаг).
+
+    allow_overlap_4_1: только для подтверждённой диагонали.
     """
     violations: list[str] = []
     by = {p.label: p for p in pts}
@@ -479,11 +483,13 @@ def _validate_impulse_rules(
     if direction == "up":
         if p1.price <= p0.price:
             violations.append("волна 1 не вверх")
+        # W2 не ниже старта W1
         if p2.price <= p0.price:
             violations.append("волна 2 зашла за основание 1")
         if p2.price >= p1.price:
             violations.append("волна 2 не откат")
     else:
+        # Падающий импульс: 0=хай, 1=лой, 2=откат вверх < 0
         if p1.price >= p0.price:
             violations.append("волна 1 не вниз")
         if p2.price >= p0.price:
@@ -503,20 +509,29 @@ def _validate_impulse_rules(
     if "4" in by and "1" in by and "3" in by:
         p4 = by["4"]
         p1 = by["1"]
+        p2 = by["2"]
+        p3 = by["3"]
         if direction == "up":
+            # Перекрытие с W1
             if p4.price <= p1.price and not allow_overlap_4_1:
                 violations.append("волна 4 пересекла волну 1")
             elif p4.price <= p1.price and allow_overlap_4_1:
                 violations.append("перекрытие 4↔1 (диагональ)")
-            if p4.price >= by["3"].price:
+            if p4.price >= p3.price:
                 violations.append("волна 4 не откат")
+            # W4 не пробивает лой W2
+            if strict_w4_vs_w2 and p4.price < p2.price:
+                violations.append("волна 4 пробила волну 2")
         else:
             if p4.price >= p1.price and not allow_overlap_4_1:
                 violations.append("волна 4 пересекла волну 1")
             elif p4.price >= p1.price and allow_overlap_4_1:
                 violations.append("перекрытие 4↔1 (диагональ)")
-            if p4.price <= by["3"].price:
+            if p4.price <= p3.price:
                 violations.append("волна 4 не откат")
+            # W4 не пробивает хай W2
+            if strict_w4_vs_w2 and p4.price > p2.price:
+                violations.append("волна 4 пробила волну 2")
 
     if "5" in by and "3" in by and "4" in by:
         p5 = by["5"]
@@ -536,13 +551,12 @@ def _validate_impulse_rules(
                     if direction == "up"
                     else "волна 5 не обновила лой 3"
                 )
-        # TradeRev: W3 НИКОГДА самая короткая (fatal)
+        # W3 НИКОГДА самая короткая (fatal)
         if w3 < w1 * 0.98 and w3 < w5 * 0.98:
             violations.append("волна 3 самая короткая (запрещено)")
         elif w3 < w1 * 0.98 or w3 < w5 * 0.98:
             violations.append("волна 3 не самая длинная (допуск)")
     elif "3" in by:
-        # Partial: check W3 vs W1 even without W5
         p0, p1, p3 = by["0"], by["1"], by["3"]
         w1 = _leg_size(p0, p1)
         w3 = _leg_size(by["2"], p3)
@@ -552,16 +566,21 @@ def _validate_impulse_rules(
     fatal_keys = (
         "зашла за основание",
         "пересекла волну 1",
+        "пробила волну 2",
         "не превысила",
         "не вверх",
         "не вниз",
         "не обновила",
         "самая короткая",
+        "не откат",
     )
     fatal = [
         v
         for v in violations
-        if any(k in v for k in fatal_keys) and "усечение" not in v and "диагональ" not in v
+        if any(k in v for k in fatal_keys)
+        and "усечение" not in v
+        and "диагональ" not in v
+        and "допуск" not in v
     ]
     return violations, len(fatal) == 0
 
@@ -751,16 +770,16 @@ def _make_impulse(
     quality_cap: int | None = None,
     min_q: int = MIN_IMPULSE_QUALITY,
 ) -> ElliottImpulse | None:
+    # Сначала настоящая диагональ по клину; только она разрешает overlap 4↔1
     diagonal = detect_diagonal_type(pts, direction, bars)
     violations, rules_ok = _validate_impulse_rules(
-        pts, direction, allow_overlap_4_1=bool(diagonal)
+        pts,
+        direction,
+        allow_overlap_4_1=bool(diagonal),
+        strict_w4_vs_w2=True,
     )
-    # Если классика упала только на overlap 4↔1 — пробуем как диагональ
-    if not rules_ok and not diagonal:
-        _v2, ok2 = _validate_impulse_rules(pts, direction, allow_overlap_4_1=True)
-        if ok2:
-            diagonal = "ending" if any(p.label == "5" for p in pts) else "leading"
-            violations, rules_ok = _v2, ok2
+    # НЕ авто-помечать любой overlap как диагональ — иначе «ломаные» импульсы
+    # проходят в сигналы. Диагональ только если detect_diagonal_type её увидел.
 
     fib = _fib_proportion_check(pts)
     fib_notes = list(fib.get("notes") or [])
@@ -785,8 +804,9 @@ def _make_impulse(
     if quality_cap is not None:
         q = min(q, quality_cap)
     fib_ok = bool(fib.get("classic_ok"))
-    # Диагонали часто ломают «классический» Fib — допускаем по quality
-    if diagonal and not fib_ok and q >= max(min_q, 58):
+    # Диагональ: Fib classic часто ломается — только мягкий допуск по quality,
+    # но НЕ для торгового valid без отдельного флага
+    if diagonal and not fib_ok and q >= max(min_q + 8, 66):
         fib_ok = True
     if not rules_ok:
         return None
@@ -812,7 +832,11 @@ def _make_impulse(
         or truncated
         or bool(diagonal)
     )
-    trade_valid = rules_ok and fib_ok and q >= min_q and shape_ok
+    # Торговый valid: правила + Fib; диагональ — отдельный тип (не «чистый импульс»)
+    trade_valid = rules_ok and fib_ok and q >= min_q and shape_ok and not (
+        # мягкие «допуск» violations не валят, fatal уже отсечены rules_ok
+        False
+    )
     note = _structure_note_ru(
         extension=extension, truncated=truncated, diagonal=diagonal
     )

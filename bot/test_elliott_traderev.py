@@ -19,6 +19,144 @@ def test_w3_never_shortest_fatal():
     assert any("самая короткая" in v for v in violations)
 
 
+def test_bull_valid_impulse_rules():
+    """Чистый бычий импульс: W2 > старт W1, W4 > W1 и W4 > W2."""
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 10, 104.0),  # выше 100
+        ElliottPoint("3", 20, 125.0),
+        ElliottPoint("4", 25, 116.0),  # выше W1=110 и выше W2=104
+        ElliottPoint("5", 35, 132.0),
+    ]
+    violations, valid = _validate_impulse_rules(pts, "up")
+    assert valid, f"expected valid, got {violations}"
+
+
+def test_bear_valid_impulse_rules():
+    """Падающий импульс: W2 < старт W1, W4 < W1 и W4 < W2."""
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 90.0),
+        ElliottPoint("2", 10, 96.0),  # ниже 100
+        ElliottPoint("3", 20, 75.0),
+        ElliottPoint("4", 25, 84.0),  # ниже W1=90 и ниже W2=96
+        ElliottPoint("5", 35, 68.0),
+    ]
+    violations, valid = _validate_impulse_rules(pts, "down")
+    assert valid, f"expected valid bear, got {violations}"
+
+
+def test_w2_beyond_w1_start_fatal_bull():
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 10, 99.0),  # ниже основания 0
+    ]
+    violations, valid = _validate_impulse_rules(pts, "up")
+    assert not valid
+    assert any("зашла за основание" in v for v in violations)
+
+
+def test_w2_beyond_w1_start_fatal_bear():
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 90.0),
+        ElliottPoint("2", 10, 101.0),  # выше основания 0
+    ]
+    violations, valid = _validate_impulse_rules(pts, "down")
+    assert not valid
+    assert any("зашла за основание" in v for v in violations)
+
+
+def test_w4_into_w1_fatal_without_diagonal():
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 10, 104.0),
+        ElliottPoint("3", 20, 125.0),
+        ElliottPoint("4", 25, 108.0),  # в территорию W1
+    ]
+    violations, valid = _validate_impulse_rules(pts, "up", allow_overlap_4_1=False)
+    assert not valid
+    assert any("пересекла волну 1" in v for v in violations)
+
+
+def test_w4_past_w2_fatal_bull_and_bear():
+    from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
+
+    bull = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 10, 104.0),
+        ElliottPoint("3", 20, 125.0),
+        ElliottPoint("4", 25, 103.0),  # ниже W2, но выше W1? 103 < 110 → также W1
+    ]
+    # Чтобы изолировать W4 vs W2: W4 выше W1, но ниже W2
+    bull_w4_vs_w2 = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 110.0),
+        ElliottPoint("2", 10, 104.0),
+        ElliottPoint("3", 20, 125.0),
+        ElliottPoint("4", 25, 111.0),  # выше W1=110, но... 111 > 104, не пробивает W2
+    ]
+    # Реальный кейс W4 пробивает W2, оставаясь выше W1 невозможен на up (W2 < W1).
+    # На up: W2 < W1 всегда; W4 > W1 ⇒ W4 > W2. Поэтому «пробила W2» при
+    # strict означает W4 < W2, что автоматически даёт и overlap с W1.
+    v, ok = _validate_impulse_rules(bull, "up")
+    assert not ok
+    assert any("пробила волну 2" in v_ or "пересекла волну 1" in v_ for v_ in v)
+
+    bear = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 90.0),
+        ElliottPoint("2", 10, 96.0),
+        ElliottPoint("3", 20, 75.0),
+        ElliottPoint("4", 25, 97.0),  # выше W2=96 → пробила волну 2 (+ возможно W1)
+    ]
+    v2, ok2 = _validate_impulse_rules(bear, "down")
+    assert not ok2
+    assert any("пробила волну 2" in x for x in v2)
+
+    # sanity: чистая W4 не бьёт W2
+    _, ok3 = _validate_impulse_rules(bull_w4_vs_w2, "up")
+    assert ok3
+
+
+def test_overlap_not_auto_valid_as_diagonal():
+    """Overlap 4↔1 без клина → invalid; _make_impulse не промоутит в diagonal."""
+    from bot.elliott_wave import ElliottPoint, _make_impulse, detect_diagonal_type
+
+    pts = [
+        ElliottPoint("0", 0, 100.0),
+        ElliottPoint("1", 5, 120.0),
+        ElliottPoint("2", 10, 108.0),
+        ElliottPoint("3", 20, 150.0),
+        ElliottPoint("4", 25, 115.0),  # overlap
+        ElliottPoint("5", 35, 155.0),
+    ]
+
+    class _B:
+        def __init__(self, i: int) -> None:
+            self.open_time = i * 60_000
+            self.open = self.high = self.low = self.close = 100.0
+            self.volume = 1.0
+
+    bars = [_B(i) for i in range(40)]
+    assert detect_diagonal_type(pts, "up", bars) == ""
+    assert _make_impulse(pts, "up", bars=bars, current_wave="5") is None
+
+
 def test_w3_not_longest_but_not_shortest_soft():
     """W3 not longest but not shortest — допуск, not fatal."""
     from bot.elliott_wave import ElliottPoint, _validate_impulse_rules
