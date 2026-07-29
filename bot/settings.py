@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 50
+SETTINGS_VERSION = 51
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -483,6 +483,39 @@ class ScannerSettings:
     anomaly_batch_interval_seconds: int = 60
     anomaly_symbol_cooldown_seconds: int = 1800
     anomaly_min_importance: float = 55.0
+
+    # Wave Watcher — только Elliott 1–5 + Fib → TELEGRAM_WAVE_CHAT_ID / anomaly / analysis
+    wave_enabled: bool = True
+    wave_min_importance: float = 58.0
+    wave_min_confidence: int = 5
+    wave_min_impulse_quality: int = 58
+    wave_require_fib_classic: bool = True
+    wave_require_entry_ready: bool = False
+    wave_allow_structure_watch: bool = False
+    wave_allow_path_alerts: bool = True
+    wave_phases_enabled: tuple[str, ...] = (
+        "impulse_2",
+        "impulse_4",
+        "impulse_5",
+        "impulse_complete",
+        "abc_C",
+        "abc_complete",
+        "abcde_triangle",
+    )
+    wave_max_per_minute: int = 2
+    wave_batch_interval_seconds: int = 90
+    wave_symbol_cooldown_seconds: int = 2400
+    wave_scan_interval_seconds: int = 120
+    wave_scan_limit: int = 40
+    wave_scan_concurrency: int = 3
+    wave_chart_enabled: bool = True
+    wave_chart_hours: int = 18
+    wave_interval_minutes: int = 5
+    wave_watch_enabled: bool = True
+    wave_watch_minutes: int = 90
+    wave_watch_enroll_cooldown_seconds: int = 900
+    wave_watch_near_pct: float = 0.35
+    wave_watch_tick_seconds: float = 15.0
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = True
@@ -958,6 +991,44 @@ class ScannerSettings:
                 base.get("anomaly_symbol_cooldown_seconds", 1800)
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
+            wave_enabled=bool(base.get("wave_enabled", True)),
+            wave_min_importance=float(base.get("wave_min_importance", 58.0)),
+            wave_min_confidence=int(base.get("wave_min_confidence", 5)),
+            wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 58)),
+            wave_require_fib_classic=bool(base.get("wave_require_fib_classic", True)),
+            wave_require_entry_ready=bool(base.get("wave_require_entry_ready", False)),
+            wave_allow_structure_watch=bool(base.get("wave_allow_structure_watch", False)),
+            wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", True)),
+            wave_phases_enabled=cls._parse_str_tuple(
+                base.get("wave_phases_enabled"),
+                (
+                    "impulse_2",
+                    "impulse_4",
+                    "impulse_5",
+                    "impulse_complete",
+                    "abc_C",
+                    "abc_complete",
+                    "abcde_triangle",
+                ),
+            ),
+            wave_max_per_minute=int(base.get("wave_max_per_minute", 2)),
+            wave_batch_interval_seconds=int(base.get("wave_batch_interval_seconds", 90)),
+            wave_symbol_cooldown_seconds=int(
+                base.get("wave_symbol_cooldown_seconds", 2400)
+            ),
+            wave_scan_interval_seconds=int(base.get("wave_scan_interval_seconds", 120)),
+            wave_scan_limit=int(base.get("wave_scan_limit", 40)),
+            wave_scan_concurrency=int(base.get("wave_scan_concurrency", 3)),
+            wave_chart_enabled=bool(base.get("wave_chart_enabled", True)),
+            wave_chart_hours=int(base.get("wave_chart_hours", 18)),
+            wave_interval_minutes=int(base.get("wave_interval_minutes", 5)),
+            wave_watch_enabled=bool(base.get("wave_watch_enabled", True)),
+            wave_watch_minutes=int(base.get("wave_watch_minutes", 90)),
+            wave_watch_enroll_cooldown_seconds=int(
+                base.get("wave_watch_enroll_cooldown_seconds", 900)
+            ),
+            wave_watch_near_pct=float(base.get("wave_watch_near_pct", 0.35)),
+            wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
@@ -1374,6 +1445,42 @@ class SettingsManager:
                 merged["signal_chart_height_scale"] = float(
                     merged.get("signal_chart_height_scale", 1.0) or 1.0
                 )
+            if version < 51:
+                # Wave Watcher: EW+Fib сигналы вместо anomaly-радара
+                merged.setdefault("wave_enabled", True)
+                merged.setdefault("wave_min_importance", 58.0)
+                merged.setdefault("wave_min_confidence", 5)
+                merged.setdefault("wave_min_impulse_quality", 58)
+                merged.setdefault("wave_require_fib_classic", True)
+                merged.setdefault("wave_require_entry_ready", False)
+                merged.setdefault("wave_allow_structure_watch", False)
+                merged.setdefault("wave_allow_path_alerts", True)
+                merged.setdefault(
+                    "wave_phases_enabled",
+                    [
+                        "impulse_2",
+                        "impulse_4",
+                        "impulse_5",
+                        "impulse_complete",
+                        "abc_C",
+                        "abc_complete",
+                        "abcde_triangle",
+                    ],
+                )
+                merged.setdefault("wave_max_per_minute", 2)
+                merged.setdefault("wave_batch_interval_seconds", 90)
+                merged.setdefault("wave_symbol_cooldown_seconds", 2400)
+                merged.setdefault("wave_scan_interval_seconds", 120)
+                merged.setdefault("wave_scan_limit", 40)
+                merged.setdefault("wave_scan_concurrency", 3)
+                merged.setdefault("wave_chart_enabled", True)
+                merged.setdefault("wave_chart_hours", 18)
+                merged.setdefault("wave_interval_minutes", 5)
+                merged.setdefault("wave_watch_enabled", True)
+                merged.setdefault("wave_watch_minutes", 90)
+                merged.setdefault("wave_watch_enroll_cooldown_seconds", 900)
+                merged.setdefault("wave_watch_near_pct", 0.35)
+                merged.setdefault("wave_watch_tick_seconds", 15.0)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
@@ -1381,7 +1488,7 @@ class SettingsManager:
                 (PRESERVE_ON_MIGRATE | LIQUIDATION_PRESERVE_KEYS | ANALYSIS_PRESERVE_KEYS) & data.keys()
             )
             logger.info(
-                "Settings migrated v%d → v%d (v49: Balanced PRO preset; preserved: %s)",
+                "Settings migrated v%d → v%d (v51: Wave Watcher; preserved: %s)",
                 version,
                 SETTINGS_VERSION,
                 ", ".join(preserved),

@@ -15,6 +15,7 @@ from .exchanges.bybit import BybitScanner
 from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
 from .anomaly_alerts import AnomalyBatcher
+from .wave_alerts import WaveBatcher, WaveScanEngine
 from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
@@ -118,6 +119,7 @@ async def main() -> None:
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
     anomaly_batcher = AnomalyBatcher(telegram.dispatch_anomaly)
+    wave_batcher = WaveBatcher(telegram.dispatch_wave)
     scanner = SignalEngine(
         settings,
         telegram.dispatch_signal,
@@ -125,6 +127,7 @@ async def main() -> None:
     )
     scanner.attach_anomaly_batcher(anomaly_batcher)
     telegram.scanner = scanner
+    wave_engine = WaveScanEngine(settings, scanner, wave_batcher)
 
     def scan_interval() -> float:
         return float(settings.settings.scan_interval_seconds)
@@ -258,6 +261,7 @@ async def main() -> None:
     binance_liq_task: asyncio.Task | None = None
     cvd_task: asyncio.Task | None = None
     anomaly_task: asyncio.Task | None = None
+    wave_task: asyncio.Task | None = None
     analysis_heartbeat_task: asyncio.Task | None = None
     try:
         await telegram.start()
@@ -280,14 +284,29 @@ async def main() -> None:
             )
         s = settings.settings
         logger.info(
-            "Startup: signals=%s liq=%s analysis=%s anomaly=%s | Bybit %d | Binance %d",
+            "Startup: signals=%s liq=%s analysis=%s anomaly=%s wave=%s | Bybit %d | Binance %d",
             "ON" if s.signals_enabled else "OFF",
             "ON" if s.liquidation_alerts_enabled else "OFF",
             "ON" if s.analysis_enabled and config.analysis_chat_configured else "OFF",
             "ON" if s.anomaly_enabled and config.anomaly_chat_configured else "OFF",
+            "ON" if getattr(s, "wave_enabled", False) and config.wave_chat_configured else "OFF",
             len(bybit.symbols),
             len(binance.symbols),
         )
+        if getattr(s, "wave_enabled", False) and config.wave_chat_configured:
+            logger.info(
+                "Wave chat=%s · scan every %ss · top %d · Fib classic=%s · chart=%s",
+                config.wave_chat_id,
+                int(getattr(s, "wave_scan_interval_seconds", 120)),
+                int(getattr(s, "wave_scan_limit", 40)),
+                "ON" if getattr(s, "wave_require_fib_classic", True) else "OFF",
+                "ON" if getattr(s, "wave_chart_enabled", True) else "OFF",
+            )
+        elif getattr(s, "wave_enabled", False):
+            logger.warning(
+                "wave_enabled=ON but no chat id — set TELEGRAM_WAVE_CHAT_ID "
+                "or TELEGRAM_ANOMALY_CHAT_ID / TELEGRAM_ANALYSIS_CHAT_ID",
+            )
         if config.analysis_chat_configured:
             logger.info(
                 "Analysis chat=%s%s | liq≥$%s/$%s/$%s alt/standard/major | "
@@ -319,6 +338,7 @@ async def main() -> None:
             target_task = asyncio.create_task(telegram.target_watcher.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
+        wave_task = asyncio.create_task(wave_engine.run_loop())
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         analysis_heartbeat_task = asyncio.create_task(
             _analysis_heartbeat_loop(analysis_engine, liquidation_tracker),
@@ -368,6 +388,8 @@ async def main() -> None:
             cvd_task.cancel()
         if anomaly_task is not None:
             anomaly_task.cancel()
+        if wave_task is not None:
+            wave_task.cancel()
         await asyncio.gather(
             *(
                 t
@@ -383,6 +405,7 @@ async def main() -> None:
                     binance_liq_task,
                     cvd_task,
                     anomaly_task,
+                    wave_task,
                 )
                 if t is not None
             ),

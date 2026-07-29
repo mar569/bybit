@@ -23,6 +23,7 @@ class Config(BaseSettings):
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")
     telegram_anomaly_chat_id: int | None = Field(None, env="TELEGRAM_ANOMALY_CHAT_ID")
+    telegram_wave_chat_id: int | None = Field(None, env="TELEGRAM_WAVE_CHAT_ID")
     telegram_manual_ta_chat_id: int | None = Field(None, env="TELEGRAM_MANUAL_TA_CHAT_ID")
 
     @validator("telegram_manual_ta_chat_id", pre=True)
@@ -45,6 +46,12 @@ class Config(BaseSettings):
 
     @validator("telegram_anomaly_chat_id", pre=True)
     def empty_anomaly_chat_id(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @validator("telegram_wave_chat_id", pre=True)
+    def empty_wave_chat_id(cls, value: object) -> object:
         if value is None or value == "":
             return None
         return value
@@ -97,6 +104,19 @@ class Config(BaseSettings):
     @property
     def anomaly_chat_configured(self) -> bool:
         return self.anomaly_chat_id is not None
+
+    @property
+    def wave_chat_id(self) -> int | None:
+        """Куда слать волновые сигналы: WAVE → ANOMALY → analysis/alert."""
+        if self.telegram_wave_chat_id is not None:
+            return self.telegram_wave_chat_id
+        if self.telegram_anomaly_chat_id is not None:
+            return self.telegram_anomaly_chat_id
+        return self.effective_analysis_chat_id
+
+    @property
+    def wave_chat_configured(self) -> bool:
+        return self.wave_chat_id is not None
 
     @property
     def manual_ta_chat_configured(self) -> bool:
