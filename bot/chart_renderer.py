@@ -835,8 +835,155 @@ def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -
                 break
 
 
-def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult, *, is_wait: bool) -> None:
+    """Общий блок отрисовки EW (LTF + HTF) из полей TA."""
+    from .elliott_wave import ElliottWaveResult
+
+    ew_pts = getattr(ta, "elliott_draw_points", None) or []
+    if ew_pts:
+        ew_stub = ElliottWaveResult(
+            label_ru=getattr(ta, "elliott_label", "") or "",
+            phase=getattr(ta, "elliott_phase", "") or "",
+            draw_points=list(ew_pts),
+            confidence=int(getattr(ta, "elliott_confidence", 0) or 0),
+            extension=str(getattr(ta, "elliott_extension", "") or ""),
+            truncated=bool(getattr(ta, "elliott_truncated", False)),
+            diagonal=str(getattr(ta, "elliott_diagonal", "") or ""),
+            corr_type=str(getattr(ta, "elliott_corr_type", "") or ""),
+            structure_note_ru=str(getattr(ta, "elliott_structure_note", "") or ""),
+            triangle_kind=str(getattr(ta, "elliott_triangle_kind", "") or ""),
+            triangle_bias=str(getattr(ta, "elliott_triangle_bias", "") or ""),
+            complex_kind=str(getattr(ta, "elliott_complex_kind", "") or ""),
+            fib_target_prices=list(getattr(ta, "elliott_fib_targets", None) or []),
+            fib_target_labels=list(getattr(ta, "elliott_fib_target_labels", None) or []),
+            path_bias=str(getattr(ta, "elliott_path_bias", "") or ""),
+            path_prices=list(getattr(ta, "elliott_path_prices", None) or []),
+            path_labels=list(getattr(ta, "elliott_path_labels", None) or []),
+            path_reason_ru=str(getattr(ta, "elliott_path_reason", "") or ""),
+            path_horizon_hours=float(getattr(ta, "elliott_path_horizon_hours", 0) or 0),
+            path_scenario=str(getattr(ta, "elliott_path_scenario", "") or ""),
+            path_invalidation=getattr(ta, "elliott_path_invalidation", None),
+            triangle_obj=getattr(ta, "elliott_triangle_obj", None),
+            global_draw_points=list(getattr(ta, "elliott_global_draw_points", None) or []),
+            local_draw_points=list(getattr(ta, "elliott_local_draw_points", None) or []),
+            global_label_ru=str(getattr(ta, "elliott_global_label", "") or ""),
+            local_label_ru=str(getattr(ta, "elliott_local_label", "") or ""),
+            has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
+            has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
+        )
+        from .pro_invariants import sanitize_path_prices
+
+        path_side = str(getattr(ew_stub, "path_bias", "") or "").lower()
+        if path_side in {"long", "short"} and ew_stub.path_prices:
+            cur = float(getattr(ta, "current_price", 0) or (bars[-1].close if bars else 0))
+            pp, pl = sanitize_path_prices(
+                path_side, cur, ew_stub.path_prices, ew_stub.path_labels,
+            )
+            ew_stub.path_prices = pp
+            ew_stub.path_labels = pl
+            if not pp:
+                ew_stub.path_bias = ""
+        # Wave-focus: всегда рисуем entry/path по EW, даже если Hot сказал WAIT
+        force_plan = not is_wait or bool(getattr(ta, "_wave_focus", False))
+        if not force_plan:
+            ew_stub.entry_plan = None
+        elif getattr(ta, "elliott_entry_price", None):
+            from .elliott_wave import ElliottEntryPlan
+
+            side = (getattr(ta, "wave_bias", "") or "").lower()
+            if side not in {"long", "short"}:
+                v = (getattr(ta, "verdict", "") or "").upper()
+                side = "long" if v == "LONG" else "short" if v == "SHORT" else "long"
+            ew_stub.entry_plan = ElliottEntryPlan(
+                mode=getattr(ta, "elliott_entry_mode", "") or "wait",
+                side=side,
+                entry_price=ta.elliott_entry_price,
+                stop_price=getattr(ta, "elliott_stop_price", None),
+                tp1=(ta.elliott_tp_prices[0] if ta.elliott_tp_prices else None),
+                tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
+                ready=bool(getattr(ta, "elliott_entry_ready", False)),
+            )
+        draw_elliott_waves(ax, bars, ew_stub)
+
+    htf_pts = getattr(ta, "htf_elliott_draw_points", None) or []
+    if htf_pts:
+        htf_stub = ElliottWaveResult(
+            label_ru=getattr(ta, "htf_elliott_label", "") or "",
+            phase=getattr(ta, "htf_elliott_phase", "") or "",
+            draw_points=list(htf_pts),
+            confidence=0,
+            diagonal="ending" if getattr(ta, "is_ending_diagonal", False) else "",
+            corr_type="triangle" if getattr(ta, "is_abcde", False) else "",
+            structure_note_ru=(
+                "конечная диагональ"
+                if getattr(ta, "is_ending_diagonal", False)
+                else ("треугольник ABCDE" if getattr(ta, "is_abcde", False) else "")
+            ),
+        )
+        draw_elliott_waves(ax, bars, htf_stub, style="htf", max_points=14)
+
+
+def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """Только волны + Fib + зона входа — без Hot/боковик/BOS/фигур."""
+    setattr(ta, "_wave_focus", True)
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+    _draw_elliott_from_ta(ax, bars, ta, is_wait=is_wait)
+    _draw_fib_levels(ax, bars, ta)
+
+    # 1–2 ключевых уровня без «зоны премии / боковик»
+    for lv in (ta.levels or [])[:2]:
+        color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
+        ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.85, alpha=0.55)
+
+    inv = getattr(ta, "elliott_path_invalidation", None) or getattr(ta, "invalidation_price", None)
+    if inv:
+        ax.axhline(float(inv), color=CHART_STYLE["inv"], linestyle="--", linewidth=1.1, alpha=0.9)
+        ax.text(
+            _x_after_last_bar(bars, 10),
+            float(inv),
+            f"inv {fmt_price(float(inv))}",
+            color=CHART_STYLE["inv"],
+            fontsize=7,
+            va="bottom",
+            ha="left",
+        )
+
+    stop = getattr(ta, "elliott_stop_price", None)
+    if stop and (inv is None or abs(float(stop) - float(inv)) / max(ta.current_price, 1e-9) > 0.001):
+        ax.axhline(float(stop), color=CHART_STYLE["accent_short"], linestyle=":", linewidth=0.9, alpha=0.75)
+
+    for tp in (getattr(ta, "elliott_tp_prices", None) or [])[:3]:
+        if not tp:
+            continue
+        ax.axhline(float(tp), color=CHART_STYLE["target"], linestyle=":", linewidth=0.85, alpha=0.7)
+
+    entry = getattr(ta, "elliott_entry_price", None)
+    if entry:
+        ax.axhline(float(entry), color=CHART_STYLE["entry"], linestyle="-", linewidth=1.15, alpha=0.9)
+        ax.text(
+            _x_after_last_bar(bars, 10),
+            float(entry),
+            f"вход {fmt_price(float(entry))}",
+            color=CHART_STYLE["entry"],
+            fontsize=7.5,
+            va="bottom",
+            ha="left",
+            fontweight="bold",
+        )
+
+
+def _draw_ta_annotations(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    wave_focus: bool = False,
+) -> None:
     if not bars:
+        return
+
+    if wave_focus:
+        _draw_wave_focus_annotations(ax, bars, ta)
         return
 
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
@@ -885,87 +1032,9 @@ def _draw_ta_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             quiet_labels=True,
         )
     # Волны Эллиотта (1–5 + ABC) — поверх / рядом с фигурами
-    from .elliott_wave import ElliottWaveResult
+    _draw_elliott_from_ta(ax, bars, ta, is_wait=is_wait)
 
-    ew_pts = getattr(ta, "elliott_draw_points", None) or []
-    if ew_pts:
-        ew_stub = ElliottWaveResult(
-            label_ru=getattr(ta, "elliott_label", "") or "",
-            phase=getattr(ta, "elliott_phase", "") or "",
-            draw_points=list(ew_pts),
-            confidence=int(getattr(ta, "elliott_confidence", 0) or 0),
-            extension=str(getattr(ta, "elliott_extension", "") or ""),
-            truncated=bool(getattr(ta, "elliott_truncated", False)),
-            diagonal=str(getattr(ta, "elliott_diagonal", "") or ""),
-            corr_type=str(getattr(ta, "elliott_corr_type", "") or ""),
-            structure_note_ru=str(getattr(ta, "elliott_structure_note", "") or ""),
-            triangle_kind=str(getattr(ta, "elliott_triangle_kind", "") or ""),
-            triangle_bias=str(getattr(ta, "elliott_triangle_bias", "") or ""),
-            complex_kind=str(getattr(ta, "elliott_complex_kind", "") or ""),
-            fib_target_prices=list(getattr(ta, "elliott_fib_targets", None) or []),
-            fib_target_labels=list(getattr(ta, "elliott_fib_target_labels", None) or []),
-            path_bias=str(getattr(ta, "elliott_path_bias", "") or ""),
-            path_prices=list(getattr(ta, "elliott_path_prices", None) or []),
-            path_labels=list(getattr(ta, "elliott_path_labels", None) or []),
-            path_reason_ru=str(getattr(ta, "elliott_path_reason", "") or ""),
-            path_horizon_hours=float(getattr(ta, "elliott_path_horizon_hours", 0) or 0),
-            path_scenario=str(getattr(ta, "elliott_path_scenario", "") or ""),
-            path_invalidation=getattr(ta, "elliott_path_invalidation", None),
-            triangle_obj=getattr(ta, "elliott_triangle_obj", None),
-            global_draw_points=list(getattr(ta, "elliott_global_draw_points", None) or []),
-            local_draw_points=list(getattr(ta, "elliott_local_draw_points", None) or []),
-            global_label_ru=str(getattr(ta, "elliott_global_label", "") or ""),
-            local_label_ru=str(getattr(ta, "elliott_local_label", "") or ""),
-            has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
-            has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
-        )
-        # EW path: санитизация по собственному path_bias алгоритма (не гасим на WAIT)
-        from .pro_invariants import sanitize_path_prices
-
-        path_side = str(getattr(ew_stub, "path_bias", "") or "").lower()
-        if path_side in {"long", "short"} and ew_stub.path_prices:
-            cur = float(getattr(ta, "current_price", 0) or (bars[-1].close if bars else 0))
-            pp, pl = sanitize_path_prices(
-                path_side, cur, ew_stub.path_prices, ew_stub.path_labels,
-            )
-            ew_stub.path_prices = pp
-            ew_stub.path_labels = pl
-            if not pp:
-                ew_stub.path_bias = ""
-        # На WAIT: без линии market-входа; Fib-цели EW остаются (алгоритм)
-        if is_wait:
-            ew_stub.entry_plan = None
-        elif getattr(ta, "elliott_entry_price", None):
-            from .elliott_wave import ElliottEntryPlan
-
-            ew_stub.entry_plan = ElliottEntryPlan(
-                mode=getattr(ta, "elliott_entry_mode", "") or "wait",
-                side="long" if (ta.wave_bias or "") == "long" else "short",
-                entry_price=ta.elliott_entry_price,
-                stop_price=getattr(ta, "elliott_stop_price", None),
-                tp1=(ta.elliott_tp_prices[0] if ta.elliott_tp_prices else None),
-                tp2=(ta.elliott_tp_prices[1] if len(ta.elliott_tp_prices) > 1 else None),
-                ready=bool(getattr(ta, "elliott_entry_ready", False)),
-            )
-        draw_elliott_waves(ax, bars, ew_stub)
-
-    # HTF Elliott (пунктир) + прогнозный путь Pro-confluence
-    htf_pts = getattr(ta, "htf_elliott_draw_points", None) or []
-    if htf_pts:
-        htf_stub = ElliottWaveResult(
-            label_ru=getattr(ta, "htf_elliott_label", "") or "",
-            phase=getattr(ta, "htf_elliott_phase", "") or "",
-            draw_points=list(htf_pts),
-            confidence=0,
-            diagonal="ending" if getattr(ta, "is_ending_diagonal", False) else "",
-            corr_type="triangle" if getattr(ta, "is_abcde", False) else "",
-            structure_note_ru=(
-                "конечная диагональ"
-                if getattr(ta, "is_ending_diagonal", False)
-                else ("треугольник ABCDE" if getattr(ta, "is_abcde", False) else "")
-            ),
-        )
-        draw_elliott_waves(ax, bars, htf_stub, style="htf", max_points=14)
+    # HTF Elliott уже внутри _draw_elliott_from_ta
 
     setup_path = getattr(ta, "forecast_path_prices", None) or []
     setup_side = (getattr(ta, "setup_side", "") or "").lower()
@@ -1128,6 +1197,103 @@ def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: 
                 alpha=0.90,
             ),
         )
+
+
+def _draw_wave_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
+    """Панели только про волны — без Hot ИТОГ/ПЛАН/боковик."""
+    base_bbox = dict(
+        boxstyle="round,pad=0.55",
+        facecolor=CHART_STYLE["panel"],
+        edgecolor=CHART_STYLE["panel_border"],
+        alpha=0.94,
+    )
+    style = dict(
+        transform=fig.transFigure,
+        color=CHART_STYLE["text"],
+        fontsize=7.8,
+        linespacing=1.4,
+        bbox=base_bbox,
+    )
+    lx, rx = 0.018, 0.982
+    verdict = (getattr(ta, "verdict", "") or "WAIT").upper()
+    conf = int(getattr(ta, "elliott_confidence", 0) or getattr(ta, "verdict_confidence", 0) or 0)
+    side_color = (
+        CHART_STYLE["accent_long"] if verdict == "LONG"
+        else CHART_STYLE["accent_short"] if verdict == "SHORT"
+        else CHART_STYLE["warning"]
+    )
+
+    g = str(getattr(ta, "elliott_global_label", "") or "").strip()
+    loc = str(getattr(ta, "elliott_local_label", "") or "").strip()
+    label = str(getattr(ta, "elliott_label", "") or "").strip()
+    phase = str(getattr(ta, "elliott_phase", "") or "").strip()
+    left_lines = ["ВОЛНЫ"]
+    if g:
+        left_lines.append(f"G: {g[:70]}")
+    if loc:
+        left_lines.append(f"L: {loc[:70]}")
+    if not g and not loc and label:
+        left_lines.append(label[:90])
+    if phase:
+        left_lines.append(f"фаза: {phase}")
+    note = str(getattr(ta, "elliott_structure_note", "") or "").strip()
+    if note:
+        left_lines.append(note[:70])
+    fib_bits: list[str] = []
+    if getattr(ta, "elliott_fib_classic_ok", False):
+        fib_bits.append("classic OK")
+    w2 = getattr(ta, "elliott_fib_w2", None)
+    w4 = getattr(ta, "elliott_fib_w4", None)
+    if w2:
+        fib_bits.append(f"W2 {float(w2):.0%}")
+    if w4:
+        fib_bits.append(f"W4 {float(w4):.0%}")
+    if fib_bits:
+        left_lines.append("Fib: " + " · ".join(fib_bits))
+    fig.text(lx, 0.975, "\n".join(left_lines), va="top", ha="left", **style)
+
+    right_lines = [f"WAVE · {verdict} {conf}/9" if conf else f"WAVE · {verdict}"]
+    expect = str(getattr(ta, "elliott_path_reason", "") or getattr(ta, "verdict_reason", "") or "").strip()
+    if expect:
+        right_lines.append(f"➡️ {expect[:110]}")
+    mode = str(getattr(ta, "elliott_entry_mode", "") or "")
+    entry = getattr(ta, "elliott_entry_price", None)
+    if entry:
+        ready = " ✓" if getattr(ta, "elliott_entry_ready", False) else ""
+        right_lines.append(f"вход {fmt_price(float(entry))} ({mode or '—'}){ready}")
+    stop = getattr(ta, "elliott_stop_price", None)
+    if stop:
+        right_lines.append(f"стоп {fmt_price(float(stop))}")
+    tps = list(getattr(ta, "elliott_tp_prices", None) or [])[:3]
+    if tps:
+        right_lines.append("TP " + " / ".join(fmt_price(float(t)) for t in tps))
+    inv = getattr(ta, "elliott_path_invalidation", None) or getattr(ta, "invalidation_price", None)
+    if inv:
+        right_lines.append(f"inv {fmt_price(float(inv))}")
+    htf = str(getattr(ta, "htf_elliott_label", "") or "").strip()
+    if htf:
+        right_lines.append(f"HTF: {htf[:60]}")
+    fig.text(
+        rx, 0.975, "\n".join(right_lines), va="top", ha="right",
+        **{**style, "color": side_color},
+    )
+
+    banner = (
+        f"Волновой график · без Hot-ИТОГ · "
+        f"{'глобальный+локальный' if (g and loc) else 'структура EW+Fib'}"
+    )
+    fig.text(
+        0.50, 0.018 if not with_subpanels else 0.125,
+        banner,
+        va="bottom", ha="center", fontsize=7.4, color=CHART_STYLE["text"],
+        transform=fig.transFigure,
+        bbox=dict(
+            boxstyle="round,pad=0.4",
+            facecolor=CHART_STYLE["panel"],
+            edgecolor=CHART_STYLE["entry"],
+            alpha=0.90,
+        ),
+    )
 
 
 def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
@@ -1363,11 +1529,12 @@ def _render_chart_figure(
     enhanced: bool = True,
     display_hours: int | None = None,
     height_scale: float | None = None,
+    wave_focus: bool = False,
 ) -> bytes:
     use_enhanced = enhanced
     fig_size, height_ratios = _chart_figure_layout(
         enhanced=use_enhanced,
-        pro_mode=pro_mode,
+        pro_mode=pro_mode and not wave_focus,
         height_scale=height_scale,
     )
     if use_enhanced:
@@ -1385,14 +1552,14 @@ def _render_chart_figure(
         ax_rsi = None
         fig.patch.set_facecolor(CHART_STYLE["bg"])
         ax.set_facecolor(CHART_STYLE["bg"])
-        if pro_mode:
+        if pro_mode and not wave_focus:
             fig.subplots_adjust(left=0.11, right=0.89, top=0.93, bottom=0.09)
         else:
             fig.subplots_adjust(left=0.12, right=0.88, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
-    _draw_ta_annotations(ax, bars, ta)
+    _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
     if use_enhanced and ax_vol is not None and ax_rsi is not None:
         draw_volume_panel(ax_vol, bars)
         draw_rsi_panel(
@@ -1411,15 +1578,29 @@ def _render_chart_figure(
         _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
         color=accent_color, fontsize=7, va="center", ha="left",
     )
-    mode_suffix = " · PRO" if pro_mode else ""
-    ax.set_title(
-        f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}",
-        color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
-    )
-    if pro_mode:
-        _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
+    if wave_focus:
+        phase = str(getattr(ta, "elliott_phase", "") or "")
+        conf = int(getattr(ta, "elliott_confidence", 0) or 0)
+        title_core = f"{symbol}  ·  WAVE {ta.verdict}"
+        if conf:
+            title_core += f" {conf}/9"
+        if phase:
+            title_core += f"  ·  {phase}"
+        ax.set_title(
+            f"{title_core}  ·  {title_suffix}",
+            color=CHART_STYLE["text"], fontsize=12, pad=14,
+        )
+        _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
     else:
-        _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
+        mode_suffix = " · PRO" if pro_mode else ""
+        ax.set_title(
+            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}",
+            color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
+        )
+        if pro_mode:
+            _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
+        else:
+            _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
     # Зум: анализ может быть на 18ч, экран — последние N часов (читаемые свечи)
     from .manual_ta import chart_display_hours
@@ -2050,6 +2231,11 @@ async def render_annotated_chart(
     pattern_min_confidence: float = 0.55,
     display_hours: int | None = None,
     height_scale: float | None = None,
+    wave_focus: bool = False,
+    wave_expect_ru: str = "",
+    wave_entry_price: float | None = None,
+    wave_stop_price: float | None = None,
+    wave_tp_prices: list[float] | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     # Полный lookback для паттернов/EW; на экране — зум display_hours
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
@@ -2078,6 +2264,7 @@ async def render_annotated_chart(
             logger.debug("Taker CVD fetch failed for %s", symbol, exc_info=True)
 
     is_long = side == "long"
+    # Wave-focus: фигуры не нужны — только EW/Fib (быстрее и чище)
     ta = run_ta_analysis(
         bars,
         is_long=is_long,
@@ -2092,11 +2279,27 @@ async def render_annotated_chart(
         interval_minutes=interval_minutes,
         history_bars=history_bars,
         taker_cvd=taker_cvd,
-        pattern_detection_enabled=pattern_detection_enabled,
+        pattern_detection_enabled=(
+            False if wave_focus else pattern_detection_enabled
+        ),
         pattern_min_confidence=pattern_min_confidence,
     )
     if verdict_override:
         ta.verdict = verdict_override
+    if wave_expect_ru:
+        ta.verdict_reason = wave_expect_ru
+        ta.elliott_path_reason = wave_expect_ru
+    if wave_entry_price:
+        ta.elliott_entry_price = float(wave_entry_price)
+    if wave_stop_price:
+        ta.elliott_stop_price = float(wave_stop_price)
+    if wave_tp_prices:
+        ta.elliott_tp_prices = [float(t) for t in wave_tp_prices if t][:4]
+    if invalidation_price and wave_focus:
+        ta.elliott_path_invalidation = float(invalidation_price)
+        ta.invalidation_price = float(invalidation_price)
+    if wave_focus and side in {"long", "short"}:
+        ta.wave_bias = side
 
     # Зум экрана: ≥12ч на 5m + расширить, если EW/дамп шире окна
     ew_idxs = [
@@ -2115,6 +2318,10 @@ async def render_annotated_chart(
     )
 
     source = (chart_source or "annotated").lower()
+    # Wave chart — всегда matplotlib wave_focus (не TradingView Hot-overlay)
+    if wave_focus:
+        source = "annotated"
+
     if source in {"tv_annotated", "tradingview"}:
         try:
             tv_png = await asyncio.wait_for(
@@ -2140,10 +2347,19 @@ async def render_annotated_chart(
         logger.info("TradingView unavailable for %s, fallback to matplotlib", symbol)
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
-    pro_mode = source == "annotated_pro"
+    if wave_focus:
+        if (ta.verdict or "").upper() == "SHORT":
+            accent = CHART_STYLE["accent_short"]
+        elif (ta.verdict or "").upper() == "LONG":
+            accent = CHART_STYLE["accent_long"]
+        else:
+            accent = CHART_STYLE["warning"]
+    pro_mode = source == "annotated_pro" and not wave_focus
     title = f"Bybit {interval_minutes}m · вид {zoom_hours}ч"
     if analysis_hours > zoom_hours:
         title = f"{title} (анализ {analysis_hours}ч)"
+    if wave_focus:
+        title = f"WAVE · {title}"
     png = _render_chart_figure(
         bars, ta,
         symbol=symbol,
@@ -2154,8 +2370,56 @@ async def render_annotated_chart(
         display_hours=zoom_hours,
         enhanced=source in {"annotated", "annotated_pro"},
         height_scale=height_scale,
+        wave_focus=wave_focus,
     )
     return png, ta
+
+
+async def render_wave_chart(
+    symbol: str,
+    *,
+    side: str = "long",
+    hours: int = 18,
+    interval_minutes: int = 5,
+    expect_ru: str = "",
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    tp_prices: tuple[float, ...] | list[float] | None = None,
+    invalidation: float | None = None,
+    oi_bars: list[FiveMinOiBar] | None = None,
+    liq_context: dict | None = None,
+    exchange: str = "bybit",
+    display_hours: int | None = None,
+    height_scale: float | None = None,
+) -> tuple[bytes | None, TAAnalysisResult | None]:
+    """Чистый волновой график: EW G/L + Fib + путь, без Hot ИТОГ/ПЛАН."""
+    verdict = "WAIT"
+    if side == "long":
+        verdict = "LONG"
+    elif side == "short":
+        verdict = "SHORT"
+
+    return await render_annotated_chart(
+        symbol,
+        side=side if side in {"long", "short"} else "long",
+        hours=hours,
+        interval_minutes=interval_minutes,
+        oi_bars=oi_bars,
+        liq_context=liq_context,
+        neutral=True,
+        chart_source="annotated",
+        exchange=exchange,
+        display_hours=display_hours,
+        height_scale=height_scale,
+        wave_focus=True,
+        verdict_override=verdict,
+        wave_expect_ru=expect_ru,
+        invalidation_price=invalidation,
+        wave_entry_price=entry_price,
+        wave_stop_price=stop_price,
+        wave_tp_prices=[float(t) for t in (tp_prices or []) if t][:4] or None,
+        pattern_detection_enabled=False,
+    )
 
 
 async def render_signal_chart(

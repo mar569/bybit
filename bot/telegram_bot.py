@@ -36,7 +36,7 @@ from .bybit_market_data import (
     format_bybit_real_data_block,
     format_bybit_real_data_compact,
 )
-from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart
+from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart, render_wave_chart
 from .bybit_klines import BybitKlineCache
 from .manual_ta import (
     MANUAL_TA_CHART_SOURCES,
@@ -2029,7 +2029,7 @@ class TelegramBot:
 
         png: bytes | None = None
         if getattr(settings, "wave_chart_enabled", True):
-            side = event.side if event.side in {"long", "short"} else "long"
+            side = event.side if event.side in {"long", "short"} else "wait"
             chart_hours = int(
                 getattr(settings, "wave_chart_hours", None)
                 or getattr(settings, "signal_chart_hours", 18)
@@ -2052,16 +2052,20 @@ class TelegramBot:
                 except Exception:
                     liq_context = None
             try:
-                png, _src, _ta, _fail = await asyncio.wait_for(
-                    get_signal_chart_png(
-                        event.exchange,
+                png, _ta = await asyncio.wait_for(
+                    render_wave_chart(
                         event.symbol,
-                        chart_source=getattr(settings, "signal_chart_source", "annotated"),
-                        chart_hours=chart_hours,
-                        chart_interval_minutes=interval,
                         side=side,
+                        hours=chart_hours,
+                        interval_minutes=interval,
+                        expect_ru=event.expect_ru or event.path_reason,
+                        entry_price=event.entry_price,
+                        stop_price=event.stop_price,
+                        tp_prices=event.tp_prices,
+                        invalidation=event.invalidation,
                         oi_bars=oi_bars,
                         liq_context=liq_context,
+                        exchange=event.exchange,
                         display_hours=display_hours,
                         height_scale=float(
                             getattr(settings, "signal_chart_height_scale", 1.0) or 1.0

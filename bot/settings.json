@@ -272,15 +272,12 @@
   "wave_require_fib_classic": true,
   "wave_require_entry_ready": false,
   "wave_allow_structure_watch": false,
-  "wave_allow_path_alerts": true,
+  "wave_allow_path_alerts": false,
+  "wave_allow_complete_alerts": false,
   "wave_phases_enabled": [
     "impulse_2",
     "impulse_4",
-    "impulse_5",
-    "impulse_complete",
-    "abc_C",
-    "abc_complete",
-    "abcde_triangle"
+    "abc_C"
   ],
   "wave_max_per_minute": 2,
   "wave_batch_interval_seconds": 90,

@@ -27,15 +27,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Фазы, которые имеют торговый смысл для алертов
+# Фазы, которые имеют торговый смысл для алертов (без «просто боковик»)
 DEFAULT_WAVE_PHASES: tuple[str, ...] = (
     "impulse_2",
     "impulse_4",
-    "impulse_5",
-    "impulse_complete",
     "abc_C",
-    "abc_complete",
-    "abcde_triangle",
 )
 
 SETUP_PRIORITY: dict[str, int] = {
@@ -224,60 +220,90 @@ def build_wave_event(
     *,
     price: float | None = None,
 ) -> WaveEvent | None:
-    """Gate: валидная EW-структура + фаза + Fib/качество → WaveEvent."""
+    """Gate: валидная EW-структура + фаза + Fib/качество → WaveEvent.
+
+    Тот же движок, что рисует волны в боте: analyze_elliott_waves
+    (правила 1–5, Fib classic, ABC, entry_plan). Без валидной
+    отрисовываемой разметки сигнал не уходит.
+    """
     if not getattr(settings, "wave_enabled", False):
         return None
     if ew is None or not ew.has_structure or ew.impulse is None:
         return None
 
+    # Должно быть что рисовать: точки 1–5 / ABC (иначе «сигнал без волн»)
+    draw_n = len(ew.draw_points or []) + len(ew.global_draw_points or []) + len(
+        ew.local_draw_points or []
+    )
+    if draw_n < 4:
+        draw_n = len(ew.impulse.points or [])
+        if ew.abc is not None:
+            draw_n += len(ew.abc.points or [])
+    if draw_n < 4:
+        return None
+
+    plan = ew.entry_plan
     phases = _enabled_phases(settings)
-    if not _phase_allowed(ew.phase, phases) and not (
-        ew.entry_plan and ew.entry_plan.ready
-    ):
-        # entry_ready всегда проходит фазовый фильтр
+    if not _phase_allowed(ew.phase, phases) and not (plan and plan.ready):
         return None
 
     imp = ew.impulse
     require_classic = bool(getattr(settings, "wave_require_fib_classic", True))
     min_quality = int(getattr(settings, "wave_min_impulse_quality", 58))
     min_conf = int(getattr(settings, "wave_min_confidence", 5))
+    require_valid = bool(getattr(settings, "wave_require_impulse_valid", True))
 
-    if imp.quality < min_quality and not (ew.entry_plan and ew.entry_plan.ready):
+    if require_valid and not imp.valid and not (plan and plan.ready and imp.quality >= 70):
         return None
-    if int(ew.confidence or 0) < min_conf and not (ew.entry_plan and ew.entry_plan.ready):
+    if imp.quality < min_quality and not (plan and plan.ready):
+        return None
+    if int(ew.confidence or 0) < min_conf and not (plan and plan.ready):
         return None
 
-    # Жёсткие правила: violations блокируют, кроме мягкого watch на complete
+    # Нарушения чек-листа EW (перекрытие 4↔1, волна 2 за основанием, 3 короткая)
     hard_violations = [
         v for v in (imp.violations or [])
-        if "перекрыт" in v.lower() or "заходит" in v.lower() or "коротк" in v.lower()
+        if any(
+            key in v.lower()
+            for key in ("перекрыт", "заходит", "коротк", "не превыш", "наруш")
+        )
     ]
     setup_kind, side = _classify_setup(ew)
 
     if require_classic:
-        # ENTRY и зоны 2/4 требуют classic; impulse_complete можно без
         if setup_kind in {"entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone"}:
             if not imp.fib_classic_ok and not (imp.fib_w2_ok or imp.fib_w4_ok):
                 return None
         if setup_kind == "entry_ready" and not imp.fib_classic_ok and imp.quality < 70:
             return None
 
-    if hard_violations and setup_kind == "entry_ready":
+    # Жёсткие violations — не шлём ни ENTRY, ни зоны 2/4/C
+    if hard_violations and setup_kind in {
+        "entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone",
+    }:
         return None
 
     require_ready = bool(getattr(settings, "wave_require_entry_ready", False))
     if require_ready and setup_kind != "entry_ready":
         return None
 
-    # Слишком сырой structure_watch без path — шум
     allow_watch = bool(getattr(settings, "wave_allow_structure_watch", False))
     if setup_kind == "structure_watch" and not allow_watch:
         return None
-    if setup_kind == "path_active" and not bool(getattr(settings, "wave_allow_path_alerts", True)):
+    if setup_kind == "path_active" and not bool(getattr(settings, "wave_allow_path_alerts", False)):
         return None
+    if setup_kind == "impulse_complete" and not (plan and plan.ready):
+        if not bool(getattr(settings, "wave_allow_complete_alerts", False)):
+            return None
+
+    actionable = {
+        "entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone",
+    }
+    if setup_kind not in actionable and not (plan and plan.ready):
+        if not allow_watch:
+            return None
 
     px = float(price) if price and price > 0 else float(bars[-1].close)
-    plan = ew.entry_plan
     tps: list[float] = []
     if plan:
         if plan.tp1:
@@ -338,12 +364,14 @@ def build_wave_event(
         meta={
             "quality": imp.quality,
             "fib_classic_ok": imp.fib_classic_ok,
+            "impulse_valid": imp.valid,
             "extension": ew.extension or imp.extension,
             "truncated": bool(ew.truncated or imp.truncated),
             "diagonal": ew.diagonal or imp.diagonal,
             "corr_type": ew.corr_type,
             "has_global": ew.has_global,
             "has_local": ew.has_local,
+            "draw_points": draw_n,
             "path_prices": list(ew.path_prices or [])[:6],
             "path_labels": list(ew.path_labels or [])[:6],
         },

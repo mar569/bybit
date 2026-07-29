@@ -491,16 +491,14 @@ class ScannerSettings:
     wave_min_impulse_quality: int = 58
     wave_require_fib_classic: bool = True
     wave_require_entry_ready: bool = False
+    wave_require_impulse_valid: bool = True
     wave_allow_structure_watch: bool = False
-    wave_allow_path_alerts: bool = True
+    wave_allow_path_alerts: bool = False
+    wave_allow_complete_alerts: bool = False
     wave_phases_enabled: tuple[str, ...] = (
         "impulse_2",
         "impulse_4",
-        "impulse_5",
-        "impulse_complete",
         "abc_C",
-        "abc_complete",
-        "abcde_triangle",
     )
     wave_max_per_minute: int = 2
     wave_batch_interval_seconds: int = 90
@@ -997,18 +995,18 @@ class ScannerSettings:
             wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 58)),
             wave_require_fib_classic=bool(base.get("wave_require_fib_classic", True)),
             wave_require_entry_ready=bool(base.get("wave_require_entry_ready", False)),
+            wave_require_impulse_valid=bool(
+                base.get("wave_require_impulse_valid", True)
+            ),
             wave_allow_structure_watch=bool(base.get("wave_allow_structure_watch", False)),
-            wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", True)),
+            wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", False)),
+            wave_allow_complete_alerts=bool(base.get("wave_allow_complete_alerts", False)),
             wave_phases_enabled=cls._parse_str_tuple(
                 base.get("wave_phases_enabled"),
                 (
                     "impulse_2",
                     "impulse_4",
-                    "impulse_5",
-                    "impulse_complete",
                     "abc_C",
-                    "abc_complete",
-                    "abcde_triangle",
                 ),
             ),
             wave_max_per_minute=int(base.get("wave_max_per_minute", 2)),
@@ -1454,17 +1452,14 @@ class SettingsManager:
                 merged.setdefault("wave_require_fib_classic", True)
                 merged.setdefault("wave_require_entry_ready", False)
                 merged.setdefault("wave_allow_structure_watch", False)
-                merged.setdefault("wave_allow_path_alerts", True)
+                merged.setdefault("wave_allow_path_alerts", False)
+                merged.setdefault("wave_allow_complete_alerts", False)
                 merged.setdefault(
                     "wave_phases_enabled",
                     [
                         "impulse_2",
                         "impulse_4",
-                        "impulse_5",
-                        "impulse_complete",
                         "abc_C",
-                        "abc_complete",
-                        "abcde_triangle",
                     ],
                 )
                 merged.setdefault("wave_max_per_minute", 2)
