@@ -72,7 +72,31 @@ class WaveEvent:
     local_label: str = ""
     fib_note: str = ""
     expect_ru: str = ""
+    # (label, open_time, price) — для точной отрисовки на графике
+    ew_draw_ot: tuple[tuple[str, float, float], ...] = ()
+    ew_global_ot: tuple[tuple[str, float, float], ...] = ()
+    ew_local_ot: tuple[tuple[str, float, float], ...] = ()
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+def _pack_ew_points_ot(
+    pts: list | None,
+    bars: list[KlineBar],
+) -> tuple[tuple[str, float, float], ...]:
+    """Сериализация точек волны: label + open_time + price (индексы на другом окне неверны)."""
+    if not pts or not bars:
+        return ()
+    out: list[tuple[str, float, float]] = []
+    n = len(bars)
+    for p in pts:
+        label = str(getattr(p, "label", "") or "")
+        price = float(getattr(p, "price", 0) or 0)
+        idx = int(getattr(p, "index", -1))
+        if not label or price <= 0:
+            continue
+        t = float(bars[idx].open_time) if 0 <= idx < n else 0.0
+        out.append((label, t, price))
+    return tuple(out)
 
 
 def _enabled_phases(settings: Any) -> frozenset[str]:
@@ -363,6 +387,20 @@ def build_wave_event(
     if ew.structure_note_ru:
         detail_parts.append(ew.structure_note_ru)
 
+    # Точки для графика: то, что реально нашли при алерте (не пересчитывать «вслепую»)
+    g_ot = _pack_ew_points_ot(list(ew.global_draw_points or []), bars)
+    l_ot = _pack_ew_points_ot(list(ew.local_draw_points or []), bars)
+    d_ot = _pack_ew_points_ot(list(ew.draw_points or []), bars)
+    if not d_ot and not g_ot and ew.impulse is not None:
+        g_ot = _pack_ew_points_ot(list(ew.impulse.points or []), bars)
+        if ew.abc is not None:
+            d_ot = g_ot + _pack_ew_points_ot(list(ew.abc.points or []), bars)
+        else:
+            d_ot = g_ot
+    # Без сериализуемых точек график будет пустым — сигнал не шлём
+    if len(d_ot) + len(g_ot) < 3:
+        return None
+
     return WaveEvent(
         exchange=exchange,
         symbol=symbol.upper(),
@@ -387,6 +425,9 @@ def build_wave_event(
         local_label=ew.local_label_ru or "",
         fib_note=fib_note,
         expect_ru=expect,
+        ew_draw_ot=d_ot,
+        ew_global_ot=g_ot,
+        ew_local_ot=l_ot,
         meta={
             "quality": imp.quality,
             "fib_classic_ok": imp.fib_classic_ok,
@@ -455,10 +496,9 @@ def format_wave_alert(event: WaveEvent) -> str:
     ts = datetime.fromtimestamp(event.timestamp, tz=timezone.utc).strftime("%H:%M")
 
     how_read = (
-        "Как читать график:\n"
-        "• синие круги <b>1–5</b> — импульс\n"
-        "• оранжевые <b>A–C</b> — коррекция\n"
-        "• зелёный <b>ВХОД</b> / красный <b>СТОП</b> / жёлтый <b>TP</b>"
+        "На скрине: синие круги <b>1–5</b> = импульс, "
+        "оранжевые <b>A–C</b> = коррекция, "
+        "зелёный вход / красный стоп / цели TP"
     )
 
     lines = [

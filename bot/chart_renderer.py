@@ -74,7 +74,8 @@ CHART_STYLE = {
     "pattern": "#ffa657",
     "inv": "#ff7b72",
     "target": "#7ee787",
-    "entry": "#ffa657",
+    "entry": "#3fb950",
+    "stop": "#f85149",
     "scenario_bull": "#3fb950",
     "scenario_bear": "#f85149",
     "fib": "#8b949e",
@@ -835,12 +836,171 @@ def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -
                 break
 
 
+def _remap_ew_points_ot(
+    snaps: tuple[tuple[str, float, float], ...] | list[tuple[str, float, float]] | None,
+    bars: list[KlineBar],
+    *,
+    max_skew_sec: float = 900.0,
+) -> list:
+    """Перенос точек алерта на индексы текущего окна баров по open_time."""
+    from .elliott_wave import ElliottPoint
+
+    if not snaps or not bars:
+        return []
+    by_t = {float(b.open_time): i for i, b in enumerate(bars)}
+    times = [float(b.open_time) for b in bars]
+    out: list = []
+    for item in snaps:
+        if len(item) < 3:
+            continue
+        label, t, price = str(item[0]), float(item[1]), float(item[2])
+        if not label or price <= 0:
+            continue
+        idx = by_t.get(t)
+        if idx is None and t > 0 and times:
+            # ближайший бар по времени
+            idx = min(range(len(times)), key=lambda i: abs(times[i] - t))
+            if abs(times[idx] - t) > max_skew_sec:
+                continue
+        if idx is None:
+            continue
+        out.append(ElliottPoint(label, int(idx), float(price)))
+    return out
+
+
+def _apply_wave_snapshot_points(
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    *,
+    draw_ot: tuple[tuple[str, float, float], ...] | None = None,
+    global_ot: tuple[tuple[str, float, float], ...] | None = None,
+    local_ot: tuple[tuple[str, float, float], ...] | None = None,
+) -> bool:
+    """Жёстко наложить точки с WaveEvent — график = то, что дало сигнал."""
+    g = _remap_ew_points_ot(global_ot, bars)
+    loc = _remap_ew_points_ot(local_ot, bars)
+    draw = _remap_ew_points_ot(draw_ot, bars)
+    if not draw and not g and not loc:
+        return False
+    if not draw:
+        draw = list(g) + list(loc)
+    if not g and draw:
+        # отделить импульс 0-5 / ABC от локальных меток
+        loc_labs = {"·0", "i", "ii", "iii", "iv", "v", "a", "b", "c", "d", "e", "w", "x", "y", "z", "x2"}
+        g = [p for p in draw if p.label not in loc_labs]
+        loc = loc or [p for p in draw if p.label in loc_labs]
+    ta.elliott_global_draw_points = g
+    ta.elliott_local_draw_points = loc
+    ta.elliott_draw_points = draw
+    return True
+
+
+def _ta_elliott_point_lists(ta: TAAnalysisResult) -> tuple[list, list, list]:
+    """(draw, global, local) — любые непустые слои для отрисовки."""
+    draw = list(getattr(ta, "elliott_draw_points", None) or [])
+    glob = list(getattr(ta, "elliott_global_draw_points", None) or [])
+    loc = list(getattr(ta, "elliott_local_draw_points", None) or [])
+    return draw, glob, loc
+
+
+def _ta_elliott_indices(ta: TAAnalysisResult) -> list[int]:
+    idxs: list[int] = []
+    for bucket in _ta_elliott_point_lists(ta):
+        for p in bucket:
+            i = int(getattr(p, "index", -1))
+            if i >= 0:
+                idxs.append(i)
+    return idxs
+
+
+def _wave_chart_zoom_hours(
+    *,
+    bars: list[KlineBar],
+    interval_minutes: int,
+    analysis_hours: float,
+    base_zoom: float,
+    point_indices: list[int],
+) -> float:
+    """Зум обязан покрыть САМУЮ РАННЮЮ точку волны → сейчас (не только span).
+
+    Раньше брали span(max−min): волны слева от окна 12ч оставались за xlim —
+    легенда обещала круги, на скрине пусто.
+    """
+    zoom = float(base_zoom)
+    if not bars or not point_indices or interval_minutes <= 0:
+        return zoom
+    from_idx = max(0, min(point_indices) - 8)
+    need_bars = max(36, len(bars) - from_idx)
+    need_h = (need_bars * interval_minutes) / 60.0
+    return min(float(analysis_hours), max(zoom, need_h, 6.0))
+
+
+def _ensure_wave_elliott_points(ta: TAAnalysisResult, bars: list[KlineBar]) -> None:
+    """Для wave-chart: сырые точки EW без фильтра «боковик/шум».
+
+    run_ta_analysis часто обнуляет elliott_*_draw_points через
+    _filter_elliott_draw_points, оставляя label/phase — панели врут про круги.
+    """
+    if not bars:
+        return
+    from .elliott_wave import analyze_elliott_waves
+    from .ta_analysis import find_swing_points
+
+    swings = list(getattr(ta, "swings", None) or [])
+    if len(swings) < 4:
+        swings = find_swing_points(bars)
+    if len(swings) < 4:
+        return
+    ew = analyze_elliott_waves(bars, swings)
+    g = list(getattr(ew, "global_draw_points", None) or [])
+    loc = list(getattr(ew, "local_draw_points", None) or [])
+    draw = list(getattr(ew, "draw_points", None) or [])
+    if not draw and ew.impulse is not None and ew.impulse.points:
+        draw = list(ew.impulse.points)
+        if ew.abc is not None and ew.abc.points:
+            draw = draw + list(ew.abc.points)
+    if not (g or loc or draw):
+        return
+    ta.elliott_global_draw_points = g
+    ta.elliott_local_draw_points = loc
+    ta.elliott_draw_points = draw if draw else (list(g) + list(loc))
+    if ew.label_ru:
+        ta.elliott_label = ew.label_ru
+    if ew.phase:
+        ta.elliott_phase = ew.phase
+    if ew.confidence:
+        ta.elliott_confidence = int(ew.confidence)
+    if ew.global_label_ru:
+        ta.elliott_global_label = ew.global_label_ru
+    if ew.local_label_ru:
+        ta.elliott_local_label = ew.local_label_ru
+    if ew.structure_note_ru:
+        ta.elliott_structure_note = ew.structure_note_ru
+    ta.elliott_fib_classic_ok = bool(
+        getattr(ew.impulse, "fib_classic_ok", False) if ew.impulse else False
+    )
+    if ew.impulse is not None:
+        ta.elliott_fib_w2 = float(getattr(ew.impulse, "fib_w2_ratio", 0) or 0)
+        ta.elliott_fib_w4 = float(getattr(ew.impulse, "fib_w4_ratio", 0) or 0)
+    if ew.path_reason_ru and not getattr(ta, "elliott_path_reason", ""):
+        ta.elliott_path_reason = ew.path_reason_ru
+    if ew.path_prices:
+        ta.elliott_path_prices = list(ew.path_prices)
+        ta.elliott_path_labels = list(ew.path_labels or [])
+        ta.elliott_path_bias = ew.path_bias or ta.elliott_path_bias
+    if ew.triangle_obj is not None:
+        ta.elliott_triangle_obj = ew.triangle_obj
+
+
 def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult, *, is_wait: bool) -> None:
     """Общий блок отрисовки EW (LTF + HTF) из полей TA."""
     from .elliott_wave import ElliottWaveResult
 
-    ew_pts = getattr(ta, "elliott_draw_points", None) or []
-    if ew_pts:
+    ew_pts, g_pts, l_pts = _ta_elliott_point_lists(ta)
+    # Раньше: if ew_pts — global/local при пустом draw игнорировались
+    if ew_pts or g_pts or l_pts:
+        if not ew_pts:
+            ew_pts = list(g_pts) or list(l_pts)
         ew_stub = ElliottWaveResult(
             label_ru=getattr(ta, "elliott_label", "") or "",
             phase=getattr(ta, "elliott_phase", "") or "",
@@ -864,12 +1024,12 @@ def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             path_scenario=str(getattr(ta, "elliott_path_scenario", "") or ""),
             path_invalidation=getattr(ta, "elliott_path_invalidation", None),
             triangle_obj=getattr(ta, "elliott_triangle_obj", None),
-            global_draw_points=list(getattr(ta, "elliott_global_draw_points", None) or []),
-            local_draw_points=list(getattr(ta, "elliott_local_draw_points", None) or []),
+            global_draw_points=list(g_pts),
+            local_draw_points=list(l_pts),
             global_label_ru=str(getattr(ta, "elliott_global_label", "") or ""),
             local_label_ru=str(getattr(ta, "elliott_local_label", "") or ""),
-            has_global=bool(getattr(ta, "elliott_global_draw_points", None)),
-            has_local=bool(getattr(ta, "elliott_local_draw_points", None)),
+            has_global=bool(g_pts),
+            has_local=bool(l_pts),
         )
         from .pro_invariants import sanitize_path_prices
 
@@ -894,8 +1054,11 @@ def _draw_elliott_from_ta(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             if side not in {"long", "short"}:
                 v = (getattr(ta, "verdict", "") or "").upper()
                 side = "long" if v == "LONG" else "short" if v == "SHORT" else "long"
+            mode = getattr(ta, "elliott_entry_mode", "") or "wait"
+            if mode not in {"conservative", "aggressive"}:
+                mode = "conservative"
             ew_stub.entry_plan = ElliottEntryPlan(
-                mode=getattr(ta, "elliott_entry_mode", "") or "wait",
+                mode=mode,
                 side=side,
                 entry_price=ta.elliott_entry_price,
                 stop_price=getattr(ta, "elliott_stop_price", None),
@@ -943,6 +1106,42 @@ def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnaly
             ha="left",
             fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=CHART_STYLE["inv"], alpha=0.85),
+        )
+
+    # Entry/Stop всегда (даже если EW-слой пуст — уровни из алерта)
+    entry = getattr(ta, "elliott_entry_price", None)
+    stop = getattr(ta, "elliott_stop_price", None)
+    x_last = _x_after_last_bar(bars, 4)
+    if entry:
+        ax.axhline(float(entry), color=CHART_STYLE["entry"], linestyle="--", linewidth=1.35, alpha=0.9)
+        ax.plot(
+            [_idx_to_date(bars, len(bars) - 1)],
+            [float(entry)],
+            marker="o",
+            color=CHART_STYLE["entry"],
+            markersize=9,
+            markeredgecolor="#0d1117",
+            zorder=12,
+        )
+        ax.text(
+            x_last, float(entry), f" ВХОД {fmt_price(float(entry))} ",
+            color=CHART_STYLE["entry"], fontsize=8.5, va="bottom", ha="left", fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="#0d1117", edgecolor=CHART_STYLE["entry"], alpha=0.85),
+        )
+    if stop:
+        ax.axhline(float(stop), color=CHART_STYLE["stop"], linestyle=":", linewidth=1.2, alpha=0.9)
+        ax.plot(
+            [_idx_to_date(bars, len(bars) - 1)],
+            [float(stop)],
+            marker="o",
+            color=CHART_STYLE["stop"],
+            markersize=8,
+            markeredgecolor="#0d1117",
+            zorder=12,
+        )
+        ax.text(
+            x_last, float(stop), f" СТОП {fmt_price(float(stop))} ",
+            color=CHART_STYLE["stop"], fontsize=8.0, va="top", ha="left", fontweight="bold",
         )
 
     for i, tp in enumerate((getattr(ta, "elliott_tp_prices", None) or [])[:2]):
@@ -1213,16 +1412,25 @@ def _draw_wave_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpan
 
     phase = str(getattr(ta, "elliott_phase", "") or "")
     label = str(getattr(ta, "elliott_label", "") or "").strip()
+    draw, glob, loc = _ta_elliott_point_lists(ta)
+    all_pts = list(draw) + list(glob) + list(loc)
+    labs = {str(getattr(p, "label", "")) for p in all_pts}
+    has_impulse = bool(labs & {"0", "1", "2", "3", "4", "5", "i", "ii", "iii", "iv", "v"})
+    has_abc = bool(labs & {"A", "B", "C", "D", "E", "a", "b", "c", "d", "e"})
     left = ["ЧТО НА ГРАФИКЕ"]
-    if "impulse" in phase or "1-5" in label.lower() or "импульс" in label.lower():
+    if has_impulse:
         left.append("• импульс 1-2-3-4-5 (синие круги)")
-    if "abc" in phase or "ABC" in label or "abc" in label.lower():
+    elif "impulse" in phase or "1-5" in label.lower() or "импульс" in label.lower():
+        left.append("• импульс 1-2-3-4-5 (ищем разметку)")
+    if has_abc:
         left.append("• коррекция A-B-C (оранжевые)")
+    elif "abc" in phase or "ABC" in label or "abc" in label.lower():
+        left.append("• коррекция A-B-C")
     if getattr(ta, "elliott_fib_classic_ok", False) or getattr(ta, "elliott_fib_w2", 0):
         left.append("• Fib 38.2 / 50 / 61.8% — зона отката")
-    if not label:
-        left.append("• волны Эллиотта по правилам бота")
-    else:
+    if not has_impulse and not has_abc:
+        left.append("• разметка волн не наложена — смотри уровни справа")
+    elif label:
         left.append(f"• {label[:70]}")
     fig.text(lx, 0.975, "\n".join(left), va="top", ha="left", **style)
 
@@ -1244,18 +1452,38 @@ def _draw_wave_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpan
         right.append(f"✗ Отмена если пробой {fmt_price(float(inv))}")
     fig.text(rx, 0.975, "\n".join(right), va="top", ha="right", **{**style, "color": side_color})
 
-    fig.text(
-        0.50, 0.018 if not with_subpanels else 0.125,
-        "Синие круги = волны импульса  ·  Оранжевые = коррекция ABC  ·  Зелёный = вход",
-        va="bottom", ha="center", fontsize=7.6, color=CHART_STYLE["text"],
-        transform=fig.transFigure,
-        bbox=dict(
-            boxstyle="round,pad=0.4",
-            facecolor=CHART_STYLE["panel"],
-            edgecolor=CHART_STYLE["entry"],
-            alpha=0.92,
-        ),
-    )
+    if has_impulse or has_abc:
+        fig.text(
+            0.50, 0.018 if not with_subpanels else 0.125,
+            "Синие круги = волны импульса  ·  Оранжевые = коррекция ABC  ·  Зелёный = вход",
+            va="bottom",
+            ha="center",
+            fontsize=7.6,
+            color=CHART_STYLE["text"],
+            transform=fig.transFigure,
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor=CHART_STYLE["panel"],
+                edgecolor=CHART_STYLE["entry"],
+                alpha=0.92,
+            ),
+        )
+    else:
+        fig.text(
+            0.50, 0.018 if not with_subpanels else 0.125,
+            "Зелёный = вход  ·  Красный = стоп  ·  Жёлтый/зелёный = TP  ·  волны не отрисованы",
+            va="bottom",
+            ha="center",
+            fontsize=7.6,
+            color=CHART_STYLE["warning"],
+            transform=fig.transFigure,
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor=CHART_STYLE["panel"],
+                edgecolor=CHART_STYLE["warning"],
+                alpha=0.92,
+            ),
+        )
 
 
 def _draw_info_panels_pro(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
@@ -2198,6 +2426,9 @@ async def render_annotated_chart(
     wave_entry_price: float | None = None,
     wave_stop_price: float | None = None,
     wave_tp_prices: list[float] | None = None,
+    wave_draw_ot: tuple[tuple[str, float, float], ...] | None = None,
+    wave_global_ot: tuple[tuple[str, float, float], ...] | None = None,
+    wave_local_ot: tuple[tuple[str, float, float], ...] | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     # Полный lookback для паттернов/EW; на экране — зум display_hours
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
@@ -2263,12 +2494,20 @@ async def render_annotated_chart(
     if wave_focus and side in {"long", "short"}:
         ta.wave_bias = side
 
+    # Wave-chart: сначала точки с алерта (open_time), иначе сырой EW без фильтра
+    if wave_focus:
+        applied = _apply_wave_snapshot_points(
+            ta,
+            bars,
+            draw_ot=wave_draw_ot,
+            global_ot=wave_global_ot,
+            local_ot=wave_local_ot,
+        )
+        if not applied:
+            _ensure_wave_elliott_points(ta, bars)
+
     # Зум экрана: ≥12ч на 5m + расширить, если EW/дамп шире окна
-    ew_idxs = [
-        int(getattr(p, "index", -1))
-        for p in (getattr(ta, "elliott_draw_points", None) or [])
-        if getattr(p, "index", -1) >= 0
-    ]
+    ew_idxs = _ta_elliott_indices(ta)
     elliott_span = (max(ew_idxs) - min(ew_idxs)) if len(ew_idxs) >= 2 else 0
     zoom_hours = structure_aware_display_hours(
         interval_minutes=interval_minutes,
@@ -2278,11 +2517,15 @@ async def render_annotated_chart(
         elliott_span_bars=elliott_span,
         fib_span_bars=0,
     )
-    # Wave-chart: зум обязан покрыть ВСЕ точки волн, иначе меток не видно
+    # Wave-chart: зум от самой ранней волны до сейчас (иначе круги слева за кадром)
     if wave_focus and ew_idxs:
-        span_bars = max(ew_idxs) - min(ew_idxs) + 16
-        need_h = (span_bars * interval_minutes) / 60.0 + 1.0
-        zoom_hours = min(float(analysis_hours), max(float(zoom_hours), need_h, 8.0))
+        zoom_hours = _wave_chart_zoom_hours(
+            bars=bars,
+            interval_minutes=interval_minutes,
+            analysis_hours=float(analysis_hours),
+            base_zoom=float(zoom_hours),
+            point_indices=ew_idxs,
+        )
 
     source = (chart_source or "annotated").lower()
     # Wave chart — всегда matplotlib wave_focus (не TradingView Hot-overlay)
@@ -2358,6 +2601,9 @@ async def render_wave_chart(
     exchange: str = "bybit",
     display_hours: int | None = None,
     height_scale: float | None = None,
+    ew_draw_ot: tuple[tuple[str, float, float], ...] | None = None,
+    ew_global_ot: tuple[tuple[str, float, float], ...] | None = None,
+    ew_local_ot: tuple[tuple[str, float, float], ...] | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     """Чистый волновой график: EW G/L + Fib + путь, без Hot ИТОГ/ПЛАН."""
     verdict = "WAIT"
@@ -2386,6 +2632,9 @@ async def render_wave_chart(
         wave_stop_price=stop_price,
         wave_tp_prices=[float(t) for t in (tp_prices or []) if t][:4] or None,
         pattern_detection_enabled=False,
+        wave_draw_ot=ew_draw_ot,
+        wave_global_ot=ew_global_ot,
+        wave_local_ot=ew_local_ot,
     )
 
 
