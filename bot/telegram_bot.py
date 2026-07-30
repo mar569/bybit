@@ -217,6 +217,8 @@ class TelegramBot:
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
         self.wave_level_watcher = WaveLevelWatcher()
+        self.oil_monitor: Any | None = None
+        self._oil_force_dispatch = False
         self._wave_watch_task: asyncio.Task | None = None
         # Контекст последнего сигнала для кнопок «Ждать LONG/SHORT»
         self._signal_watch_ctx: dict[str, dict[str, Any]] = {}
@@ -441,6 +443,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("test_analysis", self.on_test_analysis))
         self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("chart", self.on_chart))
+        self.application.add_handler(CommandHandler("oil", self.on_oil))
         self.application.add_handler(CommandHandler("ta", self.on_ta_help))
         self.application.add_handler(CommandHandler("ai_stop", self.on_ai_stop))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
@@ -1036,6 +1039,7 @@ class TelegramBot:
             "📈 Статус", "Статус",
             "📐 Ручной анализ", "Ручной анализ",
             "🌱 Тренды", "Тренды", "Потенциал трендов", "🌱 Потенциал трендов",
+            "🛢 Нефть", "Нефть", "Brent", "WTI",
             "📋 Команды", "Команды", "❓ Помощь", "Помощь",
         }
         if t in labels:
@@ -2036,11 +2040,12 @@ class TelegramBot:
         if self.application is None:
             return False
         settings = self.settings_manager.settings
-        if self._bot_notifications_blocked():
+        force = bool(self._oil_force_dispatch)
+        if not force and self._bot_notifications_blocked():
             return False
-        if not getattr(settings, "oil_news_enabled", False):
+        if not force and not getattr(settings, "oil_news_enabled", False):
             return False
-        if not getattr(settings, "oil_digest_enabled", True):
+        if not force and not getattr(settings, "oil_digest_enabled", True):
             return False
         # Текст без графика — в oil-чат; с PNG — в ручной TA.
         if png:
@@ -2051,6 +2056,8 @@ class TelegramBot:
                 chat_id, png, message, is_priority=False, keyboard=None,
             )
         chat_id = self.config.oil_news_chat_id
+        if chat_id is None and force:
+            chat_id = self._oil_chart_chat_id()
         if chat_id is None:
             return False
         return await self._send_to_chat(chat_id, message, None, is_priority=False)
@@ -2074,9 +2081,10 @@ class TelegramBot:
         if self.application is None:
             return False
         settings = self.settings_manager.settings
-        if self._bot_notifications_blocked():
+        force = bool(self._oil_force_dispatch)
+        if not force and self._bot_notifications_blocked():
             return False
-        if not getattr(settings, "oil_news_enabled", False):
+        if not force and not getattr(settings, "oil_news_enabled", False):
             return False
         chat_id = self._oil_chart_chat_id()
         if chat_id is None:
@@ -2084,6 +2092,35 @@ class TelegramBot:
         return await self._send_chart(
             chat_id, png, message, is_priority=False, keyboard=None,
         )
+
+    async def _send_oil_snapshot_now(self, message: Any) -> None:
+        """Ручной дайджест + графики Brent/WTI (админ)."""
+        if message is None:
+            return
+        if self.oil_monitor is None:
+            await message.reply_text("Нефтяной монитор ещё не подключен. Перезапусти бота.")
+            return
+        chart_chat = self._oil_chart_chat_id()
+        if chart_chat is None:
+            await message.reply_text(
+                "Нет чата для графиков: задай TELEGRAM_MANUAL_TA_CHAT_ID "
+                "или TELEGRAM_OIL_NEWS_CHAT_ID."
+            )
+            return
+        wait = await message.reply_text(
+            "⏳ Собираю нефть (UKOUSD / USOIL)…",
+            parse_mode=ParseMode.HTML,
+        )
+        self._oil_force_dispatch = True
+        try:
+            ok, detail = await self.oil_monitor.send_digest_now()
+        finally:
+            self._oil_force_dispatch = False
+        text = f"✅ Нефть: {detail}" if ok else f"⚠️ Нефть: {detail}"
+        try:
+            await wait.edit_text(text)
+        except Exception:
+            await message.reply_text(text)
 
     async def dispatch_wave(self, event: WaveEvent) -> bool:
         """Волновой сигнал EW+Fib → wave chat с графиком разметки."""
@@ -3788,6 +3825,13 @@ class TelegramBot:
             keyboard=keyboard,
         )
 
+    async def on_oil(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            if update.message:
+                await update.message.reply_text("Нет доступа.")
+            return
+        await self._send_oil_snapshot_now(update.message)
+
     async def on_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -3978,6 +4022,12 @@ class TelegramBot:
             await self._start_manual_ta_wizard(update, context)
         elif text in {"🌱 Тренды", "Тренды", "Потенциал трендов", "🌱 Потенциал трендов"}:
             await self._handle_trend_seed_scan_request(update)
+        elif text in {"🛢 Нефть", "Нефть", "Brent", "WTI"}:
+            await update.message.reply_text(
+                self._build_oil_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._oil_keyboard(),
+            )
         elif text in {"📋 Команды", "Команды", "❓ Помощь", "Помощь"}:
             await update.message.reply_text(
                 self._build_help_text(),
@@ -3995,6 +4045,7 @@ class TelegramBot:
             "/set help — точная настройка через команды\n"
             "/test — тестовые сигналы LONG + SHORT\n"
             "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
+            "/oil — свежий разбор нефти UKOUSD/USOIL + графики (сейчас)\n"
             "/ta — справка по ручному TA-чату\n"
             "/ai_stop — закрыть AI-сессию (кнопка 🤖 AI на сигнале)\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
@@ -4195,7 +4246,7 @@ class TelegramBot:
             else "графики → oil-чат (нет TELEGRAM_MANUAL_TA_CHAT_ID)"
         )
         return (
-            "<b>🛢 Нефть Brent / WTI</b>\n"
+            "<b>🛢 Нефть UKOUSD / USOIL</b>\n"
             f"Канал: {chat_line}\n"
             f"{chart_line}\n"
             f"Статус: <b>{'ON' if s.oil_news_enabled else 'OFF'}</b>\n\n"
@@ -4211,7 +4262,8 @@ class TelegramBot:
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
-            "<i>Hormuz · EIA · OPEC · санкции · пробой ключевых уровней</i>"
+            "<i>Hormuz · EIA · OPEC · санкции · пробой ключевых уровней</i>\n"
+            "Ручной снимок: кнопка <b>📊 Сейчас</b> или <code>/oil</code>"
         ).replace(",", " ")
 
     def _oil_keyboard(self) -> InlineKeyboardMarkup:
@@ -4267,6 +4319,9 @@ class TelegramBot:
                     self._mark("WTI", getattr(s, "oil_include_wti", True)),
                     callback_data="oil:wti",
                 ),
+            ],
+            [
+                InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
             ],
             [
                 InlineKeyboardButton("◀️ Настройки", callback_data="refresh_settings"),
@@ -5078,6 +5133,11 @@ class TelegramBot:
         label = ""
         s = self.settings_manager.settings
 
+        if action == "now":
+            await query.answer("Собираю нефть…", show_alert=False)
+            await self._send_oil_snapshot_now(query.message)
+            return True
+
         if action == "on":
             current = s.oil_news_enabled
             self.settings_manager.update(oil_news_enabled=not current)
@@ -5142,7 +5202,7 @@ class TelegramBot:
                 [KeyboardButton("💧 Ликвидация"), KeyboardButton("🧠 Анализ")],
                 [KeyboardButton("📐 Ручной анализ"), KeyboardButton("🌱 Тренды")],
                 [KeyboardButton("🔧 Настройки"), KeyboardButton("📊 Биржи")],
-                [KeyboardButton("📋 Команды")],
+                [KeyboardButton("🛢 Нефть"), KeyboardButton("📋 Команды")],
             ],
             resize_keyboard=True,
         )

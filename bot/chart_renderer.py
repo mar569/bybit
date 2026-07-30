@@ -1707,6 +1707,66 @@ def _chart_figure_layout(
     return (19.0, 8.5 * scale), None
 
 
+def _draw_urals_inset(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    *,
+    urals_price: float,
+    brent_last: float,
+    change_pct: float | None = None,
+    display_hours: int = 18,
+    interval_minutes: int = 15,
+) -> None:
+    """Маленькое окошко: Urals (российская нефть) — цена + мини-график."""
+    if urals_price <= 0 or not bars:
+        return
+    vis = _visible_bars(bars, display_hours, interval_minutes)
+    if len(vis) < 4:
+        vis = bars[-min(48, len(bars)):]
+    closes = [float(b.close) for b in vis]
+    if brent_last <= 0:
+        brent_last = closes[-1]
+    discount = brent_last - urals_price
+    spark = [max(1.0, c - discount) for c in closes]
+    xs = list(range(len(spark)))
+
+    try:
+        inset = ax.inset_axes([0.015, 0.58, 0.26, 0.38])
+    except Exception:
+        return
+    inset.set_facecolor("#121820")
+    for spine in inset.spines.values():
+        spine.set_color("#3d4f63")
+        spine.set_linewidth(0.8)
+    color = "#3dd68c" if (change_pct is None or change_pct >= 0) else "#f07178"
+    inset.fill_between(xs, spark, min(spark), color=color, alpha=0.18, linewidth=0)
+    inset.plot(xs, spark, color=color, linewidth=1.35, solid_capstyle="round")
+    inset.set_xlim(0, max(xs[-1], 1))
+    pad = (max(spark) - min(spark)) * 0.12 or 0.3
+    inset.set_ylim(min(spark) - pad, max(spark) + pad)
+    inset.set_xticks([])
+    inset.set_yticks([])
+    inset.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+
+    chg_txt = ""
+    if change_pct is not None:
+        sign = "+" if change_pct >= 0 else ""
+        chg_txt = f"  {sign}{change_pct:.1f}%"
+    disc_txt = f"  Brent{discount:+.1f}" if abs(discount) < 40 else ""
+    title = f"URALS · РФ  ${urals_price:.2f}{chg_txt}"
+    inset.text(
+        0.03, 0.96, title,
+        transform=inset.transAxes, va="top", ha="left",
+        fontsize=7.2, color="#e8eef5", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.18", facecolor="#0d1218", edgecolor="#3d4f63", alpha=0.92),
+    )
+    inset.text(
+        0.03, 0.08, f"скидка к Brent{disc_txt}" if disc_txt else "российская нефть",
+        transform=inset.transAxes, va="bottom", ha="left",
+        fontsize=5.8, color="#9aabbc",
+    )
+
+
 def _render_chart_figure(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
@@ -1720,6 +1780,8 @@ def _render_chart_figure(
     display_hours: int | None = None,
     height_scale: float | None = None,
     wave_focus: bool = False,
+    urals_price: float | None = None,
+    urals_change_pct: float | None = None,
 ) -> bytes:
     use_enhanced = enhanced
     fig_size, height_ratios = _chart_figure_layout(
@@ -1805,6 +1867,19 @@ def _render_chart_figure(
         _apply_display_zoom(
             ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
         )
+    if urals_price and urals_price > 0 and not wave_focus:
+        try:
+            _draw_urals_inset(
+                ax,
+                bars,
+                urals_price=float(urals_price),
+                brent_last=float(bars[-1].close),
+                change_pct=urals_change_pct,
+                display_hours=int(zoom_h),
+                interval_minutes=interval_minutes,
+            )
+        except Exception:
+            logger.debug("Urals inset draw failed", exc_info=True)
     fig.autofmt_xdate(rotation=0)
 
     # НЕ bbox_inches="tight": при зуме артисты вне осей раздувают PNG до миллионов px
@@ -2738,6 +2813,20 @@ def render_oil_chart(
     max_zoom = {5: 14, 10: 16, 15: 28, 30: 40, 60: 72}.get(im, 24)
     zoom = max(8, min(int(zoom), max_zoom))
     title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
+
+    urals_px: float | None = None
+    urals_chg: float | None = None
+    try:
+        from .urals_price import fetch_urals_snapshot
+
+        brent_last = float(bars[-1].close)
+        snap = fetch_urals_snapshot(brent_ref=brent_last)
+        if snap is not None:
+            urals_px = float(snap.price)
+            urals_chg = snap.change_pct
+    except Exception:
+        logger.debug("Urals snapshot skipped", exc_info=True)
+
     return _render_chart_figure(
         bars,
         ta,
@@ -2750,6 +2839,8 @@ def render_oil_chart(
         enhanced=True,
         height_scale=max(1.35, float(height_scale or 1.45)),
         wave_focus=False,
+        urals_price=urals_px,
+        urals_change_pct=urals_chg,
     )
 
 

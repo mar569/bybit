@@ -1,11 +1,13 @@
 """Нефть: отдельный чат — свежие новости (ссылки) + техразбор + прогноз.
 
-Данные: Google News RSS (EN + RU), Bybit TradFi linear commodity:
-  BZUSDT = Brent (UI: UKOUSD / Brent), CLUSDT = WTI (UI: USOIL).
+Торговый UI Bybit TradFi (MT5): UKOUSD.s (Brent cash) / USOIL — публичных kline нет.
+Данные для уровней: Yahoo futures BZ=F / CL=F (ближе к CFD, чем Bybit perps
+BZUSDT/CLUSDT, у которых basis часто −1…−3$). Fallback: Bybit linear commodity.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -23,9 +25,15 @@ from .ta_analysis import TAAnalysisResult, TradeScenario, fmt_price, run_ta_anal
 
 logger = logging.getLogger(__name__)
 
-# Bybit TradFi commodity perps (category=linear, symbolType=commodity)
-OIL_BRENT_SYMBOL = "BZUSDT"  # Brent — в UI часто как UKOUSD
-OIL_WTI_SYMBOL = "CLUSDT"    # WTI — в UI часто как USOIL
+# UI-символы (как на Bybit TradFi) + источники свечей
+OIL_BRENT_SYMBOL = "UKOUSD"
+OIL_WTI_SYMBOL = "USOIL"
+OIL_BRENT_LABEL = "Brent · UKOUSD"
+OIL_WTI_LABEL = "WTI · USOIL"
+OIL_BRENT_YAHOO = "BZ=F"
+OIL_WTI_YAHOO = "CL=F"
+OIL_BRENT_BYBIT = "BZUSDT"  # fallback, другой basis
+OIL_WTI_BYBIT = "CLUSDT"
 
 _OIL_KEYWORDS = frozenset({
     "oil", "crude", "brent", "wti", "petroleum", "gasoline", "diesel", "hormuz",
@@ -792,15 +800,106 @@ async def fetch_oil_news(
     )
     return merged[:max_items]
 
+def _yahoo_interval_and_range(interval_minutes: int) -> tuple[str, str, int]:
+    """(yahoo_interval, range, aggregate_factor). 10m → 5m×2."""
+    im = max(5, min(60, int(interval_minutes)))
+    if im <= 5:
+        return "5m", "5d", 1
+    if im <= 10:
+        return "5m", "5d", 2
+    if im <= 15:
+        return "15m", "1mo", 1
+    if im <= 30:
+        return "30m", "1mo", 1
+    return "60m", "3mo", 1
+
+
+def _aggregate_oil_bars(bars: list[KlineBar], factor: int) -> list[KlineBar]:
+    if factor <= 1 or len(bars) < factor:
+        return bars
+    out: list[KlineBar] = []
+    for i in range(0, len(bars) - (len(bars) % factor), factor):
+        chunk = bars[i : i + factor]
+        out.append(
+            KlineBar(
+                open_time=chunk[0].open_time,
+                open=chunk[0].open,
+                high=max(b.high for b in chunk),
+                low=min(b.low for b in chunk),
+                close=chunk[-1].close,
+                volume=sum(b.volume for b in chunk),
+            )
+        )
+    return out
+
+
+def _fetch_yahoo_oil_bars(
+    yahoo_symbol: str,
+    *,
+    interval_minutes: int = 15,
+    limit: int | None = None,
+) -> list[KlineBar]:
+    """Свечи Yahoo futures (BZ=F / CL=F) — proxy для UKOUSD / USOIL."""
+    y_int, y_range, agg = _yahoo_interval_and_range(interval_minutes)
+    lim = limit if limit is not None else _bars_limit_for_interval(interval_minutes)
+    lim = min(max(int(lim), 24), 1000)
+    params = urllib.parse.urlencode({
+        "interval": y_int,
+        "range": y_range,
+        "includePrePost": "false",
+    })
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yahoo_symbol)}?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; BybitBot/1.0)"},
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        payload = json.loads(resp.read())
+    result = (payload.get("chart") or {}).get("result") or []
+    if not result:
+        err = ((payload.get("chart") or {}).get("error") or {}).get("description") or "empty"
+        raise RuntimeError(f"Yahoo oil kline {yahoo_symbol}: {err}")
+    r0 = result[0]
+    timestamps = r0.get("timestamp") or []
+    quote = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
+    opens = quote.get("open") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
+    bars: list[KlineBar] = []
+    for i, ts in enumerate(timestamps):
+        try:
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            if o is None or h is None or l is None or c is None:
+                continue
+            vol = float(volumes[i] or 0.0)
+            bars.append(
+                KlineBar(
+                    open_time=float(ts),
+                    open=float(o),
+                    high=float(h),
+                    low=float(l),
+                    close=float(c),
+                    volume=vol,
+                )
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+    bars.sort(key=lambda b: b.open_time)
+    bars = _aggregate_oil_bars(bars, agg)
+    if lim and len(bars) > lim:
+        bars = bars[-lim:]
+    return bars
+
+
 def _fetch_bybit_oil_bars(
     symbol: str,
     *,
     interval_minutes: int = 15,
     limit: int | None = None,
 ) -> list[KlineBar]:
-    """Свечи Bybit TradFi commodity (linear): BZUSDT / CLUSDT."""
-    import json
-
+    """Свечи Bybit native commodity perps (linear): BZUSDT / CLUSDT."""
     interval = bybit_interval_for_minutes(interval_minutes)
     lim = limit if limit is not None else _bars_limit_for_interval(interval_minutes)
     lim = min(max(int(lim), 24), 1000)
@@ -835,13 +934,47 @@ def _fetch_bybit_oil_bars(
     return bars
 
 
+def _fetch_oil_bars(
+    *,
+    yahoo_symbol: str,
+    bybit_symbol: str,
+    interval_minutes: int = 15,
+    limit: int | None = None,
+) -> list[KlineBar]:
+    """Yahoo futures first (≈ UKOUSD/USOIL), Bybit perp fallback."""
+    try:
+        bars = _fetch_yahoo_oil_bars(
+            yahoo_symbol, interval_minutes=interval_minutes, limit=limit,
+        )
+        if len(bars) >= 24:
+            return bars
+    except Exception:
+        logger.warning(
+            "Yahoo oil %s failed, fallback Bybit %s",
+            yahoo_symbol,
+            bybit_symbol,
+            exc_info=True,
+        )
+    return _fetch_bybit_oil_bars(
+        bybit_symbol, interval_minutes=interval_minutes, limit=limit,
+    )
+
+
 async def fetch_oil_last_prices() -> dict[str, float]:
-    """Быстрый тик для level-alerts — 5m последнее закрытие Bybit."""
+    """Быстрый тик для level-alerts — 5m close (Yahoo → Bybit)."""
     out: dict[str, float] = {}
-    for label, sym in (("BRENT", OIL_BRENT_SYMBOL), ("WTI", OIL_WTI_SYMBOL)):
+    pairs = (
+        ("BRENT", OIL_BRENT_YAHOO, OIL_BRENT_BYBIT),
+        ("WTI", OIL_WTI_YAHOO, OIL_WTI_BYBIT),
+    )
+    for label, ysym, bsym in pairs:
         try:
             bars = await asyncio.to_thread(
-                _fetch_bybit_oil_bars, sym, interval_minutes=5, limit=5,
+                _fetch_oil_bars,
+                yahoo_symbol=ysym,
+                bybit_symbol=bsym,
+                interval_minutes=5,
+                limit=5,
             )
             if bars:
                 out[label] = float(bars[-1].close)
@@ -893,7 +1026,7 @@ async def build_oil_analysis_bundle(
     include_brent: bool = True,
     include_wti: bool = True,
 ) -> OilAnalysisBundle | None:
-    """Brent (BZUSDT) + WTI (CLUSDT) с Bybit TradFi linear."""
+    """Brent (UKOUSD ≈ BZ=F) + WTI (USOIL ≈ CL=F)."""
     im = max(5, min(60, int(interval_minutes)))
 
     brent_bars: list[KlineBar] = []
@@ -903,10 +1036,13 @@ async def build_oil_analysis_bundle(
     if include_brent:
         try:
             brent_bars = await asyncio.to_thread(
-                _fetch_bybit_oil_bars, OIL_BRENT_SYMBOL, interval_minutes=im,
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=im,
             )
         except Exception:
-            logger.warning("Brent BZUSDT fetch failed", exc_info=True)
+            logger.warning("Brent UKOUSD/BZ=F fetch failed", exc_info=True)
             return None
         if len(brent_bars) < 24:
             return None
@@ -921,7 +1057,7 @@ async def build_oil_analysis_bundle(
             pattern_min_confidence=0.50,
         )
         brent_snap = _snapshot_from_ta(
-            "Brent · BZUSDT", OIL_BRENT_SYMBOL, brent_bars, brent_ta,
+            OIL_BRENT_LABEL, OIL_BRENT_SYMBOL, brent_bars, brent_ta,
         )
     else:
         return None
@@ -932,7 +1068,10 @@ async def build_oil_analysis_bundle(
     if include_wti:
         try:
             wti_bars = await asyncio.to_thread(
-                _fetch_bybit_oil_bars, OIL_WTI_SYMBOL, interval_minutes=im,
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_WTI_YAHOO,
+                bybit_symbol=OIL_WTI_BYBIT,
+                interval_minutes=im,
             )
             if len(wti_bars) >= 24:
                 hours = min(int(len(wti_bars) * im / 60), 1080)
@@ -945,10 +1084,10 @@ async def build_oil_analysis_bundle(
                     pattern_detection_enabled=False,
                 )
                 wti_snap = _snapshot_from_ta(
-                    "WTI · CLUSDT", OIL_WTI_SYMBOL, wti_bars, wti_ta,
+                    OIL_WTI_LABEL, OIL_WTI_SYMBOL, wti_bars, wti_ta,
                 )
         except Exception:
-            logger.debug("WTI CLUSDT fetch failed", exc_info=True)
+            logger.debug("WTI USOIL/CL=F fetch failed", exc_info=True)
 
     mood = detect_oil_market_mood(brent_bars, brent_ta, im)
 
@@ -1165,7 +1304,7 @@ def format_oil_market_digest(
     primary = snaps[0] if snaps else None
     lines = [
         "📊 <b>Нефть · разбор</b>",
-        f"<i>Bybit TradFi · TF {interval_minutes}m · BZUSDT (Brent) · CLUSDT (WTI)</i>",
+        f"<i>UKOUSD / USOIL · TF {interval_minutes}m · данные ≈ Yahoo BZ=F / CL=F</i>",
         "",
     ]
     for s in snaps:
@@ -1205,6 +1344,24 @@ def format_oil_market_digest(
     if len(snaps) >= 2:
         spread = snaps[0].price - snaps[1].price
         lines.append(f"Спред Brent−WTI: <b>${spread:.2f}</b> (геополитика → Brent чувствительнее)")
+
+    try:
+        from .urals_price import fetch_urals_snapshot
+
+        brent_px = snaps[0].price if snaps else None
+        urals = fetch_urals_snapshot(brent_ref=brent_px)
+        if urals is not None:
+            disc = urals.discount_vs_brent
+            disc_txt = f" · скидка к Brent <b>{disc:+.2f}</b>$" if disc is not None else ""
+            chg = ""
+            if urals.change_pct is not None:
+                sign = "+" if urals.change_pct >= 0 else ""
+                chg = f" ({sign}{urals.change_pct:.1f}% дн.)"
+            lines.append(
+                f"🇷🇺 <b>Urals</b> · <b>${urals.price:.2f}</b>{chg}{disc_txt}"
+            )
+    except Exception:
+        pass
 
     return "\n".join(lines)
 
@@ -1394,154 +1551,13 @@ class OilMonitorEngine:
 
         digest_enabled = bool(getattr(settings, "oil_digest_enabled", True))
         digest_h = float(getattr(settings, "oil_digest_interval_hours", 4.0))
-        chart_enabled = bool(getattr(settings, "oil_chart_enabled", True))
-        interval_min = int(getattr(settings, "oil_interval_minutes", 15))
-        include_brent = bool(getattr(settings, "oil_include_brent", True))
-        include_wti = bool(getattr(settings, "oil_include_wti", True))
         now = time.time()
         if (
             digest_enabled
             and self._on_digest is not None
             and now - self._last_digest_ts >= digest_h * 3600.0
         ):
-            try:
-                bundle = await build_oil_analysis_bundle(
-                    interval_minutes=interval_min,
-                    include_brent=include_brent,
-                    include_wti=include_wti,
-                )
-                if bundle:
-                    self._sync_levels_from_bundle(bundle)
-                    snaps = [bundle.brent]
-                    if bundle.wti:
-                        snaps.append(bundle.wti)
-                    min_score = float(
-                        getattr(settings, "oil_bounce_min_news_score", 3.0)
-                    )
-                    ta_verdict_raw = bundle.brent.verdict
-                    ta_conf_raw = int(bundle.brent.confidence or 0)
-                    news_bias = summarize_oil_news_bias(
-                        self._recent_news,
-                        ta_verdict=ta_verdict_raw,
-                        ta_confidence=ta_conf_raw,
-                    )
-                    bounce = build_oil_bounce_plan(
-                        bundle.brent,
-                        news_bias,
-                        news_items=self._recent_news,
-                        min_score=min_score,
-                    )
-                    self._active_bounce = bounce
-                    if bounce is not None:
-                        apply_oil_bounce_to_ta(
-                            bundle.brent_ta,
-                            bounce,
-                            ta_confidence_raw=ta_conf_raw,
-                        )
-                        # snap mirrors chart levels for digest consistency
-                        bundle.brent.verdict = (
-                            "LONG" if bounce.side == "long" else "SHORT"
-                        )
-                        bundle.brent.confidence = int(
-                            bundle.brent_ta.verdict_confidence or ta_conf_raw
-                        )
-                        bundle.brent.entry_zone = (
-                            bounce.entry_lo,
-                            bounce.entry_hi,
-                        )
-                        bundle.brent.stop = bounce.stop
-                        bundle.brent.targets = bounce.targets
-                        bundle.brent.reason = bounce.reason_ru[:200]
-                    digest = format_oil_market_digest(
-                        snaps,
-                        ta=bundle.brent_ta,
-                        interval_minutes=bundle.interval_minutes,
-                        market_mood=bundle.market_mood,
-                        news_bias=news_bias,
-                        bounce_plan=bounce,
-                        ta_confidence_raw=ta_conf_raw,
-                        ta_verdict_raw=ta_verdict_raw,
-                    )
-                    png: bytes | None = None
-                    if chart_enabled:
-                        from .chart_renderer import render_oil_chart
-
-                        display_h = int(
-                            getattr(settings, "oil_chart_display_hours", 18) or 18
-                        )
-                        height_scale = float(
-                            getattr(settings, "oil_chart_height_scale", 1.45)
-                            or getattr(settings, "signal_chart_height_scale", 1.0)
-                            or 1.45
-                        )
-                        png = render_oil_chart(
-                            bundle.brent_bars,
-                            bundle.brent_ta,
-                            symbol_label="Brent · BZUSDT",
-                            interval_minutes=bundle.interval_minutes,
-                            display_hours=display_h,
-                            height_scale=max(1.35, height_scale),
-                        )
-                    ok = await self._on_digest(digest, png)
-                    if ok:
-                        self._last_digest_ts = now
-                        sent += 1
-                        if bounce is not None:
-                            sent += await self._maybe_send_bounce_alert(
-                                bounce,
-                                label="Brent · BZUSDT",
-                                settings=settings,
-                                png=None,  # график уже ушёл с дайджестом
-                            )
-                        if (
-                            chart_enabled
-                            and bundle.wti_bars
-                            and bundle.wti_ta
-                            and self._on_extra_chart is not None
-                        ):
-                            wti_bounce = None
-                            if bounce is not None and bundle.wti:
-                                wti_bias = summarize_oil_news_bias(
-                                    self._recent_news,
-                                    ta_verdict=bundle.wti.verdict,
-                                )
-                                wti_bounce = build_oil_bounce_plan(
-                                    bundle.wti,
-                                    wti_bias,
-                                    news_items=self._recent_news,
-                                    min_score=min_score,
-                                )
-                                if wti_bounce is not None:
-                                    apply_oil_bounce_to_ta(
-                                        bundle.wti_ta,
-                                        wti_bounce,
-                                        ta_confidence_raw=int(
-                                            bundle.wti.confidence or 0
-                                        ),
-                                    )
-                            wti_png = render_oil_chart(
-                                bundle.wti_bars,
-                                bundle.wti_ta,
-                                symbol_label="WTI · CLUSDT",
-                                interval_minutes=bundle.interval_minutes,
-                                display_hours=display_h,
-                                height_scale=max(1.35, height_scale),
-                            )
-                            if wti_png:
-                                wti_caption = (
-                                    f"📊 <b>WTI · CLUSDT</b> · {bundle.interval_minutes}m · "
-                                    f"${bundle.wti.price:.2f}"
-                                )
-                                if wti_bounce is not None:
-                                    wti_caption += (
-                                        f"\n{wti_bounce.reason_ru}"
-                                    )
-                                try:
-                                    await self._on_extra_chart(wti_caption, wti_png)
-                                except Exception:
-                                    logger.exception("Oil WTI chart dispatch failed")
-            except Exception:
-                logger.exception("Oil digest failed")
+            sent += await self._send_digest_once(settings, update_last_ts=True)
 
         # Между дайджестами: редкий bounce-alert если цена подошла к уровню
         if self._active_bounce is not None:
@@ -1565,7 +1581,7 @@ class OilMonitorEngine:
                     )
                     sent += await self._maybe_send_bounce_alert(
                         refreshed,
-                        label="Brent · BZUSDT",
+                        label=OIL_BRENT_LABEL,
                         settings=settings,
                         png=None,
                     )
@@ -1573,6 +1589,163 @@ class OilMonitorEngine:
                 logger.debug("Oil bounce tick failed", exc_info=True)
 
         return sent
+
+    async def send_digest_now(self) -> tuple[bool, str]:
+        """Ручной вызов: свежий разбор + графики, без ожидания интервала."""
+        settings = self.settings_manager.settings
+        if self._on_digest is None:
+            return False, "oil digest callback не подключен"
+        try:
+            n = await self._send_digest_once(settings, update_last_ts=True)
+        except Exception as exc:
+            logger.exception("Oil manual digest failed")
+            return False, f"ошибка: {exc}"
+        if n <= 0:
+            return False, "не удалось собрать/отправить (проверьте Bybit/чат)"
+        return True, f"отправлено ({n})"
+
+    async def _send_digest_once(
+        self,
+        settings: Any,
+        *,
+        update_last_ts: bool = True,
+    ) -> int:
+        """Собрать дайджест + PNG Brent/WTI и отправить."""
+        if self._on_digest is None:
+            return 0
+        chart_enabled = bool(getattr(settings, "oil_chart_enabled", True))
+        interval_min = int(getattr(settings, "oil_interval_minutes", 15))
+        include_brent = bool(getattr(settings, "oil_include_brent", True))
+        include_wti = bool(getattr(settings, "oil_include_wti", True))
+        sent = 0
+        try:
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=interval_min,
+                include_brent=include_brent,
+                include_wti=include_wti,
+            )
+            if not bundle:
+                return 0
+            self._sync_levels_from_bundle(bundle)
+            snaps = [bundle.brent]
+            if bundle.wti:
+                snaps.append(bundle.wti)
+            min_score = float(getattr(settings, "oil_bounce_min_news_score", 3.0))
+            ta_verdict_raw = bundle.brent.verdict
+            ta_conf_raw = int(bundle.brent.confidence or 0)
+            news_bias = summarize_oil_news_bias(
+                self._recent_news,
+                ta_verdict=ta_verdict_raw,
+                ta_confidence=ta_conf_raw,
+            )
+            bounce = build_oil_bounce_plan(
+                bundle.brent,
+                news_bias,
+                news_items=self._recent_news,
+                min_score=min_score,
+            )
+            self._active_bounce = bounce
+            if bounce is not None:
+                apply_oil_bounce_to_ta(
+                    bundle.brent_ta,
+                    bounce,
+                    ta_confidence_raw=ta_conf_raw,
+                )
+                bundle.brent.verdict = (
+                    "LONG" if bounce.side == "long" else "SHORT"
+                )
+                bundle.brent.confidence = int(
+                    bundle.brent_ta.verdict_confidence or ta_conf_raw
+                )
+                bundle.brent.entry_zone = (bounce.entry_lo, bounce.entry_hi)
+                bundle.brent.stop = bounce.stop
+                bundle.brent.targets = bounce.targets
+                bundle.brent.reason = bounce.reason_ru[:200]
+            digest = format_oil_market_digest(
+                snaps,
+                ta=bundle.brent_ta,
+                interval_minutes=bundle.interval_minutes,
+                market_mood=bundle.market_mood,
+                news_bias=news_bias,
+                bounce_plan=bounce,
+                ta_confidence_raw=ta_conf_raw,
+                ta_verdict_raw=ta_verdict_raw,
+            )
+            # пометка ручного/планового вызова в шапке уже есть в digest
+            png: bytes | None = None
+            display_h = int(getattr(settings, "oil_chart_display_hours", 18) or 18)
+            height_scale = float(
+                getattr(settings, "oil_chart_height_scale", 1.45)
+                or getattr(settings, "signal_chart_height_scale", 1.0)
+                or 1.45
+            )
+            if chart_enabled:
+                from .chart_renderer import render_oil_chart
+
+                png = render_oil_chart(
+                    bundle.brent_bars,
+                    bundle.brent_ta,
+                    symbol_label=OIL_BRENT_LABEL,
+                    interval_minutes=bundle.interval_minutes,
+                    display_hours=display_h,
+                    height_scale=max(1.35, height_scale),
+                )
+            ok = await self._on_digest(digest, png)
+            if not ok:
+                return 0
+            if update_last_ts:
+                self._last_digest_ts = time.time()
+            sent = 1
+            if (
+                chart_enabled
+                and bundle.wti_bars
+                and bundle.wti_ta
+                and self._on_extra_chart is not None
+            ):
+                from .chart_renderer import render_oil_chart
+
+                wti_bounce = None
+                if bounce is not None and bundle.wti:
+                    wti_bias = summarize_oil_news_bias(
+                        self._recent_news,
+                        ta_verdict=bundle.wti.verdict,
+                    )
+                    wti_bounce = build_oil_bounce_plan(
+                        bundle.wti,
+                        wti_bias,
+                        news_items=self._recent_news,
+                        min_score=min_score,
+                    )
+                    if wti_bounce is not None:
+                        apply_oil_bounce_to_ta(
+                            bundle.wti_ta,
+                            wti_bounce,
+                            ta_confidence_raw=int(bundle.wti.confidence or 0),
+                        )
+                wti_png = render_oil_chart(
+                    bundle.wti_bars,
+                    bundle.wti_ta,
+                    symbol_label=OIL_WTI_LABEL,
+                    interval_minutes=bundle.interval_minutes,
+                    display_hours=display_h,
+                    height_scale=max(1.35, height_scale),
+                )
+                if wti_png:
+                    wti_caption = (
+                        f"📊 <b>{OIL_WTI_LABEL}</b> · {bundle.interval_minutes}m · "
+                        f"${bundle.wti.price:.2f}"
+                    )
+                    if wti_bounce is not None:
+                        wti_caption += f"\n{wti_bounce.reason_ru}"
+                    try:
+                        await self._on_extra_chart(wti_caption, wti_png)
+                        sent += 1
+                    except Exception:
+                        logger.exception("Oil WTI chart dispatch failed")
+            return sent
+        except Exception:
+            logger.exception("Oil digest compose failed")
+            return 0
 
     async def run_loop(self, interval: float | None = None) -> None:
         while True:

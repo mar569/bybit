@@ -95,7 +95,7 @@ def test_format_oil_market_digest():
     )
     text = format_oil_market_digest([snap])
     assert "Brent" in text
-    assert "BZUSDT" in text or "Brent" in text or "TradFi" in text
+    assert "UKOUSD" in text or "Brent" in text or "Yahoo" in text or "BZ=F" in text
 
 
 def test_news_critical_score_hormuz():
@@ -187,7 +187,7 @@ def test_summarize_oil_news_bias_conflict():
 def test_digest_includes_news_bias():
     snap = OilMarketSnapshot(
         label="Brent",
-        symbol="BZUSDT",
+        symbol="UKOUSD",
         price=90.5,
         high_7d=102.0,
         low_7d=82.5,
@@ -219,7 +219,7 @@ def test_digest_includes_news_bias():
 def test_build_oil_bounce_plan_long_and_apply_ta():
     snap = OilMarketSnapshot(
         label="Brent",
-        symbol="BZUSDT",
+        symbol="UKOUSD",
         price=90.5,
         high_7d=95.0,
         low_7d=85.0,
@@ -276,7 +276,7 @@ def test_bounce_near_level_gate():
     plan = build_oil_bounce_plan(
         OilMarketSnapshot(
             label="Brent",
-            symbol="BZUSDT",
+            symbol="UKOUSD",
             price=89.1,
             high_7d=95.0,
             low_7d=85.0,
@@ -320,7 +320,7 @@ def test_bounce_near_level_gate():
 def test_weak_news_no_bounce_plan():
     snap = OilMarketSnapshot(
         label="Brent",
-        symbol="BZUSDT",
+        symbol="UKOUSD",
         price=90.0,
         high_7d=95.0,
         low_7d=85.0,

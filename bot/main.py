@@ -136,6 +136,7 @@ async def main() -> None:
         on_level_alert=telegram.dispatch_oil_level_alert,
         on_extra_chart=telegram.dispatch_oil_extra_chart,
     )
+    telegram.oil_monitor = oil_monitor
 
     def scan_interval() -> float:
         return float(settings.settings.scan_interval_seconds)
