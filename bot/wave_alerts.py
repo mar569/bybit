@@ -30,18 +30,30 @@ logger = logging.getLogger(__name__)
 # Фазы, которые имеют торговый смысл для алертов (без «просто боковик»)
 DEFAULT_WAVE_PHASES: tuple[str, ...] = (
     "impulse_2",
+    "impulse_3",
     "impulse_4",
+    "impulse_complete",
     "abc_C",
 )
 
+# Торговые сетапы (не watch). По умолчанию — волна 3 и отскок после 5.
+DEFAULT_WAVE_SETUP_MODES: tuple[str, ...] = (
+    "wave3_impulse",
+    "wave5_bounce",
+)
+
 SETUP_PRIORITY: dict[str, int] = {
-    "entry_ready": 0,
-    "wave2_zone": 1,
-    "wave4_zone": 2,
-    "abc_c_zone": 3,
-    "impulse_complete": 4,
-    "path_active": 5,
-    "structure_watch": 6,
+    "wave3_impulse": 0,
+    "wave5_bounce": 1,
+    "wave2_breakout": 2,
+    "wave4_breakout": 3,
+    "entry_ready": 4,
+    "wave2_zone": 5,
+    "wave4_zone": 6,
+    "abc_c_zone": 7,
+    "impulse_complete": 8,
+    "path_active": 9,
+    "structure_watch": 10,
 }
 
 SIDE_RU = {"long": "LONG", "short": "SHORT", "wait": "WAIT"}
@@ -99,6 +111,25 @@ def _pack_ew_points_ot(
     return tuple(out)
 
 
+def _enabled_setup_modes(settings: Any) -> frozenset[str]:
+    raw = getattr(settings, "wave_setup_modes", DEFAULT_WAVE_SETUP_MODES)
+    if raw is None:
+        return frozenset(DEFAULT_WAVE_SETUP_MODES)
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return frozenset(parts) if parts else frozenset(DEFAULT_WAVE_SETUP_MODES)
+    return frozenset(str(p).strip() for p in raw if str(p).strip())
+
+
+def _setup_mode_allowed(setup_kind: str, enabled: frozenset[str]) -> bool:
+    if setup_kind in enabled:
+        return True
+    # legacy alias
+    if setup_kind == "entry_ready" and "wave2_breakout" in enabled:
+        return True
+    return False
+
+
 def _enabled_phases(settings: Any) -> frozenset[str]:
     raw = getattr(settings, "wave_phases_enabled", DEFAULT_WAVE_PHASES)
     if raw is None:
@@ -147,6 +178,23 @@ def _expect_ru(ew: ElliottWaveResult, setup_kind: str, side: str) -> str:
     path = (ew.path_reason_ru or "").strip()
     if setup_kind == "entry_ready" and plan and plan.trigger:
         return f"Вход готов: {plan.trigger}"
+    if setup_kind == "wave2_breakout" and plan and plan.trigger:
+        return f"Пробой после волны 2: {plan.trigger}"
+    if setup_kind == "wave3_impulse":
+        return (
+            plan.trigger if plan and plan.trigger
+            else "Волна 3 (часто самая длинная) — вход на продолжении импульса"
+        )
+    if setup_kind == "wave4_breakout":
+        return (
+            plan.trigger if plan and plan.trigger
+            else "Волна 4 в Fib → пробой хая/лоя 3 для волны 5"
+        )
+    if setup_kind == "wave5_bounce":
+        return (
+            plan.trigger if plan and plan.trigger
+            else "Импульс 1–5 завершён → сценарий отскока / коррекции"
+        )
     if setup_kind == "wave2_zone":
         dir_ru = "вверх (волна 3)" if side == "long" else "вниз (волна 3)"
         return f"Волна 2 в Fib-зоне → ждём отскок {dir_ru}, стоп за основанием 1"
@@ -176,7 +224,19 @@ def _classify_setup(ew: ElliottWaveResult) -> tuple[str, str]:
         side = "long" if imp.direction == "up" else "short"
 
     if plan and plan.ready and plan.mode in {"conservative", "aggressive"}:
-        return "entry_ready", plan.side
+        wave = (imp.current_wave if imp else "") or ""
+        ext = (imp.extension if imp else "") or ""
+        trig = (plan.trigger or "").lower()
+        if wave in {"5", "complete"} or "5 волн" in trig or "отскок" in trig:
+            bounce_side = "short" if imp and imp.direction == "up" else "long"
+            return "wave5_bounce", bounce_side
+        if wave == "3" or ext == "3" or "волна 3" in trig:
+            return "wave3_impulse", plan.side
+        if wave == "4" or "волна 4" in trig or "после волны 4" in trig:
+            return "wave4_breakout", plan.side
+        if "волна 2" in trig or "после волны 2" in trig or wave in {"2", "forming"}:
+            return "wave2_breakout", plan.side
+        return "wave2_breakout", plan.side
 
     wave = (imp.current_wave if imp else "") or ""
     if wave == "2" and imp and (imp.fib_w2_ok or imp.fib_classic_ok):
@@ -202,14 +262,26 @@ def compute_wave_importance(ew: ElliottWaveResult, setup_kind: str, settings: An
     score = float(conf) * 8.0
     imp = ew.impulse
 
-    if setup_kind == "entry_ready":
+    if setup_kind == "wave3_impulse":
+        score += 24.0
+    elif setup_kind == "wave5_bounce":
         score += 22.0
-    elif setup_kind in {"wave2_zone", "wave4_zone", "abc_c_zone"}:
+    elif setup_kind == "wave2_breakout":
+        score += 18.0
+    elif setup_kind == "wave4_breakout":
         score += 16.0
+    elif setup_kind == "entry_ready":
+        score += 20.0
+    elif setup_kind in {"wave2_zone", "wave4_zone", "abc_c_zone"}:
+        score += 12.0
     elif setup_kind == "impulse_complete":
-        score += 8.0
+        score += 6.0
 
     if imp is not None:
+        if imp.extension == "3" and setup_kind == "wave3_impulse":
+            score += 10.0
+        if imp.truncated and setup_kind == "wave5_bounce":
+            score += 8.0
         if imp.valid:
             score += 8.0
         if imp.fib_classic_ok:
@@ -311,21 +383,35 @@ def build_wave_event(
     ]
     setup_kind, side = _classify_setup(ew)
 
+    enabled_modes = _enabled_setup_modes(settings)
+    trade_modes = {
+        "wave2_breakout", "wave3_impulse", "wave4_breakout", "wave5_bounce", "entry_ready",
+    }
+    if setup_kind in trade_modes and not _setup_mode_allowed(setup_kind, enabled_modes):
+        return None
+
     if require_classic:
-        if setup_kind in {"entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone"}:
+        trade_fib = {
+            "entry_ready", "wave2_breakout", "wave3_impulse", "wave4_breakout",
+            "wave5_bounce", "wave2_zone", "wave4_zone", "abc_c_zone",
+        }
+        if setup_kind in trade_fib:
             if not imp.fib_classic_ok and not (imp.fib_w2_ok or imp.fib_w4_ok):
                 return None
-        if setup_kind == "entry_ready" and not imp.fib_classic_ok and imp.quality < 70:
+        if setup_kind in {
+            "entry_ready", "wave2_breakout", "wave3_impulse", "wave4_breakout", "wave5_bounce",
+        } and not imp.fib_classic_ok and imp.quality < 70:
             return None
 
     # Жёсткие violations — не шлём ни ENTRY, ни зоны 2/4/C
     if hard_violations and setup_kind in {
-        "entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone",
+        "entry_ready", "wave2_breakout", "wave3_impulse", "wave4_breakout",
+        "wave5_bounce", "wave2_zone", "wave4_zone", "abc_c_zone",
     }:
         return None
 
-    require_ready = bool(getattr(settings, "wave_require_entry_ready", False))
-    if require_ready and setup_kind != "entry_ready":
+    require_ready = bool(getattr(settings, "wave_require_entry_ready", True))
+    if require_ready and setup_kind in trade_modes and not (plan and plan.ready):
         return None
 
     allow_watch = bool(getattr(settings, "wave_allow_structure_watch", False))
@@ -338,7 +424,8 @@ def build_wave_event(
             return None
 
     actionable = {
-        "entry_ready", "wave2_zone", "wave4_zone", "abc_c_zone",
+        "entry_ready", "wave2_breakout", "wave3_impulse", "wave4_breakout",
+        "wave5_bounce", "wave2_zone", "wave4_zone", "abc_c_zone",
     }
     if setup_kind not in actionable and not (plan and plan.ready):
         if not allow_watch:
@@ -471,6 +558,10 @@ async def analyze_symbol_waves(
 
 
 SETUP_LABELS_RU: dict[str, str] = {
+    "wave3_impulse": "🚀 WAVE 3 · импульс",
+    "wave5_bounce": "↩️ WAVE 5 · отскок",
+    "wave2_breakout": "🎯 ENTRY · пробой после 2",
+    "wave4_breakout": "🎯 ENTRY · пробой после 4",
     "entry_ready": "🎯 ENTRY · волна готова",
     "wave2_zone": "📍 WATCH · волна 2 (Fib)",
     "wave4_zone": "📍 WATCH · волна 4 (Fib)",
@@ -565,10 +656,12 @@ class WaveBatcher:
             return 0
         self._last_flush = now
 
-        max_per_min = int(getattr(settings, "wave_max_per_minute", 2))
+        max_per_min = int(getattr(settings, "wave_max_per_minute", 1))
         while self._dispatch_times and self._dispatch_times[0] < now - 60.0:
             self._dispatch_times.popleft()
         slots = max(0, max_per_min - len(self._dispatch_times))
+        max_batch = int(getattr(settings, "wave_max_per_batch", 1))
+        slots = min(slots, max(1, max_batch))
         if slots <= 0:
             return 0
 

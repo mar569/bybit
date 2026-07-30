@@ -2604,38 +2604,87 @@ async def render_wave_chart(
     ew_draw_ot: tuple[tuple[str, float, float], ...] | None = None,
     ew_global_ot: tuple[tuple[str, float, float], ...] | None = None,
     ew_local_ot: tuple[tuple[str, float, float], ...] | None = None,
+    confidence: int = 0,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
-    """Чистый волновой график: EW G/L + Fib + путь, без Hot ИТОГ/ПЛАН."""
+    """Быстрый волновой график: только bars + EW точки, без полного TA (OI/CVD/HTF)."""
+    _ = oi_bars, liq_context, exchange
+    analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
+    bars = await _fetch_bars(symbol, analysis_hours, interval_minutes=interval_minutes)
+    if not bars:
+        return None, None
+
     verdict = "WAIT"
     if side == "long":
         verdict = "LONG"
     elif side == "short":
         verdict = "SHORT"
 
-    return await render_annotated_chart(
-        symbol,
-        side=side if side in {"long", "short"} else "long",
-        hours=hours,
-        interval_minutes=interval_minutes,
-        oi_bars=oi_bars,
-        liq_context=liq_context,
-        neutral=True,
-        chart_source="annotated",
-        exchange=exchange,
-        display_hours=display_hours,
-        height_scale=height_scale,
-        wave_focus=True,
-        verdict_override=verdict,
-        wave_expect_ru=expect_ru,
-        invalidation_price=invalidation,
-        wave_entry_price=entry_price,
-        wave_stop_price=stop_price,
-        wave_tp_prices=[float(t) for t in (tp_prices or []) if t][:4] or None,
-        pattern_detection_enabled=False,
-        wave_draw_ot=ew_draw_ot,
-        wave_global_ot=ew_global_ot,
-        wave_local_ot=ew_local_ot,
+    ta = TAAnalysisResult(
+        verdict=verdict,
+        verdict_reason=expect_ru or "",
+        current_price=float(bars[-1].close),
+        elliott_entry_price=float(entry_price) if entry_price else None,
+        elliott_stop_price=float(stop_price) if stop_price else None,
+        elliott_tp_prices=[float(t) for t in (tp_prices or []) if t][:4],
+        elliott_path_reason=expect_ru or "",
+        elliott_path_invalidation=float(invalidation) if invalidation else None,
+        invalidation_price=float(invalidation) if invalidation else None,
+        elliott_entry_mode="conservative" if entry_price else "wait",
+        elliott_entry_ready=bool(entry_price),
+        wave_bias=side if side in {"long", "short"} else "",
+        elliott_confidence=int(confidence or 0),
     )
+
+    applied = _apply_wave_snapshot_points(
+        ta,
+        bars,
+        draw_ot=ew_draw_ot,
+        global_ot=ew_global_ot,
+        local_ot=ew_local_ot,
+    )
+    if not applied:
+        _ensure_wave_elliott_points(ta, bars)
+
+    ew_idxs = _ta_elliott_indices(ta)
+    base_zoom = chart_display_hours(interval_minutes, configured=display_hours)
+    zoom_hours = structure_aware_display_hours(
+        interval_minutes=interval_minutes,
+        analysis_hours=analysis_hours,
+        configured=display_hours,
+        drawdown_pct=0.0,
+        elliott_span_bars=(max(ew_idxs) - min(ew_idxs)) if len(ew_idxs) >= 2 else 0,
+        fib_span_bars=0,
+    )
+    if ew_idxs:
+        zoom_hours = _wave_chart_zoom_hours(
+            bars=bars,
+            interval_minutes=interval_minutes,
+            analysis_hours=float(analysis_hours),
+            base_zoom=float(zoom_hours),
+            point_indices=ew_idxs,
+        )
+
+    accent = (
+        CHART_STYLE["accent_long"] if verdict == "LONG"
+        else CHART_STYLE["accent_short"] if verdict == "SHORT"
+        else CHART_STYLE["warning"]
+    )
+    title = f"WAVE · Bybit {interval_minutes}m · вид {int(zoom_hours)}ч"
+    h_scale = float(height_scale or 1.0)
+    png = _render_chart_figure(
+        bars,
+        ta,
+        symbol=symbol,
+        title_suffix=title,
+        accent_color=accent,
+        interval_minutes=interval_minutes,
+        pro_mode=False,
+        display_hours=int(zoom_hours),
+        enhanced=True,
+        height_scale=h_scale,
+        wave_focus=True,
+    )
+    return png, ta
 
 
 async def render_signal_chart(

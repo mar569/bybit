@@ -70,7 +70,12 @@ def _bars(n: int = 60, price: float = 114.0) -> list[KlineBar]:
 
 def test_build_wave_event_wave4_zone():
     settings = ScannerSettings.default()
-    settings = replace(settings, wave_enabled=True, wave_min_importance=40.0)
+    settings = replace(
+        settings,
+        wave_enabled=True,
+        wave_min_importance=40.0,
+        wave_allow_structure_watch=True,
+    )
     ew = ElliottWaveResult(
         impulse=_imp(current_wave="4"),
         phase="impulse_4",
@@ -99,9 +104,14 @@ def test_build_wave_event_wave4_zone():
     assert "волна 4" in event.expect_ru.lower() or "4" in event.expect_ru
 
 
-def test_build_wave_event_entry_ready():
+def test_build_wave_event_wave2_breakout():
     settings = ScannerSettings.default()
-    settings = replace(settings, wave_enabled=True, wave_min_importance=40.0)
+    settings = replace(
+        settings,
+        wave_enabled=True,
+        wave_min_importance=40.0,
+        wave_setup_modes=("wave2_breakout", "wave3_impulse", "wave5_bounce"),
+    )
     ew = ElliottWaveResult(
         impulse=_imp(current_wave="2"),
         phase="impulse_2",
@@ -121,7 +131,7 @@ def test_build_wave_event_entry_ready():
     )
     event = build_wave_event("Bybit", "BTCUSDT", ew, _bars(price=110.4), settings)
     assert event is not None
-    assert event.setup_kind == "entry_ready"
+    assert event.setup_kind == "wave2_breakout"
     assert event.entry_ready is True
 
 
@@ -182,7 +192,7 @@ def test_importance_entry_higher_than_complete():
         impulse=_imp(valid=True, fib_classic_ok=False, quality=60),
         confidence=5,
     )
-    a = compute_wave_importance(ew_entry, "entry_ready", settings)
+    a = compute_wave_importance(ew_entry, "wave2_breakout", settings)
     b = compute_wave_importance(ew_done, "impulse_complete", settings)
     assert a > b
 

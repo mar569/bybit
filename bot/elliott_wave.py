@@ -1382,6 +1382,57 @@ def build_elliott_entry_plan(
                 ready=ready,
             )
 
+    # --- Волна 3: импульс / растяжение — вход на продолжении тренда ---
+    if (
+        impulse.current_wave == "3"
+        and p0
+        and p1
+        and p2
+        and p3
+        and impulse.fib_w2_ok
+        and impulse.valid
+    ):
+        w1 = abs(p1.price - p0.price)
+        w3 = abs(p3.price - p2.price)
+        ext3 = impulse.extension == "3" or w3 >= w1 * 1.45
+        if ext3:
+            if impulse.direction == "up":
+                entry = max(p1.price, px)
+                stop = p2.price * 0.997
+                risk = abs(entry - stop)
+                tp1 = entry + max(risk * 2.5, w1 * 0.618)
+                tp2 = entry + w1 * 1.618
+                ready = px >= p1.price * 0.998 and px <= p3.price * 1.008
+                return ElliottEntryPlan(
+                    mode="conservative",
+                    side="long",
+                    entry_price=entry,
+                    stop_price=stop,
+                    tp1=tp1,
+                    tp2=tp2,
+                    trigger="волна 3 (растяжение) — LONG на продолжении импульса",
+                    rr=(abs(tp1 - entry) / risk) if risk > 0 else 2.5,
+                    ready=ready,
+                )
+            else:
+                entry = min(p1.price, px)
+                stop = p2.price * 1.003
+                risk = abs(stop - entry)
+                tp1 = entry - max(risk * 2.5, w1 * 0.618)
+                tp2 = entry - w1 * 1.618
+                ready = px <= p1.price * 1.002 and px >= p3.price * 0.992
+                return ElliottEntryPlan(
+                    mode="conservative",
+                    side="short",
+                    entry_price=entry,
+                    stop_price=stop,
+                    tp1=tp1,
+                    tp2=tp2,
+                    trigger="волна 3 (растяжение) — SHORT на продолжении импульса",
+                    rr=(abs(entry - tp1) / risk) if risk > 0 else 2.5,
+                    ready=ready,
+                )
+
     # --- После волны 4: только если 4 ∈ 38.2–50% × волны 3 ---
     if p3 and p4 and impulse.current_wave == "4":
         if not impulse.fib_w4_ok:
@@ -1427,6 +1478,54 @@ def build_elliott_entry_plan(
             )
 
     if impulse.current_wave in {"5", "complete"} and not (abc and abc.phase in {"C", "complete"}):
+        p5 = impulse.point("5")
+        p4 = impulse.point("4")
+        p2 = impulse.point("2")
+        if (
+            p5
+            and p4
+            and impulse.valid
+            and impulse.fib_classic_ok
+            and (impulse.truncated or impulse.extension in {"3", "5"} or impulse.quality >= 68)
+        ):
+            bounce_side = "short" if impulse.direction == "up" else "long"
+            w5 = abs(p5.price - p4.price)
+            if impulse.direction == "up":
+                entry = px
+                stop = max(p5.price * 1.006, p5.price + atr * 1.2 if atr > 0 else p5.price * 1.01)
+                tp1 = p4.price
+                tp2 = p2.price if p2 else p4.price - w5 * 0.618
+                near_top = px >= p4.price and px <= p5.price * 1.012
+                ready = near_top and px <= p5.price * 1.008
+                return ElliottEntryPlan(
+                    mode="conservative",
+                    side="short",
+                    entry_price=entry,
+                    stop_price=stop,
+                    tp1=tp1,
+                    tp2=tp2,
+                    trigger="5 волн вверх завершены → SHORT отскок / коррекция",
+                    rr=(abs(entry - tp1) / abs(stop - entry)) if abs(stop - entry) > 0 else 2.0,
+                    ready=ready,
+                )
+            else:
+                entry = px
+                stop = min(p5.price * 0.994, p5.price - atr * 1.2 if atr > 0 else p5.price * 0.99)
+                tp1 = p4.price
+                tp2 = p2.price if p2 else p4.price + w5 * 0.618
+                near_bottom = px <= p4.price and px >= p5.price * 0.988
+                ready = near_bottom and px >= p5.price * 0.992
+                return ElliottEntryPlan(
+                    mode="conservative",
+                    side="long",
+                    entry_price=entry,
+                    stop_price=stop,
+                    tp1=tp1,
+                    tp2=tp2,
+                    trigger="5 волн вниз завершены → LONG отскок / коррекция",
+                    rr=(abs(tp1 - entry) / abs(entry - stop)) if abs(entry - stop) > 0 else 2.0,
+                    ready=ready,
+                )
         return ElliottEntryPlan(
             mode="wait",
             side=side,

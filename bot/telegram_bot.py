@@ -2036,21 +2036,6 @@ class TelegramBot:
             )
             interval = int(getattr(settings, "wave_interval_minutes", 5))
             display_hours = int(getattr(settings, "signal_chart_display_hours", 12) or 12)
-            oi_bars = None
-            liq_context = None
-            if self.scanner is not None:
-                try:
-                    oi_bars = self.scanner.get_five_min_oi_bars(event.exchange, event.symbol)
-                except Exception:
-                    oi_bars = None
-                try:
-                    stats = self.scanner._get_liquidation_stats(
-                        event.exchange, event.symbol, 15,
-                    )
-                    if stats is not None:
-                        liq_context = stats.to_dict()
-                except Exception:
-                    liq_context = None
             try:
                 png, _ta = await asyncio.wait_for(
                     render_wave_chart(
@@ -2063,9 +2048,6 @@ class TelegramBot:
                         stop_price=event.stop_price,
                         tp_prices=event.tp_prices,
                         invalidation=event.invalidation,
-                        oi_bars=oi_bars,
-                        liq_context=liq_context,
-                        exchange=event.exchange,
                         display_hours=display_hours,
                         height_scale=float(
                             getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
@@ -2073,31 +2055,10 @@ class TelegramBot:
                         ew_draw_ot=event.ew_draw_ot or None,
                         ew_global_ot=event.ew_global_ot or None,
                         ew_local_ot=event.ew_local_ot or None,
+                        confidence=event.confidence,
                     ),
-                    timeout=40.0,
+                    timeout=25.0,
                 )
-                # Если полный рендер вернул пусто — лёгкий fallback только с уровнями
-                if not png:
-                    png, _ta = await asyncio.wait_for(
-                        render_wave_chart(
-                            event.symbol,
-                            side=side,
-                            hours=min(chart_hours, 12),
-                            interval_minutes=interval,
-                            expect_ru=event.expect_ru or event.path_reason,
-                            entry_price=event.entry_price,
-                            stop_price=event.stop_price,
-                            tp_prices=event.tp_prices,
-                            invalidation=event.invalidation,
-                            exchange=event.exchange,
-                            display_hours=min(display_hours, 12),
-                            height_scale=1.0,
-                            ew_draw_ot=event.ew_draw_ot or None,
-                            ew_global_ot=event.ew_global_ot or None,
-                            ew_local_ot=event.ew_local_ot or None,
-                        ),
-                        timeout=25.0,
-                    )
             except asyncio.TimeoutError:
                 logger.warning("Wave chart timeout %s", event.symbol)
                 png = None

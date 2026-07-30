@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 51
+SETTINGS_VERSION = 52
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -486,23 +486,30 @@ class ScannerSettings:
 
     # Wave Watcher — только Elliott 1–5 + Fib → TELEGRAM_WAVE_CHAT_ID / anomaly / analysis
     wave_enabled: bool = True
-    wave_min_importance: float = 58.0
-    wave_min_confidence: int = 5
-    wave_min_impulse_quality: int = 58
+    wave_min_importance: float = 72.0
+    wave_min_confidence: int = 6
+    wave_min_impulse_quality: int = 65
     wave_require_fib_classic: bool = True
-    wave_require_entry_ready: bool = False
+    wave_require_entry_ready: bool = True
     wave_require_impulse_valid: bool = True
     wave_allow_diagonal_signals: bool = False
     wave_allow_structure_watch: bool = False
     wave_allow_path_alerts: bool = False
     wave_allow_complete_alerts: bool = False
+    wave_setup_modes: tuple[str, ...] = (
+        "wave3_impulse",
+        "wave5_bounce",
+    )
     wave_phases_enabled: tuple[str, ...] = (
         "impulse_2",
+        "impulse_3",
         "impulse_4",
+        "impulse_complete",
         "abc_C",
     )
-    wave_max_per_minute: int = 2
-    wave_batch_interval_seconds: int = 90
+    wave_max_per_minute: int = 1
+    wave_max_per_batch: int = 1
+    wave_batch_interval_seconds: int = 180
     wave_symbol_cooldown_seconds: int = 2400
     wave_scan_interval_seconds: int = 120
     wave_scan_limit: int = 40
@@ -991,11 +998,11 @@ class ScannerSettings:
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
             wave_enabled=bool(base.get("wave_enabled", True)),
-            wave_min_importance=float(base.get("wave_min_importance", 58.0)),
-            wave_min_confidence=int(base.get("wave_min_confidence", 5)),
-            wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 58)),
+            wave_min_importance=float(base.get("wave_min_importance", 72.0)),
+            wave_min_confidence=int(base.get("wave_min_confidence", 6)),
+            wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 65)),
             wave_require_fib_classic=bool(base.get("wave_require_fib_classic", True)),
-            wave_require_entry_ready=bool(base.get("wave_require_entry_ready", False)),
+            wave_require_entry_ready=bool(base.get("wave_require_entry_ready", True)),
             wave_require_impulse_valid=bool(
                 base.get("wave_require_impulse_valid", True)
             ),
@@ -1005,16 +1012,23 @@ class ScannerSettings:
             wave_allow_structure_watch=bool(base.get("wave_allow_structure_watch", False)),
             wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", False)),
             wave_allow_complete_alerts=bool(base.get("wave_allow_complete_alerts", False)),
+            wave_setup_modes=cls._parse_str_tuple(
+                base.get("wave_setup_modes"),
+                ("wave3_impulse", "wave5_bounce"),
+            ),
             wave_phases_enabled=cls._parse_str_tuple(
                 base.get("wave_phases_enabled"),
                 (
                     "impulse_2",
+                    "impulse_3",
                     "impulse_4",
+                    "impulse_complete",
                     "abc_C",
                 ),
             ),
-            wave_max_per_minute=int(base.get("wave_max_per_minute", 2)),
-            wave_batch_interval_seconds=int(base.get("wave_batch_interval_seconds", 90)),
+            wave_max_per_minute=int(base.get("wave_max_per_minute", 1)),
+            wave_max_per_batch=int(base.get("wave_max_per_batch", 1)),
+            wave_batch_interval_seconds=int(base.get("wave_batch_interval_seconds", 180)),
             wave_symbol_cooldown_seconds=int(
                 base.get("wave_symbol_cooldown_seconds", 2400)
             ),
@@ -1447,6 +1461,28 @@ class SettingsManager:
                 merged["signal_chart_height_scale"] = float(
                     merged.get("signal_chart_height_scale", 1.0) or 1.0
                 )
+            if version < 52:
+                merged.setdefault("wave_min_importance", 72.0)
+                merged.setdefault("wave_min_confidence", 6)
+                merged.setdefault("wave_min_impulse_quality", 65)
+                merged.setdefault("wave_require_entry_ready", True)
+                merged.setdefault(
+                    "wave_setup_modes",
+                    ["wave3_impulse", "wave5_bounce"],
+                )
+                merged.setdefault(
+                    "wave_phases_enabled",
+                    [
+                        "impulse_2",
+                        "impulse_3",
+                        "impulse_4",
+                        "impulse_complete",
+                        "abc_C",
+                    ],
+                )
+                merged.setdefault("wave_max_per_minute", 1)
+                merged.setdefault("wave_max_per_batch", 1)
+                merged.setdefault("wave_batch_interval_seconds", 180)
             if version < 51:
                 # Wave Watcher: EW+Fib сигналы вместо anomaly-радара
                 merged.setdefault("wave_enabled", True)
