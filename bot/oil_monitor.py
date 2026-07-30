@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 
 from .bybit_klines import BYBIT_KLINE_URL, KlineBar
 from .oil_level_watcher import OilLevelWatcher
-from .ta_analysis import TAAnalysisResult, fmt_price, run_ta_analysis
+from .ta_analysis import TAAnalysisResult, TradeScenario, fmt_price, run_ta_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -30,65 +30,116 @@ OIL_WTI_SYMBOL = "CLUSDT"    # WTI — в UI часто как USOIL
 _OIL_KEYWORDS = frozenset({
     "oil", "crude", "brent", "wti", "petroleum", "gasoline", "diesel", "hormuz",
     "opec", "barrel", "нефт", "баррель", "spr", "inventory", "eia", "запас",
+    "crude oil", "black gold",
 })
-_GEO_KEYWORDS = frozenset({
-    "iran", "usa", "u.s.", "united states", "hormuz", "sanction", "trump",
-    "tehran", "persian gulf", "middle east", "иран", "санкц", "ормуз",
+# Геополитика / политика США — только в связке с нефтью
+_GEO_PRIORITY = frozenset({
+    "iran", "иран", "tehran", "тегеран", "hormuz", "ормуз", "strait",
+    "trump", "трамп", "white house", "белый дом",
+    "sanction", "санкц", "pentagon", "пентагон",
+    "houthi", "хусит", "israel", "израил", "hezbollah",
+    "persian gulf", "persian", "middle east", "ближн",
+})
+_US_KEYWORDS = frozenset({
+    "usa", "u.s.", "u.s ", "united states", "america", "washington",
+    "сша", "америк", "вашингтон", "байден", "biden",
+})
+# Запасы / объёмы / покупка-продажа / предложение
+_FLOW_KEYWORDS = frozenset({
+    "inventory", "inventories", "stockpile", "stocks", "запас", "запасы",
+    "eia", "api ", " api", "spr", "strategic petroleum",
+    "draw", "build", "surplus", "deficit", "oversupply", "shortage",
+    "volume", "объем", "объём", "barrel", "баррель",
+    "buy", "buying", "purchase", "import", "export",
+    "покуп", "продаж", "экспорт", "импорт", "сделк", "deal",
+    "tanker", "танкер", "shipment", "поставк", "supply", "demand",
+    "production", "добыч", "output", "quota", "квот",
+})
+_OPEC_KEYWORDS = frozenset({
+    "opec", "опек", "opec+", "saudi", "саудов", "russia oil", "росси",
 })
 _BULL_NEWS = frozenset({
     "surge", "rise", "rally", "jump", "spike", "attack", "strike", "block",
     "close strait", "escalat", "sanction", "cut produc", "draw", "tighten",
-    "рост", "подскоч", "атак",
+    "shortage", "deficit", "buy", "purchase", "рост", "подскоч", "атак",
+    "сокращен", "дефицит", "покуп",
 })
 _BEAR_NEWS = frozenset({
     "fall", "drop", "decline", "slide", "plunge", "deal", "reopen", "de-escal",
     "ceasefire", "forecast cut", "build", "oversupply", "release spr", "accord",
-    "паден", "снижен", "сделк",
+    "surplus", "sell", "dump", "паден", "снижен", "сделк", "избыт", "продаж",
+    "перемир",
 })
+# Веса: чем выше — тем важнее для отправки в чат
 _CRITICAL_TERMS: dict[str, int] = {
-    "hormuz": 4,
-    "ормуз": 4,
-    "strait": 3,
-    "iran": 2,
-    "иран": 2,
-    "opec": 3,
-    "опек": 3,
-    "eia": 3,
-    "inventory": 2,
-    "запас": 2,
-    "sanction": 2,
-    "санкц": 2,
-    "strike": 3,
-    "attack": 3,
-    "атак": 3,
-    "blockade": 3,
-    "ceasefire": 2,
-    "перемир": 2,
-    "spr": 2,
-    "production cut": 3,
-    "сокращен": 2,
-    "houthi": 2,
-    "red sea": 2,
-    "красн": 2,
-    "brent": 1,
-    "wti": 1,
-    "нефт": 1,
-    "crude": 1,
+    "hormuz": 5,
+    "ормуз": 5,
+    "strait of hormuz": 5,
+    "iran": 3,
+    "иран": 3,
+    "tehran": 3,
+    "тегеран": 3,
+    "trump": 3,
+    "трамп": 3,
+    "sanction": 3,
+    "санкц": 3,
+    "opec": 4,
+    "опек": 4,
+    "eia": 4,
+    "inventory": 3,
+    "inventories": 3,
+    "запас": 3,
+    "запасы": 3,
+    "spr": 4,
+    "strategic petroleum": 4,
+    "strike": 4,
+    "attack": 4,
+    "атак": 4,
+    "blockade": 4,
+    "houthi": 3,
+    "хусит": 3,
+    "production cut": 4,
+    "сокращен": 3,
+    "quota": 3,
+    "квот": 3,
+    "tanker": 3,
+    "танкер": 3,
+    "export ban": 4,
+    "import ban": 4,
+    "crude buy": 3,
+    "oil purchase": 3,
+    "покупк": 3,
+    "продаж нефт": 3,
+    "drawdown": 3,
+    "stock build": 3,
+    "api inventory": 3,
 }
 
+# Только эти темы имеют право уйти в чат (не «любая нефть»)
+_PRIORITY_THEMES = frozenset({
+    "iran_geo",
+    "trump_us",
+    "inventory",
+    "opec",
+    "flow_deal",
+})
+
 NEWS_QUERIES_EN: tuple[str, ...] = (
-    "Iran oil Strait of Hormuz when:1d",
-    "US Iran oil sanctions when:1d",
-    "Brent crude oil when:1d",
-    "OPEC oil production when:2d",
-    "EIA oil inventory when:2d",
+    "Iran oil Trump sanctions Hormuz when:1d",
+    "Trump Iran oil when:1d",
+    "US Iran crude oil sanctions when:1d",
+    "EIA crude oil inventory stocks when:1d",
+    "OPEC oil production quota cut when:2d",
+    "SPR oil release OR strategic petroleum reserve when:2d",
+    "crude oil tanker export import volume when:2d",
 )
 NEWS_QUERIES_RU: tuple[str, ...] = (
-    "нефть Иран Ормуз when:1d",
-    "нефть Brent цена when:1d",
-    "ОПЕК нефть when:2d",
-    "санкции Иран нефть when:2d",
-    "EIA запасы нефть when:2d",
+    "нефть Иран Трамп санкции Ормуз when:1d",
+    "Трамп Иран нефть when:1d",
+    "EIA запасы нефти США when:1d",
+    "ОПЕК квота добыча нефть when:2d",
+    "СПР запасы нефть США when:2d",
+    "экспорт импорт нефти танкер when:2d",
 )
 
 @dataclass(frozen=True)
@@ -100,6 +151,73 @@ class OilNewsItem:
     impact: str = "neutral"  # bullish | bearish | neutral
     query: str = ""
     lang: str = "en"
+    theme: str = ""  # iran_geo | trump_us | inventory | opec | flow_deal
+
+
+def detect_oil_news_theme(title: str) -> str:
+    """Главная тема заголовка — без темы приоритета новость не шлём."""
+    low = title.lower()
+    has_oil = any(k in low for k in _OIL_KEYWORDS)
+    if not has_oil:
+        # Иран/Ормуз без слова oil всё равно нефтяная геополитика
+        if any(k in low for k in ("hormuz", "ормуз", "iran", "иран")) and any(
+            k in low for k in ("strait", "sanction", "санкц", "tanker", "танкер", "crude", "нефт")
+        ):
+            has_oil = True
+    if not has_oil:
+        return ""
+
+    if any(k in low for k in ("hormuz", "ормуз", "iran", "иран", "tehran", "тегеран", "houthi", "хусит")):
+        return "iran_geo"
+    if any(k in low for k in ("trump", "трамп")) or (
+        any(k in low for k in _US_KEYWORDS)
+        and any(k in low for k in ("sanction", "санкц", "iran", "иран", "spr", "eia"))
+    ):
+        return "trump_us"
+    if any(k in low for k in ("eia", "inventory", "inventories", "запас", "spr", "stockpile", "api ")):
+        return "inventory"
+    if any(k in low for k in _OPEC_KEYWORDS):
+        return "opec"
+    if any(k in low for k in _FLOW_KEYWORDS):
+        return "flow_deal"
+    return ""
+
+
+def _is_relevant(title: str) -> bool:
+    """Только нефть + приоритетная тема (не любой заголовок про Brent)."""
+    return detect_oil_news_theme(title) in _PRIORITY_THEMES
+
+
+def news_critical_score(title: str) -> int:
+    low = title.lower()
+    score = 0
+    for term, weight in _CRITICAL_TERMS.items():
+        if term in low:
+            score += weight
+    theme = detect_oil_news_theme(title)
+    # Бонус за приоритетную тему
+    if theme == "iran_geo":
+        score += 2
+    elif theme in {"trump_us", "inventory", "opec"}:
+        score += 1
+    return score
+
+
+def is_critical_oil_news(item: OilNewsItem, min_score: int = 4) -> bool:
+    theme = item.theme or detect_oil_news_theme(item.title)
+    if theme not in _PRIORITY_THEMES:
+        return False
+    return news_critical_score(item.title) >= min_score
+
+
+def theme_label_ru(theme: str) -> str:
+    return {
+        "iran_geo": "🇮🇷 Иран / Ормуз",
+        "trump_us": "🇺🇸 Трамп / США",
+        "inventory": "📦 Запасы EIA/SPR",
+        "opec": "🛢️ ОПЕК / добыча",
+        "flow_deal": "🚢 Покупки / объёмы / поставки",
+    }.get(theme, "нефть")
 
 @dataclass
 class OilMarketSnapshot:
@@ -157,17 +275,6 @@ def _bars_limit_for_interval(minutes: int) -> int:
     return 400
 
 
-def news_critical_score(title: str) -> int:
-    low = title.lower()
-    score = 0
-    for term, weight in _CRITICAL_TERMS.items():
-        if term in low:
-            score += weight
-    return score
-
-def is_critical_oil_news(item: OilNewsItem, min_score: int = 3) -> bool:
-    return news_critical_score(item.title) >= min_score
-
 def detect_oil_market_mood(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
@@ -216,16 +323,6 @@ def _clean_title(title: str) -> str:
         if len(parts[1]) < 40:
             return parts[0].strip()
     return t
-
-def _is_relevant(title: str) -> bool:
-    low = title.lower()
-    if any(k in low for k in _OIL_KEYWORDS):
-        return True
-    if any(k in low for k in _GEO_KEYWORDS) and any(
-        k in low for k in ("iran", "hormuz", "sanction", "gulf", "tehran", "opec", "иран", "ормуз")
-    ):
-        return True
-    return False
 
 def classify_news_impact(title: str) -> str:
     low = title.lower()
@@ -342,6 +439,191 @@ def summarize_oil_news_bias(
         how_to_use_ru=howto,
     )
 
+
+@dataclass(frozen=True)
+class OilBouncePlan:
+    """План отскока под новостной bias — entry/stop/TP для графика и алерта."""
+    side: str  # long | short
+    bounce_level: float
+    entry_lo: float
+    entry_hi: float
+    stop: float
+    targets: tuple[float, ...]
+    catalyst: str
+    reason_ru: str
+    strong: bool
+    dist_pct: float = 0.0
+
+    @property
+    def entry_mid(self) -> float:
+        return (self.entry_lo + self.entry_hi) / 2.0
+
+
+def _pick_news_catalyst(items: list[OilNewsItem], bias: str) -> str:
+    want = "bullish" if bias == "bullish" else "bearish"
+    scored: list[tuple[float, OilNewsItem]] = []
+    for it in items:
+        if it.impact != want:
+            continue
+        scored.append((news_impact_weight(it) + news_critical_score(it.title) * 0.1, it))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1].title[:140]
+
+
+def build_oil_bounce_plan(
+    snap: OilMarketSnapshot,
+    news_bias: OilNewsBias,
+    *,
+    news_items: list[OilNewsItem] | None = None,
+    min_score: float = 3.0,
+) -> OilBouncePlan | None:
+    """Сильный news-bias → конкретный отскок: уровень, entry, stop, TP."""
+    if news_bias.bias not in {"bullish", "bearish"}:
+        return None
+    if abs(news_bias.weighted_score) < min_score:
+        return None
+
+    px = float(snap.price or 0.0)
+    if px <= 0:
+        return None
+    s = snap.support
+    r = snap.resistance
+    bd = snap.breakdown
+    bo = snap.breakout
+    hi = snap.high_7d
+    lo = snap.low_7d
+    catalyst = _pick_news_catalyst(news_items or [], news_bias.bias)
+    strong = abs(news_bias.weighted_score) >= min_score + 1.0
+
+    if news_bias.bias == "bullish":
+        bounce = float(s or bd or px * 0.992)
+        if bounce <= 0 or bounce > px * 1.01:
+            bounce = px * 0.995
+        entry_lo = bounce * 0.998
+        entry_hi = min(px, bounce * 1.004) if px >= bounce else bounce * 1.003
+        stop = float(bd or bounce * 0.988)
+        if stop >= entry_lo:
+            stop = entry_lo * 0.992
+        tp1 = float(r or bo or bounce * 1.008)
+        if tp1 <= entry_hi:
+            tp1 = entry_hi * 1.006
+        tp2 = float(bo or hi or tp1 * 1.008)
+        if tp2 <= tp1:
+            tp2 = tp1 * 1.006
+        tp3 = float(hi or tp2 * 1.01)
+        if tp3 <= tp2:
+            tp3 = tp2 * 1.008
+        reason = (
+            f"Новости↑ → ловить LONG-отскок от {fmt_price(bounce)}"
+            + (f" · {catalyst}" if catalyst else "")
+        )
+        return OilBouncePlan(
+            side="long",
+            bounce_level=bounce,
+            entry_lo=entry_lo,
+            entry_hi=entry_hi,
+            stop=stop,
+            targets=(tp1, tp2, tp3),
+            catalyst=catalyst,
+            reason_ru=reason,
+            strong=strong,
+            dist_pct=abs(px - bounce) / px * 100.0,
+        )
+
+    # bearish
+    bounce = float(r or bo or px * 1.008)
+    if bounce <= 0 or bounce < px * 0.99:
+        bounce = px * 1.005
+    entry_hi = bounce * 1.002
+    entry_lo = max(px, bounce * 0.996) if px <= bounce else bounce * 0.997
+    stop = float(bo or bounce * 1.012)
+    if stop <= entry_hi:
+        stop = entry_hi * 1.008
+    tp1 = float(s or bd or bounce * 0.992)
+    if tp1 >= entry_lo:
+        tp1 = entry_lo * 0.994
+    tp2 = float(bd or lo or tp1 * 0.992)
+    if tp2 >= tp1:
+        tp2 = tp1 * 0.994
+    tp3 = float(lo or tp2 * 0.99)
+    if tp3 >= tp2:
+        tp3 = tp2 * 0.992
+    reason = (
+        f"Новости↓ → ловить SHORT-отскок от {fmt_price(bounce)}"
+        + (f" · {catalyst}" if catalyst else "")
+    )
+    return OilBouncePlan(
+        side="short",
+        bounce_level=bounce,
+        entry_lo=entry_lo,
+        entry_hi=entry_hi,
+        stop=stop,
+        targets=(tp1, tp2, tp3),
+        catalyst=catalyst,
+        reason_ru=reason,
+        strong=strong,
+        dist_pct=abs(px - bounce) / px * 100.0,
+    )
+
+
+def apply_oil_bounce_to_ta(ta: TAAnalysisResult, plan: OilBouncePlan) -> None:
+    """Переписывает entry/stop/TP на графике под новостной отскок."""
+    ta.verdict = "LONG" if plan.side == "long" else "SHORT"
+    ta.verdict_confidence = max(int(ta.verdict_confidence or 0), 7 if plan.strong else 6)
+    ta.verdict_reason = plan.reason_ru[:220]
+    ta.entry_zone = (float(plan.entry_lo), float(plan.entry_hi))
+    ta.target_prices = [float(t) for t in plan.targets[:3]]
+    ta.invalidation_price = float(plan.stop)
+    ta.elliott_stop_price = float(plan.stop)
+    ta.action_priority = "high" if plan.strong else "elevated"
+    label = "новостной отскок LONG" if plan.side == "long" else "новостной отскок SHORT"
+    scenario = TradeScenario(
+        direction=plan.side,
+        trigger_price=float(plan.bounce_level),
+        trigger_label=label,
+        stop_price=float(plan.stop),
+        target_prices=[float(t) for t in plan.targets[:3]],
+        conditions=[
+            plan.reason_ru,
+            f"зона входа {fmt_price(plan.entry_lo)}–{fmt_price(plan.entry_hi)}",
+            f"стоп {fmt_price(plan.stop)}",
+        ],
+    )
+    if plan.side == "long":
+        ta.bullish_scenario = scenario
+        ta.primary_scenario = "bullish"
+    else:
+        ta.bearish_scenario = scenario
+        ta.primary_scenario = "bearish"
+
+
+def format_oil_bounce_alert(plan: OilBouncePlan, *, label: str = "Brent") -> str:
+    side = "LONG" if plan.side == "long" else "SHORT"
+    emoji = "🟢" if plan.side == "long" else "🔴"
+    tps = " / ".join(fmt_price(t) for t in plan.targets[:3])
+    lines = [
+        f"🛢 <b>{label} · отскок {side}</b> {emoji}",
+        "",
+        f"<b>Ловить отскок от {fmt_price(plan.bounce_level)}</b>",
+        f"Вход: <b>{fmt_price(plan.entry_lo)} – {fmt_price(plan.entry_hi)}</b>",
+        f"Стоп: <b>{fmt_price(plan.stop)}</b>",
+        f"TP: <b>{tps}</b>",
+        f"До уровня: <b>{plan.dist_pct:.2f}%</b>",
+    ]
+    if plan.catalyst:
+        cat = plan.catalyst.replace("<", "&lt;").replace(">", "&gt;")
+        lines.append(f"Катализатор: <i>{cat}</i>")
+    lines.append("")
+    lines.append("<i>Без шума: только сильный news-bias + цена у уровня.</i>")
+    return "\n".join(lines)
+
+
+def bounce_plan_near_level(plan: OilBouncePlan, *, near_pct: float = 0.4) -> bool:
+    """Цена достаточно близко к уровню отскока — можно алертить."""
+    return plan.dist_pct <= max(0.15, float(near_pct))
+
 def _fetch_google_news_rss(
     query: str,
     *,
@@ -378,7 +660,8 @@ def _fetch_google_news_rss(
         if title_el is None or not title_el.text:
             continue
         title = _clean_title(title_el.text)
-        if not _is_relevant(title):
+        theme = detect_oil_news_theme(title)
+        if theme not in _PRIORITY_THEMES:
             continue
         link = (link_el.text or "").strip()
         source = (src_el.text or "news").strip() if src_el is not None else "news"
@@ -392,16 +675,17 @@ def _fetch_google_news_rss(
                 impact=classify_news_impact(title),
                 query=query,
                 lang=lang,
+                theme=theme,
             )
         )
     return out
 
 async def fetch_oil_news(
-    max_items: int = 15,
+    max_items: int = 10,
     *,
     include_russian: bool = True,
     critical_only: bool = True,
-    critical_min_score: int = 3,
+    critical_min_score: int = 4,
 ) -> list[OilNewsItem]:
     seen: set[str] = set()
     merged: list[OilNewsItem] = []
@@ -419,7 +703,11 @@ async def fetch_oil_news(
                 continue
             seen.add(key)
             merged.append(it)
-    merged.sort(key=lambda x: x.published_ts, reverse=True)
+    # Сначала самые критичные, потом свежесть
+    merged.sort(
+        key=lambda x: (news_critical_score(x.title), x.published_ts),
+        reverse=True,
+    )
     return merged[:max_items]
 
 def _fetch_bybit_oil_bars(
@@ -622,8 +910,12 @@ def format_single_oil_news(item: OilNewsItem) -> str:
         "neutral": "⚪ контекст / следить",
     }.get(item.impact, "⚪ контекст")
     lang_mark = "🇷🇺" if item.lang == "ru" else "🇬🇧"
+    theme = item.theme or detect_oil_news_theme(item.title)
+    theme_ru = theme_label_ru(theme)
+    score = news_critical_score(item.title)
     lines = [
-        "🛢 <b>Нефть · новость</b>",
+        "🛢 <b>Нефть · важное</b>",
+        f"<i>{theme_ru} · вес {score}</i>",
         "",
     ]
     if item.url:
@@ -639,7 +931,10 @@ def format_single_oil_news(item: OilNewsItem) -> str:
 
 def format_oil_news_message(items: list[OilNewsItem], *, max_show: int = 5) -> str:
     if not items:
-        return "🛢 <b>Нефть</b>\n<i>Нет важных заголовков (Hormuz / EIA / OPEC).</i>"
+        return (
+            "🛢 <b>Нефть</b>\n"
+            "<i>Нет важных: Иран/Трамп/США, EIA запасы, ОПЕК, покупки/объёмы.</i>"
+        )
     if len(items) == 1:
         return format_single_oil_news(items[0])
     lines = ["🛢 <b>Нефть · важные новости</b>", ""]
@@ -655,6 +950,7 @@ def _oil_trading_plan(
     interval_minutes: int = 15,
     market_mood: str = "",
     news_bias: OilNewsBias | None = None,
+    bounce_plan: OilBouncePlan | None = None,
 ) -> list[str]:
     """Сценарии LONG / SHORT / база — intraday 5m–1h."""
     lines: list[str] = []
@@ -669,35 +965,57 @@ def _oil_trading_plan(
     if news_bias is not None:
         lines.append(f"• {news_bias.summary_ru}")
         lines.append(f"• <i>{news_bias.how_to_use_ru}</i>")
+    if bounce_plan is not None:
+        side = "LONG" if bounce_plan.side == "long" else "SHORT"
+        tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:3])
+        lines.append(
+            f"• <b>Отскок {side}:</b> от {fmt_price(bounce_plan.bounce_level)} · "
+            f"вход {fmt_price(bounce_plan.entry_lo)}–{fmt_price(bounce_plan.entry_hi)} · "
+            f"стоп {fmt_price(bounce_plan.stop)} · TP {tps}"
+        )
+        if bounce_plan.catalyst:
+            cat = bounce_plan.catalyst.replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f"  катализатор: <i>{cat}</i>")
     if market_mood:
         lines.append(f"• <b>Настроение рынка:</b> {market_mood}")
     lines.append(f"• Итог TA ({tf}): <b>{snap.verdict}</b> · {snap.confidence}/10")
     if snap.reason:
         lines.append(f"• {snap.reason}")
 
-    if s and r and px > 0:
-        mid = (s + r) / 2.0
-        if abs(px - mid) / px < 0.015:
+    # Если есть bounce-план — не дублируем оба сценария, только подтверждающий
+    if bounce_plan is None:
+        if s and r and px > 0:
+            mid = (s + r) / 2.0
+            if abs(px - mid) / px < 0.015:
+                lines.append(
+                    f"• <b>База:</b> range {fmt_price(s)} – {fmt_price(r)} · "
+                    f"ждать пробой с закрытием {tf}"
+                )
+
+        if bo and bo > 0:
             lines.append(
-                f"• <b>База:</b> range {fmt_price(s)} – {fmt_price(r)} · "
-                f"ждать пробой с закрытием {tf}"
+                f"• <b>LONG:</b> закрытие {tf} выше {fmt_price(bo)} → "
+                f"цели {fmt_price(bo + (bo - (bd or s or px) * 0.5))} / {fmt_price(snap.high_7d)}"
             )
+            inv = (s or bd or px * 0.97)
+            lines.append(f"  стоп под {fmt_price(inv)} · отмена если ниже")
 
-    if bo and bo > 0:
-        lines.append(
-            f"• <b>LONG:</b> закрытие {tf} выше {fmt_price(bo)} → "
-            f"цели {fmt_price(bo + (bo - (bd or s or px) * 0.5))} / {fmt_price(snap.high_7d)}"
-        )
-        inv = (s or bd or px * 0.97)
-        lines.append(f"  стоп под {fmt_price(inv)} · отмена если ниже")
-
-    if bd and bd > 0:
-        lines.append(
-            f"• <b>SHORT:</b> закрытие {tf} ниже {fmt_price(bd)} → "
-            f"цели {fmt_price(bd - (bo or r or px - bd) * 0.5)} / {fmt_price(snap.low_7d)}"
-        )
-        inv = (r or bo or px * 1.03)
-        lines.append(f"  стоп выше {fmt_price(inv)} · отмена если выше")
+        if bd and bd > 0:
+            lines.append(
+                f"• <b>SHORT:</b> закрытие {tf} ниже {fmt_price(bd)} → "
+                f"цели {fmt_price(bd - (bo or r or px - bd) * 0.5)} / {fmt_price(snap.low_7d)}"
+            )
+            inv = (r or bo or px * 1.03)
+            lines.append(f"  стоп выше {fmt_price(inv)} · отмена если выше")
+    else:
+        if bounce_plan.side == "long" and bo and bo > 0:
+            lines.append(
+                f"• Альтернатива: пробой↑ {fmt_price(bo)} (если отскок не дали)"
+            )
+        if bounce_plan.side == "short" and bd and bd > 0:
+            lines.append(
+                f"• Альтернатива: пробой↓ {fmt_price(bd)} (если отскок не дали)"
+            )
 
     if snap.elliott:
         lines.append(f"• EW: {snap.elliott}")
@@ -715,6 +1033,7 @@ def format_oil_market_digest(
     interval_minutes: int = 15,
     market_mood: str = "",
     news_bias: OilNewsBias | None = None,
+    bounce_plan: OilBouncePlan | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     lines = [
@@ -741,12 +1060,15 @@ def format_oil_market_digest(
                 interval_minutes=interval_minutes,
                 market_mood=market_mood,
                 news_bias=news_bias,
+                bounce_plan=bounce_plan,
             )
         )
     elif primary:
         if news_bias is not None:
             lines.append(news_bias.summary_ru)
             lines.append(f"<i>{news_bias.how_to_use_ru}</i>")
+        if bounce_plan is not None:
+            lines.append(format_oil_bounce_alert(bounce_plan, label=primary.label))
         lines.append(f"Фаза: {primary.phase}")
         if primary.elliott:
             lines.append(f"EW: {primary.elliott}")
@@ -777,6 +1099,8 @@ class OilMonitorEngine:
         self._last_digest_ts = 0.0
         self._level_watcher = OilLevelWatcher()
         self._recent_news: list[OilNewsItem] = []
+        self._last_bounce_alert_ts: dict[str, float] = {}
+        self._active_bounce: OilBouncePlan | None = None
 
     def _remember_news(self, items: list[OilNewsItem], *, cutoff: float) -> None:
         """Хранит важные новости за окно для сводки в дайджесте."""
@@ -793,6 +1117,47 @@ class OilMonitorEngine:
         self._recent_news = [
             it for it in self._recent_news if it.published_ts >= cutoff
         ][-40:]
+
+    async def _maybe_send_bounce_alert(
+        self,
+        plan: OilBouncePlan,
+        *,
+        label: str,
+        settings: Any,
+        png: bytes | None = None,
+    ) -> int:
+        """Редкий алерт: сильный bias + цена у уровня. Без спама."""
+        if not getattr(settings, "oil_bounce_alerts_enabled", True):
+            return 0
+        if self._on_level_alert is None:
+            return 0
+        if not plan.strong:
+            return 0
+        near_pct = float(getattr(settings, "oil_bounce_near_pct", 0.4))
+        if not bounce_plan_near_level(plan, near_pct=near_pct):
+            return 0
+        cooldown = int(getattr(settings, "oil_bounce_alert_cooldown_seconds", 7200))
+        key = f"{label.upper()}:{plan.side}"
+        now = time.time()
+        if now - self._last_bounce_alert_ts.get(key, 0.0) < cooldown:
+            return 0
+        msg = format_oil_bounce_alert(plan, label=label)
+        try:
+            ok = await self._on_level_alert(msg)
+        except Exception:
+            logger.exception("Oil bounce alert failed")
+            ok = False
+        if not ok:
+            return 0
+        self._last_bounce_alert_ts[key] = now
+        sent = 1
+        # График с уже переписанными entry/stop/TP — в manual TA, без дубля текста в oil-чат
+        if png and self._on_extra_chart is not None:
+            try:
+                await self._on_extra_chart(msg, png)
+            except Exception:
+                logger.exception("Oil bounce chart failed")
+        return sent
 
     def _sync_levels_from_bundle(self, bundle: OilAnalysisBundle) -> None:
         self._level_watcher.update_levels(
@@ -841,10 +1206,10 @@ class OilMonitorEngine:
 
         max_age_h = float(getattr(settings, "oil_news_max_age_hours", 12.0))
         cutoff = time.time() - max_age_h * 3600.0
-        max_per_poll = int(getattr(settings, "oil_news_max_per_poll", 2))
+        max_per_poll = int(getattr(settings, "oil_news_max_per_poll", 1))
         separate = bool(getattr(settings, "oil_news_separate_messages", True))
         critical_only = bool(getattr(settings, "oil_news_critical_only", True))
-        critical_min = int(getattr(settings, "oil_news_critical_min_score", 3))
+        critical_min = int(getattr(settings, "oil_news_critical_min_score", 4))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
 
         try:
@@ -921,15 +1286,40 @@ class OilMonitorEngine:
                     snaps = [bundle.brent]
                     if bundle.wti:
                         snaps.append(bundle.wti)
+                    min_score = float(
+                        getattr(settings, "oil_bounce_min_news_score", 3.0)
+                    )
+                    news_bias = summarize_oil_news_bias(
+                        self._recent_news,
+                        ta_verdict=bundle.brent.verdict,
+                    )
+                    bounce = build_oil_bounce_plan(
+                        bundle.brent,
+                        news_bias,
+                        news_items=self._recent_news,
+                        min_score=min_score,
+                    )
+                    self._active_bounce = bounce
+                    if bounce is not None:
+                        apply_oil_bounce_to_ta(bundle.brent_ta, bounce)
+                        # snap mirrors chart levels for digest consistency
+                        bundle.brent.verdict = (
+                            "LONG" if bounce.side == "long" else "SHORT"
+                        )
+                        bundle.brent.entry_zone = (
+                            bounce.entry_lo,
+                            bounce.entry_hi,
+                        )
+                        bundle.brent.stop = bounce.stop
+                        bundle.brent.targets = bounce.targets
+                        bundle.brent.reason = bounce.reason_ru[:200]
                     digest = format_oil_market_digest(
                         snaps,
                         ta=bundle.brent_ta,
                         interval_minutes=bundle.interval_minutes,
                         market_mood=bundle.market_mood,
-                        news_bias=summarize_oil_news_bias(
-                            self._recent_news,
-                            ta_verdict=bundle.brent.verdict,
-                        ),
+                        news_bias=news_bias,
+                        bounce_plan=bounce,
                     )
                     png: bytes | None = None
                     if chart_enabled:
@@ -953,12 +1343,35 @@ class OilMonitorEngine:
                     if ok:
                         self._last_digest_ts = now
                         sent += 1
+                        if bounce is not None:
+                            sent += await self._maybe_send_bounce_alert(
+                                bounce,
+                                label="Brent · BZUSDT",
+                                settings=settings,
+                                png=None,  # график уже ушёл с дайджестом
+                            )
                         if (
                             chart_enabled
                             and bundle.wti_bars
                             and bundle.wti_ta
                             and self._on_extra_chart is not None
                         ):
+                            wti_bounce = None
+                            if bounce is not None and bundle.wti:
+                                wti_bias = summarize_oil_news_bias(
+                                    self._recent_news,
+                                    ta_verdict=bundle.wti.verdict,
+                                )
+                                wti_bounce = build_oil_bounce_plan(
+                                    bundle.wti,
+                                    wti_bias,
+                                    news_items=self._recent_news,
+                                    min_score=min_score,
+                                )
+                                if wti_bounce is not None:
+                                    apply_oil_bounce_to_ta(
+                                        bundle.wti_ta, wti_bounce,
+                                    )
                             wti_png = render_oil_chart(
                                 bundle.wti_bars,
                                 bundle.wti_ta,
@@ -972,12 +1385,45 @@ class OilMonitorEngine:
                                     f"📊 <b>WTI · CLUSDT</b> · {bundle.interval_minutes}m · "
                                     f"${bundle.wti.price:.2f}"
                                 )
+                                if wti_bounce is not None:
+                                    wti_caption += (
+                                        f"\n{wti_bounce.reason_ru}"
+                                    )
                                 try:
                                     await self._on_extra_chart(wti_caption, wti_png)
                                 except Exception:
                                     logger.exception("Oil WTI chart dispatch failed")
             except Exception:
                 logger.exception("Oil digest failed")
+
+        # Между дайджестами: редкий bounce-alert если цена подошла к уровню
+        if self._active_bounce is not None:
+            try:
+                prices = await fetch_oil_last_prices()
+                brent_px = prices.get("BRENT")
+                if brent_px and brent_px > 0:
+                    plan = self._active_bounce
+                    dist = abs(brent_px - plan.bounce_level) / brent_px * 100.0
+                    refreshed = OilBouncePlan(
+                        side=plan.side,
+                        bounce_level=plan.bounce_level,
+                        entry_lo=plan.entry_lo,
+                        entry_hi=plan.entry_hi,
+                        stop=plan.stop,
+                        targets=plan.targets,
+                        catalyst=plan.catalyst,
+                        reason_ru=plan.reason_ru,
+                        strong=plan.strong,
+                        dist_pct=dist,
+                    )
+                    sent += await self._maybe_send_bounce_alert(
+                        refreshed,
+                        label="Brent · BZUSDT",
+                        settings=settings,
+                        png=None,
+                    )
+            except Exception:
+                logger.debug("Oil bounce tick failed", exc_info=True)
 
         return sent
 

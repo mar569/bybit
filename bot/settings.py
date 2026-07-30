@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 56
+SETTINGS_VERSION = 58
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -526,8 +526,8 @@ class ScannerSettings:
     # Oil monitor — новости Iran/US + дайджест Brent/WTI
     oil_news_enabled: bool = False
     oil_news_interval_seconds: int = 300
-    oil_news_max_per_poll: int = 3
-    oil_news_max_age_hours: float = 48.0
+    oil_news_max_per_poll: int = 1
+    oil_news_max_age_hours: float = 24.0
     oil_digest_enabled: bool = True
     oil_digest_interval_hours: float = 4.0
     oil_chart_enabled: bool = True
@@ -539,9 +539,13 @@ class ScannerSettings:
     oil_include_wti: bool = True
     oil_russian_news: bool = True
     oil_news_critical_only: bool = True
-    oil_news_critical_min_score: int = 3
+    oil_news_critical_min_score: int = 4
     oil_level_alerts_enabled: bool = True
     oil_level_alert_cooldown_seconds: int = 1800
+    oil_bounce_alerts_enabled: bool = True
+    oil_bounce_alert_cooldown_seconds: int = 7200
+    oil_bounce_near_pct: float = 0.4
+    oil_bounce_min_news_score: float = 3.0
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = True
@@ -1067,8 +1071,8 @@ class ScannerSettings:
             wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
             oil_news_enabled=bool(base.get("oil_news_enabled", False)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 300)),
-            oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 3)),
-            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 48.0)),
+            oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
+            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 24.0)),
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
             oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
             oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
@@ -1080,11 +1084,17 @@ class ScannerSettings:
             oil_include_wti=bool(base.get("oil_include_wti", True)),
             oil_russian_news=bool(base.get("oil_russian_news", True)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
-            oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 3)),
+            oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
             oil_level_alerts_enabled=bool(base.get("oil_level_alerts_enabled", True)),
             oil_level_alert_cooldown_seconds=int(
                 base.get("oil_level_alert_cooldown_seconds", 1800)
             ),
+            oil_bounce_alerts_enabled=bool(base.get("oil_bounce_alerts_enabled", True)),
+            oil_bounce_alert_cooldown_seconds=int(
+                base.get("oil_bounce_alert_cooldown_seconds", 7200)
+            ),
+            oil_bounce_near_pct=float(base.get("oil_bounce_near_pct", 0.4)),
+            oil_bounce_min_news_score=float(base.get("oil_bounce_min_news_score", 3.0)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
@@ -1501,6 +1511,19 @@ class SettingsManager:
                 merged["signal_chart_height_scale"] = float(
                     merged.get("signal_chart_height_scale", 1.0) or 1.0
                 )
+            if version < 58:
+                # Только топ-темы: Иран/Трамп/США, запасы, ОПЕК, объёмы/сделки
+                merged["oil_news_max_per_poll"] = 1
+                merged["oil_news_critical_min_score"] = max(
+                    4, int(merged.get("oil_news_critical_min_score", 4) or 4)
+                )
+                if float(merged.get("oil_news_max_age_hours", 24) or 24) > 36:
+                    merged["oil_news_max_age_hours"] = 24.0
+            if version < 57:
+                merged.setdefault("oil_bounce_alerts_enabled", True)
+                merged.setdefault("oil_bounce_alert_cooldown_seconds", 7200)
+                merged.setdefault("oil_bounce_near_pct", 0.4)
+                merged.setdefault("oil_bounce_min_news_score", 3.0)
             if version < 56:
                 # Ещё ближе: 5m ~6ч, высота ×1.45 — свечи не слипаются.
                 old_h = int(merged.get("oil_chart_display_hours", 6) or 6)
