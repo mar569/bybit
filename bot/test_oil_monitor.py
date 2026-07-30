@@ -7,10 +7,12 @@ from bot.oil_monitor import (
     apply_oil_bounce_to_ta,
     bounce_plan_near_level,
     build_oil_bounce_plan,
+    build_oil_scalp_call,
     detect_oil_market_mood,
     format_oil_bounce_alert,
     format_oil_market_digest,
     format_oil_news_message,
+    format_oil_scalp_block,
     format_single_oil_news,
     is_critical_oil_news,
     news_critical_score,
@@ -356,3 +358,82 @@ def test_sanitize_oil_session_bars_drops_flats_and_gaps():
     assert len(out) == 30
     gaps = [out[i].open_time - out[i - 1].open_time for i in range(1, len(out))]
     assert all(abs(g - 300.0) < 1e-6 for g in gaps)
+
+
+def test_oil_scalp_wait_in_mid_range():
+    snap = OilMarketSnapshot(
+        label="Brent · UKOUSD",
+        symbol="UKOUSD",
+        price=90.5,
+        high_7d=93.0,
+        low_7d=88.0,
+        verdict="WAIT",
+        confidence=4,
+        support=89.8,
+        resistance=91.2,
+        breakdown=89.5,
+        breakout=91.4,
+        phase="",
+        elliott="",
+        reason="",
+    )
+    ta = TAAnalysisResult(verdict="WAIT", verdict_confidence=4, action_priority="long")
+    bias = OilNewsBias(bias="neutral", weighted_score=0.0, summary_ru="", how_to_use_ru="")
+    call = build_oil_scalp_call(
+        snap, ta, news_bias=bias, market_mood="база / флэт", interval_minutes=5,
+    )
+    assert call.action == "wait"
+    assert "НЕ ОТКРЫВАТЬ" in call.headline_ru
+    text = format_oil_scalp_block(call)
+    assert "10–100 мин" in text or "мин" in text
+
+
+def test_oil_scalp_open_long_near_support_with_news():
+    snap = OilMarketSnapshot(
+        label="Brent · UKOUSD",
+        symbol="UKOUSD",
+        price=89.85,
+        high_7d=93.0,
+        low_7d=88.0,
+        verdict="LONG",
+        confidence=6,
+        support=89.80,
+        resistance=91.20,
+        breakdown=89.40,
+        breakout=91.40,
+        phase="",
+        elliott="",
+        reason="",
+    )
+    ta = TAAnalysisResult(verdict="LONG", verdict_confidence=6, action_priority="long")
+    bias = OilNewsBias(
+        bias="bullish",
+        weighted_score=4.0,
+        bullish=2,
+        summary_ru="новости↑",
+        how_to_use_ru="",
+    )
+    bounce = OilBouncePlan(
+        side="long",
+        bounce_level=89.80,
+        entry_lo=89.70,
+        entry_hi=89.90,
+        stop=89.30,
+        targets=(90.50, 91.20),
+        catalyst="Hormuz",
+        reason_ru="отскок",
+        strong=True,
+        dist_pct=0.05,
+    )
+    call = build_oil_scalp_call(
+        snap,
+        ta,
+        news_bias=bias,
+        bounce_plan=bounce,
+        market_mood="intraday бычий bias",
+        interval_minutes=5,
+    )
+    assert call.action == "open_long"
+    assert call.entry_lo is not None
+    assert call.stop is not None
+    assert "LONG" in call.headline_ru

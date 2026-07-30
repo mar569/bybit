@@ -528,6 +528,308 @@ class OilBouncePlan:
         return (self.entry_lo + self.entry_hi) / 2.0
 
 
+@dataclass(frozen=True)
+class OilScalpCall:
+    """Краткосрочный вызов 10–100 мин: что открывать / не открывать."""
+    action: str  # open_long | open_short | wait
+    hold_min: int
+    hold_max: int
+    entry_lo: float | None
+    entry_hi: float | None
+    stop: float | None
+    target: float | None
+    score: int  # 1–10 согласованность факторов
+    headline_ru: str
+    factors_ru: tuple[str, ...]
+    trigger_ru: str = ""
+
+
+def _scalp_hold_window(market_mood: str, *, interval_minutes: int) -> tuple[int, int]:
+    """Окно удержания 10–100 мин под режим рынка."""
+    mood = (market_mood or "").lower()
+    if "волатил" in mood:
+        return 10, 35
+    if "база" in mood or "флэт" in mood or "флет" in mood:
+        return 25, 70
+    if "бычий" in mood or "медвеж" in mood:
+        return 20, 90
+    # TF влияет: 5m → короче, 15m+ → длиннее
+    if interval_minutes <= 5:
+        return 15, 50
+    if interval_minutes <= 15:
+        return 20, 75
+    return 30, 100
+
+
+def _dist_pct(px: float, level: float | None) -> float | None:
+    if not level or px <= 0:
+        return None
+    return abs(px - float(level)) / px * 100.0
+
+
+def build_oil_scalp_call(
+    snap: OilMarketSnapshot,
+    ta: TAAnalysisResult,
+    *,
+    news_bias: OilNewsBias | None = None,
+    bounce_plan: OilBouncePlan | None = None,
+    market_mood: str = "",
+    interval_minutes: int = 15,
+    ta_confidence_raw: int | None = None,
+    ta_verdict_raw: str | None = None,
+) -> OilScalpCall:
+    """Сводка всех факторов → одна команда на 10–100 мин."""
+    px = float(snap.price or 0.0)
+    hold_lo, hold_hi = _scalp_hold_window(market_mood, interval_minutes=interval_minutes)
+    ta_v = (ta_verdict_raw or snap.verdict or getattr(ta, "verdict", None) or "WAIT").upper()
+    ta_c = int(
+        ta_confidence_raw
+        if ta_confidence_raw is not None
+        else (snap.confidence or getattr(ta, "verdict_confidence", 0) or 0)
+    )
+    news = news_bias.bias if news_bias else "neutral"
+    news_w = float(news_bias.weighted_score) if news_bias else 0.0
+    ap = (getattr(ta, "action_priority", "") or "").lower()
+    s = snap.support
+    r = snap.resistance
+    bd = snap.breakdown
+    bo = snap.breakout
+
+    near_s = (_dist_pct(px, s) or 99) <= 0.35
+    near_r = (_dist_pct(px, r) or 99) <= 0.35
+    near_bd = (_dist_pct(px, bd) or 99) <= 0.25
+    near_bo = (_dist_pct(px, bo) or 99) <= 0.25
+    mid_range = False
+    if s and r and px > 0:
+        mid = (float(s) + float(r)) / 2.0
+        mid_range = abs(px - mid) / px < 0.012 and not (near_s or near_r)
+
+    factors: list[str] = []
+    factors.append(f"TA {ta_v} {ta_c}/10")
+    if news_bias:
+        factors.append(f"новости {news} {news_w:+.1f}/10")
+    if market_mood:
+        factors.append(f"режим: {market_mood.split('—')[0].strip()[:40]}")
+    if bounce_plan is not None:
+        factors.append(
+            f"отскок {bounce_plan.side.upper()} у {fmt_price(bounce_plan.bounce_level)}"
+        )
+    if ap in {"long", "short"}:
+        factors.append(f"lean графика → {ap}")
+
+    # ---- scoring sides ----
+    long_pts = 0
+    short_pts = 0
+    if ta_v == "LONG":
+        long_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
+    elif ta_v == "SHORT":
+        short_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
+    if news == "bullish":
+        long_pts += 2 if abs(news_w) >= 3 else 1
+    elif news == "bearish":
+        short_pts += 2 if abs(news_w) >= 3 else 1
+    if bounce_plan is not None:
+        if bounce_plan.side == "long":
+            long_pts += 3 if bounce_plan.strong else 2
+        else:
+            short_pts += 3 if bounce_plan.strong else 2
+    if ap == "long":
+        long_pts += 1
+    elif ap == "short":
+        short_pts += 1
+    if near_s or near_bd:
+        long_pts += 1  # у поддержки чаще ловят long / не шортят
+        short_pts -= 1
+    if near_r or near_bo:
+        short_pts += 1
+        long_pts -= 1
+    if mid_range:
+        long_pts -= 2
+        short_pts -= 2
+        factors.append("середина range → без market")
+
+    # конфликт новости vs TA
+    if news == "bullish" and ta_v == "SHORT":
+        short_pts -= 2
+        factors.append("конфликт: новости↑ vs TA SHORT")
+    if news == "bearish" and ta_v == "LONG":
+        long_pts -= 2
+        factors.append("конфликт: новости↓ vs TA LONG")
+
+    long_pts = max(0, long_pts)
+    short_pts = max(0, short_pts)
+    score = max(long_pts, short_pts)
+    score = max(1, min(10, score + (1 if abs(long_pts - short_pts) >= 2 else 0)))
+
+    # ---- decide ----
+    open_threshold = 5
+    action = "wait"
+    entry_lo = entry_hi = stop = target = None
+    trigger = ""
+    headline = "✋ НЕ ОТКРЫВАТЬ сейчас"
+
+    def _long_levels() -> None:
+        nonlocal entry_lo, entry_hi, stop, target, trigger
+        if bounce_plan is not None and bounce_plan.side == "long":
+            entry_lo, entry_hi = bounce_plan.entry_lo, bounce_plan.entry_hi
+            stop = bounce_plan.stop
+            target = bounce_plan.targets[0] if bounce_plan.targets else (r or bo)
+            return
+        if near_s and s:
+            entry_lo, entry_hi = float(s) * 0.998, min(px, float(s) * 1.003)
+            stop = float(bd or s) * 0.994
+            target = float(r or bo or px * 1.006)
+            return
+        if near_bo and bo:
+            entry_lo = entry_hi = float(bo)
+            stop = float(s or bd or px * 0.993)
+            target = float(bo) * 1.004
+            trigger = f"вход после закрытия {interval_minutes}m выше {fmt_price(bo)}"
+            return
+        entry_lo = entry_hi = px
+        stop = float(bd or s or px * 0.994)
+        target = float(bo or r or px * 1.005)
+        trigger = f"LONG-триггер: закрытие {interval_minutes}m ≥ {fmt_price(bo)}" if bo else (
+            "ждать уровень поддержки / пробоя"
+        )
+
+    def _short_levels() -> None:
+        nonlocal entry_lo, entry_hi, stop, target, trigger
+        if bounce_plan is not None and bounce_plan.side == "short":
+            entry_lo, entry_hi = bounce_plan.entry_lo, bounce_plan.entry_hi
+            stop = bounce_plan.stop
+            target = bounce_plan.targets[0] if bounce_plan.targets else (s or bd)
+            return
+        if near_r and r:
+            entry_lo, entry_hi = max(px, float(r) * 0.997), float(r) * 1.002
+            stop = float(bo or r) * 1.006
+            target = float(s or bd or px * 0.994)
+            return
+        if near_bd and bd:
+            entry_lo = entry_hi = float(bd)
+            stop = float(r or bo or px * 1.007)
+            target = float(bd) * 0.996
+            trigger = f"вход после закрытия {interval_minutes}m ниже {fmt_price(bd)}"
+            return
+        entry_lo = entry_hi = px
+        stop = float(bo or r or px * 1.006)
+        target = float(bd or s or px * 0.995)
+        trigger = f"SHORT-триггер: закрытие {interval_minutes}m ≤ {fmt_price(bd)}" if bd else (
+            "ждать сопротивление / пробой вниз"
+        )
+
+    # Готовый вход: сильный score + цена у уровня / bounce / подтверждённый пробой
+    ready_long = (
+        long_pts >= open_threshold
+        and long_pts > short_pts + 1
+        and (
+            (bounce_plan is not None and bounce_plan.side == "long")
+            or near_s
+            or near_bo
+            or (ta_v == "LONG" and ta_c >= 6 and (near_s or near_bo or not mid_range))
+        )
+        and not mid_range
+    )
+    ready_short = (
+        short_pts >= open_threshold
+        and short_pts > long_pts + 1
+        and (
+            (bounce_plan is not None and bounce_plan.side == "short")
+            or near_r
+            or near_bd
+            or (ta_v == "SHORT" and ta_c >= 6 and (near_r or near_bd or not mid_range))
+        )
+        and not mid_range
+    )
+
+    # Без касания уровня — не market-chase, даже при сильном score
+    if ready_long and not (
+        near_s or near_bo or (bounce_plan is not None and bounce_plan.side == "long")
+    ):
+        ready_long = False
+    if ready_short and not (
+        near_r or near_bd or (bounce_plan is not None and bounce_plan.side == "short")
+    ):
+        ready_short = False
+
+    if ready_long:
+        action = "open_long"
+        _long_levels()
+        headline = f"🟢 ОТКРЫВАТЬ LONG · {hold_lo}–{hold_hi} мин"
+        factors.append(f"score long {long_pts} > short {short_pts}")
+    elif ready_short:
+        action = "open_short"
+        _short_levels()
+        headline = f"🔴 ОТКРЫВАТЬ SHORT · {hold_lo}–{hold_hi} мин"
+        factors.append(f"score short {short_pts} > long {long_pts}")
+    else:
+        if long_pts > short_pts:
+            _long_levels()
+            headline = "✋ НЕ ОТКРЫВАТЬ · ждать LONG-триггер"
+            if bo and not trigger:
+                trigger = f"LONG: закрытие {interval_minutes}m ≥ {fmt_price(bo)}"
+        elif short_pts > long_pts:
+            _short_levels()
+            headline = "✋ НЕ ОТКРЫВАТЬ · ждать SHORT-триггер"
+            if bd and not trigger:
+                trigger = f"SHORT: закрытие {interval_minutes}m ≤ {fmt_price(bd)}"
+        elif mid_range:
+            headline = "✋ НЕ ОТКРЫВАТЬ · середина диапазона"
+            trigger = "ждать край range или новостной импульс"
+        else:
+            headline = "✋ НЕ ОТКРЫВАТЬ · нет сходимости факторов"
+            trigger = "ждать уровень + подтверждение свечой"
+        factors.append(f"score L{long_pts}/S{short_pts} — вход не готов")
+        # для wait уровни — ориентир, не «вход сейчас»
+        entry_lo = entry_hi = None
+
+    return OilScalpCall(
+        action=action,
+        hold_min=hold_lo,
+        hold_max=hold_hi,
+        entry_lo=float(entry_lo) if entry_lo else None,
+        entry_hi=float(entry_hi) if entry_hi else None,
+        stop=float(stop) if stop else None,
+        target=float(target) if target else None,
+        score=int(score),
+        headline_ru=headline,
+        factors_ru=tuple(factors[:7]),
+        trigger_ru=(trigger or "")[:180],
+    )
+
+
+def format_oil_scalp_block(call: OilScalpCall) -> str:
+    """Блок в шапке дайджеста: что делать на 10–100 мин."""
+    lines = [
+        "⚡ <b>СЕЙЧАС · 10–100 мин</b>",
+        f"<b>{call.headline_ru}</b> · сходимость <b>{call.score}/10</b>",
+    ]
+    if call.action in {"open_long", "open_short"}:
+        if call.entry_lo and call.entry_hi:
+            if abs(call.entry_lo - call.entry_hi) / max(call.entry_lo, 1e-9) < 0.0003:
+                lines.append(f"Вход: <b>{fmt_price(call.entry_lo)}</b>")
+            else:
+                lines.append(
+                    f"Вход: <b>{fmt_price(call.entry_lo)} – {fmt_price(call.entry_hi)}</b>"
+                )
+        if call.stop:
+            lines.append(f"Стоп: <b>{fmt_price(call.stop)}</b>")
+        if call.target:
+            lines.append(f"TP1: <b>{fmt_price(call.target)}</b>")
+        lines.append(
+            f"Time-stop: <b>{call.hold_min}–{call.hold_max} мин</b> "
+            "(если цели нет — закрыть / не держать)"
+        )
+    if call.trigger_ru:
+        lines.append(f"Триггер: <i>{call.trigger_ru}</i>")
+    if call.factors_ru:
+        lines.append("Факторы: " + " · ".join(call.factors_ru))
+    lines.append(
+        "<i>Не финсовет. Размер маленький; без подтверждения уровня — не входить.</i>"
+    )
+    return "\n".join(lines)
+
+
 def _pick_news_catalyst(items: list[OilNewsItem], bias: str) -> str:
     want = "bullish" if bias == "bullish" else "bearish"
     scored: list[tuple[float, OilNewsItem]] = []
@@ -1381,6 +1683,7 @@ def format_oil_market_digest(
     bounce_plan: OilBouncePlan | None = None,
     ta_confidence_raw: int | None = None,
     ta_verdict_raw: str | None = None,
+    scalp_call: OilScalpCall | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     lines = [
@@ -1388,6 +1691,21 @@ def format_oil_market_digest(
         f"<i>UKOUSD / USOIL · TF {interval_minutes}m · свечи Bybit→цена Yahoo BZ=F</i>",
         "",
     ]
+    if scalp_call is None and primary is not None and ta is not None:
+        scalp_call = build_oil_scalp_call(
+            primary,
+            ta,
+            news_bias=news_bias,
+            bounce_plan=bounce_plan,
+            market_mood=market_mood,
+            interval_minutes=interval_minutes,
+            ta_confidence_raw=ta_confidence_raw,
+            ta_verdict_raw=ta_verdict_raw,
+        )
+    if scalp_call is not None:
+        lines.append(format_oil_scalp_block(scalp_call))
+        lines.append("")
+
     for s in snaps:
         lines.append(f"<b>{s.label}</b> · <b>${s.price:.2f}</b>")
         lines.append(f"  7д: {fmt_price(s.low_7d)} – {fmt_price(s.high_7d)}")
