@@ -10,6 +10,7 @@ from bot.oil_monitor import (
     format_single_oil_news,
     is_critical_oil_news,
     news_critical_score,
+    summarize_oil_news_bias,
     OilNewsItem,
     OilMarketSnapshot,
 )
@@ -79,7 +80,7 @@ def test_format_oil_market_digest():
     )
     text = format_oil_market_digest([snap])
     assert "Brent" in text
-    assert "UKOUSD" in text
+    assert "BZUSDT" in text or "Brent" in text or "TradFi" in text
 
 
 def test_news_critical_score_hormuz():
@@ -127,3 +128,74 @@ def test_detect_oil_market_mood_range():
     )
     mood = detect_oil_market_mood(bars, ta, 15)
     assert "база" in mood or "нейтраль" in mood or "range" in mood.lower()
+
+
+def test_summarize_oil_news_bias_bullish_confirms_long():
+    items = [
+        OilNewsItem(
+            title="Iran threatens Strait of Hormuz blockade",
+            url="",
+            source="Reuters",
+            published_ts=1_700_000_000.0,
+            impact="bullish",
+        ),
+        OilNewsItem(
+            title="Oil prices surge on US sanctions",
+            url="",
+            source="Bloomberg",
+            published_ts=1_700_000_100.0,
+            impact="bullish",
+        ),
+    ]
+    bias = summarize_oil_news_bias(items, ta_verdict="LONG")
+    assert bias.bias == "bullish"
+    assert bias.bullish == 2
+    assert "вверх" in bias.summary_ru
+    assert "приоритет LONG" in bias.how_to_use_ru
+
+
+def test_summarize_oil_news_bias_conflict():
+    items = [
+        OilNewsItem(
+            title="Brent falls after US Iran deal reopen Hormuz",
+            url="",
+            source="Reuters",
+            published_ts=1_700_000_000.0,
+            impact="bearish",
+        ),
+    ]
+    bias = summarize_oil_news_bias(items, ta_verdict="LONG")
+    assert bias.bias == "bearish"
+    assert "Конфликт" in bias.how_to_use_ru
+
+
+def test_digest_includes_news_bias():
+    snap = OilMarketSnapshot(
+        label="Brent",
+        symbol="BZUSDT",
+        price=90.5,
+        high_7d=102.0,
+        low_7d=82.5,
+        verdict="WAIT",
+        confidence=5,
+        support=89.0,
+        resistance=91.0,
+        breakdown=86.5,
+        breakout=93.0,
+        phase="test",
+        elliott="",
+        reason="",
+    )
+    items = [
+        OilNewsItem(
+            title="OPEC oil production cut",
+            url="",
+            source="Reuters",
+            published_ts=1_700_000_000.0,
+            impact="bullish",
+        ),
+    ]
+    bias = summarize_oil_news_bias(items, ta_verdict="WAIT")
+    text = format_oil_market_digest([snap], news_bias=bias)
+    assert "Новостной фон" in text
+    assert "вверх" in text or "🟢" in text

@@ -2692,11 +2692,11 @@ def render_oil_chart(
     ta: TAAnalysisResult,
     *,
     symbol_label: str = "Brent",
-    interval_minutes: int = 60,
-    display_hours: int = 168,
-    height_scale: float = 1.0,
+    interval_minutes: int = 15,
+    display_hours: int | None = None,
+    height_scale: float = 1.45,
 ) -> bytes | None:
-    """PNG график нефти (Yahoo bars + полный TA)."""
+    """PNG график нефти (Bybit TradFi) — крупный зум, не вся неделя на 5m."""
     if not bars or len(bars) < 12:
         return None
     verdict = (ta.verdict or "WAIT").upper()
@@ -2705,19 +2705,47 @@ def render_oil_chart(
         else CHART_STYLE["accent_short"] if verdict == "SHORT"
         else CHART_STYLE["warning"]
     )
-    zoom = min(display_hours, max(24, int(len(bars) * interval_minutes / 60)))
-    title = f"OIL · {symbol_label} · {interval_minutes}m · {zoom}ч"
+    # Intraday: 5m ≈ 5–6ч (~60–70 свечей), иначе всё «слипается».
+    oil_defaults = {5: 6, 10: 8, 15: 10, 30: 16, 60: 30}
+    im = max(5, min(60, int(interval_minutes)))
+    configured = int(display_hours) if display_hours and int(display_hours) > 0 else None
+    # Старый дефолт 168 / слишком широкий зум — в авто
+    if configured is not None and configured >= 48:
+        configured = None
+    base = oil_defaults.get(im, 10 if im <= 15 else 24)
+    if configured is not None:
+        base = max(4, min(configured, 24 if im <= 15 else 48))
+    analysis_h = max(base, int(len(bars) * im / 60))
+    drawdown = float(getattr(ta, "drawdown_from_high_pct", 0.0) or 0.0)
+    ew_span = 0
+    try:
+        pts = getattr(ta, "elliott_points", None) or []
+        if len(pts) >= 2:
+            idxs = [int(getattr(p, "index", 0) or 0) for p in pts]
+            ew_span = max(idxs) - min(idxs)
+    except Exception:
+        ew_span = 0
+    zoom = structure_aware_display_hours(
+        interval_minutes=im,
+        analysis_hours=min(analysis_h, 48 if im <= 15 else 96),
+        configured=base,
+        drawdown_pct=drawdown,
+        elliott_span_bars=ew_span,
+    )
+    max_zoom = {5: 8, 10: 10, 15: 14, 30: 24, 60: 40}.get(im, 16)
+    zoom = max(4, min(int(zoom), max_zoom))
+    title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
     return _render_chart_figure(
         bars,
         ta,
         symbol=symbol_label,
         title_suffix=title,
         accent_color=accent,
-        interval_minutes=interval_minutes,
+        interval_minutes=im,
         pro_mode=False,
         display_hours=zoom,
         enhanced=True,
-        height_scale=height_scale,
+        height_scale=max(1.35, float(height_scale or 1.45)),
         wave_focus=False,
     )
 

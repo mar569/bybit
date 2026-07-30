@@ -83,7 +83,7 @@ class OilLevelWatcher:
                             f"🛢 <b>{watch.label} · пробой вверх</b>\n"
                             f"Закрытие выше <b>{fmt_price(watch.breakout)}</b>\n"
                             f"Цена: <b>${price:.2f}</b>\n"
-                            f"<i>UKOUSD ≈ Brent · USOIL ≈ WTI · intraday от уровней</i>"
+                            f"<i>Bybit TradFi BZUSDT/CLUSDT · intraday от уровней</i>"
                         )
                         alerts.append(
                             OilLevelAlert(
