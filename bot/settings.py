@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 58
+SETTINGS_VERSION = 59
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -531,7 +531,7 @@ class ScannerSettings:
     oil_digest_enabled: bool = True
     oil_digest_interval_hours: float = 4.0
     oil_chart_enabled: bool = True
-    oil_chart_display_hours: int = 6
+    oil_chart_display_hours: int = 18
     oil_chart_height_scale: float = 1.45
     oil_news_separate_messages: bool = True
     oil_interval_minutes: int = 15
@@ -1076,7 +1076,7 @@ class ScannerSettings:
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
             oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
             oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
-            oil_chart_display_hours=int(base.get("oil_chart_display_hours", 6)),
+            oil_chart_display_hours=int(base.get("oil_chart_display_hours", 18)),
             oil_chart_height_scale=float(base.get("oil_chart_height_scale", 1.45) or 1.45),
             oil_news_separate_messages=bool(base.get("oil_news_separate_messages", True)),
             oil_interval_minutes=int(base.get("oil_interval_minutes", 15)),
@@ -1511,6 +1511,13 @@ class SettingsManager:
                 merged["signal_chart_height_scale"] = float(
                     merged.get("signal_chart_height_scale", 1.0) or 1.0
                 )
+            if version < 59:
+                # Чуть отдалить зум oil-графиков (было слишком близко)
+                old_h = int(merged.get("oil_chart_display_hours", 18) or 18)
+                if old_h < 14:
+                    merged["oil_chart_display_hours"] = 18
+                else:
+                    merged.setdefault("oil_chart_display_hours", 18)
             if version < 58:
                 # Только топ-темы: Иран/Трамп/США, запасы, ОПЕК, объёмы/сделки
                 merged["oil_news_max_per_poll"] = 1

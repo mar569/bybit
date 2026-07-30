@@ -340,33 +340,64 @@ class OilNewsBias:
     bullish: int = 0
     bearish: int = 0
     neutral: int = 0
-    weighted_score: float = 0.0  # >0 вверх, <0 вниз
+    weighted_score: float = 0.0  # >0 вверх, <0 вниз (−10…+10)
     bias: str = "neutral"  # bullish | bearish | mixed | neutral
     summary_ru: str = ""
     how_to_use_ru: str = ""
+    basis_ru: str = ""  # понятное «на основе чего»
+    unique_stories: int = 0
+    top_catalyst: str = ""
+
+
+def _news_story_key(title: str) -> str:
+    """Схлопывает дубли одной темы (16 заголовков Hormuz → 1 сюжет)."""
+    low = re.sub(r"[^a-zа-я0-9\s]", " ", title.lower())
+    low = re.sub(r"\s+", " ", low).strip()
+    tags: list[str] = []
+    for t in (
+        "hormuz", "ормуз", "iran", "иран", "sanction", "санкц", "trump", "трамп",
+        "eia", "opec", "опек", "spr", "inventory", "запас", "tanker", "танкер",
+        "quota", "квот", "strike", "атак",
+    ):
+        if t in low:
+            tags.append(t)
+    if tags:
+        return "|".join(sorted(set(tags)))
+    return low[:48]
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
     """Вес новости: критичность (Hormuz/EIA/OPEC) сильнее обычного заголовка."""
     score = float(news_critical_score(item.title))
-    return max(1.0, min(6.0, score / 2.0))
+    return max(1.0, min(5.0, score / 3.0))
 
 
 def summarize_oil_news_bias(
     items: list[OilNewsItem],
     *,
     ta_verdict: str | None = None,
+    ta_confidence: int | None = None,
 ) -> OilNewsBias:
-    """Считает, сколько важных новостей давят вверх/вниз и как это стыковать с TA."""
+    """Считает давление по уникальным сюжетам (без раздувания score дублями)."""
     if not items:
         return OilNewsBias(
             summary_ru="Новостной фон: нет важных заголовков",
             how_to_use_ru="Торговать только от уровней TA, без новостного подтверждения.",
+            basis_ru="Нет приоритетных новостей (Иран/Трамп/EIA/ОПЕК/объёмы) → только график.",
         )
+
+    # Одна тема = один голос (не 16 одинаковых Hormuz)
+    best_by_story: dict[str, OilNewsItem] = {}
+    for it in items:
+        key = _news_story_key(it.title)
+        prev = best_by_story.get(key)
+        if prev is None or news_critical_score(it.title) > news_critical_score(prev.title):
+            best_by_story[key] = it
+    unique = list(best_by_story.values())
 
     bull = bear = neut = 0
     weighted = 0.0
-    for it in items:
+    for it in unique:
         w = news_impact_weight(it)
         if it.impact == "bullish":
             bull += 1
@@ -376,6 +407,9 @@ def summarize_oil_news_bias(
             weighted -= w
         else:
             neut += 1
+
+    # Нормализация в понятный диапазон −10…+10
+    weighted = max(-10.0, min(10.0, weighted))
 
     total_dir = bull + bear
     if total_dir == 0:
@@ -393,41 +427,65 @@ def summarize_oil_news_bias(
     else:
         bias = "mixed"
 
+    catalyst = ""
+    want = "bullish" if bias == "bullish" else "bearish" if bias == "bearish" else ""
+    if want:
+        ranked = sorted(
+            (it for it in unique if it.impact == want),
+            key=lambda x: news_critical_score(x.title),
+            reverse=True,
+        )
+        if ranked:
+            catalyst = ranked[0].title[:140]
+
     if bias == "bullish":
-        arrow = f"🟢↑ давление вверх ({bull} вверх / {bear} вниз"
+        arrow = f"🟢↑ вверх ({bull} сюжетов↑ / {bear}↓"
         if neut:
             arrow += f" / {neut} нейтр."
         arrow += ")"
     elif bias == "bearish":
-        arrow = f"🔴↓ давление вниз ({bear} вниз / {bull} вверх"
+        arrow = f"🔴↓ вниз ({bear} сюжетов↓ / {bull}↑"
         if neut:
             arrow += f" / {neut} нейтр."
         arrow += ")"
     elif bias == "mixed":
-        arrow = f"🟡 смешанно ({bull} вверх / {bear} вниз)"
+        arrow = f"🟡 смешанно ({bull}↑ / {bear}↓)"
     else:
         arrow = f"⚪ нейтрально ({neut} контекст)"
 
-    score_txt = f"score {weighted:+.1f}"
-    summary = f"Новостной фон: {arrow} · {score_txt}"
+    summary = (
+        f"Новостной фон: {arrow} · давление {weighted:+.1f}/10 "
+        f"(уник. сюжетов: {len(unique)})"
+    )
 
     tv = (ta_verdict or "WAIT").upper()
+    tc = int(ta_confidence) if ta_confidence is not None else None
+    ta_part = f"TA {tv}" + (f" {tc}/10" if tc is not None else "")
+
     if bias == "bullish" and tv == "LONG":
-        howto = "Новости = TA → приоритет LONG от уровней / на пробое вверх."
+        howto = f"Совпадение: новости↑ + {ta_part} → приоритет LONG (отскок от S / пробой R)."
     elif bias == "bearish" and tv == "SHORT":
-        howto = "Новости = TA → приоритет SHORT от уровней / на пробое вниз."
+        howto = f"Совпадение: новости↓ + {ta_part} → приоритет SHORT (отскок от R / пробой S)."
     elif bias == "bullish" and tv == "SHORT":
-        howto = "Конфликт: новости вверх, TA вниз → не гнаться; ждать пробоя или уменьшить размер."
+        howto = f"Конфликт: новости↑, но {ta_part} → не гнаться; ждать пробоя или уменьшить размер."
     elif bias == "bearish" and tv == "LONG":
-        howto = "Конфликт: новости вниз, TA вверх → не гнаться; ждать пробоя или уменьшить размер."
+        howto = f"Конфликт: новости↓, но {ta_part} → не гнаться; ждать пробоя или уменьшить размер."
     elif bias == "bullish":
-        howto = "Новости вверх, TA нейтрален → ловить LONG от support / на пробое R."
+        howto = f"Новости↑, {ta_part} слаб/нейтрален → только LONG от support, без chase."
     elif bias == "bearish":
-        howto = "Новости вниз, TA нейтрален → ловить SHORT от resistance / на пробое S."
+        howto = f"Новости↓, {ta_part} слаб/нейтрален → только SHORT от resistance, без chase."
     elif bias == "mixed":
-        howto = "Новости спорят → только чистый пробой уровня, без агрессивного входа."
+        howto = f"Сюжеты спорят, {ta_part} → только чистый пробой уровня."
     else:
-        howto = "Новостей мало → торговать чисто от TA / уровней."
+        howto = f"Новостей мало → торговать чисто от {ta_part}."
+
+    basis_parts = [
+        f"Считаем уникальные сюжеты (дубли одной темы схлопнуты), не каждый RSS-заголовок.",
+        f"Давление {weighted:+.1f}/10 из весов тем: Иран/Ормуз, Трамп/США, EIA/SPR, ОПЕК, объёмы.",
+    ]
+    if catalyst:
+        basis_parts.append(f"Главный катализатор: «{catalyst[:100]}».")
+    basis_parts.append(howto)
 
     return OilNewsBias(
         bullish=bull,
@@ -437,6 +495,9 @@ def summarize_oil_news_bias(
         bias=bias,
         summary_ru=summary,
         how_to_use_ru=howto,
+        basis_ru=" ".join(basis_parts),
+        unique_stories=len(unique),
+        top_catalyst=catalyst,
     )
 
 
@@ -516,7 +577,8 @@ def build_oil_bounce_plan(
         if tp3 <= tp2:
             tp3 = tp2 * 1.008
         reason = (
-            f"Новости↑ → ловить LONG-отскок от {fmt_price(bounce)}"
+            f"Новости↑ → LONG-отскок от S={fmt_price(bounce)} "
+            f"(вход у support, стоп под breakdown, TP к R/breakout)"
             + (f" · {catalyst}" if catalyst else "")
         )
         return OilBouncePlan(
@@ -551,7 +613,8 @@ def build_oil_bounce_plan(
     if tp3 >= tp2:
         tp3 = tp2 * 0.992
     reason = (
-        f"Новости↓ → ловить SHORT-отскок от {fmt_price(bounce)}"
+        f"Новости↓ → SHORT-отскок от R={fmt_price(bounce)} "
+        f"(вход у resistance, стоп выше breakout, TP к S/breakdown)"
         + (f" · {catalyst}" if catalyst else "")
     )
     return OilBouncePlan(
@@ -568,11 +631,29 @@ def build_oil_bounce_plan(
     )
 
 
-def apply_oil_bounce_to_ta(ta: TAAnalysisResult, plan: OilBouncePlan) -> None:
+def apply_oil_bounce_to_ta(
+    ta: TAAnalysisResult,
+    plan: OilBouncePlan,
+    *,
+    ta_confidence_raw: int | None = None,
+) -> None:
     """Переписывает entry/stop/TP на графике под новостной отскок."""
+    raw = int(
+        ta_confidence_raw
+        if ta_confidence_raw is not None
+        else (ta.verdict_confidence or 5)
+    )
+    # Не раздуваем 4/10 → 7/10: новости дают сторону, уверенность = TA + умеренный бонус
+    news_boost = 1 if plan.strong else 0
+    plan_conf = min(8, max(raw, min(raw + news_boost, 6 if plan.strong else raw)))
+
     ta.verdict = "LONG" if plan.side == "long" else "SHORT"
-    ta.verdict_confidence = max(int(ta.verdict_confidence or 0), 7 if plan.strong else 6)
-    ta.verdict_reason = plan.reason_ru[:220]
+    ta.verdict_confidence = plan_conf
+    why = (
+        f"{plan.reason_ru} | база: TA {raw}/10 + новости "
+        f"{'↑' if plan.side == 'long' else '↓'} → план {plan_conf}/10"
+    )
+    ta.verdict_reason = why[:220]
     ta.entry_zone = (float(plan.entry_lo), float(plan.entry_hi))
     ta.target_prices = [float(t) for t in plan.targets[:3]]
     ta.invalidation_price = float(plan.stop)
@@ -588,7 +669,8 @@ def apply_oil_bounce_to_ta(ta: TAAnalysisResult, plan: OilBouncePlan) -> None:
         conditions=[
             plan.reason_ru,
             f"зона входа {fmt_price(plan.entry_lo)}–{fmt_price(plan.entry_hi)}",
-            f"стоп {fmt_price(plan.stop)}",
+            f"стоп {fmt_price(plan.stop)} (под/над уровнем отмены)",
+            f"TA было {raw}/10 · план {plan_conf}/10",
         ],
     )
     if plan.side == "long":
@@ -951,6 +1033,8 @@ def _oil_trading_plan(
     market_mood: str = "",
     news_bias: OilNewsBias | None = None,
     bounce_plan: OilBouncePlan | None = None,
+    ta_confidence_raw: int | None = None,
+    ta_verdict_raw: str | None = None,
 ) -> list[str]:
     """Сценарии LONG / SHORT / база — intraday 5m–1h."""
     lines: list[str] = []
@@ -960,27 +1044,67 @@ def _oil_trading_plan(
     bd = snap.breakdown
     bo = snap.breakout
     tf = f"{interval_minutes}m"
+    ta_raw = int(
+        ta_confidence_raw
+        if ta_confidence_raw is not None
+        else (snap.confidence or ta.verdict_confidence or 0)
+    )
+    ta_v_raw = (ta_verdict_raw or snap.verdict or "WAIT").upper()
 
-    lines.append("<b>Прогноз / план</b>")
+    lines.append("<b>Почему такое суждение</b>")
     if news_bias is not None:
         lines.append(f"• {news_bias.summary_ru}")
-        lines.append(f"• <i>{news_bias.how_to_use_ru}</i>")
+        if news_bias.basis_ru:
+            lines.append(f"• <i>{news_bias.basis_ru}</i>")
+    else:
+        lines.append("• Новостной фон не учтён")
+
+    lines.append(
+        f"• Уровни TA ({tf}): цена <b>${px:.2f}</b>"
+        + (f" · S {fmt_price(s)}" if s else "")
+        + (f" · R {fmt_price(r)}" if r else "")
+        + (f" ·↓{fmt_price(bd)}" if bd else "")
+        + (f" ·↑{fmt_price(bo)}" if bo else "")
+    )
+    lines.append(
+        f"• Чистый TA (до новостей): <b>{ta_v_raw}</b> {ta_raw}/10"
+        + (f" · {snap.reason}" if snap.reason and bounce_plan is None else "")
+    )
+
+    lines.append("")
+    lines.append("<b>Рабочий план</b>")
     if bounce_plan is not None:
         side = "LONG" if bounce_plan.side == "long" else "SHORT"
         tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:3])
         lines.append(
-            f"• <b>Отскок {side}:</b> от {fmt_price(bounce_plan.bounce_level)} · "
-            f"вход {fmt_price(bounce_plan.entry_lo)}–{fmt_price(bounce_plan.entry_hi)} · "
+            f"• <b>Отскок {side}</b> от <b>{fmt_price(bounce_plan.bounce_level)}</b>"
+        )
+        lines.append(
+            f"  вход {fmt_price(bounce_plan.entry_lo)}–{fmt_price(bounce_plan.entry_hi)} · "
             f"стоп {fmt_price(bounce_plan.stop)} · TP {tps}"
         )
+        if bounce_plan.side == "long":
+            lines.append(
+                "  <i>Почему уровни: вход у support (покупатели), стоп под breakdown "
+                "(отмена структуры), TP1=R, TP2=breakout, TP3=7д high.</i>"
+            )
+        else:
+            lines.append(
+                "  <i>Почему уровни: вход у resistance (продавцы), стоп выше breakout, "
+                "TP1=S, TP2=breakdown, TP3=7д low.</i>"
+            )
         if bounce_plan.catalyst:
             cat = bounce_plan.catalyst.replace("<", "&lt;").replace(">", "&gt;")
             lines.append(f"  катализатор: <i>{cat}</i>")
+        if news_bias and news_bias.how_to_use_ru:
+            lines.append(f"• {news_bias.how_to_use_ru}")
+    else:
+        if news_bias is not None:
+            lines.append(f"• <i>{news_bias.how_to_use_ru}</i>")
+        lines.append(f"• Итог на графике: <b>{snap.verdict}</b> · {snap.confidence}/10")
+
     if market_mood:
-        lines.append(f"• <b>Настроение рынка:</b> {market_mood}")
-    lines.append(f"• Итог TA ({tf}): <b>{snap.verdict}</b> · {snap.confidence}/10")
-    if snap.reason:
-        lines.append(f"• {snap.reason}")
+        lines.append(f"• Режим рынка: {market_mood}")
 
     # Если есть bounce-план — не дублируем оба сценария, только подтверждающий
     if bounce_plan is None:
@@ -1022,7 +1146,8 @@ def _oil_trading_plan(
 
     lines.append("")
     lines.append(
-        "<i>Драйверы: Hormuz, US–Iran, EIA Wed, OPEC+, спред Brent/WTI, SPR.</i>"
+        "<i>Читай так: новости = направление bias; уровни TA = где входить/стоп; "
+        "без пробоя/касания уровня — не входить.</i>"
     )
     return lines
 
@@ -1034,6 +1159,8 @@ def format_oil_market_digest(
     market_mood: str = "",
     news_bias: OilNewsBias | None = None,
     bounce_plan: OilBouncePlan | None = None,
+    ta_confidence_raw: int | None = None,
+    ta_verdict_raw: str | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     lines = [
@@ -1061,6 +1188,8 @@ def format_oil_market_digest(
                 market_mood=market_mood,
                 news_bias=news_bias,
                 bounce_plan=bounce_plan,
+                ta_confidence_raw=ta_confidence_raw,
+                ta_verdict_raw=ta_verdict_raw,
             )
         )
     elif primary:
@@ -1289,9 +1418,12 @@ class OilMonitorEngine:
                     min_score = float(
                         getattr(settings, "oil_bounce_min_news_score", 3.0)
                     )
+                    ta_verdict_raw = bundle.brent.verdict
+                    ta_conf_raw = int(bundle.brent.confidence or 0)
                     news_bias = summarize_oil_news_bias(
                         self._recent_news,
-                        ta_verdict=bundle.brent.verdict,
+                        ta_verdict=ta_verdict_raw,
+                        ta_confidence=ta_conf_raw,
                     )
                     bounce = build_oil_bounce_plan(
                         bundle.brent,
@@ -1301,10 +1433,17 @@ class OilMonitorEngine:
                     )
                     self._active_bounce = bounce
                     if bounce is not None:
-                        apply_oil_bounce_to_ta(bundle.brent_ta, bounce)
+                        apply_oil_bounce_to_ta(
+                            bundle.brent_ta,
+                            bounce,
+                            ta_confidence_raw=ta_conf_raw,
+                        )
                         # snap mirrors chart levels for digest consistency
                         bundle.brent.verdict = (
                             "LONG" if bounce.side == "long" else "SHORT"
+                        )
+                        bundle.brent.confidence = int(
+                            bundle.brent_ta.verdict_confidence or ta_conf_raw
                         )
                         bundle.brent.entry_zone = (
                             bounce.entry_lo,
@@ -1320,12 +1459,16 @@ class OilMonitorEngine:
                         market_mood=bundle.market_mood,
                         news_bias=news_bias,
                         bounce_plan=bounce,
+                        ta_confidence_raw=ta_conf_raw,
+                        ta_verdict_raw=ta_verdict_raw,
                     )
                     png: bytes | None = None
                     if chart_enabled:
                         from .chart_renderer import render_oil_chart
 
-                        display_h = int(getattr(settings, "oil_chart_display_hours", 6) or 6)
+                        display_h = int(
+                            getattr(settings, "oil_chart_display_hours", 18) or 18
+                        )
                         height_scale = float(
                             getattr(settings, "oil_chart_height_scale", 1.45)
                             or getattr(settings, "signal_chart_height_scale", 1.0)
@@ -1370,7 +1513,11 @@ class OilMonitorEngine:
                                 )
                                 if wti_bounce is not None:
                                     apply_oil_bounce_to_ta(
-                                        bundle.wti_ta, wti_bounce,
+                                        bundle.wti_ta,
+                                        wti_bounce,
+                                        ta_confidence_raw=int(
+                                            bundle.wti.confidence or 0
+                                        ),
                                     )
                             wti_png = render_oil_chart(
                                 bundle.wti_bars,

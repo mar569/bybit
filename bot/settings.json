@@ -1,5 +1,5 @@
 {
-  "settings_version": 58,
+  "settings_version": 59,
   "oi_period_minutes": 10,
   "long_period_minutes": 10,
   "short_period_minutes": 10,
@@ -315,7 +315,7 @@
   "oil_digest_enabled": true,
   "oil_digest_interval_hours": 4.0,
   "oil_chart_enabled": true,
-  "oil_chart_display_hours": 6,
+  "oil_chart_display_hours": 18,
   "oil_chart_height_scale": 1.45,
   "oil_news_separate_messages": true,
   "oil_interval_minutes": 15,

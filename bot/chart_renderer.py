@@ -2705,16 +2705,19 @@ def render_oil_chart(
         else CHART_STYLE["accent_short"] if verdict == "SHORT"
         else CHART_STYLE["warning"]
     )
-    # Intraday: 5m ≈ 5–6ч (~60–70 свечей), иначе всё «слипается».
-    oil_defaults = {5: 6, 10: 8, 15: 10, 30: 16, 60: 30}
+    # Intraday: чуть отдалить — 15m ≈ 18–20ч, 5m ≈ 10ч (не «слипшиеся» и не микроскоп).
+    oil_defaults = {5: 10, 10: 12, 15: 18, 30: 28, 60: 48}
     im = max(5, min(60, int(interval_minutes)))
     configured = int(display_hours) if display_hours and int(display_hours) > 0 else None
     # Старый дефолт 168 / слишком широкий зум — в авто
-    if configured is not None and configured >= 48:
+    if configured is not None and configured >= 72:
         configured = None
-    base = oil_defaults.get(im, 10 if im <= 15 else 24)
+    # Старый слишком близкий зум 6ч на 15m — поднимаем
+    if configured is not None and im >= 15 and configured < 14:
+        configured = None
+    base = oil_defaults.get(im, 18 if im <= 15 else 36)
     if configured is not None:
-        base = max(4, min(configured, 24 if im <= 15 else 48))
+        base = max(8, min(configured, 36 if im <= 15 else 72))
     analysis_h = max(base, int(len(bars) * im / 60))
     drawdown = float(getattr(ta, "drawdown_from_high_pct", 0.0) or 0.0)
     ew_span = 0
@@ -2727,13 +2730,13 @@ def render_oil_chart(
         ew_span = 0
     zoom = structure_aware_display_hours(
         interval_minutes=im,
-        analysis_hours=min(analysis_h, 48 if im <= 15 else 96),
+        analysis_hours=min(analysis_h, 72 if im <= 15 else 120),
         configured=base,
         drawdown_pct=drawdown,
         elliott_span_bars=ew_span,
     )
-    max_zoom = {5: 8, 10: 10, 15: 14, 30: 24, 60: 40}.get(im, 16)
-    zoom = max(4, min(int(zoom), max_zoom))
+    max_zoom = {5: 14, 10: 16, 15: 28, 30: 40, 60: 72}.get(im, 24)
+    zoom = max(8, min(int(zoom), max_zoom))
     title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
     return _render_chart_figure(
         bars,
