@@ -320,7 +320,7 @@
   "oil_news_separate_messages": true,
   "oil_interval_minutes": 15,
   "oil_include_brent": true,
-  "oil_include_wti": true,
+  "oil_include_wti": false,
   "oil_russian_news": true,
   "oil_news_critical_only": true,
   "oil_news_critical_min_score": 4,

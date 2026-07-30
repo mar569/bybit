@@ -2077,6 +2077,22 @@ class TelegramBot:
             return False
         return await self._send_to_chat(chat_id, message, None, is_priority=True)
 
+    async def dispatch_oil_micro_signal(self, message: str) -> bool:
+        """Микро-сигналы UKOUSD (0.2–0.3%) → oil news chat."""
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        if not getattr(settings, "oil_micro_signals_enabled", True):
+            return False
+        chat_id = self.config.oil_news_chat_id
+        if chat_id is None:
+            return False
+        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+
     async def dispatch_oil_extra_chart(self, message: str, png: bytes) -> bool:
         if self.application is None:
             return False
@@ -4260,9 +4276,12 @@ class TelegramBot:
             f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
+            f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', True) else 'OFF'}</b> · "
+            f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.25):g}%</b> · "
+            f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.18):g}%</b>\n"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
-            "<i>Hormuz · EIA · OPEC · санкции · пробой ключевых уровней</i>\n"
+            "<i>Hormuz · EIA · OPEC · санкции · пробой · микро LONG/SHORT 0.2–0.3%</i>\n"
             "Ручной снимок: кнопка <b>📊 Сейчас</b> или <code>/oil</code>"
         ).replace(",", " ")
 
@@ -4311,6 +4330,15 @@ class TelegramBot:
                     self._mark("Уровни", getattr(s, "oil_level_alerts_enabled", True)),
                     callback_data="oil:levels",
                 ),
+                InlineKeyboardButton(
+                    self._mark(
+                        "Сигналы",
+                        getattr(s, "oil_micro_signals_enabled", True),
+                    ),
+                    callback_data="oil:micro",
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     self._mark("Brent", getattr(s, "oil_include_brent", True)),
                     callback_data="oil:brent",
@@ -5163,6 +5191,10 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_level_alerts_enabled", True))
             self.settings_manager.update(oil_level_alerts_enabled=not cur)
             label = f"Уровни → {'ON' if not cur else 'OFF'}"
+        elif action == "micro":
+            cur = bool(getattr(s, "oil_micro_signals_enabled", True))
+            self.settings_manager.update(oil_micro_signals_enabled=not cur)
+            label = f"Сигналы → {'ON' if not cur else 'OFF'}"
         elif action == "brent":
             cur = bool(getattr(s, "oil_include_brent", True))
             self.settings_manager.update(oil_include_brent=not cur)

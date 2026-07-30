@@ -135,6 +135,7 @@ async def main() -> None:
         on_digest=telegram.dispatch_oil_digest,
         on_level_alert=telegram.dispatch_oil_level_alert,
         on_extra_chart=telegram.dispatch_oil_extra_chart,
+        on_signal=telegram.dispatch_oil_micro_signal,
     )
     telegram.oil_monitor = oil_monitor
 

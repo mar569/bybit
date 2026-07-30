@@ -1,9 +1,9 @@
-"""Алерты пробоя ключевых уровней Brent / WTI в oil-чат."""
+"""Алерты пробоя ключевых уровней UKOUSD (Brent) / USOIL (WTI) в oil-чат."""
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .ta_analysis import fmt_price
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class OilInstrumentWatch:
     label: str
+    symbol: str = ""
     breakout: float | None = None
     breakdown: float | None = None
     initialized: bool = False
@@ -29,6 +30,15 @@ class OilLevelAlert:
     level: float
     price: float
     message: str
+
+
+def _oil_alert_footer(symbol: str, label: str) -> str:
+    sym = (symbol or label or "").upper()
+    if "UKO" in sym or "BRENT" in sym:
+        return "UKOUSD.s · Brent cash · intraday от уровней"
+    if "USOIL" in sym or "WTI" in sym or sym == "CL":
+        return "USOIL · WTI · не путать с UKOUSD (Brent)"
+    return f"{label} · intraday от уровней"
 
 
 class OilLevelWatcher:
@@ -47,12 +57,17 @@ class OilLevelWatcher:
         price: float,
         breakout: float | None,
         breakdown: float | None,
+        symbol: str = "",
     ) -> None:
-        key = label.upper()
+        key = (symbol or label).upper()
         watch = self._watches.get(key)
         if watch is None:
-            watch = OilInstrumentWatch(label=label)
+            watch = OilInstrumentWatch(label=label, symbol=symbol or label)
             self._watches[key] = watch
+        else:
+            watch.label = label
+            if symbol:
+                watch.symbol = symbol
         watch.breakout = breakout if breakout and breakout > 0 else None
         watch.breakdown = breakdown if breakdown and breakdown > 0 else None
         watch.last_price = price
@@ -64,6 +79,8 @@ class OilLevelWatcher:
     ) -> list[OilLevelAlert]:
         if not getattr(settings, "oil_level_alerts_enabled", True):
             return []
+        allow_wti = bool(getattr(settings, "oil_include_wti", False))
+        allow_brent = bool(getattr(settings, "oil_include_brent", True))
         cooldown = int(getattr(settings, "oil_level_alert_cooldown_seconds", 1800))
         now = time.time()
         alerts: list[OilLevelAlert] = []
@@ -73,7 +90,12 @@ class OilLevelWatcher:
             watch = self._watches.get(key)
             if watch is None or price <= 0:
                 continue
+            if key in {"UKOUSD", "BRENT"} and not allow_brent:
+                continue
+            if key in {"USOIL", "WTI"} and not allow_wti:
+                continue
             watch.last_price = price
+            footer = _oil_alert_footer(watch.symbol or key, watch.label)
 
             if watch.breakout and price >= watch.breakout:
                 if watch.initialized and not watch.was_above_breakout:
@@ -83,7 +105,7 @@ class OilLevelWatcher:
                             f"🛢 <b>{watch.label} · пробой вверх</b>\n"
                             f"Закрытие выше <b>{fmt_price(watch.breakout)}</b>\n"
                             f"Цена: <b>${price:.2f}</b>\n"
-                            f"<i>UKOUSD / USOIL · intraday от уровней</i>"
+                            f"<i>{footer}</i>"
                         )
                         alerts.append(
                             OilLevelAlert(
@@ -107,7 +129,7 @@ class OilLevelWatcher:
                             f"🛢 <b>{watch.label} · пробой вниз</b>\n"
                             f"Закрытие ниже <b>{fmt_price(watch.breakdown)}</b>\n"
                             f"Цена: <b>${price:.2f}</b>\n"
-                            f"<i>Стоп выше resistance / отмена при возврате в базу</i>"
+                            f"<i>{footer}</i>"
                         )
                         alerts.append(
                             OilLevelAlert(

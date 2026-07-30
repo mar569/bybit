@@ -830,6 +830,153 @@ def format_oil_scalp_block(call: OilScalpCall) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class OilMicroSignal:
+    """Микро-сигнал UKOUSD: цель ~0.2–0.3%, удержание десятки минут."""
+    side: str  # long | short
+    entry: float
+    stop: float
+    target: float
+    tp_pct: float
+    sl_pct: float
+    impulse_pct: float
+    hold_min: int
+    hold_max: int
+    quality: int  # 1–10
+    reason_ru: str
+    label: str = OIL_BRENT_LABEL
+
+
+def detect_oil_micro_signal(
+    bars: list[KlineBar],
+    *,
+    news_bias: OilNewsBias | None = None,
+    tp_pct: float = 0.25,
+    sl_pct: float = 0.18,
+    min_impulse_pct: float = 0.12,
+    max_impulse_pct: float = 0.55,
+    lookback_bars: int = 4,
+) -> OilMicroSignal | None:
+    """Импульс 5m UKOUSD → SHORT/LONG на микротейк 0.2–0.3%.
+
+    Фильтры качества:
+    - импульс уже есть, но не «догоняем» большой ход (>max)
+    - 2+ закрытия в сторону / тело не doji
+    - новости не против сильного импульса
+    """
+    if len(bars) < max(12, lookback_bars + 2):
+        return None
+    tp = max(0.15, min(0.45, float(tp_pct)))
+    sl = max(0.10, min(0.40, float(sl_pct)))
+    lb = max(2, min(8, int(lookback_bars)))
+    window = bars[-(lb + 1) :]
+    px0 = float(window[0].close)
+    px = float(window[-1].close)
+    if px0 <= 0 or px <= 0:
+        return None
+    impulse = (px - px0) / px0 * 100.0
+    abs_imp = abs(impulse)
+    if abs_imp < min_impulse_pct or abs_imp > max_impulse_pct:
+        return None
+
+    # Последовательность закрытий в сторону импульса
+    closes = [float(b.close) for b in window]
+    if impulse < 0:
+        descending = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i - 1])
+        if descending < max(1, lb // 2):
+            return None
+        side = "short"
+    else:
+        ascending = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
+        if ascending < max(1, lb // 2):
+            return None
+        side = "long"
+
+    last = window[-1]
+    body = abs(float(last.close) - float(last.open))
+    rng = max(float(last.high) - float(last.low), 1e-9)
+    if body / rng < 0.22:
+        return None  # doji / шум
+
+    # Не входить против сильного новостного давления
+    if news_bias is not None and abs(news_bias.weighted_score) >= 3.0:
+        if side == "short" and news_bias.bias == "bullish":
+            return None
+        if side == "long" and news_bias.bias == "bearish":
+            return None
+
+    # Качество: сила импульса в «сладкой» зоне + тело + новости с нами
+    quality = 5
+    if 0.15 <= abs_imp <= 0.35:
+        quality += 2
+    elif abs_imp <= 0.45:
+        quality += 1
+    if body / rng >= 0.45:
+        quality += 1
+    if news_bias is not None:
+        if side == "short" and news_bias.bias == "bearish":
+            quality += 1
+        elif side == "long" and news_bias.bias == "bullish":
+            quality += 1
+    quality = max(1, min(10, quality))
+    if quality < 6:
+        return None
+
+    if side == "short":
+        entry = px
+        target = px * (1.0 - tp / 100.0)
+        stop = px * (1.0 + sl / 100.0)
+        reason = (
+            f"UKOUSD падает {impulse:.2f}% за ~{lb * 5}м → SHORT микротейк {tp:.2f}%"
+        )
+    else:
+        entry = px
+        target = px * (1.0 + tp / 100.0)
+        stop = px * (1.0 - sl / 100.0)
+        reason = (
+            f"UKOUSD растёт {impulse:+.2f}% за ~{lb * 5}м → LONG микротейк {tp:.2f}%"
+        )
+
+    # hold: быстрее на сильном импульсе
+    if abs_imp >= 0.30:
+        hold_min, hold_max = 10, 40
+    else:
+        hold_min, hold_max = 15, 60
+
+    return OilMicroSignal(
+        side=side,
+        entry=entry,
+        stop=stop,
+        target=target,
+        tp_pct=tp,
+        sl_pct=sl,
+        impulse_pct=impulse,
+        hold_min=hold_min,
+        hold_max=hold_max,
+        quality=quality,
+        reason_ru=reason,
+    )
+
+
+def format_oil_micro_signal(sig: OilMicroSignal) -> str:
+    side = "LONG" if sig.side == "long" else "SHORT"
+    emoji = "🟢" if sig.side == "long" else "🔴"
+    rr = abs(sig.target - sig.entry) / max(abs(sig.stop - sig.entry), 1e-9)
+    return "\n".join([
+        f"🛢 <b>{sig.label} · сигнал {side}</b> {emoji}",
+        f"<b>Микро-сделка</b> · качество <b>{sig.quality}/10</b>",
+        "",
+        f"Вход: <b>{fmt_price(sig.entry)}</b>",
+        f"TP (+{sig.tp_pct:.2f}%): <b>{fmt_price(sig.target)}</b>",
+        f"Стоп (−{sig.sl_pct:.2f}% у риска): <b>{fmt_price(sig.stop)}</b>",
+        f"R:R ≈ <b>{rr:.1f}</b> · держать <b>{sig.hold_min}–{sig.hold_max} мин</b>",
+        f"Импульс: <b>{sig.impulse_pct:+.2f}%</b>",
+        "",
+        f"<i>{sig.reason_ru}</i>",
+        "<i>Не финсовет. Малый размер. Нет цели за time-stop — закрыть.</i>",
+    ])
+
+
 def _pick_news_catalyst(items: list[OilNewsItem], bias: str) -> str:
     want = "bullish" if bias == "bullish" else "bearish"
     scored: list[tuple[float, OilNewsItem]] = []
@@ -1344,11 +1491,11 @@ def _fetch_oil_bars(
 
 
 async def fetch_oil_last_prices() -> dict[str, float]:
-    """Быстрый тик для level-alerts — 5m close (Yahoo → Bybit)."""
+    """Быстрый тик для level-alerts — ключи UKOUSD / USOIL."""
     out: dict[str, float] = {}
     pairs = (
-        ("BRENT", OIL_BRENT_YAHOO, OIL_BRENT_BYBIT),
-        ("WTI", OIL_WTI_YAHOO, OIL_WTI_BYBIT),
+        ("UKOUSD", OIL_BRENT_YAHOO, OIL_BRENT_BYBIT),
+        ("USOIL", OIL_WTI_YAHOO, OIL_WTI_BYBIT),
     )
     for label, ysym, bsym in pairs:
         try:
@@ -1688,7 +1835,7 @@ def format_oil_market_digest(
     primary = snaps[0] if snaps else None
     lines = [
         "📊 <b>Нефть · разбор</b>",
-        f"<i>UKOUSD / USOIL · TF {interval_minutes}m · свечи Bybit→цена Yahoo BZ=F</i>",
+        f"<i>UKOUSD.s (Brent) · TF {interval_minutes}m · цена ≈ Yahoo BZ=F</i>",
         "",
     ]
     if scalp_call is None and primary is not None and ta is not None:
@@ -1774,19 +1921,22 @@ class OilMonitorEngine:
         on_digest: Callable[[str, bytes | None], Awaitable[bool]] | None = None,
         on_level_alert: Callable[[str], Awaitable[bool]] | None = None,
         on_extra_chart: Callable[[str, bytes], Awaitable[bool]] | None = None,
+        on_signal: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.settings_manager = settings_manager
         self._on_news = on_news
         self._on_digest = on_digest
         self._on_level_alert = on_level_alert
         self._on_extra_chart = on_extra_chart
+        self._on_signal = on_signal or on_level_alert
         self._seen_titles: set[str] = set()
         self._last_digest_ts = 0.0
         self._level_watcher = OilLevelWatcher()
         self._recent_news: list[OilNewsItem] = []
         self._last_bounce_alert_ts: dict[str, float] = {}
         self._active_bounce: OilBouncePlan | None = None
-
+        self._last_micro_signal_ts: float = 0.0
+        self._micro_signal_hour: list[float] = []
     def _remember_news(self, items: list[OilNewsItem], *, cutoff: float) -> None:
         """Хранит важные новости за окно для сводки в дайджесте."""
         seen = {it.title.lower()[:120] for it in self._recent_news}
@@ -1846,17 +1996,21 @@ class OilMonitorEngine:
 
     def _sync_levels_from_bundle(self, bundle: OilAnalysisBundle) -> None:
         self._level_watcher.update_levels(
-            "BRENT",
+            OIL_BRENT_LABEL,
             price=bundle.brent.price,
             breakout=bundle.brent.breakout,
             breakdown=bundle.brent.breakdown,
+            symbol=OIL_BRENT_SYMBOL,
         )
-        if bundle.wti:
+        if bundle.wti and getattr(
+            self.settings_manager.settings, "oil_include_wti", False
+        ):
             self._level_watcher.update_levels(
-                "WTI",
+                OIL_WTI_LABEL,
                 price=bundle.wti.price,
                 breakout=bundle.wti.breakout,
                 breakdown=bundle.wti.breakdown,
+                symbol=OIL_WTI_SYMBOL,
             )
 
     async def _tick_level_alerts(self, settings: Any) -> int:
@@ -1867,7 +2021,15 @@ class OilMonitorEngine:
         prices = await fetch_oil_last_prices()
         if not prices:
             return 0
-        alerts = self._level_watcher.check_prices(prices, settings)
+        # только включённые инструменты
+        filtered: dict[str, float] = {}
+        if getattr(settings, "oil_include_brent", True) and "UKOUSD" in prices:
+            filtered["UKOUSD"] = prices["UKOUSD"]
+        if getattr(settings, "oil_include_wti", False) and "USOIL" in prices:
+            filtered["USOIL"] = prices["USOIL"]
+        if not filtered:
+            return 0
+        alerts = self._level_watcher.check_prices(filtered, settings)
         sent = 0
         for alert in alerts:
             try:
@@ -1879,6 +2041,61 @@ class OilMonitorEngine:
                 sent += 1
         return sent
 
+    async def _tick_micro_signals(self, settings: Any) -> int:
+        """Микро-сигналы UKOUSD: TP ~0.2–0.3%, hold десятки минут."""
+        if not getattr(settings, "oil_micro_signals_enabled", True):
+            return 0
+        dispatch = self._on_signal or self._on_level_alert
+        if dispatch is None:
+            return 0
+        now = time.time()
+        cooldown = int(getattr(settings, "oil_micro_cooldown_seconds", 1200))
+        if now - self._last_micro_signal_ts < cooldown:
+            return 0
+        max_h = int(getattr(settings, "oil_micro_max_per_hour", 3))
+        self._micro_signal_hour = [t for t in self._micro_signal_hour if now - t < 3600]
+        if len(self._micro_signal_hour) >= max_h:
+            return 0
+
+        try:
+            bars = await asyncio.to_thread(
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=5,
+                limit=80,
+            )
+        except Exception:
+            logger.debug("Oil micro bars failed", exc_info=True)
+            return 0
+        news_bias = summarize_oil_news_bias(self._recent_news)
+        sig = detect_oil_micro_signal(
+            bars,
+            news_bias=news_bias,
+            tp_pct=float(getattr(settings, "oil_micro_tp_pct", 0.25)),
+            sl_pct=float(getattr(settings, "oil_micro_sl_pct", 0.18)),
+            min_impulse_pct=float(getattr(settings, "oil_micro_min_impulse_pct", 0.12)),
+            max_impulse_pct=float(getattr(settings, "oil_micro_max_impulse_pct", 0.55)),
+            lookback_bars=int(getattr(settings, "oil_micro_lookback_bars", 4)),
+        )
+        if sig is None:
+            return 0
+        msg = format_oil_micro_signal(sig)
+        try:
+            ok = await dispatch(msg)
+        except Exception:
+            logger.exception("Oil micro signal dispatch failed")
+            return 0
+        if not ok:
+            return 0
+        self._last_micro_signal_ts = now
+        self._micro_signal_hour.append(now)
+        logger.info(
+            "Oil micro %s @ %.2f TP=%.2f%% Q=%d",
+            sig.side, sig.entry, sig.tp_pct, sig.quality,
+        )
+        return 1
+
     async def poll_once(self) -> int:
         settings = self.settings_manager.settings
         if not getattr(settings, "oil_news_enabled", False):
@@ -1888,6 +2105,7 @@ class OilMonitorEngine:
 
         sent = 0
         sent += await self._tick_level_alerts(settings)
+        sent += await self._tick_micro_signals(settings)
 
         max_age_h = float(getattr(settings, "oil_news_max_age_hours", 12.0))
         cutoff = time.time() - max_age_h * 3600.0
@@ -1962,7 +2180,7 @@ class OilMonitorEngine:
         if self._active_bounce is not None:
             try:
                 prices = await fetch_oil_last_prices()
-                brent_px = prices.get("BRENT")
+                brent_px = prices.get("UKOUSD") or prices.get("BRENT")
                 if brent_px and brent_px > 0:
                     plan = self._active_bounce
                     dist = abs(brent_px - plan.bounce_level) / brent_px * 100.0

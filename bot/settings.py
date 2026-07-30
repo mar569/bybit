@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 59
+SETTINGS_VERSION = 60
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -536,7 +536,7 @@ class ScannerSettings:
     oil_news_separate_messages: bool = True
     oil_interval_minutes: int = 15
     oil_include_brent: bool = True
-    oil_include_wti: bool = True
+    oil_include_wti: bool = False
     oil_russian_news: bool = True
     oil_news_critical_only: bool = True
     oil_news_critical_min_score: int = 4
@@ -546,6 +546,15 @@ class ScannerSettings:
     oil_bounce_alert_cooldown_seconds: int = 7200
     oil_bounce_near_pct: float = 0.4
     oil_bounce_min_news_score: float = 3.0
+    # Микро-сигналы UKOUSD: цель ~0.2–0.3%
+    oil_micro_signals_enabled: bool = True
+    oil_micro_tp_pct: float = 0.25
+    oil_micro_sl_pct: float = 0.18
+    oil_micro_min_impulse_pct: float = 0.12
+    oil_micro_max_impulse_pct: float = 0.55
+    oil_micro_lookback_bars: int = 4
+    oil_micro_cooldown_seconds: int = 1200
+    oil_micro_max_per_hour: int = 3
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = True
@@ -1081,7 +1090,7 @@ class ScannerSettings:
             oil_news_separate_messages=bool(base.get("oil_news_separate_messages", True)),
             oil_interval_minutes=int(base.get("oil_interval_minutes", 15)),
             oil_include_brent=bool(base.get("oil_include_brent", True)),
-            oil_include_wti=bool(base.get("oil_include_wti", True)),
+            oil_include_wti=bool(base.get("oil_include_wti", False)),
             oil_russian_news=bool(base.get("oil_russian_news", True)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
@@ -1095,6 +1104,14 @@ class ScannerSettings:
             ),
             oil_bounce_near_pct=float(base.get("oil_bounce_near_pct", 0.4)),
             oil_bounce_min_news_score=float(base.get("oil_bounce_min_news_score", 3.0)),
+            oil_micro_signals_enabled=bool(base.get("oil_micro_signals_enabled", True)),
+            oil_micro_tp_pct=float(base.get("oil_micro_tp_pct", 0.25)),
+            oil_micro_sl_pct=float(base.get("oil_micro_sl_pct", 0.18)),
+            oil_micro_min_impulse_pct=float(base.get("oil_micro_min_impulse_pct", 0.12)),
+            oil_micro_max_impulse_pct=float(base.get("oil_micro_max_impulse_pct", 0.55)),
+            oil_micro_lookback_bars=int(base.get("oil_micro_lookback_bars", 4)),
+            oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1200)),
+            oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 3)),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
@@ -1556,7 +1573,7 @@ class SettingsManager:
             if version < 54:
                 merged.setdefault("oil_interval_minutes", 15)
                 merged.setdefault("oil_include_brent", True)
-                merged.setdefault("oil_include_wti", True)
+                merged.setdefault("oil_include_wti", False)
                 merged.setdefault("oil_russian_news", True)
                 merged.setdefault("oil_news_critical_only", True)
                 merged.setdefault("oil_news_critical_min_score", 3)
@@ -1627,6 +1644,15 @@ class SettingsManager:
                 merged.setdefault("wave_watch_enroll_cooldown_seconds", 900)
                 merged.setdefault("wave_watch_near_pct", 0.35)
                 merged.setdefault("wave_watch_tick_seconds", 15.0)
+            if version < 60:
+                merged.setdefault("oil_micro_signals_enabled", True)
+                merged.setdefault("oil_micro_tp_pct", 0.25)
+                merged.setdefault("oil_micro_sl_pct", 0.18)
+                merged.setdefault("oil_micro_min_impulse_pct", 0.12)
+                merged.setdefault("oil_micro_max_impulse_pct", 0.55)
+                merged.setdefault("oil_micro_lookback_bars", 4)
+                merged.setdefault("oil_micro_cooldown_seconds", 1200)
+                merged.setdefault("oil_micro_max_per_hour", 3)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
