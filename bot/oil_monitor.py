@@ -133,21 +133,21 @@ _PRIORITY_THEMES = frozenset({
 })
 
 NEWS_QUERIES_EN: tuple[str, ...] = (
-    "Iran oil Trump sanctions Hormuz when:1d",
-    "Trump Iran oil when:1d",
-    "US Iran crude oil sanctions when:1d",
-    "EIA crude oil inventory stocks when:1d",
-    "OPEC oil production quota cut when:2d",
-    "SPR oil release OR strategic petroleum reserve when:2d",
-    "crude oil tanker export import volume when:2d",
+    "Iran oil Trump sanctions Hormuz when:12h",
+    "Trump Iran oil when:12h",
+    "US Iran crude oil sanctions when:12h",
+    "EIA crude oil inventory stocks when:12h",
+    "OPEC oil production quota when:1d",
+    "SPR oil release OR strategic petroleum reserve when:1d",
+    "crude oil tanker Hormuz when:12h",
 )
 NEWS_QUERIES_RU: tuple[str, ...] = (
-    "нефть Иран Трамп санкции Ормуз when:1d",
-    "Трамп Иран нефть when:1d",
-    "EIA запасы нефти США when:1d",
-    "ОПЕК квота добыча нефть when:2d",
-    "СПР запасы нефть США when:2d",
-    "экспорт импорт нефти танкер when:2d",
+    "нефть Иран Трамп санкции Ормуз when:12h",
+    "Трамп Иран нефть when:12h",
+    "EIA запасы нефти США when:12h",
+    "ОПЕК квота добыча нефть when:1d",
+    "СПР запасы нефть США when:1d",
+    "Ормуз танкер нефть when:12h",
 )
 
 @dataclass(frozen=True)
@@ -316,13 +316,102 @@ def detect_oil_market_mood(
         return "intraday медвежий bias — откаты к resistance"
     return "нейтрально — торговать от уровней 5–15m"
 
-def _parse_rss_pub(pub: str) -> float:
-    if not pub:
-        return time.time()
+def _parse_rss_pub(pub: str) -> float | None:
+    """Дата из RSS. None если нет/битая — не подставляем «сейчас» (это пускало старьё)."""
+    if not pub or not str(pub).strip():
+        return None
     try:
-        return parsedate_to_datetime(pub).timestamp()
+        dt = parsedate_to_datetime(pub)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        ts = dt.timestamp()
+        # явный мусор / далёкое будущее
+        now = time.time()
+        if ts > now + 3600 or ts < now - 86400 * 400:
+            return None
+        return ts
     except Exception:
-        return time.time()
+        return None
+
+
+_URL_DATE_PATTERNS = (
+    re.compile(r"/(20\d{2})/([01]?\d)/([0-3]?\d)(?:/|$)"),
+    re.compile(r"/(20\d{2})-([01]?\d)-([0-3]?\d)(?:/|$)"),
+    re.compile(r"[?&]date=(20\d{2})-([01]?\d)-([0-3]?\d)"),
+)
+
+
+def _unwrap_news_url(url: str) -> str:
+    """Достаёт исходный URL из редиректа Google News, если есть."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for key in ("url", "q", "u"):
+            vals = qs.get(key) or []
+            if vals and vals[0].startswith("http"):
+                return vals[0]
+        # path иногда содержит encoded url
+        if "http" in raw:
+            m = re.search(r"https?%3A%2F%2F[^\s&]+", raw, re.I)
+            if m:
+                return urllib.parse.unquote(m.group(0))
+    except Exception:
+        pass
+    return raw
+
+
+def _extract_url_published_ts(url: str) -> float | None:
+    """Дата из пути статьи (/2026/04/06/…) — ловит перепубликации в Google News."""
+    target = _unwrap_news_url(url)
+    if not target:
+        return None
+    try:
+        decoded = urllib.parse.unquote(target)
+    except Exception:
+        decoded = target
+    for pat in _URL_DATE_PATTERNS:
+        m = pat.search(decoded)
+        if not m:
+            continue
+        try:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if mo < 1 or mo > 12 or d < 1 or d > 31:
+                continue
+            dt = datetime(y, mo, d, tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            continue
+    return None
+
+
+def resolve_oil_news_published_ts(
+    *,
+    rss_pub: str | None,
+    url: str,
+) -> float | None:
+    """Эффективная дата новости: min(RSS, URL) — если URL старый, статья старая."""
+    rss_ts = _parse_rss_pub(rss_pub or "")
+    url_ts = _extract_url_published_ts(url)
+    if rss_ts is None and url_ts is None:
+        return None
+    if rss_ts is None:
+        return url_ts
+    if url_ts is None:
+        return rss_ts
+    # URL-дата часто «день публикации»; если она старше RSS — верим URL (не свежий репост)
+    return min(rss_ts, url_ts)
+
+
+def oil_news_is_fresh(published_ts: float | None, *, max_age_hours: float) -> bool:
+    if published_ts is None or published_ts <= 0:
+        return False
+    max_age_h = max(1.0, min(48.0, float(max_age_hours)))
+    age_h = (time.time() - published_ts) / 3600.0
+    return 0.0 <= age_h <= max_age_h
+
 
 def _clean_title(title: str) -> str:
     t = re.sub(r"\s+", " ", (title or "").strip())
@@ -1204,7 +1293,12 @@ def _fetch_google_news_rss(
             continue
         link = (link_el.text or "").strip()
         source = (src_el.text or "news").strip() if src_el is not None else "news"
-        pub_ts = _parse_rss_pub(pub_el.text if pub_el is not None else "")
+        pub_ts = resolve_oil_news_published_ts(
+            rss_pub=pub_el.text if pub_el is not None else "",
+            url=link,
+        )
+        if pub_ts is None:
+            continue
         out.append(
             OilNewsItem(
                 title=title[:240],
@@ -1225,6 +1319,7 @@ async def fetch_oil_news(
     include_russian: bool = True,
     critical_only: bool = True,
     critical_min_score: int = 4,
+    max_age_hours: float = 18.0,
 ) -> list[OilNewsItem]:
     seen: set[str] = set()
     merged: list[OilNewsItem] = []
@@ -1235,6 +1330,8 @@ async def fetch_oil_news(
     for query, lang in queries:
         items = await asyncio.to_thread(_fetch_google_news_rss, query, lang=lang)
         for it in items:
+            if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+                continue
             if critical_only and not is_critical_oil_news(it, critical_min_score):
                 continue
             key = it.title.lower()[:120]
@@ -1242,9 +1339,9 @@ async def fetch_oil_news(
                 continue
             seen.add(key)
             merged.append(it)
-    # Сначала самые критичные, потом свежесть
+    # Сначала свежесть, потом критичность
     merged.sort(
-        key=lambda x: (news_critical_score(x.title), x.published_ts),
+        key=lambda x: (x.published_ts, news_critical_score(x.title)),
         reverse=True,
     )
     return merged[:max_items]
@@ -2121,6 +2218,7 @@ class OilMonitorEngine:
                 include_russian=include_ru,
                 critical_only=critical_only,
                 critical_min_score=critical_min,
+                max_age_hours=max_age_h,
             )
         except Exception:
             logger.exception("Oil news fetch failed")

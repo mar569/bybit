@@ -311,7 +311,7 @@
   "oil_news_enabled": false,
   "oil_news_interval_seconds": 300,
   "oil_news_max_per_poll": 1,
-  "oil_news_max_age_hours": 24.0,
+  "oil_news_max_age_hours": 18.0,
   "oil_digest_enabled": true,
   "oil_digest_interval_hours": 4.0,
   "oil_chart_enabled": true,

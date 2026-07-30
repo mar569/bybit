@@ -4273,6 +4273,7 @@ class TelegramBot:
             f"график <b>{'ON' if s.oil_chart_enabled else 'OFF'}</b>\n"
             f"Новости: только важные <b>{'ON' if getattr(s, 'oil_news_critical_only', True) else 'OFF'}</b> · "
             f"RU <b>{'ON' if getattr(s, 'oil_russian_news', True) else 'OFF'}</b> · "
+            f"свежесть ≤<b>{getattr(s, 'oil_news_max_age_hours', 18):g}ч</b> · "
             f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"

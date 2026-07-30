@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 60
+SETTINGS_VERSION = 61
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -527,7 +527,7 @@ class ScannerSettings:
     oil_news_enabled: bool = False
     oil_news_interval_seconds: int = 300
     oil_news_max_per_poll: int = 1
-    oil_news_max_age_hours: float = 24.0
+    oil_news_max_age_hours: float = 18.0
     oil_digest_enabled: bool = True
     oil_digest_interval_hours: float = 4.0
     oil_chart_enabled: bool = True
@@ -1081,7 +1081,7 @@ class ScannerSettings:
             oil_news_enabled=bool(base.get("oil_news_enabled", False)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 300)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
-            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 24.0)),
+            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 18.0)),
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
             oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
             oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
@@ -1653,6 +1653,11 @@ class SettingsManager:
                 merged.setdefault("oil_micro_lookback_bars", 4)
                 merged.setdefault("oil_micro_cooldown_seconds", 1200)
                 merged.setdefault("oil_micro_max_per_hour", 3)
+            if version < 61:
+                # Только свежие новости за день (не репосты 2–3 мес.)
+                merged["oil_news_max_age_hours"] = min(
+                    18.0, float(merged.get("oil_news_max_age_hours", 18) or 18)
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

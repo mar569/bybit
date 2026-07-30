@@ -478,3 +478,33 @@ def test_oil_micro_signal_skips_against_strong_news():
         how_to_use_ru="",
     )
     assert detect_oil_micro_signal(bars, news_bias=bias) is None
+
+
+def test_resolve_oil_news_rejects_old_url_date():
+    from bot.oil_monitor import resolve_oil_news_published_ts, oil_news_is_fresh
+    import time as _t
+
+    # RSS «сегодня», URL апрель 2026 → эффективная дата = апрель
+    rss = _t.strftime("%a, %d %b %Y %H:%M:%S GMT", _t.gmtime())
+    url = "https://energynow.com/2026/04/06/opec-agrees-to-boost-oil-output/"
+    ts = resolve_oil_news_published_ts(rss_pub=rss, url=url)
+    assert ts is not None
+    assert not oil_news_is_fresh(ts, max_age_hours=18)
+
+
+def test_resolve_oil_news_fresh_same_day_url():
+    from bot.oil_monitor import resolve_oil_news_published_ts, oil_news_is_fresh
+    from datetime import datetime, timezone
+
+    today = datetime.now(tz=timezone.utc)
+    url = f"https://example.com/{today.year:04d}/{today.month:02d}/{today.day:02d}/oil-update/"
+    ts = resolve_oil_news_published_ts(rss_pub="", url=url)
+    assert ts is not None
+    assert oil_news_is_fresh(ts, max_age_hours=18)
+
+
+def test_parse_rss_pub_empty_is_none():
+    from bot.oil_monitor import _parse_rss_pub
+
+    assert _parse_rss_pub("") is None
+    assert _parse_rss_pub("   ") is None
