@@ -3291,9 +3291,13 @@ def _situation_plain(ta: TAAnalysisResult) -> str:
 
 
 def ta_display_score(ta: TAAnalysisResult) -> int:
-    if ta.verdict == "WAIT" and ta.setup_clarity > ta.verdict_confidence:
-        return ta.setup_clarity
-    return ta.verdict_confidence
+    """Очки рядом с вердиктом = уверенность в вердикте.
+
+    Раньше на WAIT подставляли setup_clarity (ясность range) → «WAIT 10/10»
+    при реальной уверенности 4/10 — выглядело как сильный сигнал и расходилось
+    с дайджестом нефти.
+    """
+    return int(ta.verdict_confidence or 0)
 
 
 def primary_forecast_direction(ta: TAAnalysisResult) -> str:
@@ -5351,6 +5355,8 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
         f"ИТОГ: {ta.verdict} {score}/10",
         _verdict_plain(ta),
     ]
+    if ta.verdict == "WAIT" and ta.setup_clarity:
+        lines.append(f"ясность range: {int(ta.setup_clarity)}/10")
     if ta.current_price:
         lines.append(f"цена: {fmt_price(ta.current_price)}")
     if ta.breakout_level:
@@ -5373,7 +5379,7 @@ def ta_chart_panel_text(ta: TAAnalysisResult) -> str:
         lines.append(ta.primary_scenario[:55])
     if ta.range_position:
         lines.append(f"range: {ta.range_position * 100:.0f}%")
-    return "\n".join(lines[:8])
+    return "\n".join(lines[:9])
 
 
 def ta_chart_bottom_right_text(ta: TAAnalysisResult) -> str:

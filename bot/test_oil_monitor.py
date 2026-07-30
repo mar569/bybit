@@ -14,6 +14,7 @@ from bot.oil_monitor import (
     format_single_oil_news,
     is_critical_oil_news,
     news_critical_score,
+    sanitize_oil_session_bars,
     summarize_oil_news_bias,
     OilBouncePlan,
     OilNewsBias,
@@ -343,3 +344,15 @@ def test_weak_news_no_bounce_plan():
         how_to_use_ru="",
     )
     assert build_oil_bounce_plan(snap, bias, min_score=3.0) is None
+
+
+def test_sanitize_oil_session_bars_drops_flats_and_gaps():
+    dead = [KlineBar(float(i * 300), 90.0, 90.0, 90.0, 90.0, 0.0) for i in range(8)]
+    live = [
+        KlineBar(10_000.0 + i * 900, 90 + i * 0.05, 90.1 + i * 0.05, 89.9 + i * 0.05, 90.02 + i * 0.05, 1.0)
+        for i in range(30)
+    ]
+    out = sanitize_oil_session_bars(dead + live, interval_minutes=5)
+    assert len(out) == 30
+    gaps = [out[i].open_time - out[i - 1].open_time for i in range(1, len(out))]
+    assert all(abs(g - 300.0) < 1e-6 for g in gaps)

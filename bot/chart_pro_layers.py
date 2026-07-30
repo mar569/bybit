@@ -253,8 +253,23 @@ def draw_flat_breakout_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
             long_tgt = ta.breakout_level * 1.008
         short_wp = [px, z.top, mid, z.bottom, ta.breakdown_level, short_tgt]
         long_wp = [px, z.bottom, mid, z.top, ta.breakout_level, long_tgt]
-        _draw_zigzag_path(ax, bars, short_wp, color="#f85149", label="flat→short", alpha=0.42, lw=1.1)
-        _draw_zigzag_path(ax, bars, long_wp, color="#3fb950", label="flat→long", alpha=0.42, lw=1.1)
+        lean = (getattr(ta, "action_priority", "") or "").lower()
+        if lean not in {"long", "short"}:
+            ps = (getattr(ta, "primary_scenario", "") or "").lower()
+            if "вверх" in ps or "long" in ps:
+                lean = "long"
+            elif "вниз" in ps or "short" in ps:
+                lean = "short"
+        # Не красим short ярко-красным при «приоритет вверх» — выглядит как сигнал SHORT
+        if lean == "long":
+            _draw_zigzag_path(ax, bars, long_wp, color="#3fb950", label="flat→long", alpha=0.72, lw=1.25)
+            _draw_zigzag_path(ax, bars, short_wp, color="#8b949e", label="alt↓", alpha=0.22, lw=0.9)
+        elif lean == "short":
+            _draw_zigzag_path(ax, bars, short_wp, color="#f85149", label="flat→short", alpha=0.72, lw=1.25)
+            _draw_zigzag_path(ax, bars, long_wp, color="#8b949e", label="alt↑", alpha=0.22, lw=0.9)
+        else:
+            _draw_zigzag_path(ax, bars, short_wp, color="#8b949e", label="flat→short", alpha=0.38, lw=1.0)
+            _draw_zigzag_path(ax, bars, long_wp, color="#8b949e", label="flat→long", alpha=0.38, lw=1.0)
         return True
     elif ta.verdict == "WAIT" and ta.breakdown_level:
         target = ta.bearish_scenario.target_prices[0] if (

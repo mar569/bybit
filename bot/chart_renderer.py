@@ -339,22 +339,27 @@ def _extend_channel_line(
 def _draw_candles(ax: plt.Axes, bars: list[KlineBar], *, interval_minutes: int = 5) -> None:
     if not bars:
         return
-    width_minutes = max(interval_minutes * 0.8, 2.0)
+    # Чуть шире тело — иначе на широком Y/дырах выглядят как точки
+    width_minutes = max(interval_minutes * 0.88, 2.5)
     width_days = width_minutes / (24 * 60)
     for bar in bars:
         ts = datetime.fromtimestamp(bar.open_time, tz=timezone.utc)
         color = CHART_STYLE["up"] if bar.close >= bar.open else CHART_STYLE["down"]
-        ax.plot([ts, ts], [bar.low, bar.high], color=color, linewidth=1.0, solid_capstyle="round")
+        ax.plot([ts, ts], [bar.low, bar.high], color=color, linewidth=1.15, solid_capstyle="round")
         body_low = min(bar.open, bar.close)
         body_high = max(bar.open, bar.close)
-        height = max(body_high - body_low, (bar.high - bar.low) * 0.05 if bar.high > bar.low else bar.close * 0.0002)
+        wick = (bar.high - bar.low) if bar.high > bar.low else 0.0
+        height = max(
+            body_high - body_low,
+            wick * 0.14 if wick > 0 else abs(bar.close) * 0.0006,
+        )
         rect = Rectangle(
             (mdates.date2num(ts) - width_days / 2, body_low),
             width_days,
             height,
             facecolor=color,
             edgecolor=color,
-            linewidth=0.5,
+            linewidth=0.55,
         )
         ax.add_patch(rect)
 
@@ -444,17 +449,25 @@ def _draw_scenario_path(
 
 
 def _draw_wait_chart_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    """WAIT: алгоритмические пути обоих триггеров (основной ярче, альтернатива полупрозрачно)."""
+    """WAIT: лёгкие пути по lean; без «жирной» стрелки против текста ИТОГ."""
     if (getattr(ta, "verdict", "") or "").upper() != "WAIT":
         return
     lean = (getattr(ta, "action_priority", "") or "").lower()
+    if lean not in {"long", "short"}:
+        ps = (getattr(ta, "primary_scenario", "") or "").lower()
+        if "вверх" in ps or "long" in ps or "пробой" in ps and "↓" not in ps:
+            lean = "long"
+        elif "вниз" in ps or "short" in ps:
+            lean = "short"
+
+    # Только приоритетная сторона ярко; альтернатива — еле видно
     if ta.bullish_scenario and ta.bullish_scenario.target_prices:
         _draw_scenario_path(
             ax,
             bars,
             ta.bullish_scenario,
             color=CHART_STYLE["scenario_bull"],
-            alpha=0.88 if lean == "long" else 0.40,
+            alpha=0.75 if lean == "long" else (0.22 if lean == "short" else 0.35),
         )
     if ta.bearish_scenario and ta.bearish_scenario.target_prices:
         _draw_scenario_path(
@@ -462,27 +475,28 @@ def _draw_wait_chart_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRes
             bars,
             ta.bearish_scenario,
             color=CHART_STYLE["scenario_bear"],
-            alpha=0.88 if lean == "short" else 0.40,
+            alpha=0.75 if lean == "short" else (0.22 if lean == "long" else 0.35),
         )
-    if ta.correction_path and ta.correction_path.waypoints:
+    # Zigzag прогнозы — не дублируем обе стороны против lean
+    if lean != "long" and ta.correction_path and ta.correction_path.waypoints:
         _draw_zigzag_forecast_path(
             ax,
             bars,
             ta.correction_path.waypoints,
             color="#ffa657",
             label=ta.correction_path.label,
-            alpha=0.45 if lean != "short" else 0.72,
-            lw=1.2,
+            alpha=0.70 if lean == "short" else 0.35,
+            lw=1.15,
         )
-    if ta.continuation_path and ta.continuation_path.waypoints:
+    if lean != "short" and ta.continuation_path and ta.continuation_path.waypoints:
         _draw_zigzag_forecast_path(
             ax,
             bars,
             ta.continuation_path.waypoints,
             color=CHART_STYLE["accent_long"],
             label=ta.continuation_path.label,
-            alpha=0.45 if lean != "long" else 0.72,
-            lw=1.2,
+            alpha=0.70 if lean == "long" else 0.35,
+            lw=1.15,
         )
 
 

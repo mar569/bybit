@@ -1,8 +1,8 @@
 """Нефть: отдельный чат — свежие новости (ссылки) + техразбор + прогноз.
 
 Торговый UI Bybit TradFi (MT5): UKOUSD.s (Brent cash) / USOIL — публичных kline нет.
-Данные для уровней: Yahoo futures BZ=F / CL=F (ближе к CFD, чем Bybit perps
-BZUSDT/CLUSDT, у которых basis часто −1…−3$). Fallback: Bybit linear commodity.
+Свечи: форма Bybit BZUSDT/CLUSDT (ровный ряд), цена сдвинута к Yahoo BZ=F/CL=F
+(≈ уровень UKOUSD). Fallback — sanitized Yahoo без дыр сессии.
 """
 from __future__ import annotations
 
@@ -833,6 +833,68 @@ def _aggregate_oil_bars(bars: list[KlineBar], factor: int) -> list[KlineBar]:
     return out
 
 
+def _is_dead_oil_bar(bar: KlineBar) -> bool:
+    """Yahoo часто отдаёт точки o=h=l=c в паузах сессии — на графике «точки/палки»."""
+    rng = float(bar.high) - float(bar.low)
+    body = abs(float(bar.close) - float(bar.open))
+    return rng <= 1e-6 and body <= 1e-6
+
+
+def sanitize_oil_session_bars(
+    bars: list[KlineBar],
+    *,
+    interval_minutes: int = 5,
+) -> list[KlineBar]:
+    """Убрать мёртвые свечи и схлопнуть дыры сессии → ровный ряд как на терминале.
+
+    Yahoo BZ=F/CL=F: weekend/overnight gaps + нулевые бары → datetime-ось рвёт
+    ширину свечей. Переиндексируем живые бары с равномерным шагом TF.
+    """
+    if not bars:
+        return bars
+    alive = [b for b in bars if not _is_dead_oil_bar(b)]
+    if len(alive) < 24:
+        alive = list(bars)
+    if len(alive) < 2:
+        return alive
+    step = max(60, int(interval_minutes) * 60)
+    end_ts = float(alive[-1].open_time)
+    start_ts = end_ts - (len(alive) - 1) * step
+    out: list[KlineBar] = []
+    for i, b in enumerate(alive):
+        out.append(
+            KlineBar(
+                open_time=start_ts + i * step,
+                open=float(b.open),
+                high=float(b.high),
+                low=float(b.low),
+                close=float(b.close),
+                volume=float(b.volume),
+            )
+        )
+    return out
+
+
+def _shift_bars_to_price(bars: list[KlineBar], ref_price: float) -> list[KlineBar]:
+    """Сдвиг всей серии к ref (Bybit-форма → уровень UKOUSD)."""
+    if not bars or ref_price <= 0:
+        return bars
+    basis = float(ref_price) - float(bars[-1].close)
+    if abs(basis) < 1e-9:
+        return bars
+    return [
+        KlineBar(
+            open_time=b.open_time,
+            open=float(b.open) + basis,
+            high=float(b.high) + basis,
+            low=float(b.low) + basis,
+            close=float(b.close) + basis,
+            volume=float(b.volume),
+        )
+        for b in bars
+    ]
+
+
 def _fetch_yahoo_oil_bars(
     yahoo_symbol: str,
     *,
@@ -888,6 +950,7 @@ def _fetch_yahoo_oil_bars(
             continue
     bars.sort(key=lambda b: b.open_time)
     bars = _aggregate_oil_bars(bars, agg)
+    bars = sanitize_oil_session_bars(bars, interval_minutes=interval_minutes)
     if lim and len(bars) > lim:
         bars = bars[-lim:]
     return bars
@@ -941,23 +1004,41 @@ def _fetch_oil_bars(
     interval_minutes: int = 15,
     limit: int | None = None,
 ) -> list[KlineBar]:
-    """Yahoo futures first (≈ UKOUSD/USOIL), Bybit perp fallback."""
+    """Непрерывные свечи как на терминале + цена ≈ UKOUSD/USOIL.
+
+    Yahoo BZ=F даёт дыры сессии и нулевые бары → «точки» на графике.
+    Берём форму Bybit (ровный 5m), сдвигаем к последней цене Yahoo.
+    Если Bybit недоступен — sanitized Yahoo.
+    """
+    yahoo_last: float | None = None
+    yahoo_bars: list[KlineBar] = []
     try:
-        bars = _fetch_yahoo_oil_bars(
+        yahoo_bars = _fetch_yahoo_oil_bars(
             yahoo_symbol, interval_minutes=interval_minutes, limit=limit,
         )
-        if len(bars) >= 24:
-            return bars
+        if yahoo_bars:
+            yahoo_last = float(yahoo_bars[-1].close)
+    except Exception:
+        logger.warning("Yahoo oil %s failed", yahoo_symbol, exc_info=True)
+
+    try:
+        bybit_bars = _fetch_bybit_oil_bars(
+            bybit_symbol, interval_minutes=interval_minutes, limit=limit,
+        )
+        if len(bybit_bars) >= 24:
+            if yahoo_last and yahoo_last > 0:
+                return _shift_bars_to_price(bybit_bars, yahoo_last)
+            return bybit_bars
     except Exception:
         logger.warning(
-            "Yahoo oil %s failed, fallback Bybit %s",
-            yahoo_symbol,
+            "Bybit oil %s failed, fallback Yahoo",
             bybit_symbol,
             exc_info=True,
         )
-    return _fetch_bybit_oil_bars(
-        bybit_symbol, interval_minutes=interval_minutes, limit=limit,
-    )
+
+    if len(yahoo_bars) >= 24:
+        return yahoo_bars
+    raise RuntimeError(f"Oil bars unavailable ({yahoo_symbol}/{bybit_symbol})")
 
 
 async def fetch_oil_last_prices() -> dict[str, float]:
@@ -1304,7 +1385,7 @@ def format_oil_market_digest(
     primary = snaps[0] if snaps else None
     lines = [
         "📊 <b>Нефть · разбор</b>",
-        f"<i>UKOUSD / USOIL · TF {interval_minutes}m · данные ≈ Yahoo BZ=F / CL=F</i>",
+        f"<i>UKOUSD / USOIL · TF {interval_minutes}m · свечи Bybit→цена Yahoo BZ=F</i>",
         "",
     ]
     for s in snaps:

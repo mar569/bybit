@@ -72,6 +72,9 @@ def _parse_urals_from_html(html: str) -> tuple[float, float | None]:
 
     if price is None or price < 20 or price > 200:
         raise ValueError("Urals price not found / out of range")
+    # TE иногда отдаёт gap/артефакт (+18% при спокойном Brent) — не показываем как «дневной»
+    if chg is not None and abs(chg) > 6.0:
+        chg = None
     return price, chg
 
 

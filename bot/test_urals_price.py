@@ -11,7 +11,18 @@ def test_parse_urals_from_meta_description():
     )
     price, chg = _parse_urals_from_html(html)
     assert price == 85.39
-    assert chg == 18.76
+    # TE gap/артефакт >6% не показываем как дневной %
+    assert chg is None
+
+
+def test_parse_urals_keeps_normal_daily_change():
+    html = (
+        'Urals Oil rose to 72.10 USD/Bbl on July 29, 2026, '
+        'up 1.25% from the previous day.'
+    )
+    price, chg = _parse_urals_from_html(html)
+    assert price == 72.10
+    assert chg == 1.25
 
 
 def test_urals_sparkline_tracks_brent_shape():
