@@ -122,6 +122,23 @@ class Config(BaseSettings):
     def manual_ta_chat_configured(self) -> bool:
         return self.telegram_manual_ta_chat_id is not None
 
+    telegram_oil_news_chat_id: int | None = Field(None, env="TELEGRAM_OIL_NEWS_CHAT_ID")
+
+    @validator("telegram_oil_news_chat_id", pre=True)
+    def empty_oil_news_chat_id(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @property
+    def oil_news_chat_id(self) -> int | None:
+        """Только отдельный oil-чат — не смешиваем с crypto analysis."""
+        return self.telegram_oil_news_chat_id
+
+    @property
+    def oil_news_chat_configured(self) -> bool:
+        return self.telegram_oil_news_chat_id is not None
+
     scan_interval_seconds: int = Field(1, env="SCAN_INTERVAL_SECONDS")
     default_oi_period: int = Field(15, env="DEFAULT_OI_PERIOD")
     default_oi_rise_percent: float = Field(5.0, env="DEFAULT_OI_PERCENT")

@@ -236,6 +236,7 @@ class TelegramBot:
         "wave_enabled",
         "scenario_watch_enabled",
         "manual_ta_alerts_enabled",
+        "oil_news_enabled",
     )
 
     _NOTIFICATION_CHANNELS: tuple[tuple[str, str, str], ...] = (
@@ -246,6 +247,7 @@ class TelegramBot:
         ("wave_enabled", "wave", "🌊 Волны Эллиотта"),
         ("scenario_watch_enabled", "scenario", "🔮 Сценарии (фаза 2)"),
         ("manual_ta_alerts_enabled", "mta_alert", "🔔 Алерты ручного TA"),
+        ("oil_news_enabled", "oil", "🛢 Нефть Brent/WTI"),
     )
 
     def _bot_notifications_blocked(self) -> bool:
@@ -271,6 +273,8 @@ class TelegramBot:
             self.wave_level_watcher.clear_all()
         elif channel_id == "mta_alert":
             self._manual_ta_alerts.clear()
+        elif channel_id == "oil":
+            pass
 
     def _set_all_notification_channels(self, enabled: bool) -> None:
         updates = {field: enabled for field, _, _ in self._NOTIFICATION_CHANNELS}
@@ -2008,6 +2012,78 @@ class TelegramBot:
                 event.anomaly_type,
             )
         return sent
+
+    async def dispatch_oil_news(self, message: str) -> bool:
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        chat_id = self.config.oil_news_chat_id
+        if chat_id is None:
+            return False
+        return await self._send_to_chat(chat_id, message, None, is_priority=False)
+
+    def _oil_chart_chat_id(self) -> int | None:
+        """Графики нефти → чат ручного TA; fallback на oil-чат."""
+        if self.config.manual_ta_chat_configured:
+            return self.config.telegram_manual_ta_chat_id
+        return self.config.oil_news_chat_id
+
+    async def dispatch_oil_digest(self, message: str, png: bytes | None = None) -> bool:
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        if not getattr(settings, "oil_digest_enabled", True):
+            return False
+        # Текст без графика — в oil-чат; с PNG — в ручной TA.
+        if png:
+            chat_id = self._oil_chart_chat_id()
+            if chat_id is None:
+                return False
+            return await self._send_chart(
+                chat_id, png, message, is_priority=False, keyboard=None,
+            )
+        chat_id = self.config.oil_news_chat_id
+        if chat_id is None:
+            return False
+        return await self._send_to_chat(chat_id, message, None, is_priority=False)
+
+    async def dispatch_oil_level_alert(self, message: str) -> bool:
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        if not getattr(settings, "oil_level_alerts_enabled", True):
+            return False
+        chat_id = self.config.oil_news_chat_id
+        if chat_id is None:
+            return False
+        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+
+    async def dispatch_oil_extra_chart(self, message: str, png: bytes) -> bool:
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        chat_id = self._oil_chart_chat_id()
+        if chat_id is None:
+            return False
+        return await self._send_chart(
+            chat_id, png, message, is_priority=False, keyboard=None,
+        )
 
     async def dispatch_wave(self, event: WaveEvent) -> bool:
         """Волновой сигнал EW+Fib → wave chat с графиком разметки."""
@@ -4105,6 +4181,98 @@ class TelegramBot:
             "<i>Кнопки применяются сразу</i>"
         ).replace(",", " ")
 
+    def _build_oil_panel_text(self) -> str:
+        s = self.settings_manager.settings
+        chat_ok = self.config.oil_news_chat_configured
+        chat_line = (
+            f"новости id <b>{self.config.oil_news_chat_id}</b>"
+            if chat_ok
+            else "⚠️ задайте TELEGRAM_OIL_NEWS_CHAT_ID"
+        )
+        chart_line = (
+            f"графики → ручной TA <b>{self.config.telegram_manual_ta_chat_id}</b>"
+            if self.config.manual_ta_chat_configured
+            else "графики → oil-чат (нет TELEGRAM_MANUAL_TA_CHAT_ID)"
+        )
+        return (
+            "<b>🛢 Нефть Brent / WTI</b>\n"
+            f"Канал: {chat_line}\n"
+            f"{chart_line}\n"
+            f"Статус: <b>{'ON' if s.oil_news_enabled else 'OFF'}</b>\n\n"
+            f"Таймфрейм разбора: <b>{getattr(s, 'oil_interval_minutes', 15)}m</b> "
+            f"(стандарт 5–15m, intraday до 1h)\n"
+            f"Дайджест: <b>{'ON' if s.oil_digest_enabled else 'OFF'}</b> · "
+            f"каждые <b>{s.oil_digest_interval_hours:g}ч</b> · "
+            f"график <b>{'ON' if s.oil_chart_enabled else 'OFF'}</b>\n"
+            f"Новости: только важные <b>{'ON' if getattr(s, 'oil_news_critical_only', True) else 'OFF'}</b> · "
+            f"RU <b>{'ON' if getattr(s, 'oil_russian_news', True) else 'OFF'}</b> · "
+            f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
+            f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
+            f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
+            f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
+            f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
+            "<i>Hormuz · EIA · OPEC · санкции · пробой ключевых уровней</i>"
+        ).replace(",", " ")
+
+    def _oil_keyboard(self) -> InlineKeyboardMarkup:
+        s = self.settings_manager.settings
+        im = int(getattr(s, "oil_interval_minutes", 15))
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    self._mark(
+                        f"Канал {'ON' if s.oil_news_enabled else 'OFF'}",
+                        s.oil_news_enabled,
+                    ),
+                    callback_data="oil:on",
+                ),
+            ],
+            [
+                InlineKeyboardButton(self._mark("5m", im == 5), callback_data="oil:tf:5"),
+                InlineKeyboardButton(self._mark("10m", im == 10), callback_data="oil:tf:10"),
+                InlineKeyboardButton(self._mark("15m", im == 15), callback_data="oil:tf:15"),
+                InlineKeyboardButton(self._mark("30m", im == 30), callback_data="oil:tf:30"),
+                InlineKeyboardButton(self._mark("60m", im == 60), callback_data="oil:tf:60"),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Дайджест", s.oil_digest_enabled),
+                    callback_data="oil:digest",
+                ),
+                InlineKeyboardButton(
+                    self._mark("График", s.oil_chart_enabled),
+                    callback_data="oil:chart",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Важные", getattr(s, "oil_news_critical_only", True)),
+                    callback_data="oil:critical",
+                ),
+                InlineKeyboardButton(
+                    self._mark("RU новости", getattr(s, "oil_russian_news", True)),
+                    callback_data="oil:ru",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Уровни", getattr(s, "oil_level_alerts_enabled", True)),
+                    callback_data="oil:levels",
+                ),
+                InlineKeyboardButton(
+                    self._mark("Brent", getattr(s, "oil_include_brent", True)),
+                    callback_data="oil:brent",
+                ),
+                InlineKeyboardButton(
+                    self._mark("WTI", getattr(s, "oil_include_wti", True)),
+                    callback_data="oil:wti",
+                ),
+            ],
+            [
+                InlineKeyboardButton("◀️ Настройки", callback_data="refresh_settings"),
+            ],
+        ])
+
     def _build_analysis_panel_text(self) -> str:
         s = self.settings_manager.settings
         chat_ok = self.config.analysis_chat_configured
@@ -4650,6 +4818,10 @@ class TelegramBot:
         if an_changed:
             return
 
+        oil_changed = await self._handle_oil_callback(query, payload)
+        if oil_changed:
+            return
+
         await query.answer()
 
         if payload == "toggle_binance":
@@ -4735,6 +4907,13 @@ class TelegramBot:
                 self._build_analysis_panel_text(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._analysis_keyboard(),
+            )
+        elif payload == "open_oil":
+            await self._safe_edit_message_text(
+                query,
+                self._build_oil_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._oil_keyboard(),
             )
         else:
             await self._safe_edit_message_text(query, "Неизвестное действие.")
@@ -4891,6 +5070,68 @@ class TelegramBot:
         )
         return True
 
+    async def _handle_oil_callback(self, query: CallbackQuery, payload: str) -> bool:
+        if not payload.startswith("oil:"):
+            return False
+
+        action = payload[4:]
+        label = ""
+        s = self.settings_manager.settings
+
+        if action == "on":
+            current = s.oil_news_enabled
+            self.settings_manager.update(oil_news_enabled=not current)
+            self._sync_bot_paused_from_channels()
+            if not current:
+                self._pause_snapshot = None
+            label = f"Нефть → {'ON' if not current else 'OFF'}"
+        elif action == "digest":
+            self.settings_manager.update(oil_digest_enabled=not s.oil_digest_enabled)
+            label = f"Дайджест → {'ON' if not s.oil_digest_enabled else 'OFF'}"
+        elif action == "chart":
+            self.settings_manager.update(oil_chart_enabled=not s.oil_chart_enabled)
+            label = f"График → {'ON' if not s.oil_chart_enabled else 'OFF'}"
+        elif action == "critical":
+            cur = bool(getattr(s, "oil_news_critical_only", True))
+            self.settings_manager.update(oil_news_critical_only=not cur)
+            label = f"Важные → {'ON' if not cur else 'OFF'}"
+        elif action == "ru":
+            cur = bool(getattr(s, "oil_russian_news", True))
+            self.settings_manager.update(oil_russian_news=not cur)
+            label = f"RU → {'ON' if not cur else 'OFF'}"
+        elif action == "levels":
+            cur = bool(getattr(s, "oil_level_alerts_enabled", True))
+            self.settings_manager.update(oil_level_alerts_enabled=not cur)
+            label = f"Уровни → {'ON' if not cur else 'OFF'}"
+        elif action == "brent":
+            cur = bool(getattr(s, "oil_include_brent", True))
+            self.settings_manager.update(oil_include_brent=not cur)
+            label = f"Brent → {'ON' if not cur else 'OFF'}"
+        elif action == "wti":
+            cur = bool(getattr(s, "oil_include_wti", True))
+            self.settings_manager.update(oil_include_wti=not cur)
+            label = f"WTI → {'ON' if not cur else 'OFF'}"
+        elif action.startswith("tf:"):
+            value = int(action[3:])
+            if value in (5, 10, 15, 30, 60):
+                self.settings_manager.update(oil_interval_minutes=value)
+                label = f"TF → {value}m"
+            else:
+                await query.answer("Некорректный TF", show_alert=True)
+                return True
+        else:
+            await query.answer("Неизвестное действие.", show_alert=True)
+            return True
+
+        await query.answer(f"✅ {label}", show_alert=False)
+        await self._safe_edit_message_text(
+            query,
+            self._build_oil_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._oil_keyboard(),
+        )
+        return True
+
     def _reply_keyboard(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
@@ -4928,6 +5169,7 @@ class TelegramBot:
         )
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🎛 Каналы", callback_data="open_channels")],
+            [InlineKeyboardButton("🛢 Нефть", callback_data="open_oil")],
             [
                 InlineKeyboardButton(
                     self._mark(

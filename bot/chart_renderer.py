@@ -2687,6 +2687,41 @@ async def render_wave_chart(
     return png, ta
 
 
+def render_oil_chart(
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    symbol_label: str = "Brent",
+    interval_minutes: int = 60,
+    display_hours: int = 168,
+    height_scale: float = 1.0,
+) -> bytes | None:
+    """PNG график нефти (Yahoo bars + полный TA)."""
+    if not bars or len(bars) < 12:
+        return None
+    verdict = (ta.verdict or "WAIT").upper()
+    accent = (
+        CHART_STYLE["accent_long"] if verdict == "LONG"
+        else CHART_STYLE["accent_short"] if verdict == "SHORT"
+        else CHART_STYLE["warning"]
+    )
+    zoom = min(display_hours, max(24, int(len(bars) * interval_minutes / 60)))
+    title = f"OIL · {symbol_label} · {interval_minutes}m · {zoom}ч"
+    return _render_chart_figure(
+        bars,
+        ta,
+        symbol=symbol_label,
+        title_suffix=title,
+        accent_color=accent,
+        interval_minutes=interval_minutes,
+        pro_mode=False,
+        display_hours=zoom,
+        enhanced=True,
+        height_scale=height_scale,
+        wave_focus=False,
+    )
+
+
 async def render_signal_chart(
     symbol: str,
     *,

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 52
+SETTINGS_VERSION = 54
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -522,6 +522,25 @@ class ScannerSettings:
     wave_watch_enroll_cooldown_seconds: int = 900
     wave_watch_near_pct: float = 0.35
     wave_watch_tick_seconds: float = 15.0
+
+    # Oil monitor — новости Iran/US + дайджест Brent/WTI
+    oil_news_enabled: bool = False
+    oil_news_interval_seconds: int = 300
+    oil_news_max_per_poll: int = 3
+    oil_news_max_age_hours: float = 48.0
+    oil_digest_enabled: bool = True
+    oil_digest_interval_hours: float = 4.0
+    oil_chart_enabled: bool = True
+    oil_chart_display_hours: int = 168
+    oil_news_separate_messages: bool = True
+    oil_interval_minutes: int = 15
+    oil_include_brent: bool = True
+    oil_include_wti: bool = True
+    oil_russian_news: bool = True
+    oil_news_critical_only: bool = True
+    oil_news_critical_min_score: int = 3
+    oil_level_alerts_enabled: bool = True
+    oil_level_alert_cooldown_seconds: int = 1800
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = True
@@ -1045,6 +1064,25 @@ class ScannerSettings:
             ),
             wave_watch_near_pct=float(base.get("wave_watch_near_pct", 0.35)),
             wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
+            oil_news_enabled=bool(base.get("oil_news_enabled", False)),
+            oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 300)),
+            oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 3)),
+            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 48.0)),
+            oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
+            oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
+            oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
+            oil_chart_display_hours=int(base.get("oil_chart_display_hours", 168)),
+            oil_news_separate_messages=bool(base.get("oil_news_separate_messages", True)),
+            oil_interval_minutes=int(base.get("oil_interval_minutes", 15)),
+            oil_include_brent=bool(base.get("oil_include_brent", True)),
+            oil_include_wti=bool(base.get("oil_include_wti", True)),
+            oil_russian_news=bool(base.get("oil_russian_news", True)),
+            oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
+            oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 3)),
+            oil_level_alerts_enabled=bool(base.get("oil_level_alerts_enabled", True)),
+            oil_level_alert_cooldown_seconds=int(
+                base.get("oil_level_alert_cooldown_seconds", 1800)
+            ),
             analysis_enabled=bool(base.get("analysis_enabled", True)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
@@ -1461,6 +1499,25 @@ class SettingsManager:
                 merged["signal_chart_height_scale"] = float(
                     merged.get("signal_chart_height_scale", 1.0) or 1.0
                 )
+            if version < 54:
+                merged.setdefault("oil_interval_minutes", 15)
+                merged.setdefault("oil_include_brent", True)
+                merged.setdefault("oil_include_wti", True)
+                merged.setdefault("oil_russian_news", True)
+                merged.setdefault("oil_news_critical_only", True)
+                merged.setdefault("oil_news_critical_min_score", 3)
+                merged.setdefault("oil_level_alerts_enabled", True)
+                merged.setdefault("oil_level_alert_cooldown_seconds", 1800)
+            if version < 53:
+                merged.setdefault("oil_news_enabled", False)
+                merged.setdefault("oil_news_interval_seconds", 300)
+                merged.setdefault("oil_news_max_per_poll", 3)
+                merged.setdefault("oil_news_max_age_hours", 48.0)
+                merged.setdefault("oil_digest_enabled", True)
+                merged.setdefault("oil_digest_interval_hours", 4.0)
+                merged.setdefault("oil_chart_enabled", True)
+                merged.setdefault("oil_chart_display_hours", 168)
+                merged.setdefault("oil_news_separate_messages", True)
             if version < 52:
                 merged.setdefault("wave_min_importance", 72.0)
                 merged.setdefault("wave_min_confidence", 6)

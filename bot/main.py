@@ -16,6 +16,7 @@ from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
 from .anomaly_alerts import AnomalyBatcher
 from .wave_alerts import WaveBatcher, WaveScanEngine
+from .oil_monitor import OilMonitorEngine
 from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
 from .chart_screenshot import chart_capture_service
@@ -128,6 +129,13 @@ async def main() -> None:
     scanner.attach_anomaly_batcher(anomaly_batcher)
     telegram.scanner = scanner
     wave_engine = WaveScanEngine(settings, scanner, wave_batcher)
+    oil_monitor = OilMonitorEngine(
+        settings,
+        telegram.dispatch_oil_news,
+        on_digest=telegram.dispatch_oil_digest,
+        on_level_alert=telegram.dispatch_oil_level_alert,
+        on_extra_chart=telegram.dispatch_oil_extra_chart,
+    )
 
     def scan_interval() -> float:
         return float(settings.settings.scan_interval_seconds)
@@ -262,6 +270,7 @@ async def main() -> None:
     cvd_task: asyncio.Task | None = None
     anomaly_task: asyncio.Task | None = None
     wave_task: asyncio.Task | None = None
+    oil_task: asyncio.Task | None = None
     analysis_heartbeat_task: asyncio.Task | None = None
     try:
         await telegram.start()
@@ -302,6 +311,18 @@ async def main() -> None:
                 "ON" if getattr(s, "wave_require_fib_classic", True) else "OFF",
                 "ON" if getattr(s, "wave_chart_enabled", True) else "OFF",
             )
+        if getattr(s, "oil_news_enabled", False) and config.oil_news_chat_configured:
+            logger.info(
+                "Oil chat=%s · news every %ss · digest every %.0fh · chart=%s",
+                config.oil_news_chat_id,
+                int(getattr(s, "oil_news_interval_seconds", 300)),
+                float(getattr(s, "oil_digest_interval_hours", 4)),
+                "ON" if getattr(s, "oil_chart_enabled", True) else "OFF",
+            )
+        elif getattr(s, "oil_news_enabled", False):
+            logger.warning(
+                "oil_news_enabled=ON but TELEGRAM_OIL_NEWS_CHAT_ID not set",
+            )
         elif getattr(s, "wave_enabled", False):
             logger.warning(
                 "wave_enabled=ON but no chat id — set TELEGRAM_WAVE_CHAT_ID "
@@ -339,6 +360,7 @@ async def main() -> None:
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
         wave_task = asyncio.create_task(wave_engine.run_loop())
+        oil_task = asyncio.create_task(oil_monitor.run_loop())
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         analysis_heartbeat_task = asyncio.create_task(
             _analysis_heartbeat_loop(analysis_engine, liquidation_tracker),
@@ -390,6 +412,8 @@ async def main() -> None:
             anomaly_task.cancel()
         if wave_task is not None:
             wave_task.cancel()
+        if oil_task is not None:
+            oil_task.cancel()
         await asyncio.gather(
             *(
                 t
@@ -406,6 +430,7 @@ async def main() -> None:
                     cvd_task,
                     anomaly_task,
                     wave_task,
+                    oil_task,
                 )
                 if t is not None
             ),
