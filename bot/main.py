@@ -136,6 +136,8 @@ async def main() -> None:
         on_level_alert=telegram.dispatch_oil_level_alert,
         on_extra_chart=telegram.dispatch_oil_extra_chart,
         on_signal=telegram.dispatch_oil_micro_signal,
+        gemini_api_key=lambda: config.gemini_api_key,
+        gemini_model=lambda: config.gemini_model,
     )
     telegram.oil_monitor = oil_monitor
 

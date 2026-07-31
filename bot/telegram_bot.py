@@ -4280,9 +4280,12 @@ class TelegramBot:
             f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', True) else 'OFF'}</b> · "
             f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.25):g}%</b> · "
             f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.18):g}%</b>\n"
+            f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
+            f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', True) else 'OFF'}</b>"
+            f"{' · ключ OK' if self.config.gemini_configured else ' · нет GEMINI_API_KEY'}\n"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
-            "<i>Hormuz · EIA · OPEC · санкции · пробой · микро LONG/SHORT 0.2–0.3%</i>\n"
+            "<i>Hormuz · EIA · OPEC · прогноз bias · микро 0.2–0.3%</i>\n"
             "Ручной снимок: кнопка <b>📊 Сейчас</b> или <code>/oil</code>"
         ).replace(",", " ")
 
@@ -4337,6 +4340,16 @@ class TelegramBot:
                         getattr(s, "oil_micro_signals_enabled", True),
                     ),
                     callback_data="oil:micro",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Прогноз", getattr(s, "oil_forecast_enabled", True)),
+                    callback_data="oil:forecast",
+                ),
+                InlineKeyboardButton(
+                    self._mark("Gemini", getattr(s, "oil_forecast_gemini", True)),
+                    callback_data="oil:forecast_ai",
                 ),
             ],
             [
@@ -5196,6 +5209,14 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_micro_signals_enabled", True))
             self.settings_manager.update(oil_micro_signals_enabled=not cur)
             label = f"Сигналы → {'ON' if not cur else 'OFF'}"
+        elif action == "forecast":
+            cur = bool(getattr(s, "oil_forecast_enabled", True))
+            self.settings_manager.update(oil_forecast_enabled=not cur)
+            label = f"Прогноз → {'ON' if not cur else 'OFF'}"
+        elif action == "forecast_ai":
+            cur = bool(getattr(s, "oil_forecast_gemini", True))
+            self.settings_manager.update(oil_forecast_gemini=not cur)
+            label = f"Gemini → {'ON' if not cur else 'OFF'}"
         elif action == "brent":
             cur = bool(getattr(s, "oil_include_brent", True))
             self.settings_manager.update(oil_include_brent=not cur)

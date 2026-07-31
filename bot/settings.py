@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 62
+SETTINGS_VERSION = 63
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -542,6 +542,9 @@ class ScannerSettings:
     oil_news_critical_min_score: int = 4
     # Прямые RSS: OilPrice + EIA (+ Google-запросы прогнозов банков)
     oil_pro_feeds_enabled: bool = True
+    # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
+    oil_forecast_enabled: bool = True
+    oil_forecast_gemini: bool = True
     oil_level_alerts_enabled: bool = True
     oil_level_alert_cooldown_seconds: int = 1800
     oil_bounce_alerts_enabled: bool = True
@@ -1097,6 +1100,8 @@ class ScannerSettings:
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
+            oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
+            oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
             oil_level_alerts_enabled=bool(base.get("oil_level_alerts_enabled", True)),
             oil_level_alert_cooldown_seconds=int(
                 base.get("oil_level_alert_cooldown_seconds", 1800)
@@ -1663,6 +1668,9 @@ class SettingsManager:
                 )
             if version < 62:
                 merged.setdefault("oil_pro_feeds_enabled", True)
+            if version < 63:
+                merged.setdefault("oil_forecast_enabled", True)
+                merged.setdefault("oil_forecast_gemini", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

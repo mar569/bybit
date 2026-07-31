@@ -2119,6 +2119,7 @@ def format_oil_market_digest(
     ta_confidence_raw: int | None = None,
     ta_verdict_raw: str | None = None,
     scalp_call: OilScalpCall | None = None,
+    forecast: Any | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     lines = [
@@ -2126,6 +2127,12 @@ def format_oil_market_digest(
         f"<i>UKOUSD.s (Brent) · TF {interval_minutes}m · цена ≈ Yahoo BZ=F</i>",
         "",
     ]
+    if forecast is not None:
+        from .oil_forecast import format_oil_forecast_block
+
+        lines.append(format_oil_forecast_block(forecast))
+        lines.append("")
+
     if scalp_call is None and primary is not None and ta is not None:
         scalp_call = build_oil_scalp_call(
             primary,
@@ -2210,6 +2217,8 @@ class OilMonitorEngine:
         on_level_alert: Callable[[str], Awaitable[bool]] | None = None,
         on_extra_chart: Callable[[str, bytes], Awaitable[bool]] | None = None,
         on_signal: Callable[[str], Awaitable[bool]] | None = None,
+        gemini_api_key: Callable[[], str | None] | str | None = None,
+        gemini_model: Callable[[], str] | str | None = None,
     ) -> None:
         self.settings_manager = settings_manager
         self._on_news = on_news
@@ -2217,6 +2226,8 @@ class OilMonitorEngine:
         self._on_level_alert = on_level_alert
         self._on_extra_chart = on_extra_chart
         self._on_signal = on_signal or on_level_alert
+        self._gemini_api_key = gemini_api_key
+        self._gemini_model = gemini_model
         self._seen_titles: set[str] = set()
         self._last_digest_ts = 0.0
         self._level_watcher = OilLevelWatcher()
@@ -2225,6 +2236,19 @@ class OilMonitorEngine:
         self._active_bounce: OilBouncePlan | None = None
         self._last_micro_signal_ts: float = 0.0
         self._micro_signal_hour: list[float] = []
+
+    def _resolve_gemini_key(self) -> str | None:
+        key = self._gemini_api_key
+        if callable(key):
+            key = key()
+        return (key or None) if key else None
+
+    def _resolve_gemini_model(self) -> str:
+        model = self._gemini_model
+        if callable(model):
+            model = model()
+        return str(model or "gemini-3.6-flash")
+
     def _remember_news(self, items: list[OilNewsItem], *, cutoff: float) -> None:
         """Хранит важные новости за окно для сводки в дайджесте."""
         seen = {it.title.lower()[:120] for it in self._recent_news}
@@ -2569,6 +2593,45 @@ class OilMonitorEngine:
                 bundle.brent.stop = bounce.stop
                 bundle.brent.targets = bounce.targets
                 bundle.brent.reason = bounce.reason_ru[:200]
+
+            scalp = build_oil_scalp_call(
+                bundle.brent,
+                bundle.brent_ta,
+                news_bias=news_bias,
+                bounce_plan=bounce,
+                market_mood=bundle.market_mood,
+                interval_minutes=bundle.interval_minutes,
+                ta_confidence_raw=ta_conf_raw,
+                ta_verdict_raw=ta_verdict_raw,
+            )
+            forecast = None
+            if bool(getattr(settings, "oil_forecast_enabled", True)):
+                from .oil_forecast import (
+                    build_oil_forecast,
+                    enrich_oil_forecast_with_gemini,
+                )
+
+                forecast = build_oil_forecast(
+                    bundle.brent,
+                    bundle.brent_ta,
+                    news_bias=news_bias,
+                    news_items=self._recent_news,
+                    bounce_plan=bounce,
+                    scalp_call=scalp,
+                    market_mood=bundle.market_mood,
+                    interval_minutes=bundle.interval_minutes,
+                    ta_verdict_raw=ta_verdict_raw,
+                    ta_confidence_raw=ta_conf_raw,
+                )
+                if bool(getattr(settings, "oil_forecast_gemini", True)):
+                    forecast = await enrich_oil_forecast_with_gemini(
+                        forecast,
+                        bundle.brent,
+                        news_items=self._recent_news,
+                        api_key=self._resolve_gemini_key(),
+                        model=self._resolve_gemini_model(),
+                    )
+
             digest = format_oil_market_digest(
                 snaps,
                 ta=bundle.brent_ta,
@@ -2578,6 +2641,8 @@ class OilMonitorEngine:
                 bounce_plan=bounce,
                 ta_confidence_raw=ta_conf_raw,
                 ta_verdict_raw=ta_verdict_raw,
+                scalp_call=scalp,
+                forecast=forecast,
             )
             # пометка ручного/планового вызова в шапке уже есть в digest
             png: bytes | None = None
