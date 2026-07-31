@@ -2181,6 +2181,8 @@ def format_oil_market_digest(
     ta_verdict_raw: str | None = None,
     scalp_call: OilScalpCall | None = None,
     forecast: Any | None = None,
+    flow: Any | None = None,
+    bars: list[KlineBar] | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     lines = [
@@ -2192,6 +2194,19 @@ def format_oil_market_digest(
         from .oil_forecast import format_oil_forecast_block
 
         lines.append(format_oil_forecast_block(forecast))
+        lines.append("")
+
+    if flow is None and bars:
+        from .oil_flow import compute_oil_flow_proxy
+
+        # ~2–3ч окна: 5m→24, 15m→12, 60m→6
+        lb = 24 if interval_minutes <= 5 else 12 if interval_minutes <= 15 else 8
+        flow = compute_oil_flow_proxy(bars, lookback=lb)
+
+    if flow is not None:
+        from .oil_flow import format_oil_flow_block
+
+        lines.append(format_oil_flow_block(flow))
         lines.append("")
 
     if scalp_call is None and primary is not None and ta is not None:
@@ -2708,6 +2723,7 @@ class OilMonitorEngine:
                 ta_verdict_raw=ta_verdict_raw,
                 scalp_call=scalp,
                 forecast=forecast,
+                bars=bundle.brent_bars,
             )
             # пометка ручного/планового вызова в шапке уже есть в digest
             png: bytes | None = None
