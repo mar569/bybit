@@ -444,6 +444,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("scan", self.on_scan))
         self.application.add_handler(CommandHandler("chart", self.on_chart))
         self.application.add_handler(CommandHandler("oil", self.on_oil))
+        self.application.add_handler(CommandHandler("oilwhy", self.on_oil_why))
         self.application.add_handler(CommandHandler("ta", self.on_ta_help))
         self.application.add_handler(CommandHandler("ai_stop", self.on_ai_stop))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
@@ -2093,6 +2094,21 @@ class TelegramBot:
             return False
         return await self._send_to_chat(chat_id, message, None, is_priority=True)
 
+    def _oil_signal_keyboard(self) -> InlineKeyboardMarkup:
+        """Кнопки под oil setup / графиком в ручном TA."""
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("❓ Почему растёт/падает", callback_data="oil:why"),
+                InlineKeyboardButton("📊 Обновить /oil", callback_data="oil:now"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📈 Brent TV",
+                    url="https://www.tradingview.com/chart/?symbol=TVC%3AUKOIL",
+                ),
+            ],
+        ])
+
     async def dispatch_oil_setup(self, message: str, png: bytes | None = None) -> bool:
         """Сильный confluence UKOUSD → чат ручного TA (график + план)."""
         if self.application is None:
@@ -2108,11 +2124,12 @@ class TelegramBot:
         chat_id = self._oil_chart_chat_id()
         if chat_id is None:
             return False
+        keyboard = self._oil_signal_keyboard()
         if png:
             return await self._send_chart(
-                chat_id, png, message, is_priority=True, keyboard=None,
+                chat_id, png, message, is_priority=True, keyboard=keyboard,
             )
-        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+        return await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
 
     async def dispatch_oil_extra_chart(self, message: str, png: bytes) -> bool:
         if self.application is None:
@@ -3869,6 +3886,35 @@ class TelegramBot:
             return
         await self._send_oil_snapshot_now(update.message)
 
+    async def on_oil_why(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Честно: на что влияет рост/падение UKOUSD прямо сейчас."""
+        if not self._is_admin(update):
+            if update.message:
+                await update.message.reply_text("Нет доступа.")
+            return
+        if update.message is None:
+            return
+        if self.oil_monitor is None:
+            await update.message.reply_text("Нефтяной монитор ещё не подключен.")
+            return
+        wait = await update.message.reply_text(
+            "⏳ Смотрю цену, новости и поток…",
+            parse_mode=ParseMode.HTML,
+        )
+        ok, text = await self.oil_monitor.explain_why_now()
+        if not ok:
+            try:
+                await wait.edit_text(f"⚠️ Не смог объяснить: {text}")
+            except Exception:
+                await update.message.reply_text(f"⚠️ Не смог объяснить: {text}")
+            return
+        try:
+            await wait.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            )
+
     async def on_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -4083,6 +4129,7 @@ class TelegramBot:
             "/test — тестовые сигналы LONG + SHORT\n"
             "/chart SYMBOL [long|short] — TA-график с уровнями и планом\n"
             "/oil — свежий разбор нефти UKOUSD/USOIL + графики (сейчас)\n"
+            "/oilwhy — почему цена растёт/падает (факты: новости+поток)\n"
             "/ta — справка по ручному TA-чату\n"
             "/ai_stop — закрыть AI-сессию (кнопка 🤖 AI на сигнале)\n"
             "📐 <b>Ручной анализ</b> — скрин + тикер → разбор в отдельный чат\n"
@@ -4310,7 +4357,8 @@ class TelegramBot:
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
             "<i>Hormuz · EIA · OPEC · прогноз · confluence setup · микро 0.2–0.3%</i>\n"
-            "Ручной снимок: кнопка <b>📊 Сейчас</b> или <code>/oil</code>"
+            "Ручной снимок: <b>📊 Сейчас</b> / <code>/oil</code> · "
+            "почему цена: <b>❓ Почему</b> / <code>/oilwhy</code>"
         ).replace(",", " ")
 
     def _oil_keyboard(self) -> InlineKeyboardMarkup:
@@ -4394,6 +4442,7 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
+                InlineKeyboardButton("❓ Почему", callback_data="oil:why"),
             ],
             [
                 InlineKeyboardButton("◀️ Настройки", callback_data="refresh_settings"),
@@ -4881,6 +4930,14 @@ class TelegramBot:
             )
             return
 
+        # Кнопки под oil-setup в ручном TA (не только админ-панель)
+        if payload in {"oil:why", "oil:now"}:
+            if not (self._is_admin(update) or self._can_use_manual_ta(update)):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            await self._handle_oil_callback(query, payload)
+            return
+
         if not self._is_admin(update):
             await query.answer("Нет доступа.", show_alert=True)
             return
@@ -5208,6 +5265,29 @@ class TelegramBot:
         if action == "now":
             await query.answer("Собираю нефть…", show_alert=False)
             await self._send_oil_snapshot_now(query.message)
+            return True
+
+        if action == "why":
+            await query.answer("Смотрю драйверы…", show_alert=False)
+            if self.oil_monitor is None:
+                await query.message.reply_text("Нефтяной монитор не подключен.")
+                return True
+            wait = await query.message.reply_text(
+                "⏳ Почему цена: собираю факты…",
+                parse_mode=ParseMode.HTML,
+            )
+            ok, text = await self.oil_monitor.explain_why_now()
+            try:
+                await wait.edit_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                await query.message.reply_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                )
             return True
 
         if action == "on":

@@ -2616,6 +2616,83 @@ class OilMonitorEngine:
             return False, "не удалось собрать/отправить (проверьте Bybit/чат)"
         return True, f"отправлено ({n})"
 
+    async def explain_why_now(self) -> tuple[bool, str]:
+        """Честный разбор: почему цена растёт/падает прямо сейчас."""
+        settings = self.settings_manager.settings
+        interval_min = int(getattr(settings, "oil_interval_minutes", 15))
+        try:
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=interval_min,
+                include_brent=True,
+                include_wti=False,
+            )
+            if not bundle:
+                return False, "не удалось собрать свечи UKOUSD"
+
+            # Подтянуть свежие новости в окно (не обязательно слать в чат)
+            max_age_h = float(getattr(settings, "oil_news_max_age_hours", 18.0))
+            cutoff = time.time() - max_age_h * 3600.0
+            try:
+                fresh = await fetch_oil_news(
+                    max_items=16,
+                    include_russian=bool(getattr(settings, "oil_russian_news", True)),
+                    critical_only=False,
+                    critical_min_score=2,
+                    max_age_hours=max_age_h,
+                    include_pro_feeds=bool(getattr(settings, "oil_pro_feeds_enabled", True)),
+                )
+                self._remember_news(fresh, cutoff=cutoff)
+            except Exception:
+                logger.debug("Oil why news refresh failed", exc_info=True)
+
+            news_bias = summarize_oil_news_bias(
+                self._recent_news,
+                ta_verdict=bundle.brent.verdict,
+                ta_confidence=int(bundle.brent.confidence or 0),
+            )
+            forecast = None
+            if bool(getattr(settings, "oil_forecast_enabled", True)):
+                from .oil_forecast import build_oil_forecast
+
+                scalp = build_oil_scalp_call(
+                    bundle.brent,
+                    bundle.brent_ta,
+                    news_bias=news_bias,
+                    market_mood=bundle.market_mood,
+                    interval_minutes=bundle.interval_minutes,
+                )
+                forecast = build_oil_forecast(
+                    bundle.brent,
+                    bundle.brent_ta,
+                    news_bias=news_bias,
+                    news_items=self._recent_news,
+                    scalp_call=scalp,
+                    market_mood=bundle.market_mood,
+                    interval_minutes=bundle.interval_minutes,
+                )
+
+            from .oil_flow import compute_oil_flow_proxy
+            from .oil_why import build_oil_why_report, format_oil_why_report
+
+            flow = compute_oil_flow_proxy(
+                bundle.brent_bars,
+                lookback=12 if interval_min <= 15 else 8,
+            )
+            report = build_oil_why_report(
+                bundle.brent_bars,
+                news_items=self._recent_news,
+                news_bias=news_bias,
+                forecast=forecast,
+                flow=flow,
+                interval_minutes=bundle.interval_minutes,
+            )
+            if report is None:
+                return False, "мало данных для объяснения"
+            return True, format_oil_why_report(report)
+        except Exception as exc:
+            logger.exception("Oil why explain failed")
+            return False, f"ошибка: {exc}"
+
     async def _send_digest_once(
         self,
         settings: Any,
