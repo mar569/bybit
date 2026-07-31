@@ -126,6 +126,38 @@ def test_build_forecast_wait_on_mixed():
     assert "Прогноз" in text
 
 
+def test_build_forecast_long_with_missing_breakout():
+    """Regression: fmt_price(None) when R есть, BO=None."""
+    snap = _snap(verdict="LONG", confidence=6, resistance=88.0, breakout=None)
+    ta = TAAnalysisResult(verdict="LONG", verdict_confidence=6)
+    bias = OilNewsBias(
+        bias="bullish",
+        weighted_score=3.0,
+        summary_ru="up",
+        how_to_use_ru="long",
+    )
+    items = [
+        OilNewsItem(
+            title="Iran attack closes Strait of Hormuz oil tanker",
+            url="https://x",
+            source="Reuters",
+            published_ts=1.0,
+            impact="bullish",
+            theme="iran_geo",
+        ),
+    ]
+    fc = build_oil_forecast(
+        snap,
+        ta,
+        news_bias=bias,
+        news_items=items,
+        ta_verdict_raw="LONG",
+        ta_confidence_raw=6,
+    )
+    assert fc.bias == "LONG"
+    assert "цели" in fc.entry_hint_ru
+
+
 def test_digest_includes_forecast_block():
     snap = _snap(verdict="SHORT", confidence=7)
     fc = OilForecast(

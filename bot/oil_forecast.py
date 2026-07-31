@@ -9,6 +9,18 @@ from .ta_analysis import TAAnalysisResult, fmt_price
 
 logger = logging.getLogger(__name__)
 
+
+def _lvl(price: float | None) -> str:
+    """fmt_price, безопасный к None."""
+    if price is None:
+        return "—"
+    return fmt_price(float(price))
+
+
+def _lvls(*prices: float | None, sep: str = " / ") -> str:
+    parts = [_lvl(p) for p in prices if p is not None]
+    return sep.join(parts) if parts else "—"
+
 # Сценарии рынка нефти (фундамент → bias)
 _SCENARIO_LABEL = {
     "deal_tape": "Deal-tape (Ормуз/перемирие → снятие premium)",
@@ -192,24 +204,36 @@ def build_oil_forecast(
         base = (
             f"База: давление вниз с ${px:.2f}. "
             f"Искать продажи от сопротивления"
-            + (f" {fmt_price(r)}" if r else "")
+            + (f" {_lvl(r)}" if r else "")
             + (f" / отката к R" if r else "")
             + ". Geo-premium сжимается — не ловить каждое дно."
         )
         alt = (
             "Альт: срыв deal / блок Ормуза → разворот в LONG "
-            + (f"выше {fmt_price(bo)}" if bo else "на срыве переговоров")
+            + (f"выше {_lvl(bo)}" if bo else "на срыве переговоров")
             + "."
         )
         inv = (
             "Отмена SHORT: "
-            + (f"закрытие {interval_minutes}m выше {fmt_price(bo or r)}" if (bo or r) else "сильный geo-spike без отката")
+            + (
+                f"закрытие {interval_minutes}m выше {_lvl(bo or r)}"
+                if (bo or r)
+                else "сильный geo-spike без отката"
+            )
             + "."
         )
         entry = (
             "План: short от R / после failed breakout; "
-            + (f"стоп над {fmt_price(bo or (r * 1.004 if r else px * 1.005))}; " if (bo or r) else "")
-            + (f"цели {fmt_price(s)} / {fmt_price(bd)}" if s or bd else "цели — ближайшие S / breakdown")
+            + (
+                f"стоп над {_lvl(bo or (r * 1.004 if r else px * 1.005))}; "
+                if (bo or r)
+                else ""
+            )
+            + (
+                f"цели {_lvls(s, bd)}"
+                if (s or bd)
+                else "цели — ближайшие S / breakdown"
+            )
             + "."
         )
     elif bias == "LONG":
@@ -217,23 +241,35 @@ def build_oil_forecast(
         base = (
             f"База: давление вверх с ${px:.2f}. "
             f"Покупки от поддержки"
-            + (f" {fmt_price(s)}" if s else "")
+            + (f" {_lvl(s)}" if s else "")
             + " или после подтверждённого пробоя↑."
         )
         alt = (
             "Альт: deal-tape / сильный build запасов → откат "
-            + (f"к {fmt_price(s or bd)}" if (s or bd) else "к поддержке")
+            + (f"к {_lvl(s or bd)}" if (s or bd) else "к поддержке")
             + " или WAIT."
         )
         inv = (
             "Отмена LONG: "
-            + (f"закрытие {interval_minutes}m ниже {fmt_price(bd or s)}" if (bd or s) else "слом структуры вниз")
+            + (
+                f"закрытие {interval_minutes}m ниже {_lvl(bd or s)}"
+                if (bd or s)
+                else "слом структуры вниз"
+            )
             + "."
         )
         entry = (
             "План: long от S / close выше breakout; "
-            + (f"стоп под {fmt_price(bd or (s * 0.996 if s else px * 0.995))}; " if (bd or s) else "")
-            + (f"цели {fmt_price(r)} / {fmt_price(bo)}" if r or bo else "цели — R / breakout")
+            + (
+                f"стоп под {_lvl(bd or (s * 0.996 if s else px * 0.995))}; "
+                if (bd or s)
+                else ""
+            )
+            + (
+                f"цели {_lvls(r, bo)}"
+                if (r or bo)
+                else "цели — R / breakout"
+            )
             + "."
         )
     else:
@@ -248,8 +284,8 @@ def build_oil_forecast(
         )
         inv = "Ждать clarifier: танкеры Ормуз, EIA, тон переговоров."
         entry = (
-            f"План: без касания S/R или пробоя — снаружи. "
-            + (f"Range {fmt_price(s)}–{fmt_price(r)}." if s and r else "")
+            "План: без касания S/R или пробоя — снаружи. "
+            + (f"Range {_lvl(s)}–{_lvl(r)}." if s and r else "")
         )
 
     if catalyst:
