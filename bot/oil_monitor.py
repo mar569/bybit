@@ -66,7 +66,15 @@ _FLOW_KEYWORDS = frozenset({
 _OPEC_KEYWORDS = frozenset({
     "opec", "опек", "opec+", "saudi", "саудов", "russia oil", "росси",
 })
-# Прогнозы банков / IEA / EIA STEO / именованные аналитики
+# Именованные про-аналитики: ловим в Google News + boost в Новостник
+PRO_OIL_ANALYSTS: tuple[tuple[str, str, int], ...] = (
+    # (match substring, display name, score boost)
+    ("javier blas", "Javier Blas", 5),
+    ("john kemp", "John Kemp", 4),
+    ("helima croft", "Helima Croft", 3),
+    ("amrita sen", "Amrita Sen", 3),
+)
+
 _ANALYST_KEYWORDS = frozenset({
     "forecast", "price outlook", "oil outlook", "market outlook", "brent outlook",
     "steo", "price target", "price view", "price to",
@@ -74,7 +82,8 @@ _ANALYST_KEYWORDS = frozenset({
     "expects brent", "expects oil", "predicts", "projection",
     "oil market report", "short-term energy", "iea ", " iea",
     "barclays", "goldman", "jpmorgan", "jp morgan", "morgan stanley",
-    "john kemp", "javier blas", "analyst", "аналитик",
+    "john kemp", "javier blas", "helima croft", "amrita sen",
+    "analyst", "аналитик",
     "прогноз", "прогноз цен", "upside risk", "downside risk",
     "war premium", "cuts forecast", "raises forecast", "slashes forecast",
     "to average", "will average",
@@ -142,8 +151,10 @@ _CRITICAL_TERMS: dict[str, int] = {
     "goldman": 3,
     "iea": 4,
     "прогноз": 3,
-    "john kemp": 3,
-    "javier blas": 3,
+    "john kemp": 4,
+    "javier blas": 5,
+    "helima croft": 3,
+    "amrita sen": 3,
     "war premium": 3,
 }
 
@@ -169,6 +180,10 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "site:reuters.com Brent crude oil OR Hormuz when:1d",
     "site:oilprice.com Brent OR WTI OR OPEC when:1d",
     "Brent crude price forecast OR outlook Barclays OR Goldman OR EIA STEO when:2d",
+    # Топ-аналитики (Blas / Kemp) — приоритет для Новостника
+    "Javier Blas oil OR crude OR Hormuz OR Brent when:2d",
+    "site:bloomberg.com Javier Blas oil OR energy OR Hormuz when:2d",
+    "John Kemp oil OR crude OR inventories OR Brent when:2d",
     "John Kemp Reuters oil when:2d",
     "war premium oil unwind OR Hormuz deal oil prices when:1d",
 )
@@ -202,9 +217,22 @@ class OilNewsItem:
     theme: str = ""  # iran_geo | trump_us | inventory | opec | flow_deal | analyst
 
 
-def detect_oil_news_theme(title: str) -> str:
+def match_pro_oil_analyst(title: str, source: str = "") -> tuple[str, int] | None:
+    """Если в заголовке/источнике топ-аналитик → (display_name, boost)."""
+    blob = f"{title} {source}".lower()
+    best: tuple[str, int] | None = None
+    for needle, display, boost in PRO_OIL_ANALYSTS:
+        if needle in blob:
+            if best is None or boost > best[1]:
+                best = (display, boost)
+    return best
+
+
+def detect_oil_news_theme(title: str, *, source: str = "") -> str:
     """Главная тема заголовка — без темы приоритета новость не шлём."""
     low = title.lower()
+    src = (source or "").lower()
+    pro = match_pro_oil_analyst(title, source)
     has_oil = any(k in low for k in _OIL_KEYWORDS)
     if not has_oil:
         # Иран/Ормуз без слова oil всё равно нефтяная геополитика
@@ -214,6 +242,15 @@ def detect_oil_news_theme(title: str) -> str:
             has_oil = True
         # Прогнозы банков без «oil» в title, но с Brent/IEA/STEO
         if any(k in low for k in ("brent", "wti", "steo", "iea", "опек", "opec")):
+            has_oil = True
+        # Колонка Blas/Kemp: даже без слова oil в title
+        if pro is not None and any(
+            k in low or k in src
+            for k in (
+                "oil", "crude", "brent", "energy", "hormuz", "опек", "opec",
+                "bloomberg", "reuters", "commodity", "commodit",
+            )
+        ):
             has_oil = True
     if not has_oil:
         return ""
@@ -226,8 +263,8 @@ def detect_oil_news_theme(title: str) -> str:
         and any(k in low for k in ("sanction", "санкц", "iran", "иран", "spr", "eia"))
     ):
         return "trump_us"
-    # STEO / bank outlook — раньше сырых inventory, чтобы «EIA STEO forecast» шёл как аналитика
-    if any(k in low for k in _ANALYST_KEYWORDS):
+    # Именованный аналитик / STEO / bank outlook
+    if pro is not None or any(k in low for k in _ANALYST_KEYWORDS):
         return "analyst"
     if any(k in low for k in ("eia", "inventory", "inventories", "запас", "spr", "stockpile", "api ")):
         return "inventory"
@@ -262,30 +299,38 @@ def _is_relevant(title: str) -> bool:
     return detect_oil_news_theme(title) in _PRIORITY_THEMES
 
 
-def news_critical_score(title: str) -> int:
+def news_critical_score(title: str, *, source: str = "") -> int:
     low = title.lower()
     score = 0
     for term, weight in _CRITICAL_TERMS.items():
         if term in low:
             score += weight
-    theme = detect_oil_news_theme(title)
+    theme = detect_oil_news_theme(title, source=source)
     # Бонус за приоритетную тему
     if theme == "iran_geo":
         score += 2
     elif theme in {"trump_us", "inventory", "opec", "analyst"}:
         score += 1
+    pro = match_pro_oil_analyst(title, source)
+    if pro is not None:
+        # Именованный топ-аналитик — почти всегда пушим в чат
+        score += pro[1]
     return score
 
 
 def is_critical_oil_news(item: OilNewsItem, min_score: int = 4) -> bool:
-    theme = item.theme or detect_oil_news_theme(item.title)
+    theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
     if theme not in _PRIORITY_THEMES:
         return False
-    # Аналитика банков/IEA: чуть мягче порог (прогноз полезен и без Hormuz)
+    score = news_critical_score(item.title, source=item.source)
+    # Аналитика банков/IEA: чуть мягче порог
     need = min_score
     if theme == "analyst":
         need = max(3, min_score - 1)
-    return news_critical_score(item.title) >= need
+    # Blas / Kemp — ещё мягче (их колонки важны даже без Hormuz в title)
+    if match_pro_oil_analyst(item.title, item.source) is not None:
+        need = max(2, min_score - 2)
+    return score >= need
 
 
 def theme_label_ru(theme: str) -> str:
@@ -532,6 +577,7 @@ def _news_story_key(title: str) -> str:
         "hormuz", "ормуз", "iran", "иран", "sanction", "санкц", "trump", "трамп",
         "eia", "opec", "опек", "spr", "inventory", "запас", "tanker", "танкер",
         "quota", "квот", "strike", "атак", "forecast", "прогноз", "steo", "barclays",
+        "blas", "kemp",
     ):
         if t in low:
             tags.append(t)
@@ -541,8 +587,8 @@ def _news_story_key(title: str) -> str:
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
-    """Вес новости: критичность (Hormuz/EIA/OPEC) сильнее обычного заголовка."""
-    score = float(news_critical_score(item.title))
+    """Вес новости: критичность (Hormuz/EIA/OPEC/Blas) сильнее обычного заголовка."""
+    score = float(news_critical_score(item.title, source=item.source))
     return max(1.0, min(5.0, score / 3.0))
 
 
@@ -565,7 +611,9 @@ def summarize_oil_news_bias(
     for it in items:
         key = _news_story_key(it.title)
         prev = best_by_story.get(key)
-        if prev is None or news_critical_score(it.title) > news_critical_score(prev.title):
+        if prev is None or news_critical_score(
+            it.title, source=it.source
+        ) > news_critical_score(prev.title, source=prev.source):
             best_by_story[key] = it
     unique = list(best_by_story.values())
 
@@ -606,7 +654,7 @@ def summarize_oil_news_bias(
     if want:
         ranked = sorted(
             (it for it in unique if it.impact == want),
-            key=lambda x: news_critical_score(x.title),
+            key=lambda x: news_critical_score(x.title, source=x.source),
             reverse=True,
         )
         if ranked:
@@ -1149,7 +1197,9 @@ def _pick_news_catalyst(items: list[OilNewsItem], bias: str) -> str:
     for it in items:
         if it.impact != want:
             continue
-        scored.append((news_impact_weight(it) + news_critical_score(it.title) * 0.1, it))
+        scored.append(
+            (news_impact_weight(it) + news_critical_score(it.title, source=it.source) * 0.1, it)
+        )
     if not scored:
         return ""
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -1365,11 +1415,11 @@ def _fetch_google_news_rss(
         if title_el is None or not title_el.text:
             continue
         title = _clean_title(title_el.text)
-        theme = detect_oil_news_theme(title)
-        if theme not in _PRIORITY_THEMES:
-            continue
         link = (link_el.text or "").strip()
         source = (src_el.text or "news").strip() if src_el is not None else "news"
+        theme = detect_oil_news_theme(title, source=source)
+        if theme not in _PRIORITY_THEMES:
+            continue
         pub_ts = resolve_oil_news_published_ts(
             rss_pub=pub_el.text if pub_el is not None else "",
             url=link,
@@ -1528,7 +1578,7 @@ async def fetch_oil_news(
 
     # Сначала свежесть, потом критичность
     merged.sort(
-        key=lambda x: (x.published_ts, news_critical_score(x.title)),
+        key=lambda x: (x.published_ts, news_critical_score(x.title, source=x.source)),
         reverse=True,
     )
     return merged[:max_items]
@@ -1945,11 +1995,17 @@ def format_single_oil_news(item: OilNewsItem) -> str:
         "neutral": "⚪ контекст / следить",
     }.get(item.impact, "⚪ контекст")
     lang_mark = "🇷🇺" if item.lang == "ru" else "🇬🇧"
-    theme = item.theme or detect_oil_news_theme(item.title)
+    theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
     theme_ru = theme_label_ru(theme)
-    score = news_critical_score(item.title)
-    is_analyst = theme == "analyst"
-    header = "🛢 <b>Нефть · аналитика</b>" if is_analyst else "🛢 <b>Нефть · важное</b>"
+    score = news_critical_score(item.title, source=item.source)
+    pro = match_pro_oil_analyst(item.title, item.source)
+    is_analyst = theme == "analyst" or pro is not None
+    if pro is not None:
+        header = f"🛢 <b>Нефть · ⭐ {pro[0]}</b>"
+    elif is_analyst:
+        header = "🛢 <b>Нефть · аналитика</b>"
+    else:
+        header = "🛢 <b>Нефть · важное</b>"
     lines = [
         header,
         f"<i>{theme_ru} · вес {score}</i>",
@@ -1961,7 +2017,12 @@ def format_single_oil_news(item: OilNewsItem) -> str:
         lines.append(f"<b>{title}</b>")
     lines.append("")
     lines.append(f"{impact_ru}")
-    if is_analyst:
+    if pro is not None:
+        lines.append(
+            f"<i>Топ-аналитик ({pro[0]}) — приоритет для bias; "
+            "не сигнал входа, сверяй с графиком UKOUSD.</i>"
+        )
+    elif is_analyst:
         lines.append("<i>Прогноз/мнение — не сигнал входа; сверяй с графиком UKOUSD.</i>")
     lines.append(f"<i>{lang_mark} {item.source} · {_age_label(item.published_ts)}</i>")
     if item.url:
@@ -2217,6 +2278,7 @@ class OilMonitorEngine:
         on_level_alert: Callable[[str], Awaitable[bool]] | None = None,
         on_extra_chart: Callable[[str, bytes], Awaitable[bool]] | None = None,
         on_signal: Callable[[str], Awaitable[bool]] | None = None,
+        on_setup: Callable[[str, bytes | None], Awaitable[bool]] | None = None,
         gemini_api_key: Callable[[], str | None] | str | None = None,
         gemini_model: Callable[[], str] | str | None = None,
     ) -> None:
@@ -2226,6 +2288,7 @@ class OilMonitorEngine:
         self._on_level_alert = on_level_alert
         self._on_extra_chart = on_extra_chart
         self._on_signal = on_signal or on_level_alert
+        self._on_setup = on_setup
         self._gemini_api_key = gemini_api_key
         self._gemini_model = gemini_model
         self._seen_titles: set[str] = set()
@@ -2236,6 +2299,8 @@ class OilMonitorEngine:
         self._active_bounce: OilBouncePlan | None = None
         self._last_micro_signal_ts: float = 0.0
         self._micro_signal_hour: list[float] = []
+        self._last_setup_ts: float = 0.0
+        self._last_setup_side: str = ""
 
     def _resolve_gemini_key(self) -> str | None:
         key = self._gemini_api_key
@@ -2669,6 +2734,17 @@ class OilMonitorEngine:
             if update_last_ts:
                 self._last_digest_ts = time.time()
             sent = 1
+            sent += await self._maybe_dispatch_confluence_setup(
+                settings,
+                bundle=bundle,
+                forecast=forecast,
+                news_bias=news_bias,
+                scalp=scalp,
+                bounce=bounce,
+                ta_verdict_raw=ta_verdict_raw,
+                ta_conf_raw=ta_conf_raw,
+                png=png,
+            )
             if (
                 chart_enabled
                 and bundle.wti_bars
@@ -2719,6 +2795,108 @@ class OilMonitorEngine:
         except Exception:
             logger.exception("Oil digest compose failed")
             return 0
+
+    async def _maybe_dispatch_confluence_setup(
+        self,
+        settings: Any,
+        *,
+        bundle: OilAnalysisBundle,
+        forecast: Any | None,
+        news_bias: OilNewsBias,
+        scalp: OilScalpCall,
+        bounce: OilBouncePlan | None,
+        ta_verdict_raw: str,
+        ta_conf_raw: int,
+        png: bytes | None,
+    ) -> int:
+        """Сильный confluence → отдельное сообщение в ручной TA."""
+        if self._on_setup is None:
+            return 0
+        if not bool(getattr(settings, "oil_setup_enabled", True)):
+            return 0
+        min_q = int(getattr(settings, "oil_setup_min_quality", 7))
+        near_pct = float(getattr(settings, "oil_setup_near_pct", 0.35))
+        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 3600))
+        now = time.time()
+        if now - self._last_setup_ts < cooldown:
+            return 0
+
+        from .oil_confluence import (
+            build_oil_confluence_setup,
+            enrich_setup_with_gemini,
+            format_oil_confluence_setup,
+            setup_passes_gate,
+        )
+
+        setup = build_oil_confluence_setup(
+            bundle.brent,
+            bundle.brent_ta,
+            forecast=forecast,
+            news_bias=news_bias,
+            scalp_call=scalp,
+            bounce_plan=bounce,
+            news_items=self._recent_news,
+            market_mood=bundle.market_mood,
+            interval_minutes=bundle.interval_minutes,
+            ta_verdict_raw=ta_verdict_raw,
+            ta_confidence_raw=ta_conf_raw,
+            min_quality=min_q,
+            near_pct=near_pct,
+        )
+        if not setup_passes_gate(setup, min_quality=min_q):
+            return 0
+        assert setup is not None
+        # Не спамить ту же сторону подряд в пределах cooldown (уже проверен) —
+        # доп. защита: тот же side < 15 мин даже если cooldown снижен
+        if setup.side == self._last_setup_side and now - self._last_setup_ts < 900:
+            return 0
+
+        if bool(getattr(settings, "oil_forecast_gemini", True)):
+            setup = await enrich_setup_with_gemini(
+                setup,
+                bundle.brent,
+                news_items=self._recent_news,
+                api_key=self._resolve_gemini_key(),
+                model=self._resolve_gemini_model(),
+            )
+
+        msg = format_oil_confluence_setup(setup)
+        chart_png = png
+        if chart_png is None and bool(getattr(settings, "oil_chart_enabled", True)):
+            try:
+                from .chart_renderer import render_oil_chart
+
+                display_h = int(getattr(settings, "oil_chart_display_hours", 18) or 18)
+                height_scale = float(
+                    getattr(settings, "oil_chart_height_scale", 1.45) or 1.45
+                )
+                chart_png = render_oil_chart(
+                    bundle.brent_bars,
+                    bundle.brent_ta,
+                    symbol_label=OIL_BRENT_LABEL,
+                    interval_minutes=bundle.interval_minutes,
+                    display_hours=display_h,
+                    height_scale=max(1.35, height_scale),
+                )
+            except Exception:
+                logger.exception("Oil setup chart render failed")
+                chart_png = None
+        try:
+            ok = await self._on_setup(msg, chart_png)
+        except Exception:
+            logger.exception("Oil confluence setup dispatch failed")
+            return 0
+        if not ok:
+            return 0
+        self._last_setup_ts = now
+        self._last_setup_side = setup.side
+        logger.info(
+            "Oil confluence setup %s quality=%d @ %.2f",
+            setup.side,
+            setup.quality,
+            setup.price,
+        )
+        return 1
 
     async def run_loop(self, interval: float | None = None) -> None:
         while True:

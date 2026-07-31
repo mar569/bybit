@@ -2093,6 +2093,27 @@ class TelegramBot:
             return False
         return await self._send_to_chat(chat_id, message, None, is_priority=True)
 
+    async def dispatch_oil_setup(self, message: str, png: bytes | None = None) -> bool:
+        """Сильный confluence UKOUSD → чат ручного TA (график + план)."""
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        force = bool(self._oil_force_dispatch)
+        if not force and self._bot_notifications_blocked():
+            return False
+        if not force and not getattr(settings, "oil_news_enabled", False):
+            return False
+        if not force and not getattr(settings, "oil_setup_enabled", True):
+            return False
+        chat_id = self._oil_chart_chat_id()
+        if chat_id is None:
+            return False
+        if png:
+            return await self._send_chart(
+                chat_id, png, message, is_priority=True, keyboard=None,
+            )
+        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+
     async def dispatch_oil_extra_chart(self, message: str, png: bytes) -> bool:
         if self.application is None:
             return False
@@ -4283,9 +4304,12 @@ class TelegramBot:
             f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
             f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', True) else 'OFF'}</b>"
             f"{' · ключ OK' if self.config.gemini_configured else ' · нет GEMINI_API_KEY'}\n"
+            f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
+            f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 7)}</b> · "
+            f"CD <b>{getattr(s, 'oil_setup_cooldown_seconds', 3600)}с</b>\n"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
-            "<i>Hormuz · EIA · OPEC · прогноз bias · микро 0.2–0.3%</i>\n"
+            "<i>Hormuz · EIA · OPEC · прогноз · confluence setup · микро 0.2–0.3%</i>\n"
             "Ручной снимок: кнопка <b>📊 Сейчас</b> или <code>/oil</code>"
         ).replace(",", " ")
 
@@ -4350,6 +4374,12 @@ class TelegramBot:
                 InlineKeyboardButton(
                     self._mark("Gemini", getattr(s, "oil_forecast_gemini", True)),
                     callback_data="oil:forecast_ai",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    self._mark("Setup→TA", getattr(s, "oil_setup_enabled", True)),
+                    callback_data="oil:setup",
                 ),
             ],
             [
@@ -5217,6 +5247,10 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_forecast_gemini", True))
             self.settings_manager.update(oil_forecast_gemini=not cur)
             label = f"Gemini → {'ON' if not cur else 'OFF'}"
+        elif action == "setup":
+            cur = bool(getattr(s, "oil_setup_enabled", True))
+            self.settings_manager.update(oil_setup_enabled=not cur)
+            label = f"Setup→TA → {'ON' if not cur else 'OFF'}"
         elif action == "brent":
             cur = bool(getattr(s, "oil_include_brent", True))
             self.settings_manager.update(oil_include_brent=not cur)

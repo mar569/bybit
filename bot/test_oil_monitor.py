@@ -39,6 +39,38 @@ def test_is_relevant_rejects_random():
     assert not _is_relevant("Brent crude weekly technical outlook chart")
 
 
+def test_pro_analyst_blas_kemp_priority():
+    from bot.oil_monitor import (
+        detect_oil_news_theme,
+        is_critical_oil_news,
+        match_pro_oil_analyst,
+        news_critical_score,
+    )
+
+    assert match_pro_oil_analyst("Javier Blas on Hormuz oil flood")[0] == "Javier Blas"
+    assert match_pro_oil_analyst("Oil inventories", "John Kemp")[0] == "John Kemp"
+    assert detect_oil_news_theme(
+        "Brace for an oil flood when Hormuz reopens — Javier Blas"
+    ) in {"iran_geo", "analyst"}
+    assert detect_oil_news_theme(
+        "John Kemp: crude inventories and fund positioning",
+        source="Reuters",
+    ) == "analyst"
+    item = OilNewsItem(
+        title="Javier Blas: energy markets after Hormuz talks",
+        url="https://bloomberg.com/x",
+        source="Bloomberg",
+        published_ts=1_700_000_000.0,
+        impact="bearish",
+        theme="analyst",
+    )
+    assert news_critical_score(item.title, source=item.source) >= 5
+    assert is_critical_oil_news(item, min_score=4)
+    text = format_single_oil_news(item)
+    assert "Javier Blas" in text
+    assert "⭐" in text
+
+
 def test_detect_themes_priority():
     from bot.oil_monitor import detect_oil_news_theme
     assert detect_oil_news_theme("Iran oil Trump sanctions") == "iran_geo"
