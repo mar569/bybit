@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 61
+SETTINGS_VERSION = 62
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -540,6 +540,8 @@ class ScannerSettings:
     oil_russian_news: bool = True
     oil_news_critical_only: bool = True
     oil_news_critical_min_score: int = 4
+    # Прямые RSS: OilPrice + EIA (+ Google-запросы прогнозов банков)
+    oil_pro_feeds_enabled: bool = True
     oil_level_alerts_enabled: bool = True
     oil_level_alert_cooldown_seconds: int = 1800
     oil_bounce_alerts_enabled: bool = True
@@ -1094,6 +1096,7 @@ class ScannerSettings:
             oil_russian_news=bool(base.get("oil_russian_news", True)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
+            oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_level_alerts_enabled=bool(base.get("oil_level_alerts_enabled", True)),
             oil_level_alert_cooldown_seconds=int(
                 base.get("oil_level_alert_cooldown_seconds", 1800)
@@ -1658,6 +1661,8 @@ class SettingsManager:
                 merged["oil_news_max_age_hours"] = min(
                     18.0, float(merged.get("oil_news_max_age_hours", 18) or 18)
                 )
+            if version < 62:
+                merged.setdefault("oil_pro_feeds_enabled", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

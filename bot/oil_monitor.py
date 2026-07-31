@@ -66,17 +66,31 @@ _FLOW_KEYWORDS = frozenset({
 _OPEC_KEYWORDS = frozenset({
     "opec", "опек", "opec+", "saudi", "саудов", "russia oil", "росси",
 })
+# Прогнозы банков / IEA / EIA STEO / именованные аналитики
+_ANALYST_KEYWORDS = frozenset({
+    "forecast", "price outlook", "oil outlook", "market outlook", "brent outlook",
+    "steo", "price target", "price view", "price to",
+    "sees brent", "sees oil", "sees upside", "sees downside",
+    "expects brent", "expects oil", "predicts", "projection",
+    "oil market report", "short-term energy", "iea ", " iea",
+    "barclays", "goldman", "jpmorgan", "jp morgan", "morgan stanley",
+    "john kemp", "javier blas", "analyst", "аналитик",
+    "прогноз", "прогноз цен", "upside risk", "downside risk",
+    "war premium", "cuts forecast", "raises forecast", "slashes forecast",
+    "to average", "will average",
+})
 _BULL_NEWS = frozenset({
     "surge", "rise", "rally", "jump", "spike", "attack", "strike", "block",
     "close strait", "escalat", "sanction", "cut produc", "draw", "tighten",
     "shortage", "deficit", "buy", "purchase", "рост", "подскоч", "атак",
-    "сокращен", "дефицит", "покуп",
+    "сокращен", "дефицит", "покуп", "upside", "raises forecast",
 })
 _BEAR_NEWS = frozenset({
     "fall", "drop", "decline", "slide", "plunge", "deal", "reopen", "de-escal",
-    "ceasefire", "forecast cut", "build", "oversupply", "release spr", "accord",
-    "surplus", "sell", "dump", "паден", "снижен", "сделк", "избыт", "продаж",
-    "перемир",
+    "ceasefire", "forecast cut", "cuts forecast", "slashes forecast", "build",
+    "oversupply", "release spr", "accord", "surplus", "sell", "dump", "паден",
+    "снижен", "сделк", "избыт", "продаж", "перемир", "downside", "war premium unwind",
+    "unwind", "cooling",
 })
 # Веса: чем выше — тем важнее для отправки в чат
 _CRITICAL_TERMS: dict[str, int] = {
@@ -121,6 +135,16 @@ _CRITICAL_TERMS: dict[str, int] = {
     "drawdown": 3,
     "stock build": 3,
     "api inventory": 3,
+    "forecast": 3,
+    "price outlook": 3,
+    "steo": 4,
+    "barclays": 3,
+    "goldman": 3,
+    "iea": 4,
+    "прогноз": 3,
+    "john kemp": 3,
+    "javier blas": 3,
+    "war premium": 3,
 }
 
 # Только эти темы имеют право уйти в чат (не «любая нефть»)
@@ -130,6 +154,7 @@ _PRIORITY_THEMES = frozenset({
     "inventory",
     "opec",
     "flow_deal",
+    "analyst",
 })
 
 NEWS_QUERIES_EN: tuple[str, ...] = (
@@ -140,6 +165,12 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "OPEC oil production quota when:1d",
     "SPR oil release OR strategic petroleum reserve when:1d",
     "crude oil tanker Hormuz when:12h",
+    # Про-аналитика / прогнозы (Reuters, OilPrice, банки)
+    "site:reuters.com Brent crude oil OR Hormuz when:1d",
+    "site:oilprice.com Brent OR WTI OR OPEC when:1d",
+    "Brent crude price forecast OR outlook Barclays OR Goldman OR EIA STEO when:2d",
+    "John Kemp Reuters oil when:2d",
+    "war premium oil unwind OR Hormuz deal oil prices when:1d",
 )
 NEWS_QUERIES_RU: tuple[str, ...] = (
     "нефть Иран Трамп санкции Ормуз when:12h",
@@ -148,6 +179,15 @@ NEWS_QUERIES_RU: tuple[str, ...] = (
     "ОПЕК квота добыча нефть when:1d",
     "СПР запасы нефть США when:1d",
     "Ормуз танкер нефть when:12h",
+    "прогноз цена нефти Brent EIA OR ОПЕК when:2d",
+    "нефть Ормуз сделка цена when:1d",
+)
+
+# Прямые RSS профи (отрасль / EIA) → новостник
+PRO_OIL_RSS_FEEDS: tuple[tuple[str, str], ...] = (
+    ("OilPrice", "https://oilprice.com/rss/main"),
+    ("EIA Today in Energy", "https://www.eia.gov/rss/todayinenergy.xml"),
+    ("EIA Press", "https://www.eia.gov/rss/press_rss.xml"),
 )
 
 @dataclass(frozen=True)
@@ -159,7 +199,7 @@ class OilNewsItem:
     impact: str = "neutral"  # bullish | bearish | neutral
     query: str = ""
     lang: str = "en"
-    theme: str = ""  # iran_geo | trump_us | inventory | opec | flow_deal
+    theme: str = ""  # iran_geo | trump_us | inventory | opec | flow_deal | analyst
 
 
 def detect_oil_news_theme(title: str) -> str:
@@ -172,22 +212,48 @@ def detect_oil_news_theme(title: str) -> str:
             k in low for k in ("strait", "sanction", "санкц", "tanker", "танкер", "crude", "нефт")
         ):
             has_oil = True
+        # Прогнозы банков без «oil» в title, но с Brent/IEA/STEO
+        if any(k in low for k in ("brent", "wti", "steo", "iea", "опек", "opec")):
+            has_oil = True
     if not has_oil:
         return ""
 
     if any(k in low for k in ("hormuz", "ормуз", "iran", "иран", "tehran", "тегеран", "houthi", "хусит")):
+        # Прогноз по Ормузу остаётся геополитикой (главный драйвер)
         return "iran_geo"
     if any(k in low for k in ("trump", "трамп")) or (
         any(k in low for k in _US_KEYWORDS)
         and any(k in low for k in ("sanction", "санкц", "iran", "иран", "spr", "eia"))
     ):
         return "trump_us"
+    # STEO / bank outlook — раньше сырых inventory, чтобы «EIA STEO forecast» шёл как аналитика
+    if any(k in low for k in _ANALYST_KEYWORDS):
+        return "analyst"
     if any(k in low for k in ("eia", "inventory", "inventories", "запас", "spr", "stockpile", "api ")):
         return "inventory"
     if any(k in low for k in _OPEC_KEYWORDS):
         return "opec"
     if any(k in low for k in _FLOW_KEYWORDS):
         return "flow_deal"
+    return ""
+
+
+def _pro_feed_theme(title: str) -> str:
+    """Для OilPrice/EIA RSS: приоритетная тема или отраслевой oil-заголовок → analyst."""
+    theme = detect_oil_news_theme(title)
+    if theme:
+        return theme
+    low = title.lower()
+    if not any(k in low for k in _OIL_KEYWORDS):
+        return ""
+    if any(
+        k in low
+        for k in (
+            "brent", "wti", "crude", "oil price", "oil prices", "нефт",
+            "petroleum", "opec", "eia", "gasoline", "diesel",
+        )
+    ):
+        return "analyst"
     return ""
 
 
@@ -206,7 +272,7 @@ def news_critical_score(title: str) -> int:
     # Бонус за приоритетную тему
     if theme == "iran_geo":
         score += 2
-    elif theme in {"trump_us", "inventory", "opec"}:
+    elif theme in {"trump_us", "inventory", "opec", "analyst"}:
         score += 1
     return score
 
@@ -215,7 +281,11 @@ def is_critical_oil_news(item: OilNewsItem, min_score: int = 4) -> bool:
     theme = item.theme or detect_oil_news_theme(item.title)
     if theme not in _PRIORITY_THEMES:
         return False
-    return news_critical_score(item.title) >= min_score
+    # Аналитика банков/IEA: чуть мягче порог (прогноз полезен и без Hormuz)
+    need = min_score
+    if theme == "analyst":
+        need = max(3, min_score - 1)
+    return news_critical_score(item.title) >= need
 
 
 def theme_label_ru(theme: str) -> str:
@@ -225,6 +295,7 @@ def theme_label_ru(theme: str) -> str:
         "inventory": "📦 Запасы EIA/SPR",
         "opec": "🛢️ ОПЕК / добыча",
         "flow_deal": "🚢 Покупки / объёмы / поставки",
+        "analyst": "📊 Аналитика / прогноз",
     }.get(theme, "нефть")
 
 @dataclass
@@ -425,6 +496,12 @@ def classify_news_impact(title: str) -> str:
     low = title.lower()
     bull = sum(1 for k in _BULL_NEWS if k in low)
     bear = sum(1 for k in _BEAR_NEWS if k in low)
+    # «cuts Brent forecast» / «raises WTI outlook» — слова не подряд
+    if "forecast" in low or "outlook" in low or "прогноз" in low:
+        if any(k in low for k in ("cut", "slash", "lower", "reduce", "trim", "сниж", "пониж")):
+            bear += 1
+        if any(k in low for k in ("raise", "hike", "lift", "boost", "повыш", "увеличен")):
+            bull += 1
     if bull > bear and bull > 0:
         return "bullish"
     if bear > bull and bear > 0:
@@ -454,7 +531,7 @@ def _news_story_key(title: str) -> str:
     for t in (
         "hormuz", "ормуз", "iran", "иран", "sanction", "санкц", "trump", "трамп",
         "eia", "opec", "опек", "spr", "inventory", "запас", "tanker", "танкер",
-        "quota", "квот", "strike", "атак",
+        "quota", "квот", "strike", "атак", "forecast", "прогноз", "steo", "barclays",
     ):
         if t in low:
             tags.append(t)
@@ -1313,6 +1390,100 @@ def _fetch_google_news_rss(
         )
     return out
 
+
+def _fetch_pro_oil_rss(
+    source_name: str,
+    feed_url: str,
+    *,
+    timeout: float = 20.0,
+) -> list[OilNewsItem]:
+    """Прямой RSS OilPrice / EIA — без Google News."""
+    req = urllib.request.Request(
+        feed_url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; BybitBot/1.0)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except Exception:
+        logger.debug("Pro oil RSS failed for %s", feed_url, exc_info=True)
+        return []
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+
+    channel = root.find("channel")
+    if channel is None:
+        # Atom fallback
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("a:entry", ns) or root.findall("entry")
+        out_atom: list[OilNewsItem] = []
+        for entry in entries:
+            title_el = entry.find("a:title", ns) if entry.find("a:title", ns) is not None else entry.find("title")
+            if title_el is None or not (title_el.text or "").strip():
+                continue
+            title = _clean_title(title_el.text or "")
+            theme = _pro_feed_theme(title)
+            if theme not in _PRIORITY_THEMES:
+                continue
+            link = ""
+            link_el = entry.find("a:link", ns) if entry.find("a:link", ns) is not None else entry.find("link")
+            if link_el is not None:
+                link = (link_el.get("href") or link_el.text or "").strip()
+            updated = entry.find("a:updated", ns) if entry.find("a:updated", ns) is not None else entry.find("updated")
+            pub_raw = (updated.text or "") if updated is not None else ""
+            pub_ts = resolve_oil_news_published_ts(rss_pub=pub_raw, url=link)
+            if pub_ts is None:
+                continue
+            out_atom.append(
+                OilNewsItem(
+                    title=title[:240],
+                    url=link,
+                    source=source_name[:60],
+                    published_ts=pub_ts,
+                    impact=classify_news_impact(title),
+                    query=feed_url,
+                    lang="en",
+                    theme=theme,
+                )
+            )
+        return out_atom
+
+    out: list[OilNewsItem] = []
+    for item in channel.findall("item"):
+        title_el = item.find("title")
+        link_el = item.find("link")
+        pub_el = item.find("pubDate")
+        if title_el is None or not title_el.text:
+            continue
+        title = _clean_title(title_el.text)
+        theme = _pro_feed_theme(title)
+        if theme not in _PRIORITY_THEMES:
+            continue
+        link = (link_el.text or "").strip() if link_el is not None else ""
+        pub_ts = resolve_oil_news_published_ts(
+            rss_pub=pub_el.text if pub_el is not None else "",
+            url=link,
+        )
+        if pub_ts is None:
+            continue
+        out.append(
+            OilNewsItem(
+                title=title[:240],
+                url=link,
+                source=source_name[:60],
+                published_ts=pub_ts,
+                impact=classify_news_impact(title),
+                query=feed_url,
+                lang="en",
+                theme=theme,
+            )
+        )
+    return out
+
+
 async def fetch_oil_news(
     max_items: int = 10,
     *,
@@ -1320,6 +1491,7 @@ async def fetch_oil_news(
     critical_only: bool = True,
     critical_min_score: int = 4,
     max_age_hours: float = 18.0,
+    include_pro_feeds: bool = True,
 ) -> list[OilNewsItem]:
     seen: set[str] = set()
     merged: list[OilNewsItem] = []
@@ -1339,6 +1511,21 @@ async def fetch_oil_news(
                 continue
             seen.add(key)
             merged.append(it)
+
+    if include_pro_feeds:
+        for source_name, feed_url in PRO_OIL_RSS_FEEDS:
+            items = await asyncio.to_thread(_fetch_pro_oil_rss, source_name, feed_url)
+            for it in items:
+                if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+                    continue
+                if critical_only and not is_critical_oil_news(it, critical_min_score):
+                    continue
+                key = it.title.lower()[:120]
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(it)
+
     # Сначала свежесть, потом критичность
     merged.sort(
         key=lambda x: (x.published_ts, news_critical_score(x.title)),
@@ -1761,8 +1948,10 @@ def format_single_oil_news(item: OilNewsItem) -> str:
     theme = item.theme or detect_oil_news_theme(item.title)
     theme_ru = theme_label_ru(theme)
     score = news_critical_score(item.title)
+    is_analyst = theme == "analyst"
+    header = "🛢 <b>Нефть · аналитика</b>" if is_analyst else "🛢 <b>Нефть · важное</b>"
     lines = [
-        "🛢 <b>Нефть · важное</b>",
+        header,
         f"<i>{theme_ru} · вес {score}</i>",
         "",
     ]
@@ -1772,6 +1961,8 @@ def format_single_oil_news(item: OilNewsItem) -> str:
         lines.append(f"<b>{title}</b>")
     lines.append("")
     lines.append(f"{impact_ru}")
+    if is_analyst:
+        lines.append("<i>Прогноз/мнение — не сигнал входа; сверяй с графиком UKOUSD.</i>")
     lines.append(f"<i>{lang_mark} {item.source} · {_age_label(item.published_ts)}</i>")
     if item.url:
         lines.append(f"🔗 <a href=\"{item.url}\">Открыть источник</a>")
@@ -1781,7 +1972,7 @@ def format_oil_news_message(items: list[OilNewsItem], *, max_show: int = 5) -> s
     if not items:
         return (
             "🛢 <b>Нефть</b>\n"
-            "<i>Нет важных: Иран/Трамп/США, EIA запасы, ОПЕК, покупки/объёмы.</i>"
+            "<i>Нет важных: Иран/Трамп/США, EIA запасы, ОПЕК, прогнозы банков, покупки/объёмы.</i>"
         )
     if len(items) == 1:
         return format_single_oil_news(items[0])
@@ -2211,6 +2402,7 @@ class OilMonitorEngine:
         critical_only = bool(getattr(settings, "oil_news_critical_only", True))
         critical_min = int(getattr(settings, "oil_news_critical_min_score", 4))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
+        include_pro = bool(getattr(settings, "oil_pro_feeds_enabled", True))
 
         try:
             items = await fetch_oil_news(
@@ -2219,6 +2411,7 @@ class OilMonitorEngine:
                 critical_only=critical_only,
                 critical_min_score=critical_min,
                 max_age_hours=max_age_h,
+                include_pro_feeds=include_pro,
             )
         except Exception:
             logger.exception("Oil news fetch failed")

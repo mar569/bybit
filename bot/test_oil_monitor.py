@@ -45,11 +45,42 @@ def test_detect_themes_priority():
     assert detect_oil_news_theme("EIA crude oil inventory build") == "inventory"
     assert detect_oil_news_theme("OPEC oil production cut quota") == "opec"
     assert detect_oil_news_theme("China buys more crude oil tanker") == "flow_deal"
+    assert detect_oil_news_theme(
+        "Barclays sees upside risks to 2026 Brent price view"
+    ) == "analyst"
+    assert detect_oil_news_theme(
+        "EIA STEO cuts Brent crude oil forecast to $82"
+    ) == "analyst"
+    assert detect_oil_news_theme("Hormuz deal oil prices fall forecast") == "iran_geo"
+
+
+def test_format_analyst_news_header():
+    item = OilNewsItem(
+        title="Barclays raises Brent crude oil forecast outlook",
+        url="https://example.com/barclays",
+        source="Reuters",
+        published_ts=1_700_000_000.0,
+        impact="bullish",
+        theme="analyst",
+    )
+    text = format_single_oil_news(item)
+    assert "аналитика" in text
+    assert "Прогноз" in text
+    assert "UKOUSD" in text
+
+
+def test_pro_feed_theme_oilprice_headline():
+    from bot.oil_monitor import _pro_feed_theme
+    # Price + demand → flow_deal; чистый отраслевой oil-заголовок без flow → analyst
+    assert _pro_feed_theme("Oil Prices Fall as Demand Concerns Mount") == "flow_deal"
+    assert _pro_feed_theme("Brent Crude Slumps Below $87") == "analyst"
+    assert _pro_feed_theme("Tech stocks rally on AI news") == ""
 
 
 def test_classify_news_impact():
     assert classify_news_impact("Oil prices surge on Hormuz block") == "bullish"
     assert classify_news_impact("Brent falls after US Iran deal") == "bearish"
+    assert classify_news_impact("EIA STEO cuts Brent forecast after Hormuz MOU") == "bearish"
 
 
 def test_format_single_oil_news_has_link():
