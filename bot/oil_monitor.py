@@ -1176,18 +1176,37 @@ def format_oil_micro_signal(sig: OilMicroSignal) -> str:
     side = "LONG" if sig.side == "long" else "SHORT"
     emoji = "🟢" if sig.side == "long" else "🔴"
     rr = abs(sig.target - sig.entry) / max(abs(sig.stop - sig.entry), 1e-9)
+    # Абсолютные уровни — только ориентир с прокси-цены (Yahoo BZ / BZUSDT),
+    # не тик Bybit TradFi UKOUSD.s (часто +0.5…2$).
+    if sig.side == "long":
+        how = (
+            f"На Bybit жми <b>Buy</b> по <b>текущей</b> цене UKOUSD.s "
+            f"(не копируй {fmt_price(sig.entry)} слепо).\n"
+            f"TP: <b>+{sig.tp_pct:.2f}%</b> от твоей цены входа · "
+            f"стоп: <b>−{sig.sl_pct:.2f}%</b> от входа."
+        )
+    else:
+        how = (
+            f"На Bybit жми <b>Sell</b> по <b>текущей</b> цене UKOUSD.s "
+            f"(не копируй {fmt_price(sig.entry)} слепо).\n"
+            f"TP: <b>−{sig.tp_pct:.2f}%</b> от твоей цены входа · "
+            f"стоп: <b>+{sig.sl_pct:.2f}%</b> от входа."
+        )
     return "\n".join([
         f"🛢 <b>{sig.label} · сигнал {side}</b> {emoji}",
         f"<b>Микро-сделка</b> · качество <b>{sig.quality}/10</b>",
         "",
-        f"Вход: <b>{fmt_price(sig.entry)}</b>",
-        f"TP (+{sig.tp_pct:.2f}%): <b>{fmt_price(sig.target)}</b>",
-        f"Стоп (−{sig.sl_pct:.2f}% у риска): <b>{fmt_price(sig.stop)}</b>",
+        how,
+        "",
+        f"<i>Ориентир прокси (Yahoo BZ≈ / не тик TradFi): "
+        f"вход {fmt_price(sig.entry)} · TP {fmt_price(sig.target)} · "
+        f"стоп {fmt_price(sig.stop)}</i>",
         f"R:R ≈ <b>{rr:.1f}</b> · держать <b>{sig.hold_min}–{sig.hold_max} мин</b>",
-        f"Импульс: <b>{sig.impulse_pct:+.2f}%</b>",
+        f"Импульс на прокси: <b>{sig.impulse_pct:+.2f}%</b>",
         "",
         f"<i>{sig.reason_ru}</i>",
-        "<i>Не финсовет. Малый размер. Нет цели за time-stop — закрыть.</i>",
+        "<i>Цена UKOUSD.s на Bybit часто отличается от прокси на $0.5–2. "
+        "Считай TP/стоп в % от своей цены. Малый размер. Не финсовет.</i>",
     ])
 
 

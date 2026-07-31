@@ -530,6 +530,8 @@ def test_oil_micro_signal_short_on_dump():
     text = format_oil_micro_signal(sig)
     assert "SHORT" in text
     assert "TP" in text
+    assert "текущей" in text or "прокси" in text
+    assert "UKOUSD.s" in text
 
 
 def test_oil_micro_signal_skips_against_strong_news():

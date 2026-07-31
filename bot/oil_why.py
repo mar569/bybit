@@ -1,4 +1,4 @@
-"""Честный ответ «почему UKOUSD растёт/падает» — из новостей + цены + потока, без фантазий."""
+"""Честный ответ «почему UKOUSD» — простым языком, без жаргона."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,7 +6,6 @@ from typing import Any, Sequence
 
 from .bybit_klines import KlineBar
 from .oil_flow import OilFlowProxy, compute_oil_flow_proxy
-from .ta_analysis import fmt_price
 
 
 @dataclass(frozen=True)
@@ -15,13 +14,12 @@ class OilWhyReport:
     move_1h_pct: float
     move_4h_pct: float
     price: float
-    confidence: int  # 1–10 насколько объяснение опирается на факты
-    headline_ru: str
-    drivers_ru: tuple[str, ...]
-    against_ru: tuple[str, ...]
-    unknown_ru: tuple[str, ...]
-    how_to_use_ru: str
-    sources_note_ru: str
+    confidence: int
+    plain_ru: str  # 2–3 фразы «суть»
+    facts_ru: tuple[str, ...]
+    news_plain_ru: tuple[str, ...]
+    careful_ru: tuple[str, ...]
+    do_now_ru: str
 
 
 def _pct(a: float, b: float) -> float:
@@ -37,36 +35,77 @@ def _move_from_bars(bars: Sequence[KlineBar], *, bars_back: int) -> float:
     return _pct(float(bars[-1].close), float(bars[i].close))
 
 
-def _theme_counts(news_items: Sequence[Any]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for it in news_items:
-        theme = getattr(it, "theme", "") or ""
-        if not theme:
-            continue
-        counts[theme] = counts.get(theme, 0) + 1
-    return counts
+def _explain_headline(title: str) -> tuple[str, str, str]:
+    """(коротко_по-русски, влияние_на_цену, side: up|down|mix)."""
+    low = title.lower()
+    # Сделка / открытие пролива → обычно вниз
+    if any(
+        k in low
+        for k in (
+            "offer to open", "reopen", "open strait", "open hormuz", "flows recover",
+            "more crude flows", "ceasefire", "peace deal", "mou", "diplom",
+            "сделк", "открыт", "перемир",
+        )
+    ):
+        return (
+            "США/Иран обсуждают открытие Ормузского пролива / сделку",
+            "Если танкеры пойдут свободно — нефти на рынке больше → цена обычно падает",
+            "down",
+        )
+    if any(k in low for k in ("sanction", "санкц", "tariff", "extortion")):
+        return (
+            "Новые санкции / давление на Иран",
+            "Риск снова перекроет поставки → цена часто растёт или не даёт упасть",
+            "up",
+        )
+    if any(
+        k in low
+        for k in (
+            "attack", "strike", "missile", "blockade", "close strait", "halt",
+            "атак", "удар", "блок", "закрыт",
+        )
+    ):
+        return (
+            "Удары / блок поставок / эскалация войны",
+            "Страх, что нефть не пройдёт через Ормуз → цена обычно растёт",
+            "up",
+        )
+    if any(k in low for k in ("eia", "inventory", "запас", "stock")):
+        if any(k in low for k in ("build", "rise", "рост запас", "избыт")):
+            return ("Запасы нефти в США выросли", "Нефти много на складах → давление вниз", "down")
+        if any(k in low for k in ("draw", "fall", "сниж", "упал")):
+            return ("Запасы нефти в США упали", "Нефти на складах меньше → поддержка цены вверх", "up")
+        return ("Вышли данные по запасам США (EIA)", "Сюрприз по запасам может дёрнуть цену на часы", "mix")
+    if any(k in low for k in ("opec", "опек", "quota", "квот")):
+        return ("Новости OPEC по добыче", "Режут добычу → вверх; повышают → вниз", "mix")
+    # Обрезка длинного EN-заголовка + нейтраль
+    short = title.strip()
+    if len(short) > 90:
+        short = short[:87] + "…"
+    return (f"Новость: {short}", "Влияние на цену неоднозначное — смотри контекст Ормуза", "mix")
 
 
-def _top_headlines(news_items: Sequence[Any], *, want_impact: str, limit: int = 3) -> list[str]:
-    scored: list[tuple[int, str]] = []
-    for it in news_items:
-        if want_impact and getattr(it, "impact", "") != want_impact:
-            continue
+def _pick_news(items: Sequence[Any], *, limit: int = 3) -> list[Any]:
+    """Важные сюжеты: гео сначала, без дублей."""
+    from .oil_monitor import news_critical_score
+
+    scored: list[tuple[int, Any]] = []
+    for it in items:
         title = (getattr(it, "title", "") or "").strip()
         if not title:
             continue
-        from .oil_monitor import news_critical_score
-
-        scored.append((news_critical_score(title, source=getattr(it, "source", "")), title))
+        theme = getattr(it, "theme", "") or ""
+        bonus = 5 if theme == "iran_geo" else 2 if theme in {"inventory", "opec", "analyst"} else 0
+        scored.append((news_critical_score(title, source=getattr(it, "source", "")) + bonus, it))
     scored.sort(key=lambda x: x[0], reverse=True)
-    out: list[str] = []
+    out: list[Any] = []
     seen: set[str] = set()
-    for _, t in scored:
-        key = t.lower()[:80]
+    for _, it in scored:
+        key = (getattr(it, "title", "") or "").lower()[:70]
         if key in seen:
             continue
         seen.add(key)
-        out.append(t[:140])
+        out.append(it)
         if len(out) >= limit:
             break
     return out
@@ -84,13 +123,11 @@ def build_oil_why_report(
     if not bars or len(bars) < 8:
         return None
     px = float(bars[-1].close)
-    # Окна в барах
     b1h = max(1, int(round(60 / max(5, interval_minutes))))
     b4h = max(b1h + 1, int(round(240 / max(5, interval_minutes))))
     m1 = _move_from_bars(bars, bars_back=b1h)
     m4 = _move_from_bars(bars, bars_back=min(b4h, len(bars) - 1))
 
-    # Направление: приоритет 1ч, иначе 4ч
     primary_move = m1 if abs(m1) >= 0.08 else m4
     if primary_move >= 0.12:
         direction = "up"
@@ -104,144 +141,159 @@ def build_oil_why_report(
         flow = compute_oil_flow_proxy(bars, lookback=12 if interval_minutes <= 15 else 8)
 
     news = getattr(news_bias, "bias", "neutral") if news_bias else "neutral"
-    news_w = float(getattr(news_bias, "weighted_score", 0) or 0) if news_bias else 0.0
-    catalyst = (getattr(news_bias, "top_catalyst", "") or "") if news_bias else ""
-    fc_bias = (getattr(forecast, "bias", "") or "") if forecast else ""
     fc_scen = (getattr(forecast, "scenario", "") or "") if forecast else ""
 
-    drivers: list[str] = []
-    against: list[str] = []
-    unknown: list[str] = [
-        "Нет доступа к живому DOM ICE/NYMEX — только свечи + публичные заголовки.",
-        "CFD UKOUSD может на минуты расходиться с Brent futures (basis/спред брокера).",
-    ]
+    facts: list[str] = []
+    news_plain: list[str] = []
+    careful: list[str] = []
 
-    # Цена
+    # --- цена простым языком ---
     if direction == "up":
-        drivers.append(
-            f"Цена UKOUSD≈${px:.2f}: за ~1ч {m1:+.2f}%, за ~4ч {m4:+.2f}%."
+        facts.append(
+            f"Сейчас нефть (UKOUSD) около <b>${px:.2f}</b>. "
+            f"За час выросла примерно на <b>{abs(m1):.2f}%</b>, за 4 часа — на <b>{abs(m4):.2f}%</b>."
         )
     elif direction == "down":
-        drivers.append(
-            f"Цена UKOUSD≈${px:.2f}: за ~1ч {m1:+.2f}%, за ~4ч {m4:+.2f}%."
+        facts.append(
+            f"Сейчас нефть (UKOUSD) около <b>${px:.2f}</b>. "
+            f"За час упала примерно на <b>{abs(m1):.2f}%</b>, за 4 часа — на <b>{abs(m4):.2f}%</b>."
         )
     else:
-        drivers.append(
-            f"Цена UKOUSD≈${px:.2f}: движение слабое (~1ч {m1:+.2f}%, ~4ч {m4:+.2f}%) — "
-            "скорее шум/база, не новый тренд."
+        facts.append(
+            f"Сейчас нефть около <b>${px:.2f}</b>. За час почти без движения "
+            f"({m1:+.2f}%) — это скорее колебание, не сильный тренд."
         )
 
-    # Новости
-    themes = _theme_counts(items)
-    if themes.get("iran_geo"):
-        if news == "bullish" or (direction == "up" and news != "bearish"):
-            drivers.append(
-                "Геополитика Иран/Ормуз в свежих заголовках — рынок часто добавляет "
-                "war-premium при эскалации / блоке танкеров."
-            )
-        elif news == "bearish" or direction == "down":
-            drivers.append(
-                "Иран/Ормуз в ленте, но тон скорее «сделка / больше танкерных потоков» — "
-                "это обычно снимает premium и давит цену вниз."
-            )
+    # --- пролив Ормуз — главная тема мира ---
+    has_geo = any((getattr(it, "theme", "") or "") == "iran_geo" for it in items)
+    if has_geo or any("hormuz" in (getattr(it, "title", "") or "").lower() or "ормуз" in (getattr(it, "title", "") or "").lower() for it in items):
+        facts.append(
+            "Главная тема мира по нефти сейчас — <b>Ормузский пролив</b> "
+            "(узкое место, через которое идёт огромная часть нефти с Ближнего Востока). "
+            "Если его боятся закрыть — цена растёт. Если танкеры снова ходят — цена часто падает."
+        )
+
+    # --- новости: смысл, не сырой EN ---
+    picked = _pick_news(items, limit=3)
+    up_news = down_news = mix_news = 0
+    for it in picked:
+        title = getattr(it, "title", "") or ""
+        what, means, side = _explain_headline(title)
+        news_plain.append(f"<b>{what}</b>\n  → {means}")
+        if side == "up":
+            up_news += 1
+        elif side == "down":
+            down_news += 1
         else:
-            drivers.append("Иран/Ормуз в ленте — главный источник волатильности, тон смешанный.")
-    if themes.get("inventory"):
-        drivers.append("Есть заголовки по запасам EIA/SPR — краткосрочный драйвер US crude.")
-    if themes.get("opec"):
-        drivers.append("Есть сюжеты OPEC/добыча — среднесрочный supply-фактор.")
-    if themes.get("analyst"):
-        drivers.append("В ленте прогнозы банков/аналитиков — влияют на bias, не на тик.")
+            mix_news += 1
 
-    want = "bullish" if direction == "up" else "bearish" if direction == "down" else ""
-    tops = _top_headlines(items, want_impact=want, limit=3) if want else []
-    if not tops and items:
-        tops = _top_headlines(items, want_impact="", limit=2)
-    for t in tops:
-        drivers.append(f"Заголовок: «{t}»")
+    if not news_plain:
+        news_plain.append("Свежих сильных заголовков в ленте бота мало — объяснение слабее.")
 
-    if catalyst and catalyst not in " ".join(drivers):
-        drivers.append(f"Катализатор ленты: «{catalyst[:120]}»")
-
-    if news_bias is not None:
-        drivers.append(f"News-bias бота: {news} ({news_w:+.1f}/10).")
-
-    # Поток
+    # --- поток без жаргона ---
     if flow is not None:
-        if flow.bias == "buy" and direction == "up":
-            drivers.append(
-                f"Поток-прокси BUY (share {flow.buy_share_pct:g}%, vol x{flow.volume_ratio:g}) "
-                "— свечной delta согласуется с ростом."
+        if flow.bias == "buy":
+            facts.append(
+                "По свечам видно, что <b>покупатели активнее продавцов</b> "
+                f"(доля покупок около {flow.buy_share_pct:g}%). "
+                "Это поддерживает рост, но это оценка по свечам, не «стакан биржи»."
             )
-        elif flow.bias == "sell" and direction == "down":
-            drivers.append(
-                f"Поток-прокси SELL (share {flow.buy_share_pct:g}%) — согласуется с падением."
-            )
-        elif flow.bias == "buy" and direction == "down":
-            against.append(
-                "Поток-прокси BUY при падении цены — возможен short-cover / слабый даун-мув."
-            )
-        elif flow.bias == "sell" and direction == "up":
-            against.append(
-                "Поток-прокси SELL при росте — риск ложного отскока / thin bounce."
+        elif flow.bias == "sell":
+            facts.append(
+                "По свечам видно, что <b>продавцы активнее покупателей</b> "
+                f"(доля покупок только {flow.buy_share_pct:g}%). "
+                "Это давит цену вниз."
             )
         else:
-            against.append(f"Поток-прокси {flow.bias.upper()} — без явного подтверждения движения.")
+            facts.append("По объёму свечей нет явного перевеса покупателей или продавцов.")
 
-    # Прогноз / сценарий
-    if fc_scen:
-        scen_map = {
-            "deal_tape": "сценарий deal-tape (снятие premium) обычно давит цену вниз",
-            "disruption": "сценарий disruption (блок/атаки) обычно поддерживает цену вверх",
-            "inventory": "сценарий inventory — смотри сюрприз EIA",
-            "mixed_geo": "mixed geo — рынок дёргается в обе стороны",
-            "range": "range — без сильного фундаментального края",
-        }
-        drivers.append(f"Сценарий бота: {fc_scen} — {scen_map.get(fc_scen, fc_scen)}.")
-    if fc_bias and fc_bias != "WAIT":
-        if (fc_bias == "LONG" and direction == "down") or (fc_bias == "SHORT" and direction == "up"):
-            against.append(f"Прогноз бота {fc_bias}, а цена сейчас идёт иначе — локальный шум возможен.")
+    # --- сценарий ---
+    if fc_scen == "deal_tape":
+        careful.append(
+            "Бот видит фон «переговоры / больше поставок» — такой фон обычно "
+            "<b>мешает росту</b> надолго, даже если час-два цена зелёная."
+        )
+    elif fc_scen == "disruption":
+        facts.append(
+            "Фон «сбои поставок / эскалация» — рынок может держать цену высокой, пока страх не спадёт."
+        )
+    elif fc_scen == "mixed_geo":
+        careful.append(
+            "Сигналы по Ормузу смешанные (и сделка, и угрозы) — цена может резко ходить в обе стороны."
+        )
 
-    # Честность: конфликт новости vs движение
-    if direction == "up" and news == "bearish":
-        against.append(
-            "Свежие новости в сумме медвежьи, а цена растёт — чаще отскок/шорт-сквиз, "
-            "а не новый бычий фундамент."
+    # --- конфликты простым языком ---
+    if direction == "up" and down_news > up_news:
+        careful.append(
+            "В новостях больше про «открыть пролив / сделку» (это обычно вниз), "
+            "а цена всё равно растёт. Часто это <b>короткий отскок</b>, а не новый долгий рост. "
+            "Не стоит слепо гнаться за лонгом."
         )
         conf = 4
-    elif direction == "down" and news == "bullish":
-        against.append(
-            "Новости в сумме бычьи, цена падает — возможна фиксация / снятие geo-spike."
+    elif direction == "down" and up_news > down_news:
+        careful.append(
+            "Новости больше про угрозы/санкции (обычно вверх), а цена падает — "
+            "возможно, рынок уже «выдохнул» страх или танкеры всё же идут."
+        )
+        conf = 4
+    elif direction == "up" and news == "bearish":
+        careful.append(
+            "Общий тон новостей скорее «давит цену вниз», а график зелёный — "
+            "осторожно, рост может быстро сдуться."
         )
         conf = 4
     elif direction == "flat":
         conf = 5
-    elif items and (news in {"bullish", "bearish"} or themes):
+    elif picked:
         conf = 7
-    elif items:
-        conf = 5
     else:
         conf = 3
-        unknown.append("Мало свежих приоритетных новостей в окне — объяснение слабее.")
+        careful.append("Мало свежих новостей — нельзя уверенно сказать «из-за чего».")
 
+    careful.append(
+        "Мы не видим живую ленту сделок на большой бирже нефти (ICE). "
+        "Цена на Bybit (UKOUSD) — это CFD, иногда на минуты чуть отличается от Brent."
+    )
+
+    # --- суть ---
     if direction == "up":
-        headline = f"UKOUSD растёт (~1ч {m1:+.2f}%) — что видно по фактам"
-        howto = (
-            "Если рост совпадает с эскалацией/OI-блоком — не ловить short против premium. "
-            "Если новости медвежьи, а цена зелёная — осторожный fade только от сопротивления."
+        if up_news >= down_news and has_geo:
+            plain = (
+                f"Нефть растёт (сейчас ≈${px:.2f}, за час +{abs(m1):.2f}%), "
+                "потому что рынок снова нервничает из-за Ирана и Ормузского пролива: "
+                "боятся перебоев с поставками. "
+                + (
+                    "Но в ленте есть и новости про возможную сделку/открытие пролива — "
+                    "из-за этого рост может быть нестойким."
+                    if down_news
+                    else "Пока страх поставок жив — рост выглядит логичным."
+                )
+            )
+        else:
+            plain = (
+                f"Нефть сейчас растёт (≈${px:.2f}, +{abs(m1):.2f}% за час), "
+                "но по новостям картина неоднозначная. "
+                "Часто так бывает на коротком отскоке — сначала смотри уровни, потом заголовки."
+            )
+        do_now = (
+            "Не шортить против сильного страха по Ормузу. "
+            "Если новости про сделку/открытие пролива — лонг только от поддержки, без погони за ценой."
         )
     elif direction == "down":
-        headline = f"UKOUSD падает (~1ч {m1:+.2f}%) — что видно по фактам"
-        howto = (
-            "Если падение на «танкеры Ормуз / deal» — тренд снятие premium. "
-            "Лонги только от сильной поддержки или после смены ленты."
+        plain = (
+            f"Нефть падает (≈${px:.2f}, за час −{abs(m1):.2f}%). "
+            "Чаще всего так бывает, когда рынок думает: «танкеры снова пойдут / война чуть отступила» — "
+            "страх поставок слабеет и цену отпускают вниз."
+        )
+        do_now = (
+            "Не ловить ножи лонгом. Покупать только от сильной поддержки или когда новости снова про блок/удары."
         )
     else:
-        headline = "UKOUSD без ясного края — шум/база"
-        howto = "Не выдумывать причину. Ждать уровень или новый заголовок Иран/EIA/OPEC."
-
-    if not against:
-        against = ("Явных противоречий в данных бота сейчас нет.",)
+        plain = (
+            f"Нефть около ${px:.2f} почти стоит. "
+            "Нет одного ясного драйвера — лучше подождать уровень или новую новость по Ормузу."
+        )
+        do_now = "Не выдумывать причину. Ждать касания уровня или свежий сильный заголовок."
 
     return OilWhyReport(
         direction=direction,
@@ -249,41 +301,43 @@ def build_oil_why_report(
         move_4h_pct=round(m4, 2),
         price=px,
         confidence=conf,
-        headline_ru=headline,
-        drivers_ru=tuple(drivers[:8]),
-        against_ru=tuple(against[:4]),
-        unknown_ru=tuple(unknown[:4]),
-        how_to_use_ru=howto,
-        sources_note_ru=(
-            "База: свечи BZ≈UKOUSD + приоритетные заголовки (Иран/Ормуз/EIA/OPEC/аналитики). "
-            "Это реконструкция драйверов, не инсайд."
-        ),
+        plain_ru=plain,
+        facts_ru=tuple(facts[:5]),
+        news_plain_ru=tuple(news_plain[:4]),
+        careful_ru=tuple(careful[:4]),
+        do_now_ru=do_now,
     )
 
 
 def format_oil_why_report(rep: OilWhyReport) -> str:
     mark = {"up": "📈", "down": "📉", "flat": "➡️"}.get(rep.direction, "➡️")
+    dir_ru = {"up": "растёт", "down": "падает", "flat": "почти стоит"}.get(rep.direction, "")
     lines = [
-        f"{mark} <b>Почему цена · UKOUSD</b> · уверенность {rep.confidence}/10",
-        f"<i>{_esc(rep.headline_ru)}</i>",
-        f"<i>${rep.price:.2f} · 1ч {rep.move_1h_pct:+.2f}% · 4ч {rep.move_4h_pct:+.2f}%</i>",
+        f"{mark} <b>Почему нефть {dir_ru}</b> · понятность {rep.confidence}/10",
+        f"<i>${rep.price:.2f} · за 1ч {rep.move_1h_pct:+.2f}% · за 4ч {rep.move_4h_pct:+.2f}%</i>",
         "",
-        "<b>Что поддерживает движение</b>",
+        "<b>Суть простыми словами</b>",
+        _esc(rep.plain_ru),
+        "",
+        "<b>Факты</b>",
     ]
-    for d in rep.drivers_ru:
-        lines.append(f"• {_esc(d)}")
+    for f in rep.facts_ru:
+        # facts may contain intentional <b> — allow limited tags
+        lines.append(f"• {_soft_html(f)}")
     lines.append("")
-    lines.append("<b>Что против / сомнения</b>")
-    for a in rep.against_ru:
-        lines.append(f"• {_esc(a)}")
+    lines.append("<b>Новости и что они значат для цены</b>")
+    for n in rep.news_plain_ru:
+        lines.append(f"• {_soft_html(n)}")
     lines.append("")
-    lines.append("<b>Чего мы не знаем</b>")
-    for u in rep.unknown_ru:
-        lines.append(f"• {_esc(u)}")
+    lines.append("<b>Осторожно</b>")
+    for c in rep.careful_ru:
+        lines.append(f"• {_esc(c)}")
     lines.append("")
-    lines.append(f"<b>Как использовать:</b> {_esc(rep.how_to_use_ru)}")
+    lines.append(f"<b>Что делать сейчас:</b> {_esc(rep.do_now_ru)}")
     lines.append("")
-    lines.append(f"<i>{_esc(rep.sources_note_ru)}</i>")
+    lines.append(
+        "<i>Это объяснение по публичным новостям и графику, не секретный инсайд.</i>"
+    )
     return "\n".join(lines)
 
 
@@ -294,3 +348,17 @@ def _esc(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def _soft_html(text: str) -> str:
+    """Экранирует всё, кроме простых <b>...</b>."""
+    import re
+
+    parts = re.split(r"(</?b>)", text or "")
+    out: list[str] = []
+    for p in parts:
+        if p in {"<b>", "</b>"}:
+            out.append(p)
+        else:
+            out.append(_esc(p))
+    return "".join(out)

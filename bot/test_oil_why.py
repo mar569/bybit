@@ -1,4 +1,4 @@
-"""Tests for oil why (honest move drivers)."""
+"""Tests for oil why (plain-language drivers)."""
 from __future__ import annotations
 
 from bot.bybit_klines import KlineBar
@@ -24,7 +24,7 @@ def _bars_up(n: int = 40) -> list[KlineBar]:
     return out
 
 
-def test_why_up_with_bullish_geo_news():
+def test_why_plain_explains_hormuz_attack():
     bars = _bars_up()
     items = [
         OilNewsItem(
@@ -65,35 +65,38 @@ def test_why_up_with_bullish_geo_news():
     )
     assert rep is not None
     assert rep.direction == "up"
-    assert rep.confidence >= 5
+    assert "Ормуз" in rep.plain_ru or "ормуз" in rep.plain_ru.lower()
     text = format_oil_why_report(rep)
-    assert "Почему цена" in text
-    assert "Hormuz" in text or "Ормуз" in text or "Иран" in text
+    assert "Суть простыми словами" in text
+    assert "что они значат" in text
+    assert "war-premium" not in text.lower()
+    assert "News-bias" not in text
 
 
-def test_why_flags_conflict_when_news_bearish_but_price_up():
+def test_why_flags_open_hormuz_deal_vs_rising_price():
     bars = _bars_up()
-    bias = OilNewsBias(
-        bias="bearish",
-        weighted_score=-4.0,
-        summary_ru="down",
-        how_to_use_ru="short",
-        top_catalyst="Hormuz deal flows",
-    )
     items = [
         OilNewsItem(
-            title="Oil falls as Hormuz tanker flows recover deal",
+            title="US considering Iran’s offer to open Strait of Hormuz in exchange for lifting blockade",
             url="https://x",
-            source="CNBC",
+            source="News",
             published_ts=1.0,
             impact="bearish",
             theme="iran_geo",
         ),
     ]
+    bias = OilNewsBias(
+        bias="bearish",
+        weighted_score=-3.0,
+        summary_ru="down",
+        how_to_use_ru="short",
+        top_catalyst="open Hormuz",
+    )
     rep = build_oil_why_report(
         bars, news_items=items, news_bias=bias, interval_minutes=15
     )
     assert rep is not None
     assert rep.direction == "up"
-    assert any("медвежь" in a.lower() or "отскок" in a.lower() for a in rep.against_ru)
-    assert rep.confidence <= 5
+    text = format_oil_why_report(rep)
+    assert "открыт" in text.lower() or "сделк" in text.lower() or "пролив" in text.lower()
+    assert any("отскок" in c.lower() or "нестойк" in c.lower() or "осторож" in c.lower() for c in rep.careful_ru)
