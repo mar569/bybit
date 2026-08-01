@@ -4343,6 +4343,10 @@ class TelegramBot:
             f"RU <b>{'ON' if getattr(s, 'oil_russian_news', True) else 'OFF'}</b> · "
             f"свежесть ≤<b>{getattr(s, 'oil_news_max_age_hours', 18):g}ч</b> · "
             f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
+            f"Fast-lane ‼️: <b>{'ON' if getattr(s, 'oil_fastlane_enabled', True) else 'OFF'}</b> · "
+            f"каждые <b>{getattr(s, 'oil_fastlane_interval_seconds', 60)}с</b> · "
+            f"score≥<b>{getattr(s, 'oil_fastlane_min_score', 7)}</b> · "
+            f"Gemini <b>{'ON' if getattr(s, 'oil_fastlane_gemini', True) else 'OFF'}</b>\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
             f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', True) else 'OFF'}</b> · "
@@ -4356,7 +4360,7 @@ class TelegramBot:
             f"CD <b>{getattr(s, 'oil_setup_cooldown_seconds', 3600)}с</b>\n"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
-            "<i>Hormuz · EIA · OPEC · прогноз · confluence setup · микро 0.2–0.3%</i>\n"
+            "<i>Fast-lane: WSJ · Reuters · Bloomberg · Blas · FT · NYT · White House/DoD/EIA</i>\n"
             "Ручной снимок: <b>📊 Сейчас</b> / <code>/oil</code> · "
             "почему цена: <b>❓ Почему</b> / <code>/oilwhy</code>"
         ).replace(",", " ")
@@ -4399,6 +4403,10 @@ class TelegramBot:
                 InlineKeyboardButton(
                     self._mark("RU новости", getattr(s, "oil_russian_news", True)),
                     callback_data="oil:ru",
+                ),
+                InlineKeyboardButton(
+                    self._mark("‼️ Fast", getattr(s, "oil_fastlane_enabled", True)),
+                    callback_data="oil:fastlane",
                 ),
             ],
             [
@@ -5307,6 +5315,10 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_news_critical_only", True))
             self.settings_manager.update(oil_news_critical_only=not cur)
             label = f"Важные → {'ON' if not cur else 'OFF'}"
+        elif action == "fastlane":
+            cur = bool(getattr(s, "oil_fastlane_enabled", True))
+            self.settings_manager.update(oil_fastlane_enabled=not cur)
+            label = f"Fast-lane → {'ON' if not cur else 'OFF'}"
         elif action == "ru":
             cur = bool(getattr(s, "oil_russian_news", True))
             self.settings_manager.update(oil_russian_news=not cur)

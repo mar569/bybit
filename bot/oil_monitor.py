@@ -1553,6 +1553,48 @@ def _fetch_pro_oil_rss(
     return out
 
 
+async def fetch_oil_fastlane_news(
+    *,
+    max_items: int = 8,
+    max_age_hours: float = 6.0,
+    min_flash_score: int = 7,
+    include_russian: bool = True,
+) -> list[OilNewsItem]:
+    """Узкий быстрый пул: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official."""
+    from .oil_fastlane import FAST_LANE_QUERIES_EN, FAST_LANE_QUERIES_RU, is_fastlane_item
+
+    seen: set[str] = set()
+    merged: list[OilNewsItem] = []
+    queries: list[tuple[str, str]] = [(q, "en") for q in FAST_LANE_QUERIES_EN]
+    if include_russian:
+        queries.extend((q, "ru") for q in FAST_LANE_QUERIES_RU)
+
+    for query, lang in queries:
+        items = await asyncio.to_thread(_fetch_google_news_rss, query, lang=lang)
+        for it in items:
+            if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+                continue
+            # Fast-lane: не требуем общий critical_only — свой score по outlet
+            if not is_fastlane_item(it, min_flash_score=min_flash_score):
+                # Всё же пропустим geo tier1 с чуть более мягким порогом
+                if not is_fastlane_item(it, min_flash_score=max(5, min_flash_score - 2)):
+                    continue
+                theme = it.theme or detect_oil_news_theme(it.title, source=it.source)
+                if theme not in {"iran_geo", "trump_us"}:
+                    continue
+            key = it.title.lower()[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(it)
+
+    merged.sort(
+        key=lambda x: (x.published_ts, news_critical_score(x.title, source=x.source)),
+        reverse=True,
+    )
+    return merged[:max_items]
+
+
 async def fetch_oil_news(
     max_items: int = 10,
     *,
@@ -2335,6 +2377,9 @@ class OilMonitorEngine:
         self._micro_signal_hour: list[float] = []
         self._last_setup_ts: float = 0.0
         self._last_setup_side: str = ""
+        self._last_fastlane_ts: float = 0.0
+        self._seen_fastlane: set[str] = set()
+        self._last_regular_news_ts: float = 0.0
 
     def _resolve_gemini_key(self) -> str | None:
         key = self._gemini_api_key
@@ -2507,6 +2552,106 @@ class OilMonitorEngine:
         )
         return 1
 
+    async def _tick_fastlane(self, settings: Any) -> int:
+        """‼️ КРИТИЧНО: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → сразу в Новостник."""
+        if not getattr(settings, "oil_fastlane_enabled", True):
+            return 0
+        now = time.time()
+        interval = float(getattr(settings, "oil_fastlane_interval_seconds", 60.0))
+        interval = max(45.0, interval)
+        if now - self._last_fastlane_ts < interval:
+            return 0
+
+        from .oil_fastlane import (
+            detect_fastlane_outlet,
+            enrich_fastlane_with_gemini,
+            format_fastlane_flash,
+            _price_move_note,
+        )
+
+        max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 6.0))
+        min_score = int(getattr(settings, "oil_fastlane_min_score", 7))
+        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 2))
+        include_ru = bool(getattr(settings, "oil_russian_news", True))
+        use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
+
+        try:
+            items = await fetch_oil_fastlane_news(
+                max_items=12,
+                max_age_hours=max_age_h,
+                min_flash_score=min_score,
+                include_russian=include_ru,
+            )
+        except Exception:
+            logger.exception("Oil fast-lane fetch failed")
+            self._last_fastlane_ts = now
+            return 0
+
+        self._last_fastlane_ts = now
+        cutoff = now - max_age_h * 3600.0
+        self._remember_news(items, cutoff=cutoff)
+
+        bars = None
+        try:
+            bars = await asyncio.to_thread(
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=5,
+                limit=80,
+            )
+        except Exception:
+            logger.debug("Oil fast-lane bars failed", exc_info=True)
+
+        move_note = _price_move_note(bars, interval_minutes=5)
+        sent = 0
+        for it in items:
+            key = it.title.lower()[:120]
+            if key in self._seen_titles or key in self._seen_fastlane:
+                continue
+            meta = detect_fastlane_outlet(it.title, it.source, it.url or "")
+            if meta is None:
+                continue
+            ai_ru = ""
+            if use_gemini:
+                ai_ru = await enrich_fastlane_with_gemini(
+                    it.title,
+                    source=it.source,
+                    outlet=meta.outlet,
+                    impact=it.impact,
+                    move_note=move_note,
+                    api_key=self._resolve_gemini_key(),
+                    model=self._resolve_gemini_model(),
+                )
+            msg = format_fastlane_flash(
+                it,
+                meta=meta,
+                ai_ru=ai_ru,
+                move_note=move_note,
+                age_label=_age_label(it.published_ts),
+            )
+            try:
+                ok = await self._on_news(msg)
+            except Exception:
+                logger.exception("Oil fast-lane dispatch failed")
+                ok = False
+            if ok:
+                self._seen_titles.add(key)
+                self._seen_fastlane.add(key)
+                sent += 1
+                logger.info(
+                    "Oil fast-lane %s score=%d: %s",
+                    meta.outlet,
+                    meta.flash_score,
+                    it.title[:80],
+                )
+                if sent >= max_per:
+                    break
+
+        if len(self._seen_fastlane) > 300:
+            self._seen_fastlane = set(list(self._seen_fastlane)[-150:])
+        return sent
+
     async def poll_once(self) -> int:
         settings = self.settings_manager.settings
         if not getattr(settings, "oil_news_enabled", False):
@@ -2517,9 +2662,14 @@ class OilMonitorEngine:
         sent = 0
         sent += await self._tick_level_alerts(settings)
         sent += await self._tick_micro_signals(settings)
+        sent += await self._tick_fastlane(settings)
+
+        now = time.time()
+        news_interval = float(getattr(settings, "oil_news_interval_seconds", 300.0))
+        run_regular = (now - self._last_regular_news_ts) >= max(120.0, news_interval)
 
         max_age_h = float(getattr(settings, "oil_news_max_age_hours", 12.0))
-        cutoff = time.time() - max_age_h * 3600.0
+        cutoff = now - max_age_h * 3600.0
         max_per_poll = int(getattr(settings, "oil_news_max_per_poll", 1))
         separate = bool(getattr(settings, "oil_news_separate_messages", True))
         critical_only = bool(getattr(settings, "oil_news_critical_only", True))
@@ -2527,62 +2677,64 @@ class OilMonitorEngine:
         include_ru = bool(getattr(settings, "oil_russian_news", True))
         include_pro = bool(getattr(settings, "oil_pro_feeds_enabled", True))
 
-        try:
-            items = await fetch_oil_news(
-                max_items=20,
-                include_russian=include_ru,
-                critical_only=critical_only,
-                critical_min_score=critical_min,
-                max_age_hours=max_age_h,
-                include_pro_feeds=include_pro,
-            )
-        except Exception:
-            logger.exception("Oil news fetch failed")
-            items = []
+        items: list[OilNewsItem] = []
+        if run_regular:
+            try:
+                items = await fetch_oil_news(
+                    max_items=20,
+                    include_russian=include_ru,
+                    critical_only=critical_only,
+                    critical_min_score=critical_min,
+                    max_age_hours=max_age_h,
+                    include_pro_feeds=include_pro,
+                )
+            except Exception:
+                logger.exception("Oil news fetch failed")
+                items = []
+            self._last_regular_news_ts = now
 
-        fresh: list[OilNewsItem] = []
-        for it in items:
-            if it.published_ts < cutoff:
-                continue
-            key = it.title.lower()[:120]
-            if key in self._seen_titles:
-                continue
-            fresh.append(it)
+            fresh: list[OilNewsItem] = []
+            for it in items:
+                if it.published_ts < cutoff:
+                    continue
+                key = it.title.lower()[:120]
+                if key in self._seen_titles:
+                    continue
+                fresh.append(it)
 
-        # Все свежие важные (не только отправленные) — в фон для дайджеста.
-        self._remember_news(items, cutoff=cutoff)
+            # Все свежие важные (не только отправленные) — в фон для дайджеста.
+            self._remember_news(items, cutoff=cutoff)
 
-        if fresh:
-            batch = fresh[:max_per_poll]
-            if separate:
-                for it in batch:
-                    msg = format_single_oil_news(it)
+            if fresh:
+                batch = fresh[:max_per_poll]
+                if separate:
+                    for it in batch:
+                        msg = format_single_oil_news(it)
+                        try:
+                            ok = await self._on_news(msg)
+                        except Exception:
+                            logger.exception("Oil news dispatch failed")
+                            ok = False
+                        if ok:
+                            self._seen_titles.add(it.title.lower()[:120])
+                            sent += 1
+                else:
+                    msg = format_oil_news_message(batch, max_show=len(batch))
                     try:
                         ok = await self._on_news(msg)
                     except Exception:
                         logger.exception("Oil news dispatch failed")
                         ok = False
                     if ok:
-                        self._seen_titles.add(it.title.lower()[:120])
-                        sent += 1
-            else:
-                msg = format_oil_news_message(batch, max_show=len(batch))
-                try:
-                    ok = await self._on_news(msg)
-                except Exception:
-                    logger.exception("Oil news dispatch failed")
-                    ok = False
-                if ok:
-                    for it in batch:
-                        self._seen_titles.add(it.title.lower()[:120])
-                    sent += len(batch)
+                        for it in batch:
+                            self._seen_titles.add(it.title.lower()[:120])
+                        sent += len(batch)
 
-            if len(self._seen_titles) > 500:
-                self._seen_titles = set(list(self._seen_titles)[-200:])
+                if len(self._seen_titles) > 500:
+                    self._seen_titles = set(list(self._seen_titles)[-200:])
 
         digest_enabled = bool(getattr(settings, "oil_digest_enabled", True))
         digest_h = float(getattr(settings, "oil_digest_interval_hours", 4.0))
-        now = time.time()
         if (
             digest_enabled
             and self._on_digest is not None
@@ -3018,7 +3170,13 @@ class OilMonitorEngine:
                 if interval is not None
                 else getattr(settings, "oil_news_interval_seconds", 300.0)
             )
-            sleep_s = max(120.0, sleep_s)
+            fastlane_on = bool(getattr(settings, "oil_fastlane_enabled", True))
+            if fastlane_on:
+                fl = float(getattr(settings, "oil_fastlane_interval_seconds", 60.0))
+                sleep_s = min(sleep_s, max(45.0, fl))
+                sleep_s = max(45.0, sleep_s)
+            else:
+                sleep_s = max(120.0, sleep_s)
             try:
                 if getattr(settings, "oil_news_enabled", False):
                     n = await self.poll_once()

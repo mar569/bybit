@@ -573,3 +573,88 @@ def test_parse_rss_pub_empty_is_none():
 
     assert _parse_rss_pub("") is None
     assert _parse_rss_pub("   ") is None
+
+
+def test_fastlane_detects_wsj_reuters_blas():
+    from bot.oil_fastlane import detect_fastlane_outlet, is_fastlane_item, format_fastlane_flash
+
+    wsj = detect_fastlane_outlet(
+        "Trump Orders Attack on Iran Nuclear Sites, WSJ Reports",
+        source="Wall Street Journal",
+        url="https://www.wsj.com/world/iran-attack",
+    )
+    assert wsj is not None
+    assert wsj.outlet == "WSJ"
+    assert wsj.tier == 1
+    assert wsj.flash_score >= 8
+
+    blas = detect_fastlane_outlet(
+        "Javier Blas: Hormuz tanker traffic collapses",
+        source="Bloomberg Opinion",
+    )
+    assert blas is not None
+    assert blas.outlet == "Javier Blas"
+
+    item = OilNewsItem(
+        title="Reuters: Strait of Hormuz blockade threatens oil supply",
+        url="https://www.reuters.com/world/hormuz",
+        source="Reuters",
+        published_ts=1_700_000_000.0,
+        impact="bullish",
+        theme="iran_geo",
+    )
+    assert is_fastlane_item(item, min_flash_score=7)
+    meta = detect_fastlane_outlet(item.title, item.source, item.url)
+    assert meta is not None
+    text = format_fastlane_flash(
+        item,
+        meta=meta,
+        ai_ru="Bias вверх; ждать отскок от хая.",
+        move_note="⚠️ Движение опережает новость: прокси-цена уже +1.2% / 30м",
+        age_label="5 мин",
+    )
+    assert "КРИТИЧНО" in text
+    assert "Reuters" in text
+    assert "Разбор ИИ" in text
+    assert "опережает" in text
+
+
+def test_fastlane_rejects_random_blog():
+    from bot.oil_fastlane import detect_fastlane_outlet, is_fastlane_item
+
+    meta = detect_fastlane_outlet(
+        "My blog oil price prediction next week",
+        source="Random Blog",
+        url="https://example.com/oil",
+    )
+    assert meta is None
+    item = OilNewsItem(
+        title="My blog oil price prediction next week",
+        url="https://example.com/oil",
+        source="Random Blog",
+        published_ts=1_700_000_000.0,
+    )
+    assert not is_fastlane_item(item)
+
+
+def test_fastlane_bounce_hint_after_spike():
+    from bot.oil_fastlane import _bounce_hint, _price_move_note
+
+    assert "отскок вниз" in _bounce_hint("bullish", "движение опережает новость")
+    assert "отскок вверх" in _bounce_hint("bearish", "уже сдвинулась")
+
+    # Flat bars → no move note
+    bars = [
+        KlineBar(open_time=i, open=80, high=81, low=79, close=80.0, volume=1)
+        for i in range(20)
+    ]
+    assert _price_move_note(bars) == ""
+
+    # Spike bars
+    spiked = [
+        KlineBar(open_time=i, open=80, high=81, low=79, close=80.0 + (1.5 if i == 19 else 0), volume=1)
+        for i in range(20)
+    ]
+    # last close 81.5 vs earlier 80 → ~1.875%
+    note = _price_move_note(spiked)
+    assert "опережает" in note or "сдвинулась" in note

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 64
+SETTINGS_VERSION = 65
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -540,6 +540,13 @@ class ScannerSettings:
     oil_russian_news: bool = True
     oil_news_critical_only: bool = True
     oil_news_critical_min_score: int = 4
+    # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
+    oil_fastlane_enabled: bool = True
+    oil_fastlane_interval_seconds: int = 60
+    oil_fastlane_max_age_hours: float = 6.0
+    oil_fastlane_min_score: int = 7
+    oil_fastlane_max_per_poll: int = 2
+    oil_fastlane_gemini: bool = True
     # Прямые RSS: OilPrice + EIA (+ Google-запросы прогнозов банков)
     oil_pro_feeds_enabled: bool = True
     # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
@@ -1104,6 +1111,16 @@ class ScannerSettings:
             oil_russian_news=bool(base.get("oil_russian_news", True)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
+            oil_fastlane_enabled=bool(base.get("oil_fastlane_enabled", True)),
+            oil_fastlane_interval_seconds=int(
+                base.get("oil_fastlane_interval_seconds", 60)
+            ),
+            oil_fastlane_max_age_hours=float(
+                base.get("oil_fastlane_max_age_hours", 6.0)
+            ),
+            oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 7)),
+            oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 2)),
+            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
             oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
@@ -1685,6 +1702,13 @@ class SettingsManager:
                 merged.setdefault("oil_setup_min_quality", 7)
                 merged.setdefault("oil_setup_cooldown_seconds", 3600)
                 merged.setdefault("oil_setup_near_pct", 0.35)
+            if version < 65:
+                merged.setdefault("oil_fastlane_enabled", True)
+                merged.setdefault("oil_fastlane_interval_seconds", 60)
+                merged.setdefault("oil_fastlane_max_age_hours", 6.0)
+                merged.setdefault("oil_fastlane_min_score", 7)
+                merged.setdefault("oil_fastlane_max_per_poll", 2)
+                merged.setdefault("oil_fastlane_gemini", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
