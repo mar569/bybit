@@ -637,6 +637,35 @@ def test_fastlane_rejects_random_blog():
     assert not is_fastlane_item(item)
 
 
+def test_fastlane_rejects_wsj_fashion_noise():
+    """WSJ в source больше не даёт flash без нефтяной темы в title."""
+    from bot.oil_fastlane import (
+        ai_says_off_topic,
+        fastlane_title_on_topic,
+        is_fastlane_item,
+    )
+
+    title = "‘Naked Dressing’ Is Spreading and It’s Making Things Awkward"
+    assert not fastlane_title_on_topic(title)
+    item = OilNewsItem(
+        title=title,
+        url="https://www.wsj.com/style/fashion/naked-dressing",
+        source="The Wall Street Journal",
+        published_ts=1_700_000_000.0,
+        impact="neutral",
+    )
+    assert not is_fastlane_item(item, min_flash_score=7)
+
+    gemini_no = (
+        "OIL_RELEVANT: NO\n"
+        "Статья WSJ про моду; никак не относится к нефти."
+    )
+    assert ai_says_off_topic(gemini_no)
+    assert not ai_says_off_topic(
+        "OIL_RELEVANT: YES\nBias вверх из‑за Ормуза."
+    )
+
+
 def test_fastlane_bounce_hint_after_spike():
     from bot.oil_fastlane import _bounce_hint, _price_move_note
 

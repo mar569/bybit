@@ -50,6 +50,7 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("energy information administration", "EIA", 1),
 )
 
+# Баллы только по ЗАГОЛОВКУ (не по source — иначе любой WSJ даёт flash)
 _FLASH_TERMS: dict[str, int] = {
     "attack": 5,
     "strike": 5,
@@ -68,12 +69,40 @@ _FLASH_TERMS: dict[str, int] = {
     "трамп": 3,
     "iran": 3,
     "иран": 3,
-    "wsj": 4,
-    "wall street journal": 4,
+    "oil": 3,
+    "crude": 3,
+    "brent": 3,
+    "нефт": 3,
+    "opec": 2,
+    "eia": 2,
+    "tanker": 3,
+    "танкер": 3,
     "javier blas": 4,
     "pentagon": 3,
     "white house": 3,
 }
+
+# Без этого в title — не шлём, даже если outlet = WSJ
+# Короткие токены (spr, eia, wti) — только целыми словами (иначе spr⊂Spreading).
+_TOPIC_OIL: tuple[str, ...] = (
+    "oil", "crude", "brent", "petroleum", "gasoline", "diesel",
+    "нефт", "баррель", "barrel", "opec", "опек",
+    "energy", "энерг", "commodity", "commodit", "fuel oil",
+)
+_TOPIC_OIL_WORDS: tuple[str, ...] = (
+    "wti", "eia", "spr", "fuel",
+)
+_TOPIC_GEO: tuple[str, ...] = (
+    "iran", "иран", "tehran", "тегеран", "hormuz", "ормуз", "strait",
+    "houthi", "хусит", "persian gulf", "middle east", "ближн",
+    "israel", "израил", "hezbollah", "red sea",
+)
+
+
+def _has_whole_word(text: str, word: str) -> bool:
+    import re
+
+    return re.search(rf"(?<![a-zа-я0-9]){re.escape(word)}(?![a-zа-я0-9])", text) is not None
 
 
 @dataclass(frozen=True)
@@ -84,8 +113,28 @@ class FastLaneMeta:
     is_flash: bool
 
 
+def fastlane_title_on_topic(title: str) -> bool:
+    """Заголовок про нефть / Ормуз / Иран / энерго-гео — иначе шум (мода, спорт…)."""
+    low = (title or "").lower()
+    if not low.strip():
+        return False
+    if any(k in low for k in _TOPIC_OIL):
+        return True
+    if any(_has_whole_word(low, w) for w in _TOPIC_OIL_WORDS):
+        return True
+    if any(k in low for k in _TOPIC_GEO):
+        return True
+    # Санкции/атака США — только вместе с нефтью или Ираном (не любой Trump-заголовок)
+    if any(k in low for k in ("sanction", "санкц", "attack", "strike", "удар", "атак")) and any(
+        k in low for k in ("oil", "crude", "нефт", "iran", "иран", "hormuz", "ормуз", "energy")
+    ):
+        return True
+    return False
+
+
 def detect_fastlane_outlet(title: str, source: str = "", url: str = "") -> FastLaneMeta | None:
     blob = f"{title} {source} {url}".lower()
+    title_l = (title or "").lower()
     best: tuple[str, int] | None = None
     for needle, display, tier in _TIER1_SOURCES:
         if needle in blob:
@@ -101,7 +150,7 @@ def detect_fastlane_outlet(title: str, source: str = "", url: str = "") -> FastL
         return None
     score = 0
     for term, w in _FLASH_TERMS.items():
-        if term in blob:
+        if term in title_l:
             score += w
     # Tier1 outlet always gets base boost
     score += 4 if best[1] == 1 else 2
@@ -110,8 +159,11 @@ def detect_fastlane_outlet(title: str, source: str = "", url: str = "") -> FastL
 
 
 def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
+    title = getattr(item, "title", "") or ""
+    if not fastlane_title_on_topic(title):
+        return False
     meta = detect_fastlane_outlet(
-        getattr(item, "title", "") or "",
+        title,
         getattr(item, "source", "") or "",
         getattr(item, "url", "") or "",
     )
@@ -123,6 +175,30 @@ def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
     if meta.tier == 2 and meta.flash_score >= min_flash_score + 2:
         return True
     return meta.is_flash
+
+
+def ai_says_off_topic(ai_text: str) -> bool:
+    """Gemini пометил новость как не про нефть → не слать в чат."""
+    raw = (ai_text or "").strip()
+    if not raw:
+        return False
+    head = raw[:220].upper().replace(" ", "")
+    if "OIL_RELEVANT:NO" in head or "OIL_RELEVANT：NO" in head:
+        return True
+    if "OIL_RELEVANT:YES" in head or "OIL_RELEVANT：YES" in head:
+        return False
+    low = raw.lower()
+    strong_no = (
+        "никак не относится к нефт",
+        "абсолютно никак не относится",
+        "не относится к нефт",
+        "влияние на котировки ukousd нулев",
+        "влияние на нефть: нет",
+        "no_trade",
+        "информационным шумом",
+        "полностью игнорировать эту новость",
+    )
+    return any(p in low for p in strong_no)
 
 
 def _price_move_note(bars: Sequence[KlineBar] | None, *, interval_minutes: int = 5) -> str:
@@ -186,7 +262,10 @@ async def enrich_fastlane_with_gemini(
     api_key: str | None,
     model: str = "gemini-3.6-flash",
 ) -> str:
-    """Короткий ИИ-разбор для UKOUSD; пустая строка при ошибке."""
+    """Короткий ИИ-разбор для UKOUSD; пустая строка при ошибке.
+
+    Первая строка ответа: OIL_RELEVANT: YES|NO — для отсева моды/спорта и т.п.
+    """
     if not api_key:
         return ""
     try:
@@ -194,20 +273,23 @@ async def enrich_fastlane_with_gemini(
 
         ctx = (
             "Ты профессиональный трейдер Brent/UKOUSD. Пиши по-русски, просто и жёстко. "
-            "Без markdown. 5–7 коротких строк.\n"
+            "Без markdown.\n"
             f"Источник: {outlet} ({source})\n"
             f"Заголовок: {title}\n"
             f"Тон заголовка (бот): {impact}\n"
             f"Цена: {move_note or 'без сильного сдвига до новости'}\n"
         )
         user = (
-            "Разбери для трейдера UKOUSD:\n"
-            "1) Суть новости одной фразой\n"
-            "2) Почему влияет на нефть (Ормуз/поставки/санкции)\n"
-            "3) Bias: вверх / вниз / mixed\n"
-            "4) Что часто бывает после такого импульса (отскок?)\n"
-            "5) Что делать сейчас (не финсовет, план)\n"
-            "Не выдумывай факты, которых нет в заголовке."
+            "Первая строка СТРОГО одна из двух:\n"
+            "OIL_RELEVANT: YES\n"
+            "или\n"
+            "OIL_RELEVANT: NO\n"
+            "YES — только если влияет на нефть/Brent/Ормуз/санкции/запасы/ОПЕК/танкеры.\n"
+            "NO — мода, спорт, культура, быт, чистая политика без энергии.\n\n"
+            "Если YES, дальше 5 коротких пунктов:\n"
+            "1) Суть\n2) Почему влияет на нефть\n3) Bias вверх/вниз/mixed\n"
+            "4) Отскок после импульса?\n5) Что делать (не финсовет)\n"
+            "Если NO — одной фразой почему это шум. Не выдумывай факты."
         )
         result = await ask_gemini(
             api_key=api_key,

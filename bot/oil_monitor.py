@@ -2563,8 +2563,10 @@ class OilMonitorEngine:
             return 0
 
         from .oil_fastlane import (
+            ai_says_off_topic,
             detect_fastlane_outlet,
             enrich_fastlane_with_gemini,
+            fastlane_title_on_topic,
             format_fastlane_flash,
             _price_move_note,
         )
@@ -2609,6 +2611,10 @@ class OilMonitorEngine:
             key = it.title.lower()[:120]
             if key in self._seen_titles or key in self._seen_fastlane:
                 continue
+            if not fastlane_title_on_topic(it.title):
+                self._seen_fastlane.add(key)
+                logger.info("Oil fast-lane skip off-topic title: %s", it.title[:90])
+                continue
             meta = detect_fastlane_outlet(it.title, it.source, it.url or "")
             if meta is None:
                 continue
@@ -2623,6 +2629,19 @@ class OilMonitorEngine:
                     api_key=self._resolve_gemini_key(),
                     model=self._resolve_gemini_model(),
                 )
+                if ai_ru and ai_says_off_topic(ai_ru):
+                    self._seen_fastlane.add(key)
+                    self._seen_titles.add(key)
+                    logger.info(
+                        "Oil fast-lane drop (Gemini off-topic): %s",
+                        it.title[:90],
+                    )
+                    continue
+            # Убрать служебную строку OIL_RELEVANT из текста в чат
+            if ai_ru:
+                lines_ai = ai_ru.splitlines()
+                if lines_ai and "OIL_RELEVANT" in lines_ai[0].upper():
+                    ai_ru = "\n".join(lines_ai[1:]).strip()
             msg = format_fastlane_flash(
                 it,
                 meta=meta,
