@@ -27,6 +27,10 @@ FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "EIA crude oil inventory OR STEO when:1d",
     "site:reuters.com OR site:bloomberg.com OR site:wsj.com Trump cancels OR pauses OR TACO Iran strike when:12h",
     "site:reuters.com OR site:bloomberg.com Strait of Hormuz tanker OR blockade OR reopen when:12h",
+    # Иранская линия (Fars / Tasnim) — контр-нарратив к «deal tape»
+    "site:farsnews.ir Hormuz OR Strait OR Iran OR tanker OR oil when:12h",
+    "Fars News Agency Hormuz OR Iran Strait OR refuse OR reject when:12h",
+    "site:tasnimnews.com Hormuz OR Iran oil OR Strait when:12h",
 )
 
 FAST_LANE_QUERIES_RU: tuple[str, ...] = (
@@ -35,6 +39,8 @@ FAST_LANE_QUERIES_RU: tuple[str, ...] = (
     "Bloomberg Ормуз OR Иран нефть when:12h",
     "investing.com нефть OR Brent OR Ормуз OR Иран when:12h",
     "Reuters OR Bloomberg Трамп отменил удар Иран нефть when:12h",
+    "Fars Ормуз OR Иран пролив нефть when:12h",
+    "site:farsnews.ir Ормуз OR Иран when:12h",
 )
 
 # Needle только в source/url (НЕ в title) — иначе EdexLive «White House signals…» = fake Tier-1
@@ -57,6 +63,13 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("defense.gov", "DoD", 1),
     ("eia.gov", "EIA", 1),
     ("energy information administration", "EIA", 1),
+    # Иранская гос. линия — важна для Ормуза (не WSJ, но primary для Тегерана)
+    ("farsnews.ir", "Fars", 2),
+    ("fars news", "Fars", 2),
+    ("farsnews", "Fars", 2),
+    ("tasnimnews.com", "Tasnim", 2),
+    ("tasnim", "Tasnim", 2),
+    ("irna.ir", "IRNA", 2),
 )
 
 # Домены-синдикаты / образовательные зеркала — не пускать в ‼️
@@ -114,6 +127,13 @@ _FLASH_TERMS: dict[str, int] = {
     "javier blas": 4,
     "pentagon": 3,
     "white house": 3,
+    "fars": 3,
+    "tasnim": 2,
+    "refuse": 3,
+    "reject": 3,
+    "will not open": 4,
+    "won't open": 4,
+    "won't negotiate": 4,
 }
 
 # Без этого в title — не шлём, даже если outlet = WSJ
@@ -243,6 +263,9 @@ def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
         return False
     # Tier-1 geo/oil always; tier-2 needs higher score
     if meta.tier == 1 and meta.flash_score >= min_flash_score:
+        return True
+    # Иранские агентства (Fars/Tasnim/IRNA) — тот же порог, что Tier-1 по Ормузу
+    if meta.outlet in {"Fars", "Tasnim", "IRNA"} and meta.flash_score >= min_flash_score:
         return True
     if meta.tier == 2 and meta.flash_score >= min_flash_score + 2:
         return True

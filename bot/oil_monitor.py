@@ -113,6 +113,12 @@ _BULL_NEWS = frozenset({
     "cut produc", "draw", "tighten", "shortage", "deficit", "buy", "purchase",
     "атак", "удар", "сокращен", "дефицит", "покуп", "upside", "raises forecast",
     "new strikes", "fresh strikes", "orders attack", "bomb",
+    # Иран/Fars: отказ от сделки / не открываем пролив → риск поставок вверх
+    "will not negotiate", "won't negotiate", "refuse to negotiate",
+    "reject deal", "rejects deal", "no deal", "will not open", "won't open",
+    "not reopen", "keep closed", "remain closed", "blockade continues",
+    "не будем договарив", "не договарива", "не откроем", "не откроют",
+    "отказ от переговор", "отверг", "пролив закрыт",
 })
 # Катализатор вниз (деэскалация / сделка / отмена ударов).
 _BEAR_NEWS = frozenset({
@@ -216,6 +222,12 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "John Kemp Reuters oil when:1d",
     "war premium oil unwind OR Hormuz deal oil prices when:12h",
     "Trump TACO OR cancels Iran strike OR pauses attack oil when:12h",
+    # Иранская гос. линия (Fars / IRGC-adjacent) — важно для Ормуза
+    "site:farsnews.ir Hormuz OR Strait OR Iran oil OR tanker when:1d",
+    "site:farsnews.ir Iran refuse OR reject OR will not negotiate OR reopen Hormuz when:1d",
+    "Fars News Hormuz OR Iran Strait OR tanker when:12h",
+    "site:tasnimnews.com Hormuz OR Iran oil OR Strait when:1d",
+    "site:en.irna.ir Hormuz OR Strait of Hormuz OR oil tanker when:1d",
 )
 NEWS_QUERIES_RU: tuple[str, ...] = (
     "нефть Иран Трамп санкции Ормуз when:12h",
@@ -229,6 +241,9 @@ NEWS_QUERIES_RU: tuple[str, ...] = (
     "прогноз цена нефти Brent EIA OR ОПЕК when:1d",
     "нефть Ормуз сделка цена when:12h",
     "Трамп отменил удар Иран нефть when:12h",
+    "site:farsnews.ir Ормуз OR Иран нефть OR танкер when:1d",
+    "Fars News Ормуз OR Иран пролив when:12h",
+    "site:tasnimnews.com Ормуз OR Иран нефть when:1d",
 )
 
 # Прямые RSS профи (отрасль / EIA) → новостник
@@ -627,6 +642,19 @@ def classify_news_impact(title: str) -> str:
     ) and any(k in low for k in ("attack", "strike", "удар", "атак", "bomb")):
         bear += 3
         bull = max(0, bull - 2)
+
+    # Иран/Fars: отказ переговоров / не открываем пролив → bullish для нефти
+    if any(
+        k in low
+        for k in (
+            "will not negotiate", "won't negotiate", "refuse", "reject",
+            "will not open", "won't open", "not reopen", "keep closed",
+            "не будем договарив", "не договарива", "не откроем", "не откроют",
+            "отказ от переговор",
+        )
+    ) and any(k in low for k in ("hormuz", "ормуз", "strait", "deal", "сделк", "iran", "иран")):
+        bull += 3
+        bear = max(0, bear - 1)
 
     # «cuts Brent forecast» / «raises WTI outlook»
     if "forecast" in low or "outlook" in low or "прогноз" in low:

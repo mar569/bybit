@@ -133,6 +133,19 @@ def test_classify_news_impact():
         )
         == "bullish"
     )
+    # Fars / Тегеран: отказ договариваться / не открываем пролив → вверх для нефти
+    assert (
+        classify_news_impact(
+            "Fars: Iran will not negotiate, Strait of Hormuz will not open"
+        )
+        == "bullish"
+    )
+    assert (
+        classify_news_impact(
+            "Iran rejects Hormuz deal, says will not reopen the strait"
+        )
+        == "bullish"
+    )
 
 
 def test_format_single_oil_news_has_link():
