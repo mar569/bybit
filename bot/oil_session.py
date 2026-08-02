@@ -149,6 +149,21 @@ class OilOpenBrief:
     disclaimer_ru: str
 
 
+def _title_has_deny_hormuz_reopen(title: str) -> bool:
+    """«Не откроем Ормуз» ≠ сделка reopen (локально, без импорта oil_monitor)."""
+    low = (title or "").lower()
+    deny = any(
+        k in low
+        for k in (
+            "no agreement to reopen", "not reopen", "won't reopen", "will not reopen",
+            "refuse to reopen", "refuses to reopen", "denies", "deny", "denied",
+            "sheer lie", "не откроем", "не откроют", "отрицает", "опроверг", "ложь",
+        )
+    )
+    ctx = any(k in low for k in ("reopen", "hormuz", "ормуз", "open the strait", "открыт"))
+    return deny and ctx
+
+
 def build_weekend_open_brief(
     *,
     price: float,
@@ -159,7 +174,7 @@ def build_weekend_open_brief(
     sat_high_hint: float | None = None,
     sun_low_hint: float | None = None,
 ) -> OilOpenBrief:
-    """Коротко: что ждать на открытии пн 01:00 MSK (Bybit UKOUSD.s)."""
+    """Коротко: что ждать на открытии. Без зашитых догм «ОПЕК = вниз»."""
     session = session or oil_session_status()
     bias_n = getattr(news_bias, "bias", "neutral") if news_bias else "neutral"
     w = float(getattr(news_bias, "weighted_score", 0) or 0) if news_bias else 0.0
@@ -176,84 +191,110 @@ def build_weekend_open_brief(
         if len(tops) >= 3:
             break
 
+    def _low(it: Any) -> str:
+        return (getattr(it, "title", "") or "").lower()
+
+    deny_reopen = any(_title_has_deny_hormuz_reopen(_low(it)) for it in (news_items or []))
+    # Сделка/TACO — но не «отрицает reopen» (это был баг классификации)
     dealish = any(
-        any(
-            k in (getattr(it, "title", "") or "").lower()
-            for k in (
-                "taco", "cancel", "pause", "deal", "reopen", "tumble", "slump",
-                "отмен", "струсил", "сделк", "holds off", "hold off",
+        (
+            any(
+                k in _low(it)
+                for k in (
+                    "taco", "cancel", "pause", "tumble", "slump",
+                    "отмен", "струсил", "holds off", "hold off",
+                )
+            )
+            or (
+                any(k in _low(it) for k in ("deal", "reopen", "сделк"))
+                and not _title_has_deny_hormuz_reopen(_low(it))
             )
         )
         for it in (news_items or [])
     )
-    hot_geo = any(
-        any(
-            k in (getattr(it, "title", "") or "").lower()
-            for k in ("attack", "strike", "blockade", "close strait", "удар", "атак")
-        )
-        and not any(
-            k in (getattr(it, "title", "") or "").lower()
-            for k in ("cancel", "pause", "taco", "отмен", "holds off", "hold off")
-        )
-        for it in (news_items or [])
-    )
-    opec_hike = any(
-        any(
-            k in (getattr(it, "title", "") or "").lower()
-            for k in ("quota", "hike", "increase", "квот", "повыс", "добыч")
+    hot_geo = deny_reopen or any(
+        (
+            any(
+                k in _low(it)
+                for k in (
+                    "attack", "strike", "blockade", "close strait", "удар", "атак",
+                    "closed", "закрыт", "не откро",
+                )
+            )
+            and not any(
+                k in _low(it)
+                for k in ("cancel", "pause", "taco", "отмен", "holds off", "hold off")
+            )
         )
         for it in (news_items or [])
     )
 
-    # Новости важнее прогноза графика: сделка/ОПЕК → вниз; удары → вверх
-    if dealish and not hot_geo:
-        bias = "DOWN"
-        conf = 7 if abs(w) >= 2 or dealish else 5
-        if opec_hike:
-            conf = min(8, conf + 1)
+    # Живой разбор: конфликт факторов → смешанно; без «всегда ОПЕК вниз»
+    if hot_geo and dealish:
+        bias, conf = "MIXED", 5
         headline = (
-            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
-            f"(сейчас ориентир ≈${price:.2f})."
+            f"На открытии пн <b>01:00 МСК</b> <b>смешанно</b> "
+            f"(ориентир ≈${price:.2f})."
         )
         base = (
-            "Страх войны ослаб (пауза/отмена ударов). "
-            + (
-                "Плюс ОПЕК может добавить добычу — тоже давит вниз. "
-                if opec_hike
-                else ""
-            )
-            + "На старте возможен резкий разрыв цены."
+            "В ленте и риск по проливу/Ирану, и смягчение (пауза/сделка). "
+            "Не угадывай направление в первую минуту — смотри реакцию."
         )
-        alt = "Если ночью снова про удары/пролив — может развернуться вверх."
-    elif bias_n == "bearish" or fc_bias == "SHORT" or opec_hike:
-        bias = "DOWN"
-        conf = 6 if opec_hike or abs(w) >= 2 else 5
-        headline = (
-            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
-            f"(сейчас ориентир ≈${price:.2f})."
-        )
-        base = (
-            "Новости давят цену вниз. "
-            "Подожди первый час после открытия."
-        )
-        alt = "Резкая новость про конфликт/пролив может подбросить вверх."
-    elif hot_geo or bias_n == "bullish":
-        bias = "UP"
-        conf = 6
+        alt = "Какой заголовок сильнее перед открытием — тот и задаст гэп."
+    elif hot_geo and not dealish:
+        bias, conf = "UP", (6 if abs(w) >= 2 else 5)
         headline = (
             f"На открытии пн <b>01:00 МСК</b> скорее <b>дороже</b> "
             f"(сейчас ориентир ≈${price:.2f})."
         )
-        base = "В ленте риски по Ирану/проливу — рынок может открыться выше."
-        alt = "Если до открытия скажут про сделку или паузу — может резко вниз."
+        base = (
+            "Сейчас в ленте сильнее звучит риск по Ирану/проливу. "
+            "Это не приговор на неделю — только ориентир на открытие."
+        )
+        alt = "Новый заголовок про сделку/паузу до 01:00 может развернуть вниз."
+    elif dealish and not hot_geo:
+        bias, conf = "DOWN", (6 if abs(w) >= 2 else 5)
+        headline = (
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
+        )
+        base = (
+            "В ленте смягчение (пауза/отмена ударов и т.п.). "
+            "На старте возможен разрыв — не входи вслепую в первую минуту."
+        )
+        alt = "Если ночью снова эскалация по проливу — может развернуться вверх."
+    elif bias_n == "bearish" or (fc_bias == "SHORT" and bias_n != "bullish"):
+        bias, conf = "DOWN", (5 if abs(w) >= 2.5 else 4)
+        headline = (
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
+        )
+        base = (
+            "По сумме свежих заголовков фон скорее вниз. "
+            "Уверенность умеренная — рынок может всё переписать за ночь."
+        )
+        alt = "Сильный геозаголовок может подбросить вверх."
+    elif bias_n == "bullish":
+        bias, conf = "UP", (5 if abs(w) >= 2.5 else 4)
+        headline = (
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дороже</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
+        )
+        base = (
+            "По сумме свежих заголовков фон скорее вверх. "
+            "Без chase в первую минуту."
+        )
+        alt = "Сделка/пауза до открытия может резко вниз."
     else:
-        bias = "MIXED"
-        conf = 4
+        bias, conf = "MIXED", 4
         headline = (
             f"На открытии пн <b>01:00 МСК</b> пока <b>неясно</b> "
             f"(ориентир ≈${price:.2f}). Лучше подождать первый час."
         )
-        base = "Новости тянут в разные стороны. Без ясного сигнала не входи вслепую."
+        base = (
+            "Заголовки тянут в разные стороны или фона мало. "
+            "Не закладывай жёсткий сценарий заранее."
+        )
         alt = "Сильная новость ночью может всё перевернуть."
 
     levels: list[str] = []

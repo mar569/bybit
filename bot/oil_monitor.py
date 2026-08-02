@@ -787,7 +787,7 @@ _FASTLANE_STORY_TTL_SEC = 75 * 60.0
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
-    """Вес: критичность × свежесть (старое >24ч почти не давит на bias)."""
+    """Вес: критичность × свежесть. Без жёсткой «догмы» по ОПЕК/квотам."""
     score = float(news_critical_score(item.title, source=item.source))
     base = max(1.0, min(5.0, score / 3.0))
     return base * oil_news_freshness_weight(getattr(item, "published_ts", None))
@@ -1705,12 +1705,30 @@ def build_oil_qa_web_queries(question: str) -> list[str]:
     if any(k in ql for k in ("ормуз", "hormuz")):
         queries.append("Strait of Hormuz Iran reopen OR closed OR tanker when:7d")
 
+    # Запрос вида «статьи Bloomberg / Reuters / WSJ про нефть»
+    outlet_q: list[tuple[str, str]] = [
+        ("bloomberg", "site:bloomberg.com oil OR crude OR Brent OR OPEC OR Hormuz OR Iran when:7d"),
+        ("reuters", "site:reuters.com oil OR crude OR Brent OR OPEC OR Hormuz OR Iran when:7d"),
+        ("wsj", "site:wsj.com oil OR crude OR Brent OR OPEC OR Hormuz OR Iran when:7d"),
+        ("wall street", "site:wsj.com oil OR crude OR Brent OR OPEC OR Hormuz when:7d"),
+        ("investing", "site:investing.com oil OR Brent OR Hormuz OR OPEC when:7d"),
+        ("ft.com", "site:ft.com oil OR Brent OR Hormuz OR Iran when:7d"),
+        ("financial times", "site:ft.com oil OR Brent OR Hormuz OR Iran when:7d"),
+    ]
+    for needle, qq in outlet_q:
+        if needle in ql:
+            queries.insert(0, qq)
+            # RU-зеркало тоже
+            if "bloomberg" in needle:
+                queries.insert(1, "Bloomberg нефть OR Brent OR Ормуз OR ОПЕК when:7d")
+            break
+
     # Общий запрос из слов пользователя (без воды)
     stop = {
         "есть", "какая", "какой", "какие", "что", "или", "нет", "про", "это",
         "скажи", "найди", "найти", "информац", "статью", "статья", "новость",
         "новости", "влияет", "нефть", "как", "она", "этот", "эту", "ли",
-        "то", "же", "чтоли", "что-ли",
+        "то", "же", "чтоли", "что-ли", "все", "статьи", "у",
     }
     words = [
         w for w in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9-]{3,}", q)
@@ -2477,19 +2495,18 @@ async def enrich_oil_news_blurb(
         return ""
 
 
-OIL_QA_SYSTEM_PROMPT = """Ты умный собеседник по нефти (Brent / Bybit UKOUSD.s), как живой аналитик в чате.
+OIL_QA_SYSTEM_PROMPT = """Ты живой собеседник по нефти (Brent / Bybit UKOUSD.s).
 
-Общайся естественно: пойми суть вопроса, уточни если надо одной фразой, ответь по делу.
-Не будь роботом с жёстким шаблоном.
+Говори просто, по-человечески — как умный друг, который шарит в рынке.
+Не как робот, не как чеклист, не как шаблон «1) 2) 3)».
 
-Как работать:
-1) Пойми, чего хочет человек (факт? влияние на цену? что делать?).
-2) Используй контекст: историю диалога, «ЛЕНТУ БОТА», «ПОИСК В ИНТЕРНЕТЕ».
-3) Если просят «найди новость» — сначала лента, потом интернет; скажи честно нашёл/не нашёл.
-4) Не выдумывай факты и заголовки, которых нет в данных.
-5) Влияние на нефть объясняй простыми словами (вверх/вниз/слабо/неясно).
-6) Торговый план (ВЕРДИКТ LONG / стоп / TP) — ТОЛЬКО если явно просят план/вход/стоп.
-7) По-русски, коротко (обычно 6–14 строк). Не финсовет.
+Правила по делу:
+• Пойми вопрос и ответь на него — не уходи в сторону.
+• Опирайся на ленту бота и блок поиска, если они есть. Не выдумывай новости.
+• Если не нашёл — так и скажи коротко.
+• Если факторы спорят — скажи «смешанно / неясно», без фальшивой уверенности.
+• План сделки (LONG/стоп/TP) — только если человек сам просит.
+• 4–10 коротких предложений обычно достаточно. По-русски. Не финсовет.
 """
 
 OIL_PLAN_SYSTEM_PROMPT = """Ты трейдер нефти (Brent / Bybit UKOUSD.s). Пользователь ПРОСИТ торговый план.
@@ -2572,6 +2589,43 @@ def match_oil_news_for_question(
     return list(items or [])[:limit]
 
 
+def detect_requested_outlet(question: str) -> str | None:
+    """Если пользователь просит конкретное СМИ — bloomberg/reuters/…"""
+    ql = (question or "").lower()
+    mapping = (
+        ("bloomberg", "Bloomberg"),
+        ("reuters", "Reuters"),
+        ("wsj", "WSJ"),
+        ("wall street", "WSJ"),
+        ("investing", "Investing"),
+        ("financial times", "FT"),
+        ("ft.com", "FT"),
+        ("fars", "Fars"),
+    )
+    for needle, name in mapping:
+        if needle in ql:
+            return name
+    return None
+
+
+def filter_news_by_outlet(items: list[OilNewsItem], outlet: str) -> list[OilNewsItem]:
+    """Оставляет заголовки, похожие на запрошенный outlet (source/url/title)."""
+    needles = {
+        "Bloomberg": ("bloomberg",),
+        "Reuters": ("reuters",),
+        "WSJ": ("wsj", "wall street journal"),
+        "Investing": ("investing.com", "investing"),
+        "FT": ("ft.com", "financial times"),
+        "Fars": ("fars", "farsnews"),
+    }.get(outlet, (outlet.lower(),))
+    out: list[OilNewsItem] = []
+    for it in items or []:
+        blob = f"{it.source} {it.url} {it.title}".lower()
+        if any(n in blob for n in needles):
+            out.append(it)
+    return out
+
+
 def format_oil_ai_fallback(
     question: str,
     *,
@@ -2581,33 +2635,74 @@ def format_oil_ai_fallback(
     news_bias: OilNewsBias,
     recent: list[OilNewsItem],
     rate_limited: bool = False,
+    web_items: list[OilNewsItem] | None = None,
 ) -> str:
-    """Ответ «Спросить ИИ» без Gemini — по свежим заголовкам бота."""
+    """Ответ без ИИ: по ленте и/или живому поиску — строго по вопросу."""
     impact_ru = {
         "bullish": "🟢 вверх",
         "bearish": "🔴 вниз",
         "neutral": "⚪ контекст",
     }
+    q = (question or "").strip()
+    q_low = q.lower()
+    outlet = detect_requested_outlet(q)
+    web = list(web_items or [])
+
+    lines: list[str] = ["🤖 <b>По нефти</b>"]
+    if rate_limited:
+        lines.append("<i>ИИ сейчас недоступен — отвечаю по поиску/ленте.</i>")
+    lines.append("")
+    if q:
+        safe_q = q.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        lines.append(f"<b>Вопрос:</b> {safe_q}")
+        lines.append("")
+
+    # Запрос «статьи у Bloomberg» — отвечаем источником, не чужим ОПЕК/Бахрейном
+    if outlet:
+        from_web = filter_news_by_outlet(web, outlet)
+        from_mem = filter_news_by_outlet(list(recent or []), outlet)
+        found = from_web or from_mem
+        if found:
+            lines.append(f"<b>Нашёл у {outlet} (свежее):</b>")
+            for it in found[:10]:
+                title = (it.title or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                age = _age_label(float(it.published_ts)) if it.published_ts else ""
+                tag = impact_ru.get(it.impact or "", "⚪")
+                if it.url:
+                    lines.append(
+                        f'• {tag} <a href="{it.url}">{title}</a>'
+                        f"{(' · ' + age) if age else ''}"
+                    )
+                else:
+                    lines.append(f"• {tag} {title} · {it.source}")
+            lines.append("")
+            lines.append(
+                "Это не «все статьи за всё время» — свежая выборка Google News "
+                f"по {outlet} + нефть/Ормуз/ОПЕК за ~несколько дней."
+            )
+        else:
+            lines.append(
+                f"❌ По живому поиску свежих заголовков <b>{outlet}</b> про нефть "
+                "сейчас не нашёл (или Google News не отдал). "
+                "Попробуй ещё раз через минуту или уточни тему "
+                "(Ормуз / ОПЕК / Иран)."
+            )
+            if web:
+                lines.append("")
+                lines.append("<b>Рядом в поиске (другие источники):</b>")
+                for it in web[:5]:
+                    title = (it.title or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    lines.append(f"• {it.source}: {title}")
+        lines.append("")
+        lines.append("<i>Не финсовет · только Bybit UKOUSD.s</i>")
+        return "\n".join(lines)
+
     bias_ru = {
         "bullish": "скорее давление вверх",
         "bearish": "скорее давление вниз",
         "mixed": "смешанно",
         "neutral": "нейтрально",
     }.get(news_bias.bias, news_bias.bias)
-
-    lines: list[str] = [
-        "🤖 <b>Нефть · ответ по новостям бота</b>",
-    ]
-    if rate_limited:
-        lines.append(
-            "<i>Gemini сейчас недоступен (квота). Ниже — свежие заголовки и вывод без ИИ.</i>"
-        )
-    lines.append("")
-    q = (question or "").strip()
-    if q:
-        safe_q = q.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        lines.append(f"<b>Вопрос:</b> {safe_q}")
-        lines.append("")
 
     lines.append(f"📍 {session_hint}")
     if next_open:
@@ -2619,35 +2714,29 @@ def format_oil_ai_fallback(
     )
     lines.append("")
 
-    matched = match_oil_news_for_question(q, list(recent or []), limit=6)
-    # Эвристика: вопрос про конкретный сюжет, а в matched нет ключевых слов вопроса
-    q_low = q.lower()
+    matched = match_oil_news_for_question(q, list(recent or []) + web, limit=8)
     specific = any(
-        k in q_low
-        for k in (
-            "бахрейн", "bahrain", "f-35", "f35", "истребител",
-        )
+        k in q_low for k in ("бахрейн", "bahrain", "f-35", "f35", "истребител")
     )
     if specific:
         hit = any(
-            any(k in (it.title or "").lower() for k in ("bahrain", "бахрейн", "f-35", "f35", "fighter", "истребител"))
+            any(
+                k in (it.title or "").lower()
+                for k in ("bahrain", "бахрейн", "f-35", "f35", "fighter", "истребител")
+            )
             for it in matched
         )
         if not hit:
             lines.append(
-                "❌ <b>В свежей ленте бота нет заголовка про удар по Бахрейну / F-35.</b> "
-                "Либо слух не подтверждён в наших источниках, либо ещё не попал в Новостник."
+                "❌ В ленте и поиске нет заголовка про Бахрейн / F-35."
             )
             lines.append("")
 
     fresh = matched if matched else list(recent or [])[:8]
     if not fresh:
-        lines.append(
-            "Пока в памяти бота нет свежих заголовков — подожди 2–3 минуты "
-            "пока Новостник обновит ленту, или смотри чат «Нефть»."
-        )
+        lines.append("Пока нет свежих заголовков под вопрос.")
     else:
-        lines.append("<b>Что бот видит сейчас по теме / рядом:</b>")
+        lines.append("<b>Что нашёл по теме:</b>")
         for it in fresh:
             tag = impact_ru.get(getattr(it, "impact", "") or "", "⚪")
             title = (getattr(it, "title", "") or "").strip()
@@ -2655,7 +2744,10 @@ def format_oil_ai_fallback(
             pts = getattr(it, "published_ts", None)
             age = _age_label(float(pts)) if pts else ""
             safe_t = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            bit = f"• {tag} {safe_t}"
+            if getattr(it, "url", ""):
+                bit = f'• {tag} <a href="{it.url}">{safe_t}</a>'
+            else:
+                bit = f"• {tag} {safe_t}"
             meta = " · ".join(x for x in (src, age) if x)
             if meta:
                 bit += f" <i>({meta})</i>"
@@ -2663,11 +2755,13 @@ def format_oil_ai_fallback(
         lines.append("")
         if news_bias.summary_ru:
             lines.append(f"💡 {news_bias.summary_ru}")
-        lines.append(
-            "🧭 Если бы был удар по Бахрейну / потери F-35 — обычно это "
-            "<b>вверх для нефти</b> (страх эскалации). Без подтверждения в ленте "
-            "не торгуй слух."
-        )
+        if specific:
+            lines.append(
+                "🧭 Если бы удар по Бахрейну / F-35 подтвердился — обычно "
+                "вверх для нефти. Без подтверждения не торгуй слух."
+            )
+        elif news_bias.how_to_use_ru:
+            lines.append(f"🧭 {news_bias.how_to_use_ru}")
 
     lines.append("")
     lines.append("<i>Не финсовет · только Bybit UKOUSD.s</i>")
@@ -3910,28 +4004,54 @@ class OilMonitorEngine:
                     news_bias=news_bias,
                     recent=list(self._recent_news),
                     rate_limited=rate_limited,
+                    web_items=web_items if "web_items" in dir() else None,
                 )
 
             key = self._resolve_gemini_key()
             from .ai_analyst import groq_configured
 
-            # Без ключей — сразу сводка по новостям; иначе Gemini → Groq fallback
-            if not key and not groq_configured():
-                return True, _fallback(rate_limited=False)
-
             recent = list(self._recent_news)
             matched_local = match_oil_news_for_question(q, recent, limit=8)
             wants_plan = oil_question_wants_trade_plan(q)
+            outlet = detect_requested_outlet(q)
+            q_low = q.lower()
+            is_find_articles = any(
+                k in q_low
+                for k in (
+                    "найди", "найти", "статьи", "стать", "article", "все у",
+                    "покажи новости", "ссылк",
+                )
+            )
 
-            # Поиск в сети для обычных вопросов; для плана — тоже лёгкий фон
+            # Поиск в сети всегда для вопросов (и для плана — фон)
             web_items: list[OilNewsItem] = []
             try:
                 web_items = await search_oil_news_on_web(
-                    q, max_items=12, max_age_hours=72.0
+                    q, max_items=14, max_age_hours=72.0
                 )
             except Exception:
                 logger.exception("Oil AI web search failed")
                 web_items = []
+
+            def _fallback2(*, rate_limited: bool) -> str:
+                return format_oil_ai_fallback(
+                    q,
+                    price=price,
+                    session_hint=session.market_open_hint_ru,
+                    next_open=session.next_open_label_ru,
+                    news_bias=news_bias,
+                    recent=list(self._recent_news),
+                    rate_limited=rate_limited,
+                    web_items=web_items,
+                )
+
+            # «Найди статьи Bloomberg» — сразу поиск, без галлюцинаций ИИ
+            if outlet and is_find_articles and not wants_plan:
+                return True, _fallback2(rate_limited=False)
+
+            # Без ключей — сводка/поиск
+            if not key and not groq_configured():
+                return True, _fallback2(rate_limited=False)
 
             def _fmt_list(items: list[OilNewsItem], *, limit: int = 12) -> str:
                 if not items:
@@ -3953,8 +4073,9 @@ class OilMonitorEngine:
 
             tops_bot = _fmt_list(matched_local or recent[:12])
             tops_web = _fmt_list(web_items)
+            if outlet:
+                tops_web = _fmt_list(filter_news_by_outlet(web_items, outlet) or web_items)
 
-            q_low = q.lower()
             looking_bahrain_f35 = any(
                 k in q_low
                 for k in ("бахрейн", "bahrain", "f-35", "f35", "истребител")
@@ -3977,6 +4098,12 @@ class OilMonitorEngine:
                     if hit
                     else "Подсказка: Бахрейн/F-35 НЕТ ни в ленте бота, ни в поиске "
                     "Google News за ~7 дней — скажи прямо «не нашёл»."
+                )
+            if outlet:
+                found_hint = (
+                    f"Пользователь просит именно {outlet}. "
+                    "Отвечай только по этому источнику из блока ПОИСК. "
+                    "Не уходи в общий ОПЕК/план сделки."
                 )
 
             hist: list[AiChatMessage] = []
@@ -4003,15 +4130,15 @@ class OilMonitorEngine:
                     f"Запрос пользователя (нужен ТОРГОВЫЙ ПЛАН):\n{q}\n\n"
                     "Дай план по структуре 1–7. Нефть = UKOUSD.s."
                 )
-                header = "ИИ · план"
+                header = "план"
             else:
                 sys_p = OIL_QA_SYSTEM_PROMPT
                 user_t = (
-                    f"Сообщение пользователя:\n{q}\n\n"
-                    "Ответь как в живом диалоге: по сути вопроса. "
-                    "Если нужно — опирайся на ленту и поиск. Не выдумывай."
+                    f"Сообщение:\n{q}\n\n"
+                    "Ответь живо и по делу. Без нумерации пунктов и без ВЕРДИКТ/LONG, "
+                    "если не просили план. Если просили статьи СМИ — перечисли из поиска."
                 )
-                header = "ИИ"
+                header = "чат"
             try:
                 result = await ask_gemini(
                     api_key=key,
@@ -4022,11 +4149,11 @@ class OilMonitorEngine:
                     history=hist,
                 )
             except GeminiRateLimitError:
-                return True, _fallback(rate_limited=True)
+                return True, _fallback2(rate_limited=True)
 
             text = sanitize_ai_reply_for_telegram(result.text or "").strip()
             if result.error or not text:
-                return True, _fallback(rate_limited=False)
+                return True, _fallback2(rate_limited=False)
             # В режиме Q&A: если модель ушла в трейдерский шаблон — fallback
             if not wants_plan:
                 up = text.upper()
@@ -4036,29 +4163,31 @@ class OilMonitorEngine:
                     and "МОЯ ПОЗИЦИЯ" in up
                 ):
                     logger.warning("Oil AI ignored Q&A prompt — using fallback")
-                    return True, _fallback(rate_limited=False)
+                    return True, _fallback2(rate_limited=False)
             provider = header
             if (result.model or "").startswith("groq:"):
                 provider = f"{header} · Groq"
             safe = (
                 text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             )
-            # В конце Q&A — до 3 ссылок из поиска, если модель не вставила
+            # Ссылки из поиска
             if not wants_plan and web_items and "http" not in text.lower():
                 links: list[str] = []
-                for it in match_oil_news_for_question(q, web_items, limit=3):
+                pool = (
+                    filter_news_by_outlet(web_items, outlet)
+                    if outlet
+                    else match_oil_news_for_question(q, web_items, limit=5)
+                )
+                for it in (pool or web_items)[:5]:
                     if it.url:
                         t = (it.title or "")[:70].replace("<", "").replace(">", "")
                         links.append(f'• <a href="{it.url}">{t}</a>')
                 if links:
                     safe += "\n\n🔗 <b>Нашёл в поиске:</b>\n" + "\n".join(links)
-            safe += (
-                "\n\n<i>Можешь спросить ещё в этом чате — помню контекст ~30 мин.</i>"
-            )
-            return True, f"🤖 <b>Нефть · {provider}</b>\n\n{safe}"
+            safe += "\n\n<i>Можешь ещё спросить — я на связи.</i>"
+            return True, f"🤖 <b>{provider}</b>\n\n{safe}"
         except Exception as exc:
             logger.exception("Oil AI chat failed")
-            # Последний шанс — без Gemini, если уже есть новости в памяти
             try:
                 from .oil_session import oil_session_status
 
@@ -4072,6 +4201,7 @@ class OilMonitorEngine:
                     news_bias=news_bias,
                     recent=list(self._recent_news),
                     rate_limited=True,
+                    web_items=None,
                 )
             except Exception:
                 return False, f"ошибка: {exc}"

@@ -439,7 +439,7 @@ async def ask_gemini(
                         )
                         return AiAskResult(text=text, model=mid, finish_reason=finish)
 
-                    if _looks_truncated(text, finish):
+                    if _looks_truncated(text, finish) and not system_prompt:
                         cont_body = {
                             "system_instruction": {"parts": [{"text": system}]},
                             "contents": contents

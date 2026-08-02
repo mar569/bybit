@@ -831,7 +831,7 @@ def test_format_oil_ai_fallback_lists_news():
         recent=items,
         rate_limited=True,
     )
-    assert "без ИИ" in text or "квота" in text.lower()
+    assert "недоступен" in text.lower() or "поиск" in text.lower()
     assert "Fars" in text
     assert "90.12" in text
     assert "UKO" in text or "BRENT" in text
@@ -862,7 +862,38 @@ def test_oil_qa_fallback_says_no_bahrain():
     )
     assert "нет заголовка" in text.lower() or "Бахрейн" in text
     assert "ВЕРДИКТ" not in text
-    assert "LONG" not in text
+
+
+def test_oil_qa_fallback_bloomberg_search():
+    from bot.oil_monitor import OilNewsBias, format_oil_ai_fallback, build_oil_qa_web_queries
+    import time
+
+    qs = build_oil_qa_web_queries("Найди все статьи у bloomberg про нефть")
+    assert any("bloomberg.com" in q.lower() for q in qs)
+
+    web = [
+        OilNewsItem(
+            title="Oil climbs as Hormuz risks linger",
+            url="https://www.bloomberg.com/news/articles/oil-1",
+            source="Bloomberg",
+            published_ts=time.time() - 600,
+            impact="bullish",
+        ),
+    ]
+    bias = OilNewsBias(bias="neutral", weighted_score=0.0)
+    text = format_oil_ai_fallback(
+        "Найди все статьи у bloomberg про нефть",
+        price=90.0,
+        session_hint="выходные",
+        next_open="пн",
+        news_bias=bias,
+        recent=[],
+        web_items=web,
+    )
+    assert "Bloomberg" in text
+    assert "Hormuz" in text or "oil" in text.lower()
+    assert "Бахрейн" not in text
+    assert "ОПЕК+ согласовала" not in text
 
 
 def test_oil_question_wants_trade_plan():

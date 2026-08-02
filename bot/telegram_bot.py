@@ -4093,7 +4093,7 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             return
-        wait = await update.message.reply_text("🤖 Думаю по нефти…", parse_mode=ParseMode.HTML)
+        wait = await update.message.reply_text("Секунду…", parse_mode=ParseMode.HTML)
         ok, text = await self.oil_monitor.ask_oil_ai(q)
         if not ok:
             try:
@@ -4356,7 +4356,7 @@ class TelegramBot:
             return True
         hist = list(self._oil_ai_history.get(uid) or [])
         wait = await update.message.reply_text(
-            "🤖 Думаю по нефти…",
+            "Секунду…",
             parse_mode=ParseMode.HTML,
         )
         ok, answer = await self.oil_monitor.ask_oil_ai(text, history=hist)
@@ -5704,21 +5704,19 @@ class TelegramBot:
                 self._oil_ai_pending[uid] = time.time()
             await query.message.reply_text(
                 "🤖 <b>Спроси про нефть</b>\n\n"
-                "Пиши как в обычном чате — своими словами. "
-                "Бот поймёт вопрос, посмотрит <b>ленту</b>, при необходимости "
-                "<b>поиск в интернете</b>, ответит по сути.\n\n"
-                "Можно несколько сообщений подряд (~30 мин) — помнит контекст.\n\n"
-                "<b>Примеры:</b>\n"
-                "• <i>Есть новость про удар Ирана по Бахрейну и F-35?</i>\n"
-                "• <i>А как это влияет на открытие в пн?</i>\n"
-                "• <i>Дай план: long/short, вход, стоп</i>\n\n"
-                "Или жми быстрый вариант ниже.\n"
-                "<i>Жду сообщение…</i>",
+                "Пиши как обычно — своими словами. "
+                "Посмотрю ленту и при необходимости поиск, отвечу по делу.\n\n"
+                "Можно несколько сообщений подряд (~30 мин).\n\n"
+                "Например:\n"
+                "• <i>Есть что-то про Бахрейн и F-35?</i>\n"
+                "• <i>Найди статьи Bloomberg про нефть</i>\n"
+                "• <i>Дай план на открытие</i>\n\n"
+                "<i>Жду…</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
-                            "✍️ Жду мой вопрос",
+                            "✍️ Напишу сам",
                             callback_data="oil:aiwait",
                         ),
                     ],
@@ -5756,7 +5754,7 @@ class TelegramBot:
             if uid:
                 self._oil_ai_pending[uid] = time.time()
             await query.message.reply_text(
-                "✍️ Ок. <b>Напиши вопрос обычным текстом</b> — отвечу по нефти.\n"
+                "✍️ Ок, пиши — отвечу по нефти.\n"
                 "<i>Окно ~30 мин.</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -5796,7 +5794,7 @@ class TelegramBot:
             if uid:
                 self._oil_ai_pending[uid] = time.time()
             wait = await query.message.reply_text(
-                "🤖 Думаю по нефти…",
+                "Секунду…",
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.ask_oil_ai(q)
@@ -5813,7 +5811,7 @@ class TelegramBot:
                 await wait.edit_text(
                     (text if ok else f"⚠️ {text}")
                     + (
-                        "\n\n<i>Можешь сразу написать свой вопрос следующим сообщением.</i>"
+                        "\n\n<i>Можешь сразу дописать свой вопрос.</i>"
                         if ok
                         else ""
                     ),

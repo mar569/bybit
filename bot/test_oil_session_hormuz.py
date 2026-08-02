@@ -202,6 +202,38 @@ def test_weekend_open_brief_down_on_taco():
     assert text.count("\n") < 25
 
 
+def test_weekend_open_brief_hormuz_deny_beats_opec():
+    """Deny reopen не должен читаться как «сделка reopen» → DOWN."""
+    items = [
+        OilNewsItem(
+            title="Iran denies agreement to reopen Strait of Hormuz, policy unchanged",
+            url="https://ex.com/a",
+            source="Investing",
+            published_ts=1.0,
+            impact="bullish",
+            theme="iran_geo",
+        ),
+        OilNewsItem(
+            title="OPEC+ agrees to small oil output quota hike 188000 for September",
+            url="https://ex.com/b",
+            source="Reuters",
+            published_ts=1.0,
+            impact="neutral",
+            theme="opec",
+        ),
+    ]
+    from bot.oil_monitor import summarize_oil_news_bias
+
+    bias = summarize_oil_news_bias(items)
+    brief = build_weekend_open_brief(
+        price=90.12,
+        news_items=items,
+        news_bias=bias,
+    )
+    # Не «уверенный DOWN» из‑за слова reopen / ОПЕК
+    assert brief.bias in {"UP", "MIXED"}
+
+
 def test_oil_session_bybit_schedule():
     from datetime import datetime, timezone, timedelta
     from bot.oil_session import (
