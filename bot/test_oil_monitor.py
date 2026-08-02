@@ -802,6 +802,53 @@ def test_classify_refuse_to_reopen_bullish():
     )
 
 
+def test_format_oil_ai_fallback_lists_news():
+    from bot.oil_monitor import OilNewsBias, format_oil_ai_fallback
+    import time
+
+    items = [
+        OilNewsItem(
+            title="Fars: no agreement to reopen Hormuz",
+            url="https://example.com/a",
+            source="Fars",
+            published_ts=time.time() - 600,
+            impact="bullish",
+        ),
+    ]
+    bias = OilNewsBias(
+        bullish=1,
+        weighted_score=2.5,
+        bias="bullish",
+        summary_ru="Фон скорее вверх",
+        how_to_use_ru="Смотри Ормуз",
+    )
+    text = format_oil_ai_fallback(
+        "Есть ли свежие новости по UKO BRENT",
+        price=90.12,
+        session_hint="UKOUSD.s сейчас открыт",
+        next_open="",
+        news_bias=bias,
+        recent=items,
+        rate_limited=True,
+    )
+    assert "без ИИ" in text or "квота" in text.lower()
+    assert "Fars" in text
+    assert "90.12" in text
+    assert "UKO" in text or "BRENT" in text
+
+
+def test_gemini_cooldown_blocks_ask():
+    from bot.ai_analyst import gemini_in_cooldown, mark_gemini_rate_limited
+    import bot.ai_analyst as aa
+
+    aa._gemini_cooldown_until = 0.0
+    assert not gemini_in_cooldown()
+    mark_gemini_rate_limited(seconds=120)
+    assert gemini_in_cooldown()
+    aa._gemini_cooldown_until = 0.0
+
+
+
 def test_fastlane_rejects_random_blog():
     from bot.oil_fastlane import detect_fastlane_outlet, is_fastlane_item
 

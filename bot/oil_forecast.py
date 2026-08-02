@@ -406,8 +406,10 @@ async def enrich_oil_forecast_with_gemini(
     if not api_key:
         return fc
     try:
-        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+        from .ai_analyst import ask_gemini, gemini_in_cooldown, sanitize_ai_reply_for_telegram
 
+        if gemini_in_cooldown():
+            return fc
         ctx = _forecast_context_for_gemini(fc, snap, news_items)
         user = (
             "Сформулируй 6–10 строк по-русски простыми словами (не страница):\n"

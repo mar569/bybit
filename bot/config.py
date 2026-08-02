@@ -19,6 +19,8 @@ class Config(BaseSettings):
 
     gemini_api_key: str | None = Field(None, env="GEMINI_API_KEY")
     gemini_model: str = Field("gemini-3.6-flash", env="GEMINI_MODEL")
+    groq_api_key: str | None = Field(None, env="GROQ_API_KEY")
+    groq_model: str = Field("llama-3.3-70b-versatile", env="GROQ_MODEL")
 
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")
@@ -62,9 +64,23 @@ class Config(BaseSettings):
             return None
         return value
 
+    @validator("groq_api_key", pre=True)
+    def empty_groq_api_key(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
     @property
     def gemini_configured(self) -> bool:
         return bool(self.gemini_api_key)
+
+    @property
+    def groq_configured(self) -> bool:
+        return bool(self.groq_api_key)
+
+    @property
+    def ai_configured(self) -> bool:
+        return bool(self.gemini_api_key or self.groq_api_key)
 
     @property
     def notification_chat_id(self) -> int:

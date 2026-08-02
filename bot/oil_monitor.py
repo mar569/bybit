@@ -2312,6 +2312,13 @@ async def enrich_oil_news_blurb(
     """Короткий разбор для сильных новостей (без выдуманных entry/TP)."""
     if not api_key:
         return ""
+    try:
+        from .ai_analyst import gemini_in_cooldown
+
+        if gemini_in_cooldown():
+            return ""
+    except Exception:
+        pass
     score = news_critical_score(item.title, source=item.source)
     theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
     if score < 12 and theme not in {"iran_geo", "trump_us"}:
@@ -2344,6 +2351,89 @@ async def enrich_oil_news_blurb(
     except Exception:
         logger.debug("Oil news blurb Gemini failed", exc_info=True)
         return ""
+
+
+def format_oil_ai_fallback(
+    question: str,
+    *,
+    price: float,
+    session_hint: str,
+    next_open: str,
+    news_bias: OilNewsBias,
+    recent: list[OilNewsItem],
+    rate_limited: bool = False,
+) -> str:
+    """Ответ «Спросить ИИ» без Gemini — по свежим заголовкам бота."""
+    impact_ru = {
+        "bullish": "🟢 вверх",
+        "bearish": "🔴 вниз",
+        "neutral": "⚪ контекст",
+    }
+    bias_ru = {
+        "bullish": "скорее давление вверх",
+        "bearish": "скорее давление вниз",
+        "mixed": "смешанно",
+        "neutral": "нейтрально",
+    }.get(news_bias.bias, news_bias.bias)
+
+    lines: list[str] = [
+        "🤖 <b>Нефть · ответ по новостям бота</b>",
+    ]
+    if rate_limited:
+        lines.append(
+            "<i>Gemini сейчас недоступен (квота). Ниже — свежие заголовки и вывод без ИИ.</i>"
+        )
+    lines.append("")
+    q = (question or "").strip()
+    if q:
+        safe_q = q.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        lines.append(f"<b>Вопрос:</b> {safe_q}")
+        lines.append("")
+
+    lines.append(f"📍 {session_hint}")
+    if next_open:
+        lines.append(f"🗓 {next_open}")
+    if price > 0:
+        lines.append(f"💰 UKOUSD.s ≈ <b>{price:.2f}</b>")
+    lines.append(
+        f"📰 Фон: <b>{bias_ru}</b> ({news_bias.weighted_score:+.1f}/10)"
+    )
+    lines.append("")
+
+    fresh = list(recent or [])[:8]
+    if not fresh:
+        lines.append(
+            "Пока в памяти бота нет свежих заголовков — подожди 2–3 минуты "
+            "пока Новостник обновит ленту, или смотри чат «Нефть»."
+        )
+    else:
+        lines.append("<b>Свежие статьи/новости, которые бот уже видит:</b>")
+        for it in fresh:
+            tag = impact_ru.get(getattr(it, "impact", "") or "", "⚪")
+            title = (getattr(it, "title", "") or "").strip()
+            src = (getattr(it, "source", "") or "").strip()
+            pts = getattr(it, "published_ts", None)
+            age = _age_label(float(pts)) if pts else ""
+            safe_t = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            bit = f"• {tag} {safe_t}"
+            meta = " · ".join(x for x in (src, age) if x)
+            if meta:
+                bit += f" <i>({meta})</i>"
+            lines.append(bit)
+        lines.append("")
+        if news_bias.summary_ru:
+            lines.append(f"💡 {news_bias.summary_ru}")
+        if news_bias.how_to_use_ru:
+            lines.append(f"🧭 {news_bias.how_to_use_ru}")
+        else:
+            lines.append(
+                "🧭 Смотри ленту Новостника: сильные Иран/Ормуз/White House "
+                "с весом ≥12 важнее перепечаток."
+            )
+
+    lines.append("")
+    lines.append("<i>Не финсовет · только Bybit UKOUSD.s</i>")
+    return "\n".join(lines)
 
 
 def format_oil_news_message(items: list[OilNewsItem], *, max_show: int = 5) -> str:
@@ -3541,16 +3631,20 @@ class OilMonitorEngine:
             return False, f"ошибка: {exc}"
 
     async def ask_oil_ai(self, question: str) -> tuple[bool, str]:
-        """Чат с ИИ по нефти: новости + цена + сессия."""
+        """Чат с ИИ по нефти: новости + цена + сессия.
+
+        Если Gemini квота/ключ — отвечает по свежим заголовкам бота (без ИИ).
+        """
         q = (question or "").strip()
         if not q:
             return False, "пустой вопрос"
-        key = self._resolve_gemini_key()
-        if not key:
-            return False, "нет GEMINI_API_KEY"
         settings = self.settings_manager.settings
         try:
-            from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+            from .ai_analyst import (
+                GeminiRateLimitError,
+                ask_gemini,
+                sanitize_ai_reply_for_telegram,
+            )
             from .oil_session import oil_session_status
 
             session = oil_session_status()
@@ -3562,6 +3656,25 @@ class OilMonitorEngine:
             )
             price = float(bundle.brent.price) if bundle else 0.0
             news_bias = summarize_oil_news_bias(self._recent_news)
+
+            def _fallback(*, rate_limited: bool) -> str:
+                return format_oil_ai_fallback(
+                    q,
+                    price=price,
+                    session_hint=session.market_open_hint_ru,
+                    next_open=session.next_open_label_ru,
+                    news_bias=news_bias,
+                    recent=list(self._recent_news),
+                    rate_limited=rate_limited,
+                )
+
+            key = self._resolve_gemini_key()
+            from .ai_analyst import groq_configured
+
+            # Без ключей — сразу сводка по новостям; иначе Gemini → Groq fallback
+            if not key and not groq_configured():
+                return True, _fallback(rate_limited=False)
+
             tops = "\n".join(
                 f"- [{getattr(it, 'impact', '')}] {getattr(it, 'title', '')}"
                 for it in self._recent_news[:10]
@@ -3576,27 +3689,50 @@ class OilMonitorEngine:
                 f"Тон новостей бота: {news_bias.bias} (число {news_bias.weighted_score})\n"
                 f"Заголовки:\n{tops}\n"
             )
-            result = await ask_gemini(
-                api_key=key,
-                model=self._resolve_gemini_model(),
-                context_text=ctx,
-                user_text=(
-                    q
-                    + "\n\nОтвет по-русски: 6–10 строк, выжми важное, без простыни. "
-                    "Структура: что случилось → почему важно → куда цена → что делать → на что смотреть. "
-                    "Не финансовый совет. Если выходные — отдельно про открытие биржи."
-                ),
-            )
+            try:
+                result = await ask_gemini(
+                    api_key=key,
+                    model=self._resolve_gemini_model(),
+                    context_text=ctx,
+                    user_text=(
+                        q
+                        + "\n\nОтвет по-русски: 6–10 строк, выжми важное, без простыни. "
+                        "Структура: что случилось → почему важно → куда цена → что делать → на что смотреть. "
+                        "Не финансовый совет. Если выходные — отдельно про открытие биржи."
+                    ),
+                )
+            except GeminiRateLimitError:
+                return True, _fallback(rate_limited=True)
+
             text = sanitize_ai_reply_for_telegram(result.text or "").strip()
             if result.error or not text:
-                return False, result.error or "пустой ответ ИИ"
+                return True, _fallback(rate_limited=False)
+            provider = "ИИ"
+            if (result.model or "").startswith("groq:"):
+                provider = "ИИ · Groq"
             safe = (
                 text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             )
-            return True, f"🤖 <b>Нефть · ИИ</b>\n\n{safe}"
+            return True, f"🤖 <b>Нефть · {provider}</b>\n\n{safe}"
         except Exception as exc:
             logger.exception("Oil AI chat failed")
-            return False, f"ошибка: {exc}"
+            # Последний шанс — без Gemini, если уже есть новости в памяти
+            try:
+                from .oil_session import oil_session_status
+
+                session = oil_session_status()
+                news_bias = summarize_oil_news_bias(self._recent_news)
+                return True, format_oil_ai_fallback(
+                    q,
+                    price=0.0,
+                    session_hint=session.market_open_hint_ru,
+                    next_open=session.next_open_label_ru,
+                    news_bias=news_bias,
+                    recent=list(self._recent_news),
+                    rate_limited=True,
+                )
+            except Exception:
+                return False, f"ошибка: {exc}"
 
     async def _send_digest_once(
         self,

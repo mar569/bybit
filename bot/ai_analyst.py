@@ -4,12 +4,38 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# После 429 / дневной квоты — не жечь ключ авто-blurbs и ретраями.
+_gemini_cooldown_until: float = 0.0
+_GEMINI_COOLDOWN_SEC = 45 * 60.0
+
+
+def gemini_in_cooldown() -> bool:
+    return time.time() < _gemini_cooldown_until
+
+
+def gemini_cooldown_left_sec() -> int:
+    return max(0, int(_gemini_cooldown_until - time.time()))
+
+
+def mark_gemini_rate_limited(*, seconds: float | None = None) -> None:
+    """Пауза авто-вызовов Gemini после исчерпания квоты."""
+    global _gemini_cooldown_until
+    sec = float(seconds if seconds is not None else _GEMINI_COOLDOWN_SEC)
+    until = time.time() + max(60.0, sec)
+    if until > _gemini_cooldown_until:
+        _gemini_cooldown_until = until
+        logger.warning(
+            "Gemini cooldown ON for ~%d min (quota/rate limit)",
+            int(sec // 60),
+        )
 
 SYSTEM_PROMPT = """Ты — очень опытный трейдер USDT-perp (Bybit/Binance), 8–12 лет.
 Смотришь рынок ГЛОБАЛЬНО по нескольким ТФ, собираешь картину и даёшь КОНКРЕТНУЮ ПОЗИЦИЮ.
@@ -82,20 +108,48 @@ DEFAULT_USER_PROMPT = (
 )
 
 DEFAULT_MODEL = "gemini-3.6-flash"
+# Мало фолбэков: каждый лишний POST жрёт бесплатную квоту Gemini.
 FALLBACK_MODELS = (
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
     "gemini-2.0-flash",
 )
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
 )
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 MAX_OUTPUT_TOKENS = 4096
 
+
+def _env_groq_key() -> str | None:
+    import os
+
+    key = (os.environ.get("GROQ_API_KEY") or "").strip()
+    return key or None
+
+
+def _env_groq_model() -> str:
+    import os
+
+    return (os.environ.get("GROQ_MODEL") or "").strip() or DEFAULT_GROQ_MODEL
+
+
+def groq_configured() -> bool:
+    return bool(_env_groq_key())
+
+
+def ai_provider_hint() -> str:
+    """Коротко для панели: какие ключи есть."""
+    parts: list[str] = []
+    import os
+
+    if (os.environ.get("GEMINI_API_KEY") or "").strip():
+        parts.append("Gemini")
+    if _env_groq_key():
+        parts.append("Groq")
+    return "+".join(parts) if parts else "нет ключей"
 
 @dataclass
 class AiChatMessage:
@@ -217,9 +271,13 @@ async def _post_gemini(
     async with session.post(url, params={"key": api_key}, json=body) as resp:
         raw = await resp.text()
         if _is_rate_limit_payload(resp.status, raw):
+            mark_gemini_rate_limited()
+            left = gemini_cooldown_left_sec()
             raise GeminiRateLimitError(
                 "Лимит бесплатного Gemini исчерпан. "
-                "Подожди минуту/до завтра (дневная квота)."
+                f"Автопауза ~{max(1, left // 60)} мин "
+                "(или до завтра, если дневная квота). "
+                "Спросить ИИ ответит по новостям бота без Gemini."
             )
         if _is_model_error_payload(resp.status, raw):
             return None, raw[:300]
@@ -234,6 +292,68 @@ async def _post_gemini(
         return payload, ""
 
 
+async def _ask_groq(
+    *,
+    api_key: str,
+    model: str,
+    system: str,
+    user_text: str,
+    history: list[AiChatMessage] | None = None,
+) -> AiAskResult:
+    """Бесплатный запасной канал (Groq Llama) — без картинок."""
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for msg in (history or [])[-8:]:
+        role = "assistant" if msg.role == "model" else "user"
+        if msg.text:
+            messages.append({"role": role, "content": msg.text})
+    messages.append({"role": "user", "content": user_text or DEFAULT_USER_PROMPT})
+
+    body = {
+        "model": model or DEFAULT_GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.35,
+        "max_tokens": min(2048, MAX_OUTPUT_TOKENS),
+    }
+    timeout = aiohttp.ClientTimeout(total=90)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                GROQ_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            ) as resp:
+                raw = await resp.text()
+                if resp.status == 429:
+                    return AiAskResult(
+                        text="",
+                        model=model,
+                        error="Лимит Groq исчерпан. Подожди минуту.",
+                    )
+                if resp.status >= 400:
+                    return AiAskResult(
+                        text="",
+                        model=model,
+                        error=f"Groq HTTP {resp.status}: {raw[:240]}",
+                    )
+                payload = json.loads(raw)
+                choices = payload.get("choices") or []
+                if not choices:
+                    return AiAskResult(text="", model=model, error="Groq: пустой ответ")
+                msg = (choices[0] or {}).get("message") or {}
+                text = str(msg.get("content") or "").strip()
+                finish = str((choices[0] or {}).get("finish_reason") or "")
+                if not text:
+                    return AiAskResult(text="", model=model, error="Groq: пустой текст")
+                logger.info("AI via Groq model=%s", model)
+                return AiAskResult(text=text, model=f"groq:{model}", finish_reason=finish)
+    except Exception as exc:
+        logger.exception("Groq request failed")
+        return AiAskResult(text="", model=model, error=str(exc))
+
+
 async def ask_gemini(
     *,
     api_key: str | None,
@@ -243,94 +363,143 @@ async def ask_gemini(
     history: list[AiChatMessage] | None = None,
     images: list[bytes] | None = None,
 ) -> AiAskResult:
-    if not api_key:
-        raise GeminiNotConfiguredError(
-            "Нет GEMINI_API_KEY. Бесплатный ключ: https://aistudio.google.com/apikey"
-        )
-
+    """Gemini primary; при квоте/ошибке — бесплатный Groq (если GROQ_API_KEY)."""
+    groq_key = _env_groq_key()
+    has_images = bool(images)
     system = SYSTEM_PROMPT + "\n\n=== ПАКЕТ АЛГОРИТМОВ БОТА ===\n" + (context_text or "(пакет пуст)")
     prompt = user_text or DEFAULT_USER_PROMPT
-    contents = _build_contents(
-        list(history or []),
-        prompt,
-        list(images or []),
-    )
-    body: dict[str, Any] = {
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.35,
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-        },
-    }
 
-    primary = model or DEFAULT_MODEL
-    candidates = [primary] + [m for m in FALLBACK_MODELS if m != primary]
-    last_err = ""
+    if not api_key and not groq_key:
+        raise GeminiNotConfiguredError(
+            "Нет GEMINI_API_KEY (и нет GROQ_API_KEY). "
+            "Gemini: https://aistudio.google.com/apikey · "
+            "Groq бесплатно: https://console.groq.com/keys"
+        )
 
-    timeout = aiohttp.ClientTimeout(total=120)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for mid in candidates:
-            try:
-                payload, err = await _post_gemini(
-                    session, api_key=api_key, model=mid, body=body,
-                )
-                if payload is None:
-                    last_err = err
-                    if err and ("not found" in err.lower() or "not supported" in err.lower() or "404" in err):
-                        logger.warning("Gemini model %s unavailable: %s", mid, err)
-                        continue
-                    logger.error("Gemini error on %s: %s", mid, err)
-                    continue
+    rate_err: GeminiRateLimitError | None = None
 
-                text, finish = _extract_text(payload)
-                if not text:
-                    text = "Не удалось получить ответ модели. Попробуй ещё раз или пришли скрин."
-                    return AiAskResult(text=text, model=mid, finish_reason=finish)
+    # 1) Gemini, если ключ есть и не на паузе
+    if api_key and not gemini_in_cooldown():
+        contents = _build_contents(
+            list(history or []),
+            prompt,
+            list(images or []),
+        )
+        body: dict[str, Any] = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.35,
+                "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            },
+        }
 
-                # Авто-продолжение если ответ обрезан по токенам
-                if _looks_truncated(text, finish):
-                    cont_body = {
-                        "system_instruction": {"parts": [{"text": system}]},
-                        "contents": contents
-                        + [
-                            {"role": "model", "parts": [{"text": text}]},
-                            {
-                                "role": "user",
-                                "parts": [{
-                                    "text": (
-                                        "Продолжи С ТОГО МЕСТА где оборвалось. "
-                                        "Допиши недостающие пункты, особенно "
-                                        "2) МОЯ ПОЗИЦИЯ и 3) КАК ВОЙТИ, затем 6–7. "
-                                        "Не повторяй пункт 1 целиком. Без markdown."
-                                    )
-                                }],
-                            },
-                        ],
-                        "generationConfig": {
-                            "temperature": 0.3,
-                            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-                        },
-                    }
-                    payload2, err2 = await _post_gemini(
-                        session, api_key=api_key, model=mid, body=cont_body,
+        primary = model or DEFAULT_MODEL
+        candidates = [primary] + [m for m in FALLBACK_MODELS if m != primary]
+        last_err = ""
+
+        timeout = aiohttp.ClientTimeout(total=90)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for mid in candidates:
+                try:
+                    payload, err = await _post_gemini(
+                        session, api_key=api_key, model=mid, body=body,
                     )
-                    if payload2 is not None:
-                        more, finish2 = _extract_text(payload2)
-                        if more:
-                            text = (text.rstrip() + "\n" + more.lstrip()).strip()
-                            finish = finish2 or finish
-                    elif err2:
-                        logger.warning("Gemini continuation failed on %s: %s", mid, err2)
+                    if payload is None:
+                        last_err = err
+                        if err and (
+                            "not found" in err.lower()
+                            or "not supported" in err.lower()
+                            or "404" in err
+                        ):
+                            logger.warning("Gemini model %s unavailable: %s", mid, err)
+                            continue
+                        logger.error("Gemini error on %s: %s", mid, err)
+                        continue
 
-                return AiAskResult(text=text, model=mid, finish_reason=finish)
-            except GeminiRateLimitError:
-                raise
-            except Exception as exc:
-                last_err = str(exc)
-                logger.exception("Gemini request failed on %s", mid)
+                    text, finish = _extract_text(payload)
+                    if not text:
+                        text = (
+                            "Не удалось получить ответ модели. "
+                            "Попробуй ещё раз или пришли скрин."
+                        )
+                        return AiAskResult(text=text, model=mid, finish_reason=finish)
 
-    return AiAskResult(text="", error=f"Gemini недоступен: {last_err}")
+                    if _looks_truncated(text, finish):
+                        cont_body = {
+                            "system_instruction": {"parts": [{"text": system}]},
+                            "contents": contents
+                            + [
+                                {"role": "model", "parts": [{"text": text}]},
+                                {
+                                    "role": "user",
+                                    "parts": [{
+                                        "text": (
+                                            "Продолжи С ТОГО МЕСТА где оборвалось. "
+                                            "Допиши недостающие пункты, особенно "
+                                            "2) МОЯ ПОЗИЦИЯ и 3) КАК ВОЙТИ, затем 6–7. "
+                                            "Не повторяй пункт 1 целиком. Без markdown."
+                                        )
+                                    }],
+                                },
+                            ],
+                            "generationConfig": {
+                                "temperature": 0.3,
+                                "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                            },
+                        }
+                        payload2, err2 = await _post_gemini(
+                            session, api_key=api_key, model=mid, body=cont_body,
+                        )
+                        if payload2 is not None:
+                            more, finish2 = _extract_text(payload2)
+                            if more:
+                                text = (text.rstrip() + "\n" + more.lstrip()).strip()
+                                finish = finish2 or finish
+                        elif err2:
+                            logger.warning(
+                                "Gemini continuation failed on %s: %s", mid, err2
+                            )
+
+                    return AiAskResult(text=text, model=mid, finish_reason=finish)
+                except GeminiRateLimitError as exc:
+                    rate_err = exc
+                    break
+                except Exception as exc:
+                    last_err = str(exc)
+                    logger.exception("Gemini request failed on %s", mid)
+
+        if rate_err is None and last_err and not groq_key:
+            return AiAskResult(text="", error=f"Gemini недоступен: {last_err}")
+    elif api_key and gemini_in_cooldown():
+        left = gemini_cooldown_left_sec()
+        rate_err = GeminiRateLimitError(
+            "Лимит бесплатного Gemini исчерпан. "
+            f"Пауза ещё ~{max(1, left // 60)} мин."
+        )
+
+    # 2) Groq fallback (текст; картинки Gemini-only)
+    if groq_key and not has_images:
+        groq_res = await _ask_groq(
+            api_key=groq_key,
+            model=_env_groq_model(),
+            system=system,
+            user_text=prompt,
+            history=history,
+        )
+        if groq_res.text and not groq_res.error:
+            return groq_res
+        if groq_res.error:
+            logger.warning("Groq fallback failed: %s", groq_res.error)
+
+    if rate_err is not None:
+        raise rate_err
+    if not api_key:
+        raise GeminiNotConfiguredError(
+            "Нет рабочего AI-ключа. Gemini: aistudio.google.com/apikey · "
+            "Groq: console.groq.com/keys"
+        )
+    return AiAskResult(text="", error="Gemini недоступен (и Groq не помог)")
 
 
 def sanitize_ai_reply_for_telegram(text: str) -> str:

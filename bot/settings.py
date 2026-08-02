@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 71
+SETTINGS_VERSION = 72
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -546,7 +546,7 @@ class ScannerSettings:
     oil_fastlane_max_age_hours: float = 4.0
     oil_fastlane_min_score: int = 8
     oil_fastlane_max_per_poll: int = 2
-    oil_fastlane_gemini: bool = True
+    oil_fastlane_gemini: bool = False
     # Ормуз: пуш в Новостник при важном изменении AIS/статуса
     oil_hormuz_alerts_enabled: bool = True
     oil_hormuz_interval_seconds: int = 900
@@ -559,7 +559,7 @@ class ScannerSettings:
     oil_pro_feeds_enabled: bool = True
     # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
     oil_forecast_enabled: bool = True
-    oil_forecast_gemini: bool = True
+    oil_forecast_gemini: bool = False
     # Confluence-setup → чат ручного TA (только сильные LONG/SHORT)
     oil_setup_enabled: bool = True
     oil_setup_min_quality: int = 7
@@ -1132,7 +1132,7 @@ class ScannerSettings:
             ),
             oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 8)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 2)),
-            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
+            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", False)),
             oil_hormuz_alerts_enabled=bool(base.get("oil_hormuz_alerts_enabled", True)),
             oil_hormuz_interval_seconds=int(
                 base.get("oil_hormuz_interval_seconds", 900)
@@ -1148,7 +1148,7 @@ class ScannerSettings:
             ),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
-            oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
+            oil_forecast_gemini=bool(base.get("oil_forecast_gemini", False)),
             oil_setup_enabled=bool(base.get("oil_setup_enabled", True)),
             oil_setup_min_quality=int(base.get("oil_setup_min_quality", 7)),
             oil_setup_cooldown_seconds=int(
@@ -1785,6 +1785,11 @@ class SettingsManager:
                 merged["oil_news_enabled"] = True
                 merged["oil_include_brent"] = True
                 merged["bot_paused"] = False
+            if version < 72:
+                # Не жечь бесплатную квоту Gemini на каждый flash/дайджест —
+                # «Спросить ИИ» и ручной AI важнее. Включить снова кнопкой в панели.
+                merged["oil_fastlane_gemini"] = False
+                merged["oil_forecast_gemini"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

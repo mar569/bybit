@@ -372,8 +372,10 @@ async def enrich_fastlane_with_gemini(
     if not api_key:
         return "", None
     try:
-        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+        from .ai_analyst import ask_gemini, gemini_in_cooldown, sanitize_ai_reply_for_telegram
 
+        if gemini_in_cooldown():
+            return "", None
         ctx = (
             "Ты профессиональный трейдер нефти (Brent / UKOUSD). "
             "Пиши ТОЛЬКО по-русски, простыми словами, без англ. жаргона "

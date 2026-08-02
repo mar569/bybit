@@ -964,9 +964,10 @@ class TelegramBot:
         if not self._is_admin(update):
             await query.answer("AI только для админа.", show_alert=True)
             return True
-        if not self.config.gemini_configured:
+        if not self.config.ai_configured:
             await query.answer(
-                "Добавь GEMINI_API_KEY в .env (бесплатно: aistudio.google.com/apikey)",
+                "Добавь GEMINI_API_KEY или GROQ_API_KEY в .env "
+                "(aistudio.google.com / console.groq.com)",
                 show_alert=True,
             )
             return True
@@ -4626,8 +4627,11 @@ class TelegramBot:
             f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.25):g}%</b> · "
             f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.18):g}%</b>\n"
             f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
-            f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', True) else 'OFF'}</b>"
-            f"{' · ключ OK' if self.config.gemini_configured else ' · нет GEMINI_API_KEY'}\n"
+            f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', False) else 'OFF'}</b> · "
+            f"ключи: <b>{'Gemini' if self.config.gemini_configured else ''}"
+            f"{'+' if self.config.gemini_configured and self.config.groq_configured else ''}"
+            f"{'Groq' if self.config.groq_configured else ''}"
+            f"{'нет' if not self.config.ai_configured else ''}</b>\n"
             f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
             f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 7)}</b> · "
             f"CD <b>{int(getattr(s, 'oil_setup_cooldown_seconds', 14400) / 3600)}ч</b> · "
