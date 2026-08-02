@@ -85,7 +85,8 @@ _SYNDICATE_HOST_DENY: tuple[str, ...] = (
     "news18.com",
     "msn.com",
     "yahoo.com",
-    "news.google.com",
+    # news.google.com НЕ здесь: это наш RSS-агрегатор; outlet берём из <source>
+    # (Bloomberg/WSJ). Иначе ВСЕ Tier‑1 с Google News молчат.
 )
 
 # Баллы только по ЗАГОЛОВКУ (не по source — иначе любой WSJ даёт flash)

@@ -721,6 +721,46 @@ def test_fastlane_detects_wsj_reuters_blas():
     assert "опережает" in text
 
 
+def test_fastlane_accepts_bloomberg_via_google_news_url():
+    """Google News RSS link + source=Bloomberg — не режется как syndicate."""
+    from bot.oil_fastlane import detect_fastlane_outlet, is_fastlane_item, is_syndicate_host
+
+    url = "https://news.google.com/rss/articles/CBMisgFBVV95cUxQVnR2UmZn"
+    assert not is_syndicate_host(url, "Bloomberg")
+    meta = detect_fastlane_outlet(
+        "Trump Holds Off Iran Strikes on Pledge a Hormuz Deal Is Close",
+        source="Bloomberg",
+        url=url,
+    )
+    assert meta is not None
+    assert meta.outlet == "Bloomberg"
+    item = OilNewsItem(
+        title="Trump Holds Off Iran Strikes on Pledge a Hormuz Deal Is Close",
+        url=url,
+        source="Bloomberg",
+        published_ts=1_700_000_000.0,
+        impact="bearish",
+        theme="iran_geo",
+    )
+    assert is_fastlane_item(item)
+
+
+def test_title_year_in_historical_phrase_not_old_date():
+    """«Unwinding 2023 Cuts» у свежей статьи ≠ дата публикации 2023."""
+    from bot.oil_monitor import resolve_oil_news_published_ts, oil_news_is_fresh
+    import time as _t
+
+    rss = _t.strftime("%a, %d %b %Y %H:%M:%S GMT", _t.gmtime())
+    title = "OPEC+ Makes Small Quota Hike to Finish Unwinding 2023 Cuts"
+    ts = resolve_oil_news_published_ts(
+        rss_pub=rss,
+        url="https://news.google.com/rss/articles/CBMiabc",
+        title=title,
+    )
+    assert ts is not None
+    assert oil_news_is_fresh(ts, max_age_hours=18)
+
+
 def test_fastlane_rejects_edexlive_white_house_title():
     """Слова White House в title + EdexLive ≠ primary White House."""
     from bot.oil_fastlane import (

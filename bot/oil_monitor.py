@@ -255,6 +255,10 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     # Investing.com + wire (рано выходят)
     "site:investing.com oil OR Brent OR WTI OR Hormuz OR Iran when:12h",
     "site:investing.com crude oil price news when:12h",
+    # Tier‑1 wire в обычную ленту (не только fastlane)
+    "site:bloomberg.com Iran OR Hormuz OR oil OR Brent OR OPEC when:12h",
+    "site:wsj.com Iran OR Hormuz OR oil OR Trump when:12h",
+    "site:bloomberg.com Strait of Hormuz OR tanker OR crude when:12h",
     # Про-аналитика / прогнозы (Reuters, OilPrice, банки)
     "site:reuters.com Brent crude oil OR Hormuz when:1d",
     "site:oilprice.com Brent OR WTI OR OPEC when:1d",
@@ -554,7 +558,41 @@ _URL_DATE_PATTERNS = (
     re.compile(r"/(20\d{2})/([01]?\d)/([0-3]?\d)(?:/|$)"),
     re.compile(r"/(20\d{2})-([01]?\d)-([0-3]?\d)(?:/|$)"),
     re.compile(r"[?&]date=(20\d{2})-([01]?\d)-([0-3]?\d)"),
+    # Bloomberg / Reuters стили: /articles/2026-04-06/...  /20260406/
+    re.compile(r"/(20\d{2})([01]\d)([0-3]\d)(?:/|[-_]|$)"),
 )
+
+_TITLE_DATE_PATTERNS = (
+    re.compile(
+        r"\b(20\d{2})-([01]?\d)-([0-3]?\d)\b",
+    ),
+    re.compile(
+        r"\b([0-3]?\d)[./]([01]?\d)[./](20\d{2})\b",
+    ),
+    re.compile(
+        r"\b("
+        r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+        r"Nov(?:ember)?|Dec(?:ember)?"
+        r")\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(20\d{2})\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b([0-3]?\d)\s+("
+        r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+        r"Nov(?:ember)?|Dec(?:ember)?"
+        r")\s+(20\d{2})\b",
+        re.I,
+    ),
+)
+
+_MONTH_MAP = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
 
 
 def _unwrap_news_url(url: str) -> str:
@@ -596,6 +634,7 @@ def _extract_url_published_ts(url: str) -> float | None:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if mo < 1 or mo > 12 or d < 1 or d > 31:
                 continue
+            # Отсекаем мусор вроде /2026/99/…
             dt = datetime(y, mo, d, tzinfo=timezone.utc)
             return dt.timestamp()
         except Exception:
@@ -603,33 +642,88 @@ def _extract_url_published_ts(url: str) -> float | None:
     return None
 
 
+def _extract_title_published_ts(title: str) -> float | None:
+    """Дата из заголовка — часто единственный якорь у репоста Google News."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    # ISO / numeric
+    m = _TITLE_DATE_PATTERNS[0].search(t)
+    if m:
+        try:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return datetime(y, mo, d, tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    m = _TITLE_DATE_PATTERNS[1].search(t)
+    if m:
+        try:
+            d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return datetime(y, mo, d, tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    m = _TITLE_DATE_PATTERNS[2].search(t)
+    if m:
+        try:
+            mo = _MONTH_MAP.get(m.group(1).lower(), 0)
+            d, y = int(m.group(2)), int(m.group(3))
+            if mo:
+                return datetime(y, mo, d, tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    m = _TITLE_DATE_PATTERNS[3].search(t)
+    if m:
+        try:
+            d = int(m.group(1))
+            mo = _MONTH_MAP.get(m.group(2).lower(), 0)
+            y = int(m.group(3))
+            if mo:
+                return datetime(y, mo, d, tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    # Не якорим по голому году: «Unwinding 2023 Cuts» у свежей Bloomberg
+    # иначе помечалась бы как 2023 и отбрасывалась.
+    return None
+
+
 def resolve_oil_news_published_ts(
     *,
     rss_pub: str | None,
     url: str,
+    title: str = "",
 ) -> float | None:
-    """Эффективная дата новости: min(RSS, URL) — если URL старый, статья старая."""
+    """Эффективная дата: самый ранний якорь (RSS / URL / title).
+
+    Google News часто ставит свежий pubDate у старой статьи — URL/title важнее.
+    """
+    candidates: list[float] = []
     rss_ts = _parse_rss_pub(rss_pub or "")
     url_ts = _extract_url_published_ts(url)
-    if rss_ts is None and url_ts is None:
+    title_ts = _extract_title_published_ts(title)
+    for ts in (rss_ts, url_ts, title_ts):
+        if ts is not None and ts > 0:
+            candidates.append(ts)
+    if not candidates:
         return None
-    if rss_ts is None:
-        return url_ts
-    if url_ts is None:
-        return rss_ts
-    # URL-дата часто «день публикации»; если она старше RSS — верим URL (не свежий репост)
-    return min(rss_ts, url_ts)
+    return min(candidates)
 
 
 def oil_news_is_fresh(published_ts: float | None, *, max_age_hours: float) -> bool:
-    """Свежесть для чата. Жёсткий потолок — 48ч (2 суток): старше уже не двигает нефть."""
+    """Свежесть для чата. Жёсткий потолок — 48ч (2 суток)."""
     if published_ts is None or published_ts <= 0:
         return False
-    # Никогда не пускать старше 2 суток, даже если в settings ошибочно 72+
     hard_cap_h = 48.0
     max_age_h = max(1.0, min(hard_cap_h, float(max_age_hours)))
     age_h = (time.time() - published_ts) / 3600.0
     return 0.0 <= age_h <= max_age_h
+
+
+def _google_news_undated(url: str) -> bool:
+    """Ссылка только на news.google.com без даты в URL — высокий риск репоста старья."""
+    host = (urllib.parse.urlparse(url or "").netloc or "").lower()
+    if "news.google." not in host and "google.com/rss" not in (url or "").lower():
+        return False
+    return _extract_url_published_ts(url) is None
 
 
 def oil_news_freshness_weight(published_ts: float | None, *, now: float | None = None) -> float:
@@ -1658,12 +1752,11 @@ def _fetch_google_news_rss(
         pub_ts = resolve_oil_news_published_ts(
             rss_pub=pub_el.text if pub_el is not None else "",
             url=link,
+            title=title,
         )
         if pub_ts is None:
-            # Для Q&A всё же возьмём «сейчас», иначе теряем свежие без даты
-            if require_theme:
-                continue
-            pub_ts = time.time()
+            # Без даты не пускаем: «сейчас» раньше маскировало статьи месячной давности
+            continue
         out.append(
             OilNewsItem(
                 title=title[:240],
@@ -1758,11 +1851,12 @@ async def search_oil_news_on_web(
     question: str,
     *,
     max_items: int = 12,
-    max_age_hours: float = 72.0,
+    max_age_hours: float = 48.0,
 ) -> list[OilNewsItem]:
     """Живой поиск Google News под вопрос (не только память бота)."""
     queries = build_oil_qa_web_queries(question)
-    cutoff = time.time() - max_age_hours * 3600.0
+    # Совпадает с hard-cap чата (48ч), не 72 — иначе Ask AI тянет «вчерашнее» старьё
+    age_h = min(48.0, max(1.0, float(max_age_hours)))
     bag: list[OilNewsItem] = []
     seen: set[str] = set()
 
@@ -1786,7 +1880,7 @@ async def search_oil_news_on_web(
             key = (it.title or "").lower()[:100]
             if not key or key in seen:
                 continue
-            if it.published_ts < cutoff:
+            if not oil_news_is_fresh(it.published_ts, max_age_hours=age_h):
                 continue
             seen.add(key)
             bag.append(it)
@@ -1841,7 +1935,7 @@ def _fetch_pro_oil_rss(
                 link = (link_el.get("href") or link_el.text or "").strip()
             updated = entry.find("a:updated", ns) if entry.find("a:updated", ns) is not None else entry.find("updated")
             pub_raw = (updated.text or "") if updated is not None else ""
-            pub_ts = resolve_oil_news_published_ts(rss_pub=pub_raw, url=link)
+            pub_ts = resolve_oil_news_published_ts(rss_pub=pub_raw, url=link, title=title)
             if pub_ts is None:
                 continue
             out_atom.append(
@@ -1873,6 +1967,7 @@ def _fetch_pro_oil_rss(
         pub_ts = resolve_oil_news_published_ts(
             rss_pub=pub_el.text if pub_el is not None else "",
             url=link,
+            title=title,
         )
         if pub_ts is None:
             continue
@@ -3576,7 +3671,7 @@ class OilMonitorEngine:
 
             fresh: list[OilNewsItem] = []
             for it in items:
-                if it.published_ts < cutoff:
+                if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_h):
                     continue
                 key = it.title.lower()[:120]
                 if key in self._seen_titles:
@@ -4027,7 +4122,7 @@ class OilMonitorEngine:
             web_items: list[OilNewsItem] = []
             try:
                 web_items = await search_oil_news_on_web(
-                    q, max_items=14, max_age_hours=72.0
+                    q, max_items=14, max_age_hours=48.0
                 )
             except Exception:
                 logger.exception("Oil AI web search failed")
