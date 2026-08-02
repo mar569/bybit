@@ -232,6 +232,9 @@ class TelegramBot:
         # Ожидание вопроса по нефти после кнопки «Спросить ИИ»
         self._oil_ai_pending: dict[int, float] = {}
         self._OIL_AI_PENDING_TTL_SEC = 30 * 60
+        # История диалога «Спросить ИИ» (user_id → [{role, text}, ...])
+        self._oil_ai_history: dict[int, list[dict[str, str]]] = {}
+        self._OIL_AI_HISTORY_MAX = 10
 
     _BOT_PAUSE_KEYS: tuple[str, ...] = (
         "signals_enabled",
@@ -4320,7 +4323,7 @@ class TelegramBot:
             )
 
     async def _handle_oil_ai_pending(self, update: Update) -> bool:
-        """Если нажали «Спросить ИИ» — следующее текстовое сообщение = вопрос по нефти."""
+        """Диалог «Спросить ИИ»: несколько сообщений подряд ~30 мин, с памятью."""
         if update.message is None or update.effective_user is None:
             return False
         uid = update.effective_user.id
@@ -4329,9 +4332,10 @@ class TelegramBot:
             return False
         if time.time() - started > self._OIL_AI_PENDING_TTL_SEC:
             self._oil_ai_pending.pop(uid, None)
+            self._oil_ai_history.pop(uid, None)
             return False
         text = (update.message.text or "").strip()
-        # Меню / короткие кнопки — не считаем вопросом
+        # Меню / короткие кнопки — не считаем вопросом, выходим из диалога
         if text in {
             "🛢 Нефть", "Нефть", "Brent", "WTI",
             "📋 Команды", "Команды", "❓ Помощь", "Помощь",
@@ -4341,18 +4345,35 @@ class TelegramBot:
             "📊 Биржи", "Биржи",
         }:
             self._oil_ai_pending.pop(uid, None)
+            self._oil_ai_history.pop(uid, None)
             return False
         if len(text) < 3:
             return False
-        self._oil_ai_pending.pop(uid, None)
+        # Продлеваем окно диалога — можно спрашивать дальше как в чате
+        self._oil_ai_pending[uid] = time.time()
         if self.oil_monitor is None:
             await update.message.reply_text("Нефтяной монитор ещё не подключен.")
             return True
+        hist = list(self._oil_ai_history.get(uid) or [])
         wait = await update.message.reply_text(
             "🤖 Думаю по нефти…",
             parse_mode=ParseMode.HTML,
         )
-        ok, answer = await self.oil_monitor.ask_oil_ai(text)
+        ok, answer = await self.oil_monitor.ask_oil_ai(text, history=hist)
+        # Сохраняем ход диалога
+        hist.append({"role": "user", "text": text})
+        if ok and answer:
+            # без HTML-хвоста для истории модели
+            plain = re.sub(r"<[^>]+>", "", answer)
+            plain = plain.replace("🤖 Нефть · ИИ", "").replace("🤖 Нефть · ИИ · Groq", "")
+            plain = re.sub(
+                r"Можешь спросить ещё.*?30 мин\.?",
+                "",
+                plain,
+                flags=re.I | re.S,
+            ).strip()
+            hist.append({"role": "model", "text": plain[:2500]})
+        self._oil_ai_history[uid] = hist[-self._OIL_AI_HISTORY_MAX :]
         try:
             await wait.edit_text(
                 answer if ok else f"⚠️ {answer}",
@@ -5683,14 +5704,16 @@ class TelegramBot:
                 self._oil_ai_pending[uid] = time.time()
             await query.message.reply_text(
                 "🤖 <b>Спроси про нефть</b>\n\n"
-                "<b>Пиши своим текстом следующим сообщением</b> — любой вопрос "
-                "про UKOUSD / Ормуз / Трампа / открытие / запасы.\n\n"
-                "Примеры:\n"
-                "• <i>Иран сказал что не откроет пролив — это вверх или вниз?</i>\n"
-                "• <i>Что ждать на открытии пн 01:00?</i>\n"
-                "• <i>ОПЕК повышает квоты — сильно ли давит цену?</i>\n\n"
-                "Или жми быстрый вариант ниже (это необязательно).\n"
-                "<i>Жду твоё сообщение ~30 мин. Ответ по-русски, просто.</i>",
+                "Пиши как в обычном чате — своими словами. "
+                "Бот поймёт вопрос, посмотрит <b>ленту</b>, при необходимости "
+                "<b>поиск в интернете</b>, ответит по сути.\n\n"
+                "Можно несколько сообщений подряд (~30 мин) — помнит контекст.\n\n"
+                "<b>Примеры:</b>\n"
+                "• <i>Есть новость про удар Ирана по Бахрейну и F-35?</i>\n"
+                "• <i>А как это влияет на открытие в пн?</i>\n"
+                "• <i>Дай план: long/short, вход, стоп</i>\n\n"
+                "Или жми быстрый вариант ниже.\n"
+                "<i>Жду сообщение…</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
                     [

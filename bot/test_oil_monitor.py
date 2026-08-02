@@ -837,6 +837,55 @@ def test_format_oil_ai_fallback_lists_news():
     assert "UKO" in text or "BRENT" in text
 
 
+def test_oil_qa_fallback_says_no_bahrain():
+    from bot.oil_monitor import OilNewsBias, format_oil_ai_fallback
+    import time
+
+    items = [
+        OilNewsItem(
+            title="Iran denies Hormuz reopen deal",
+            url="https://example.com/a",
+            source="Fars",
+            published_ts=time.time() - 300,
+            impact="bullish",
+        ),
+    ]
+    bias = OilNewsBias(bias="bullish", weighted_score=3.0, summary_ru="вверх")
+    text = format_oil_ai_fallback(
+        "Есть новость что Иран ударил по Бахрейну и три F-35?",
+        price=90.0,
+        session_hint="открыт",
+        next_open="",
+        news_bias=bias,
+        recent=items,
+        rate_limited=False,
+    )
+    assert "нет заголовка" in text.lower() or "Бахрейн" in text
+    assert "ВЕРДИКТ" not in text
+    assert "LONG" not in text
+
+
+def test_oil_question_wants_trade_plan():
+    from bot.oil_monitor import oil_question_wants_trade_plan
+
+    assert not oil_question_wants_trade_plan(
+        "Есть новость что Иран ударил по Бахрейну и F-35?"
+    )
+    assert oil_question_wants_trade_plan("Дай план на открытие — long или short, стоп")
+    assert oil_question_wants_trade_plan("Куда вход и тейк по UKOUSD?")
+
+
+def test_build_oil_qa_web_queries_bahrain():
+    from bot.oil_monitor import build_oil_qa_web_queries
+
+    qs = build_oil_qa_web_queries(
+        "Есть новость что Иран ударил по Бахрейну и три F-35?"
+    )
+    blob = " ".join(qs).lower()
+    assert "bahrain" in blob or "бахрейн" in blob
+    assert "f-35" in blob or "f35" in blob
+
+
 def test_gemini_cooldown_blocks_ask():
     from bot.ai_analyst import gemini_in_cooldown, mark_gemini_rate_limited
     import bot.ai_analyst as aa

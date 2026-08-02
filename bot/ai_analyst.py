@@ -362,11 +362,25 @@ async def ask_gemini(
     user_text: str,
     history: list[AiChatMessage] | None = None,
     images: list[bytes] | None = None,
+    system_prompt: str | None = None,
 ) -> AiAskResult:
-    """Gemini primary; при квоте/ошибке — бесплатный Groq (если GROQ_API_KEY)."""
+    """Gemini primary; при квоте/ошибке — бесплатный Groq (если GROQ_API_KEY).
+
+    system_prompt: если задан — полностью заменяет трейдерский SYSTEM_PROMPT
+    (нужно для «Спросить ИИ» по нефти, иначе модель пишет ВЕРДИКТ LONG).
+    """
     groq_key = _env_groq_key()
     has_images = bool(images)
-    system = SYSTEM_PROMPT + "\n\n=== ПАКЕТ АЛГОРИТМОВ БОТА ===\n" + (context_text or "(пакет пуст)")
+    if system_prompt:
+        system = system_prompt.strip()
+        if context_text:
+            system = system + "\n\n=== КОНТЕКСТ БОТА ===\n" + context_text
+    else:
+        system = (
+            SYSTEM_PROMPT
+            + "\n\n=== ПАКЕТ АЛГОРИТМОВ БОТА ===\n"
+            + (context_text or "(пакет пуст)")
+        )
     prompt = user_text or DEFAULT_USER_PROMPT
 
     if not api_key and not groq_key:
