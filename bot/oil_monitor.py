@@ -116,7 +116,8 @@ _BULL_NEWS = frozenset({
     # Иран/Fars: отказ от сделки / не открываем пролив → риск поставок вверх
     "will not negotiate", "won't negotiate", "refuse to negotiate",
     "reject deal", "rejects deal", "no deal", "will not open", "won't open",
-    "not reopen", "keep closed", "remain closed", "blockade continues",
+    "not reopen", "refuse to reopen", "refuses to reopen", "refusing to reopen",
+    "keep closed", "remain closed", "blockade continues",
     "не будем договарив", "не договарива", "не откроем", "не откроют",
     "отказ от переговор", "отверг", "пролив закрыт",
 })
@@ -132,6 +133,49 @@ _BEAR_NEWS = frozenset({
     "abandons attack", "scraps strike", "no strike", "won't strike",
     "отмен", "отказ от удар", "струсил", "приостан", "деэскал",
 })
+# Отрицание reopen/сделки по Ормузу — эскалация риска поставок (не медвежий reopen).
+_DENY_REOPEN_PHRASES: tuple[str, ...] = (
+    "no agreement to reopen",
+    "not reopen",
+    "won't reopen",
+    "will not reopen",
+    "refuse to reopen",
+    "refuses to reopen",
+    "refusing to reopen",
+    "no deal to reopen",
+    "not planning to reopen",
+    "no plans to reopen",
+    "will not open",
+    "won't open",
+    "sheer lie",
+    "denies",
+    "deny",
+    "denied",
+    "rejects",
+    "reject",
+    "false",
+    "не откроем",
+    "не откроют",
+    "отрицает",
+    "опроверг",
+    "ложь",
+    "не договарива",
+)
+_REOPEN_CONTEXT: tuple[str, ...] = (
+    "reopen",
+    "open the strait",
+    "opening of the",
+    "открыт",
+    "ормуз",
+    "hormuz",
+)
+
+
+def _is_deny_hormuz_reopen(title_low: str) -> bool:
+    """«Не откроем / ложь про reopen» ≠ деэскалация."""
+    if not any(k in title_low for k in _DENY_REOPEN_PHRASES):
+        return False
+    return any(k in title_low for k in _REOPEN_CONTEXT)
 # Веса: чем выше — тем важнее для отправки в чат
 _CRITICAL_TERMS: dict[str, int] = {
     "hormuz": 5,
@@ -643,14 +687,18 @@ def classify_news_impact(title: str) -> str:
         bear += 3
         bull = max(0, bull - 2)
 
+    # «не откроем / отрицает reopen / ложь про сделку» — НЕ медвежий reopen
+    if _is_deny_hormuz_reopen(low):
+        bull += 4
+        bear = max(0, bear - 3)
+
     # Иран/Fars: отказ переговоров / не открываем пролив → bullish для нефти
     if any(
         k in low
         for k in (
-            "will not negotiate", "won't negotiate", "refuse", "reject",
-            "will not open", "won't open", "not reopen", "keep closed",
-            "не будем договарив", "не договарива", "не откроем", "не откроют",
-            "отказ от переговор",
+            "will not negotiate", "won't negotiate", "refuse to negotiate",
+            "reject deal", "rejects deal",
+            "не будем договарив", "не договарива", "отказ от переговор",
         )
     ) and any(k in low for k in ("hormuz", "ормуз", "strait", "deal", "сделк", "iran", "иран")):
         bull += 3
@@ -685,7 +733,10 @@ class OilNewsBias:
 
 
 def _news_story_key(title: str) -> str:
-    """Схлопывает дубли одной темы; эскалация ≠ отмена ударов."""
+    """Схлопывает дубли одной темы; эскалация ≠ отмена ударов.
+
+    Важно: «will not reopen» / Fars deny ≠ deesc (иначе flash глотает сильные апдейты).
+    """
     low = re.sub(r"[^a-zа-я0-9\s]", " ", title.lower())
     low = re.sub(r"\s+", " ", low).strip()
     tags: list[str] = []
@@ -707,7 +758,11 @@ def _news_story_key(title: str) -> str:
         "strike", "attack", "blockade", "closed", "weighing", "considering",
         "удар", "атак", "блок", "закрыт", "collapses", "broke it",
     )
-    if any(k in low for k in deesc_kw):
+    if _is_deny_hormuz_reopen(low):
+        # Отказ открыть пролив = риск поставок вверх (эскалация), не «reopen deal»
+        tags.append("esc")
+        tags.append("deny_reopen")
+    elif any(k in low for k in deesc_kw):
         tags.append("deesc")
     elif any(k in low for k in esc_kw):
         tags.append("esc")
@@ -720,6 +775,10 @@ def _news_story_key(title: str) -> str:
     if tags:
         return "|".join(sorted(set(tags)))
     return low[:48]
+
+
+# Один сюжет fast-lane не блокируем навсегда — иначе Ормуз-лента замирает на часы.
+_FASTLANE_STORY_TTL_SEC = 75 * 60.0
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
@@ -2188,7 +2247,7 @@ def _age_label(published_ts: float) -> str:
         return f"{age_h:.1f}ч назад · скорее фон, не импульс"
     return datetime.fromtimestamp(published_ts, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
 
-def format_single_oil_news(item: OilNewsItem) -> str:
+def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
     """Одна новость = одно сообщение со ссылкой."""
     title = item.title.replace("<", "&lt;").replace(">", "&gt;")
     impact_ru = {
@@ -2202,7 +2261,11 @@ def format_single_oil_news(item: OilNewsItem) -> str:
     score = news_critical_score(item.title, source=item.source)
     pro = match_pro_oil_analyst(item.title, item.source)
     is_analyst = theme == "analyst" or pro is not None
-    if pro is not None:
+    # Сильный вес по Ормузу/Ирану — шапка как «важно», с разбором если есть
+    priority = score >= 12 and theme in {"iran_geo", "trump_us"}
+    if priority:
+        header = "‼️ <b>ВАЖНО ДЛЯ НЕФТИ</b> · Bybit UKOUSD.s"
+    elif pro is not None:
         header = f"🛢 <b>Нефть · ⭐ {pro[0]}</b>"
     elif is_analyst:
         header = "🛢 <b>Нефть · аналитика</b>"
@@ -2219,7 +2282,14 @@ def format_single_oil_news(item: OilNewsItem) -> str:
         lines.append(f"<b>{title}</b>")
     lines.append("")
     lines.append(f"{impact_ru}")
-    if pro is not None:
+    if ai_ru:
+        lines.append("")
+        lines.append("🤖 <b>Коротко</b>")
+        safe_ai = (
+            ai_ru.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+        lines.append(safe_ai)
+    elif pro is not None:
         lines.append(
             f"<i>Топ-аналитик ({pro[0]}) — приоритет для bias; "
             "не сигнал входа, сверяй с графиком UKOUSD.</i>"
@@ -2229,7 +2299,52 @@ def format_single_oil_news(item: OilNewsItem) -> str:
     lines.append(f"<i>{lang_mark} {item.source} · {_age_label(item.published_ts)}</i>")
     if item.url:
         lines.append(f"🔗 <a href=\"{item.url}\">Открыть источник</a>")
+    lines.append("<i>Не финсовет · только Bybit UKOUSD.s</i>")
     return "\n".join(lines)
+
+
+async def enrich_oil_news_blurb(
+    item: OilNewsItem,
+    *,
+    api_key: str | None,
+    model: str = "gemini-3.6-flash",
+) -> str:
+    """Короткий разбор для сильных новостей (без выдуманных entry/TP)."""
+    if not api_key:
+        return ""
+    score = news_critical_score(item.title, source=item.source)
+    theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
+    if score < 12 and theme not in {"iran_geo", "trump_us"}:
+        return ""
+    if score < 10:
+        return ""
+    try:
+        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+        from .oil_fastlane import strip_invented_trade_levels
+
+        result = await ask_gemini(
+            api_key=api_key,
+            model=model,
+            context_text=(
+                "Ты объясняешь новость про нефть обычному человеку по-русски. "
+                "Без англ. жаргона. Без цен входа/стопа/TP и без «вердикт LONG/SHORT».\n"
+                f"Заголовок: {item.title}\n"
+                f"Источник: {item.source}\n"
+                f"Тон бота: {item.impact}\n"
+            ),
+            user_text=(
+                "3–5 коротких строк: что случилось; почему важно для нефти; "
+                "скорее вверх или вниз и почему; на что смотреть. Не финсовет."
+            ),
+        )
+        text = sanitize_ai_reply_for_telegram(result.text or "").strip()
+        if result.error or not text:
+            return ""
+        return strip_invented_trade_levels(text)[:700]
+    except Exception:
+        logger.debug("Oil news blurb Gemini failed", exc_info=True)
+        return ""
+
 
 def format_oil_news_message(items: list[OilNewsItem], *, max_show: int = 5) -> str:
     if not items:
@@ -2523,7 +2638,7 @@ class OilMonitorEngine:
         self._last_preopen_alert_ts: float = 0.0
         self._last_fastlane_ts: float = 0.0
         self._seen_fastlane: set[str] = set()
-        self._seen_fastlane_stories: set[str] = set()
+        self._seen_fastlane_stories: dict[str, float] = {}
         self._last_regular_news_ts: float = 0.0
         self._last_hormuz_check_ts: float = 0.0
         self._last_hormuz_alert_ts: float = 0.0
@@ -2844,12 +2959,20 @@ class OilMonitorEngine:
 
         move_note = _price_move_note(bars, interval_minutes=5)
         sent = 0
+        # Протухшие сюжеты — снова можно flash (новый виток Ормуза)
+        if self._seen_fastlane_stories:
+            self._seen_fastlane_stories = {
+                k: ts
+                for k, ts in self._seen_fastlane_stories.items()
+                if now - ts < _FASTLANE_STORY_TTL_SEC
+            }
         for it in items:
             key = it.title.lower()[:120]
             story = _news_story_key(it.title)
             if key in self._seen_titles or key in self._seen_fastlane:
                 continue
-            if story and story in self._seen_fastlane_stories:
+            story_ts = self._seen_fastlane_stories.get(story) if story else None
+            if story and story_ts is not None and now - story_ts < _FASTLANE_STORY_TTL_SEC:
                 self._seen_fastlane.add(key)
                 logger.info(
                     "Oil fast-lane skip story-dupe (%s): %s",
@@ -2878,8 +3001,7 @@ class OilMonitorEngine:
                 if ai_ru and ai_says_off_topic(ai_ru):
                     self._seen_fastlane.add(key)
                     self._seen_titles.add(key)
-                    if story:
-                        self._seen_fastlane_stories.add(story)
+                    # Не блокируем сюжет: другой outlet может быть on-topic
                     logger.info(
                         "Oil fast-lane drop (Gemini off-topic): %s",
                         it.title[:90],
@@ -2917,7 +3039,7 @@ class OilMonitorEngine:
                 self._seen_titles.add(key)
                 self._seen_fastlane.add(key)
                 if story:
-                    self._seen_fastlane_stories.add(story)
+                    self._seen_fastlane_stories[story] = now
                 sent += 1
                 logger.info(
                     "Oil fast-lane %s score=%d: %s",
@@ -2939,7 +3061,10 @@ class OilMonitorEngine:
         if len(self._seen_fastlane) > 300:
             self._seen_fastlane = set(list(self._seen_fastlane)[-150:])
         if len(self._seen_fastlane_stories) > 120:
-            self._seen_fastlane_stories = set(list(self._seen_fastlane_stories)[-60:])
+            keep = sorted(
+                self._seen_fastlane_stories.items(), key=lambda kv: kv[1], reverse=True
+            )[:60]
+            self._seen_fastlane_stories = dict(keep)
         return sent
 
     async def _maybe_forward_trade_brief(
@@ -3041,9 +3166,23 @@ class OilMonitorEngine:
 
             if fresh:
                 batch = fresh[:max_per_poll]
+                use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
                 if separate:
                     for it in batch:
-                        msg = format_single_oil_news(it)
+                        ai_ru = ""
+                        sc = news_critical_score(it.title, source=it.source)
+                        th = it.theme or detect_oil_news_theme(it.title, source=it.source)
+                        if (
+                            use_gemini
+                            and sc >= 12
+                            and th in {"iran_geo", "trump_us", "flow_deal"}
+                        ):
+                            ai_ru = await enrich_oil_news_blurb(
+                                it,
+                                api_key=self._resolve_gemini_key(),
+                                model=self._resolve_gemini_model(),
+                            )
+                        msg = format_single_oil_news(it, ai_ru=ai_ru)
                         try:
                             ok = await self._on_news(msg)
                         except Exception:

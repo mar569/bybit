@@ -231,7 +231,7 @@ class TelegramBot:
         self._AI_REDIS_PREFIX = "ai:session:"
         # Ожидание вопроса по нефти после кнопки «Спросить ИИ»
         self._oil_ai_pending: dict[int, float] = {}
-        self._OIL_AI_PENDING_TTL_SEC = 10 * 60
+        self._OIL_AI_PENDING_TTL_SEC = 30 * 60
 
     _BOT_PAUSE_KEYS: tuple[str, ...] = (
         "signals_enabled",
@@ -5232,7 +5232,7 @@ class TelegramBot:
         # Кнопки под oil-setup в ручном TA (не только админ-панель)
         if payload in {"oil:why", "oil:now", "oil:open", "oil:hormuz", "oil:spr", "oil:ai"} or payload.startswith(
             "oil:aiask:"
-        ) or payload.startswith("oil:out:"):
+        ) or payload in {"oil:aiwait"} or payload.startswith("oil:out:"):
             if not (self._is_admin(update) or self._can_use_manual_ta(update)):
                 await query.answer("Нет доступа.", show_alert=True)
                 return
@@ -5673,19 +5673,28 @@ class TelegramBot:
             return True
 
         if action == "ai":
-            await query.answer("Жду вопрос…", show_alert=False)
+            await query.answer("Можно писать свой вопрос", show_alert=False)
             uid = query.from_user.id if query.from_user else 0
             if uid:
                 self._oil_ai_pending[uid] = time.time()
             await query.message.reply_text(
-                "🤖 <b>Спроси про нефть обычными словами</b>\n\n"
-                "Напиши следующим сообщением, например:\n"
-                "• <i>Будет ли нефть падать к 80 на открытии?</i>\n"
-                "• <i>Что значит отмена ударов Трампа?</i>\n"
-                "• <i>Ходят ли танкеры через Ормуз?</i>\n\n"
-                "<i>Ответ будет по-русски, простыми словами. Жду сообщение ~10 мин.</i>",
+                "🤖 <b>Спроси про нефть</b>\n\n"
+                "<b>Пиши своим текстом следующим сообщением</b> — любой вопрос "
+                "про UKOUSD / Ормуз / Трампа / открытие / запасы.\n\n"
+                "Примеры:\n"
+                "• <i>Иран сказал что не откроет пролив — это вверх или вниз?</i>\n"
+                "• <i>Что ждать на открытии пн 01:00?</i>\n"
+                "• <i>ОПЕК повышает квоты — сильно ли давит цену?</i>\n\n"
+                "Или жми быстрый вариант ниже (это необязательно).\n"
+                "<i>Жду твоё сообщение ~30 мин. Ответ по-русски, просто.</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "✍️ Жду мой вопрос",
+                            callback_data="oil:aiwait",
+                        ),
+                    ],
                     [
                         InlineKeyboardButton(
                             "Будет ли к $80?",
@@ -5704,7 +5713,25 @@ class TelegramBot:
                             callback_data="oil:aiask:hormuz",
                         ),
                     ],
+                    [
+                        InlineKeyboardButton(
+                            "Fars / Иран сейчас?",
+                            callback_data="oil:aiask:fars",
+                        ),
+                    ],
                 ]),
+            )
+            return True
+
+        if action == "aiwait":
+            await query.answer("Пиши вопрос следующим сообщением", show_alert=True)
+            uid = query.from_user.id if query.from_user else 0
+            if uid:
+                self._oil_ai_pending[uid] = time.time()
+            await query.message.reply_text(
+                "✍️ Ок. <b>Напиши вопрос обычным текстом</b> — отвечу по нефти.\n"
+                "<i>Окно ~30 мин.</i>",
+                parse_mode=ParseMode.HTML,
             )
             return True
 
@@ -5727,23 +5754,42 @@ class TelegramBot:
                     "Простыми словами: что сейчас с Ормузским проливом — "
                     "танкеры ходят или есть риск остановки? Как это влияет на цену нефти?"
                 ),
+                "fars": (
+                    "Простыми словами: что сейчас говорит Иран/Fars про Ормуз и переговоры? "
+                    "Если Иран не хочет открывать пролив и не договаривается — "
+                    "это скорее рост или падение нефти на Bybit UKOUSD? Почему?"
+                ),
             }
             q = questions.get(preset)
             if not q:
                 await query.message.reply_text("Неизвестный быстрый вопрос.")
                 return True
+            # После быстрого ответа можно сразу написать свой вопрос
             uid = query.from_user.id if query.from_user else 0
             if uid:
-                self._oil_ai_pending.pop(uid, None)
+                self._oil_ai_pending[uid] = time.time()
             wait = await query.message.reply_text(
                 "🤖 Думаю по нефти…",
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.ask_oil_ai(q)
-            kb = self._oil_context_keyboard()
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✍️ Задать свой вопрос",
+                        callback_data="oil:aiwait",
+                    ),
+                ],
+                *self._oil_context_keyboard().inline_keyboard,
+            ])
             try:
                 await wait.edit_text(
-                    text if ok else f"⚠️ {text}",
+                    (text if ok else f"⚠️ {text}")
+                    + (
+                        "\n\n<i>Можешь сразу написать свой вопрос следующим сообщением.</i>"
+                        if ok
+                        else ""
+                    ),
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     reply_markup=kb if ok else None,

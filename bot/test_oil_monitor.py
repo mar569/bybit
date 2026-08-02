@@ -146,6 +146,18 @@ def test_classify_news_impact():
         )
         == "bullish"
     )
+    assert (
+        classify_news_impact(
+            "Fars News Agency: no agreement to reopen the Strait of Hormuz"
+        )
+        == "bullish"
+    )
+    assert (
+        classify_news_impact(
+            "Media reports on Iran agreeing to reopen Hormuz are a sheer lie"
+        )
+        == "bullish"
+    )
 
 
 def test_format_single_oil_news_has_link():
@@ -761,9 +773,33 @@ def test_news_story_key_esc_vs_deesc():
     deesc = _news_story_key(
         "Trump cancels Iran strike, deal to open Hormuz strait"
     )
+    deny = _news_story_key(
+        "Fars News Agency reports there is no agreement to reopen the Strait of Hormuz"
+    )
+    refuse = _news_story_key("Iran refuses to reopen the Strait of Hormuz")
     assert "esc" in esc
     assert "deesc" in deesc
     assert esc != deesc
+    # Deny/refuse reopen ≠ deesc (иначе flash глотает сильные апдейты)
+    assert "esc" in deny
+    assert "deny_reopen" in deny
+    assert "deesc" not in deny
+    assert deny != deesc
+    assert "esc" in refuse
+    assert refuse != deesc
+
+
+def test_classify_refuse_to_reopen_bullish():
+    assert (
+        classify_news_impact("Iran refuses to reopen the Strait of Hormuz")
+        == "bullish"
+    )
+    assert (
+        classify_news_impact(
+            "Iran reportedly not planning to reopen Hormuz while U.S. strikes continue"
+        )
+        == "bullish"
+    )
 
 
 def test_fastlane_rejects_random_blog():

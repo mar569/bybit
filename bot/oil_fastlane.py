@@ -31,6 +31,7 @@ FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "site:farsnews.ir Hormuz OR Strait OR Iran OR tanker OR oil when:12h",
     "Fars News Agency Hormuz OR Iran Strait OR refuse OR reject when:12h",
     "site:tasnimnews.com Hormuz OR Iran oil OR Strait when:12h",
+    "site:en.irna.ir Hormuz OR Strait OR tanker OR oil when:12h",
 )
 
 FAST_LANE_QUERIES_RU: tuple[str, ...] = (
@@ -134,6 +135,11 @@ _FLASH_TERMS: dict[str, int] = {
     "will not open": 4,
     "won't open": 4,
     "won't negotiate": 4,
+    "refuse to reopen": 4,
+    "refuses to reopen": 4,
+    "will not reopen": 4,
+    "won't reopen": 4,
+    "no agreement to reopen": 4,
 }
 
 # Без этого в title — не шлём, даже если outlet = WSJ
