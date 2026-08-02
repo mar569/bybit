@@ -2,28 +2,31 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
 from .bybit_klines import KlineBar
 
 logger = logging.getLogger(__name__)
 
-# Узкий набор — только топ wire / эксклюзивы / official
+# Узкий набор — только топ wire / эксклюзивы / official (site: — не тянем tertiary)
 FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "site:wsj.com Iran OR Hormuz OR oil OR Trump when:12h",
     "site:reuters.com Iran OR Hormuz OR oil OR Trump when:12h",
     "site:bloomberg.com Iran OR Hormuz OR oil OR energy OR Trump when:12h",
+    "site:apnews.com Iran OR Hormuz OR Trump oil OR strike OR cancel when:12h",
     "site:investing.com oil OR Brent OR WTI OR Hormuz OR Iran OR crude when:12h",
     "Javier Blas oil OR Hormuz OR Iran OR Brent when:12h",
     "site:ft.com oil OR Iran OR Hormuz OR Brent when:1d",
     "site:nytimes.com Iran OR Hormuz OR oil OR Trump when:1d",
-    "White House Iran oil OR Pentagon Iran OR DoD Iran Hormuz when:12h",
+    "site:whitehouse.gov Iran OR Hormuz OR oil when:1d",
+    "site:defense.gov Iran OR Hormuz OR oil when:1d",
     "EIA crude oil inventory OR STEO when:1d",
-    "Trump orders attack Iran OR strike Iran oil when:12h",
-    "Trump cancels OR pauses OR TACO Iran strike OR attack oil when:12h",
-    "Strait of Hormuz tanker OR blockade OR reopen OR traffic when:12h",
+    "site:reuters.com OR site:bloomberg.com OR site:wsj.com Trump cancels OR pauses OR TACO Iran strike when:12h",
+    "site:reuters.com OR site:bloomberg.com Strait of Hormuz tanker OR blockade OR reopen when:12h",
 )
 
 FAST_LANE_QUERIES_RU: tuple[str, ...] = (
@@ -31,29 +34,44 @@ FAST_LANE_QUERIES_RU: tuple[str, ...] = (
     "Reuters Ормуз нефть Иран when:12h",
     "Bloomberg Ормуз OR Иран нефть when:12h",
     "investing.com нефть OR Brent OR Ормуз OR Иран when:12h",
-    "Трамп отменил удар Иран нефть when:12h",
+    "Reuters OR Bloomberg Трамп отменил удар Иран нефть when:12h",
 )
 
-# (needle in source/title/url, display, tier 1=highest)
+# Needle только в source/url (НЕ в title) — иначе EdexLive «White House signals…» = fake Tier-1
 _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("wall street journal", "WSJ", 1),
     ("wsj.com", "WSJ", 1),
-    ("wsj", "WSJ", 1),
+    ("reuters.com", "Reuters", 1),
     ("reuters", "Reuters", 1),
+    ("bloomberg.com", "Bloomberg", 1),
     ("bloomberg", "Bloomberg", 1),
+    ("apnews.com", "AP", 1),
+    ("associated press", "AP", 1),
     ("javier blas", "Javier Blas", 1),
     ("investing.com", "Investing.com", 1),
-    ("investing", "Investing.com", 2),
-    ("financial times", "FT", 2),
     ("ft.com", "FT", 2),
+    ("financial times", "FT", 2),
+    ("nytimes.com", "NYT", 2),
     ("new york times", "NYT", 2),
-    ("nytimes", "NYT", 2),
-    ("white house", "White House", 1),
-    ("pentagon", "DoD / Pentagon", 1),
-    ("department of defense", "DoD", 1),
+    ("whitehouse.gov", "White House", 1),
+    ("defense.gov", "DoD", 1),
     ("eia.gov", "EIA", 1),
-    ("u.s. energy information", "EIA", 1),
     ("energy information administration", "EIA", 1),
+)
+
+# Домены-синдикаты / образовательные зеркала — не пускать в ‼️
+_SYNDICATE_HOST_DENY: tuple[str, ...] = (
+    "edexlive.com",
+    "edexlive",
+    "indiatoday.in",
+    "ndtv.com",
+    "timesofindia",
+    "hindustantimes.com",
+    "thehindu.com",
+    "news18.com",
+    "msn.com",
+    "yahoo.com",
+    "news.google.com",
 )
 
 # Баллы только по ЗАГОЛОВКУ (не по source — иначе любой WSJ даёт flash)
@@ -66,7 +84,10 @@ _FLASH_TERMS: dict[str, int] = {
     "ordered a": 4,
     "taco": 5,
     "cancels": 4,
+    "cancel": 3,
     "pauses": 4,
+    "holds off": 4,
+    "hold off": 4,
     "tumble": 4,
     "tumbles": 4,
     "slump": 3,
@@ -113,9 +134,24 @@ _TOPIC_GEO: tuple[str, ...] = (
 
 
 def _has_whole_word(text: str, word: str) -> bool:
-    import re
-
     return re.search(rf"(?<![a-zа-я0-9]){re.escape(word)}(?![a-zа-я0-9])", text) is not None
+
+
+def _url_host(url: str) -> str:
+    try:
+        host = (urlparse(url or "").netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+
+def is_syndicate_host(url: str = "", source: str = "") -> bool:
+    """Tertiary зеркала PTI/AP (EdexLive и т.п.) — не primary wire."""
+    host = _url_host(url)
+    blob = f"{host} {(source or '').lower()}"
+    return any(d in blob for d in _SYNDICATE_HOST_DENY)
 
 
 @dataclass(frozen=True)
@@ -124,6 +160,7 @@ class FastLaneMeta:
     tier: int  # 1 or 2
     flash_score: int
     is_flash: bool
+    publisher: str = ""  # реальный RSS source / host
 
 
 def fastlane_title_on_topic(title: str) -> bool:
@@ -146,29 +183,51 @@ def fastlane_title_on_topic(title: str) -> bool:
 
 
 def detect_fastlane_outlet(title: str, source: str = "", url: str = "") -> FastLaneMeta | None:
-    blob = f"{title} {source} {url}".lower()
+    """Outlet = реальный publisher (source/url), НЕ слова из заголовка.
+
+    «White House signals…» на edexlive.com → None (не Tier-1 White House).
+    """
+    if is_syndicate_host(url, source):
+        return None
+
+    # Только source + host — title не участвует в определении outlet
+    # (исключение: именные аналитики Javier Blas — часто в title, не в domain)
+    host = _url_host(url)
+    provenance = f"{source or ''} {host} {url or ''}".lower()
     title_l = (title or "").lower()
+    analyst_blob = f"{provenance} {title_l}"
+
     best: tuple[str, int] | None = None
     for needle, display, tier in _TIER1_SOURCES:
-        if needle in blob:
-            if best is None or tier < best[1] or (tier == best[1] and len(display) > len(best[0])):
-                # prefer lower tier number (more important)
-                if best is None or tier < best[1]:
-                    best = (display, tier)
-                elif tier == best[1] and display != best[0]:
-                    # keep first match of same tier unless WSJ/Blas
-                    if display in {"WSJ", "Javier Blas", "Bloomberg", "Reuters"}:
-                        best = (display, tier)
+        blob = analyst_blob if display == "Javier Blas" else provenance
+        if needle not in blob:
+            continue
+        if best is None or tier < best[1]:
+            best = (display, tier)
+        elif tier == best[1] and display in {"WSJ", "Javier Blas", "Bloomberg", "Reuters", "AP"}:
+            # Именной аналитик важнее общего Bloomberg Opinion
+            if display == "Javier Blas":
+                best = (display, tier)
+            elif best[0] != "Javier Blas" and display in {"WSJ", "Bloomberg", "Reuters", "AP"}:
+                best = (display, tier)
+
     if best is None:
         return None
+
     score = 0
     for term, w in _FLASH_TERMS.items():
         if term in title_l:
             score += w
-    # Tier1 outlet always gets base boost
     score += 4 if best[1] == 1 else 2
     is_flash = score >= 8
-    return FastLaneMeta(outlet=best[0], tier=best[1], flash_score=score, is_flash=is_flash)
+    publisher = (source or "").strip() or host or best[0]
+    return FastLaneMeta(
+        outlet=best[0],
+        tier=best[1],
+        flash_score=score,
+        is_flash=is_flash,
+        publisher=publisher,
+    )
 
 
 def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
@@ -290,7 +349,8 @@ async def enrich_fastlane_with_gemini(
             "Ты профессиональный трейдер нефти (Brent / UKOUSD). "
             "Пиши ТОЛЬКО по-русски, простыми словами, без англ. жаргона "
             "(не пиши gap, bias, deal-tape — говори «скорее подешевеет», «страх войны»).\n"
-            f"Источник: {outlet} ({source})\n"
+            f"Издатель (реальный): {source}\n"
+            f"Канал (если primary wire): {outlet}\n"
             f"Заголовок: {title}\n"
             f"Черновой тон бота (может ОШИБАТЬСЯ): {impact} — НЕ копируй слепо.\n"
             f"Цена: {move_note or 'без сильного сдвига до новости'}\n"
@@ -299,18 +359,23 @@ async def enrich_fastlane_with_gemini(
             "- отмена/пауза ударов, TACO, сделка, открытие Ормуза → вниз.\n"
             "- новые удары/блок пролива без отмены → вверх.\n"
             "- attack само по себе НЕ вверх, если рядом cancel/pause/TACO.\n"
+            "- если заголовок про «weighing / considering strikes», а рынок уже "
+            "знает отмену/сделку — это СТАРЫЙ нарратив, не разгоняй LONG.\n"
+            "ЗАПРЕЩЕНО: цены входа, стоп, TP, уровни вроде $74.50, «ВЕРДИКТ: LONG», "
+            "«открываю покупку», RR. Только направление и осторожность.\n"
         )
         user = (
             "Строка 1 СТРОГО: OIL_RELEVANT: YES или OIL_RELEVANT: NO\n"
             "Строка 2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n\n"
             "YES — только нефть/Ормуз/санкции/запасы/ОПЕК. NO — одной фразой почему шум.\n\n"
-            "Если YES — 6–10 строк (не страница!), выжми важное:\n"
-            "• Что случилось (1–2 предложения)\n"
-            "• Главное ПОЧЕМУ это важно для нефти (самое громкое)\n"
-            "• Куда давит цену: вверх / вниз / неясно\n"
-            "• Что делать сейчас (1–2 предложения, не финсовет)\n"
-            "• На что смотреть дальше (1 фраза)\n"
-            "Без воды и повторов. Не выдумывай факты."
+            "Если YES — ровно такой каркас (простые слова, 7–10 строк):\n"
+            "📌 Что случилось — 1–2 предложения, факт\n"
+            "💡 Что это значит для Brent/UKOUSD — почему цена может дёрнуться\n"
+            "👀 Что ждать дальше — 1–2 clarifier (Reuters/AP, Ормуз, EIA)\n"
+            "⚡ Риск сюрприза — может ли дать резкие ±2–5% в ближайшие часы/сессию "
+            "(низкий/средний/высокий) и от чего\n"
+            "🧭 Как аккуратно — без цифр входа/стопа: не догонять / ждать / осторожно\n"
+            "Не выдумывай факты и уровни. Если похоже на репост вчерашнего — скажи прямо."
         )
         result = await ask_gemini(
             api_key=api_key,
@@ -322,6 +387,7 @@ async def enrich_fastlane_with_gemini(
         if result.error or not text:
             return "", None
         bias_override = parse_gemini_oil_bias(text)
+        text = strip_invented_trade_levels(text)
         if len(text) > 1400:
             text = text[:1397] + "…"
         return text, bias_override
@@ -357,6 +423,35 @@ def strip_gemini_oil_meta(ai_text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def strip_invented_trade_levels(ai_text: str) -> str:
+    """Убирает выдуманные entry/stop/TP / «ВЕРДИКТ: LONG» из flash-ИИ."""
+    if not ai_text:
+        return ""
+    lines: list[str] = []
+    skip_re = re.compile(
+        r"(вход|стоп|take.?profit|тейк|tp\s*[12]?|entry|stop.?loss|"
+        r"вердикт\s*:\s*long|вердикт\s*:\s*short|открываю\s+(покуп|прод)|"
+        r"\$\s*\d{2,3}(?:[.,]\d+)?|"
+        r"\d{2,3}(?:[.,]\d+)?\s*\$?\s*/\s*барр|"
+        r"rr\s*\d|риск/?награда)",
+        re.IGNORECASE,
+    )
+    for line in ai_text.splitlines():
+        if skip_re.search(line) and (
+            "вход" in line.lower()
+            or "стоп" in line.lower()
+            or "tp" in line.lower()
+            or "тейк" in line.lower()
+            or "вердикт" in line.lower()
+            or "открываю" in line.lower()
+            or "$" in line
+            or "барр" in line.lower()
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def format_fastlane_flash(
     item: Any,
     *,
@@ -375,6 +470,7 @@ def format_fastlane_flash(
         "neutral": "⚪ влияние смешанное",
     }.get(impact, "⚪ контекст")
     bang = "‼️‼️" if meta.tier == 1 and meta.flash_score >= 12 else "‼️"
+    # В шапке — реальный wire (Reuters), не слово из title
     lines = [
         f"{bang} <b>ВАЖНО ДЛЯ НЕФТИ</b> · {meta.outlet}",
         f"{impact_ru}",
@@ -391,10 +487,15 @@ def format_fastlane_flash(
         lines.append(_esc(move_note))
     if ai_ru:
         lines.append("")
-        lines.append("🤖 <b>Главное</b>")
+        lines.append("🤖 <b>Разбор</b>")
         lines.append(_esc(ai_ru))
+    else:
+        # Без Gemini — минимальный проф-каркас по правилам
+        lines.append("")
+        lines.append("🧭 <b>Кратко</b>")
+        lines.append(_rule_brief(impact, title))
     lines.append("")
-    src = getattr(item, "source", "") or meta.outlet
+    src = (getattr(item, "source", "") or meta.publisher or meta.outlet).strip()
     age = age_label or ""
     lines.append(
         f"<i>{src}"
@@ -403,8 +504,30 @@ def format_fastlane_flash(
     )
     if url:
         lines.append(f"🔗 <a href=\"{url}\">Источник</a>")
-    lines.append("<i>Не финансовый совет.</i>")
+    lines.append("<i>Не финансовый совет. Без выдуманных уровней входа.</i>")
     return "\n".join(lines)
+
+
+def _rule_brief(impact: str, title: str) -> str:
+    low = (title or "").lower()
+    surprise = "средний"
+    if any(k in low for k in ("strike", "attack", "blockade", "closed", "удар", "атак")):
+        surprise = "высокий"
+    if any(k in low for k in ("cancel", "taco", "pause", "holds off", "отмен")):
+        surprise = "высокий"
+    if any(k in low for k in ("eia", "inventory", "spr", "запас")):
+        surprise = "средний"
+    dir_ru = {
+        "bullish": "давление вверх (страх поставок / тугой склад)",
+        "bearish": "давление вниз (деэскалация / избыток)",
+        "neutral": "смешанно — нужен clarifier",
+    }.get(impact, "смешанно")
+    return (
+        f"💡 Значит: {dir_ru}.\n"
+        f"👀 Ждать: подтверждение от Reuters/AP/Bloomberg, не tertiary-репост.\n"
+        f"⚡ Сюрприз ±2–5%: <b>{surprise}</b> на гео/официальных заявлениях.\n"
+        f"🧭 Аккуратно: не догонять импульс; торговать только на открытой сессии Bybit."
+    )
 
 
 def is_trade_critical_flash(
@@ -478,7 +601,7 @@ def filter_fastlane_items(
     items: Sequence[Any],
     *,
     min_flash_score: int = 7,
-    max_age_hours: float = 6.0,
+    max_age_hours: float = 4.0,
 ) -> list[Any]:
     now = time.time()
     out: list[Any] = []

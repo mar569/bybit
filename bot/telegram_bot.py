@@ -450,6 +450,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("oilwhy", self.on_oil_why))
         self.application.add_handler(CommandHandler("oilopen", self.on_oil_open))
         self.application.add_handler(CommandHandler("hormuz", self.on_hormuz))
+        self.application.add_handler(CommandHandler("spr", self.on_spr))
+        self.application.add_handler(CommandHandler("eia", self.on_spr))
         self.application.add_handler(CommandHandler("oilai", self.on_oil_ai))
         self.application.add_handler(CommandHandler("ta", self.on_ta_help))
         self.application.add_handler(CommandHandler("ai_stop", self.on_ai_stop))
@@ -2082,7 +2084,9 @@ class TelegramBot:
         chat_id = self.config.oil_news_chat_id
         if chat_id is None:
             return False
-        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+        return await self._send_to_chat(
+            chat_id, message, self._oil_signal_keyboard(), is_priority=True,
+        )
 
     async def dispatch_oil_micro_signal(self, message: str) -> bool:
         """Микро-сигналы UKOUSD (0.2–0.3%) → oil news chat."""
@@ -2098,7 +2102,26 @@ class TelegramBot:
         chat_id = self.config.oil_news_chat_id
         if chat_id is None:
             return False
-        return await self._send_to_chat(chat_id, message, None, is_priority=True)
+        return await self._send_to_chat(
+            chat_id, message, self._oil_signal_keyboard(), is_priority=True,
+        )
+
+    def _oil_context_keyboard(self) -> InlineKeyboardMarkup:
+        """Быстрые кнопки под ответами Почему/Запасы/Ормуз — без команд."""
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("❓ Почему так", callback_data="oil:why"),
+                InlineKeyboardButton("📦 Запасы США", callback_data="oil:spr"),
+            ],
+            [
+                InlineKeyboardButton("🚢 Ормуз", callback_data="oil:hormuz"),
+                InlineKeyboardButton("🗓 На открытии", callback_data="oil:open"),
+            ],
+            [
+                InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
+                InlineKeyboardButton("🤖 Спросить ИИ", callback_data="oil:ai"),
+            ],
+        ])
 
     def _oil_signal_keyboard(self) -> InlineKeyboardMarkup:
         """Кнопки под oil setup / графиком в ручном TA."""
@@ -2116,6 +2139,7 @@ class TelegramBot:
                 InlineKeyboardButton("🚢 Ормуз", callback_data="oil:hormuz"),
             ],
             [
+                InlineKeyboardButton("📦 Запасы США", callback_data="oil:spr"),
                 InlineKeyboardButton("🤖 Спросить ИИ", callback_data="oil:ai"),
             ],
             [
@@ -3915,7 +3939,7 @@ class TelegramBot:
             await update.message.reply_text("Нефтяной монитор ещё не подключен.")
             return
         wait = await update.message.reply_text(
-            "⏳ Смотрю цену, новости и поток…",
+            "⏳ Собираю самые свежие новости и смотрю, что двигает цену прямо сейчас…",
             parse_mode=ParseMode.HTML,
         )
         ok, text = await self.oil_monitor.explain_why_now()
@@ -3925,11 +3949,20 @@ class TelegramBot:
             except Exception:
                 await update.message.reply_text(f"⚠️ Не смог объяснить: {text}")
             return
+        kb = self._oil_context_keyboard()
         try:
-            await wait.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await wait.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
+            )
         except Exception:
             await update.message.reply_text(
-                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
             )
 
     async def on_oil_open(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3954,11 +3987,20 @@ class TelegramBot:
             except Exception:
                 await update.message.reply_text(f"⚠️ {text}")
             return
+        kb = self._oil_context_keyboard()
         try:
-            await wait.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await wait.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
+            )
         except Exception:
             await update.message.reply_text(
-                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
             )
 
     async def on_hormuz(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3983,11 +4025,58 @@ class TelegramBot:
             except Exception:
                 await update.message.reply_text(f"⚠️ {text}")
             return
+        kb = self._oil_context_keyboard()
         try:
-            await wait.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+            await wait.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+                reply_markup=kb,
+            )
         except Exception:
             await update.message.reply_text(
-                text, parse_mode=ParseMode.HTML, disable_web_page_preview=False
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+                reply_markup=kb,
+            )
+
+    async def on_spr(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """SPR + коммерческие запасы США (EIA) с оценкой мало/много."""
+        if not self._is_admin(update):
+            if update.message:
+                await update.message.reply_text("Нет доступа.")
+            return
+        if update.message is None:
+            return
+        if self.oil_monitor is None:
+            await update.message.reply_text("Нефтяной монитор ещё не подключен.")
+            return
+        wait = await update.message.reply_text(
+            "⏳ Гружу EIA: SPR / коммерция / Cushing…",
+            parse_mode=ParseMode.HTML,
+        )
+        ok, text = await self.oil_monitor.inventory_status_now()
+        if not ok:
+            try:
+                await wait.edit_text(f"⚠️ {text}")
+            except Exception:
+                await update.message.reply_text(f"⚠️ {text}")
+            return
+        kb = self._oil_context_keyboard()
+        try:
+            await wait.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+                reply_markup=kb,
+            )
+        except Exception:
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+                reply_markup=kb,
             )
 
     async def on_oil_ai(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4018,11 +4107,20 @@ class TelegramBot:
             except Exception:
                 await update.message.reply_text(f"⚠️ {text}")
             return
+        kb = self._oil_context_keyboard()
         try:
-            await wait.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await wait.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
+            )
         except Exception:
             await update.message.reply_text(
-                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=kb,
             )
 
     async def on_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4475,6 +4573,29 @@ class TelegramBot:
             "<i>Кнопки применяются сразу</i>"
         ).replace(",", " ")
 
+    def _oil_journal_stats_line(self) -> str:
+        """Строка статистики исходов для панели Нефть."""
+        if self.oil_monitor is None:
+            return "Журнал исходов: <i>монитор ещё не запущен</i>\n"
+        journal = getattr(self.oil_monitor, "_setup_journal", None)
+        if journal is None:
+            return "Журнал исходов: —\n"
+        try:
+            st = journal.stats()
+            active_n = len(journal.active())
+        except Exception:
+            return "Журнал исходов: ошибка чтения\n"
+        if st.samples <= 0 and active_n <= 0:
+            return (
+                "Журнал: авто «сбылось/нет» в фоне · кнопок на сигналах ждут первые сделки\n"
+            )
+        wr = f"{st.winrate_pct:.0f}%" if st.winrate_pct is not None else "—"
+        lesson = f" · {st.recent_lesson_ru}" if st.recent_lesson_ru else ""
+        return (
+            f"Журнал: активных <b>{active_n}</b> · история <b>{st.samples}</b> · "
+            f"✓{st.wins} ✗{st.losses} ⏳{st.expired} · WR <b>{wr}</b>{lesson}\n"
+        )
+
     def _build_oil_panel_text(self) -> str:
         s = self.settings_manager.settings
         chat_ok = self.config.oil_news_chat_configured
@@ -4506,6 +4627,8 @@ class TelegramBot:
             f"каждые <b>{getattr(s, 'oil_fastlane_interval_seconds', 60)}с</b> · "
             f"score≥<b>{getattr(s, 'oil_fastlane_min_score', 7)}</b> · "
             f"Gemini <b>{'ON' if getattr(s, 'oil_fastlane_gemini', True) else 'OFF'}</b>\n"
+            f"Сигналы входа: <b>{'ON' if getattr(s, 'oil_entry_signals_enabled', True) else 'OFF'}</b> "
+            f"(мастер: уровни/micro/bounce/confluence)\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
             f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', True) else 'OFF'}</b> · "
@@ -4517,11 +4640,12 @@ class TelegramBot:
             f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
             f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 7)}</b> · "
             f"CD <b>{getattr(s, 'oil_setup_cooldown_seconds', 3600)}с</b>\n"
+            f"{self._oil_journal_stats_line()}"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
             "<b>Кнопки сверху панели</b>\n"
-            "📊 Сейчас · ❓ Почему так · 🗓 Что на открытии · 🚢 Ормуз · 🤖 Спросить ИИ\n"
-            "<i>Прогнозы — простыми словами на русском. Команды не нужны.</i>"
+            "📊 Сейчас · ❓ Почему так · 🗓 Что на открытии · 🚢 Ормуз · 📦 Запасы · 🤖 ИИ\n"
+            "<i>Прогнозы — простыми словами на русском. Команды: /hormuz /spr /oilai</i>"
         ).replace(",", " ")
 
     def _oil_keyboard(self) -> InlineKeyboardMarkup:
@@ -4537,6 +4661,7 @@ class TelegramBot:
                 InlineKeyboardButton("🚢 Ормуз", callback_data="oil:hormuz"),
             ],
             [
+                InlineKeyboardButton("📦 Запасы США", callback_data="oil:spr"),
                 InlineKeyboardButton("🤖 Спросить ИИ", callback_data="oil:ai"),
             ],
             [
@@ -4581,12 +4706,19 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton(
+                    self._mark(
+                        "Входы",
+                        getattr(s, "oil_entry_signals_enabled", True),
+                    ),
+                    callback_data="oil:signals",
+                ),
+                InlineKeyboardButton(
                     self._mark("Уровни", getattr(s, "oil_level_alerts_enabled", True)),
                     callback_data="oil:levels",
                 ),
                 InlineKeyboardButton(
                     self._mark(
-                        "Сигналы",
+                        "Micro",
                         getattr(s, "oil_micro_signals_enabled", True),
                     ),
                     callback_data="oil:micro",
@@ -5105,7 +5237,7 @@ class TelegramBot:
             return
 
         # Кнопки под oil-setup в ручном TA (не только админ-панель)
-        if payload in {"oil:why", "oil:now", "oil:open", "oil:hormuz", "oil:ai"} or payload.startswith(
+        if payload in {"oil:why", "oil:now", "oil:open", "oil:hormuz", "oil:spr", "oil:ai"} or payload.startswith(
             "oil:aiask:"
         ) or payload.startswith("oil:out:"):
             if not (self._is_admin(update) or self._can_use_manual_ta(update)):
@@ -5449,20 +5581,23 @@ class TelegramBot:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
             wait = await query.message.reply_text(
-                "⏳ Почему цена: собираю факты…",
+                "⏳ Почему цена: свежий сбор новостей прямо сейчас…",
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.explain_why_now()
+            kb = self._oil_context_keyboard()
             try:
                 await wait.edit_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
+                    reply_markup=kb if ok else None,
                 )
             except Exception:
                 await query.message.reply_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
                 )
             return True
 
@@ -5476,16 +5611,19 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.weekend_open_brief_now()
+            kb = self._oil_context_keyboard()
             try:
                 await wait.edit_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
+                    reply_markup=kb if ok else None,
                 )
             except Exception:
                 await query.message.reply_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
                 )
             return True
 
@@ -5499,16 +5637,45 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.hormuz_status_now()
+            kb = self._oil_context_keyboard()
             try:
                 await wait.edit_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=False,
+                    reply_markup=kb if ok else None,
                 )
             except Exception:
                 await query.message.reply_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
+                )
+            return True
+
+        if action == "spr":
+            await query.answer("Запасы США…", show_alert=False)
+            if self.oil_monitor is None:
+                await query.message.reply_text("Нефтяной монитор не подключен.")
+                return True
+            wait = await query.message.reply_text(
+                "⏳ EIA: SPR / коммерция / Cushing…",
+                parse_mode=ParseMode.HTML,
+            )
+            ok, text = await self.oil_monitor.inventory_status_now()
+            kb = self._oil_context_keyboard()
+            try:
+                await wait.edit_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                    reply_markup=kb if ok else None,
+                )
+            except Exception:
+                await query.message.reply_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
                 )
             return True
 
@@ -5580,16 +5747,19 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.ask_oil_ai(q)
+            kb = self._oil_context_keyboard()
             try:
                 await wait.edit_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
+                    reply_markup=kb if ok else None,
                 )
             except Exception:
                 await query.message.reply_text(
                     text if ok else f"⚠️ {text}",
                     parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
                 )
             return True
 
@@ -5604,18 +5774,19 @@ class TelegramBot:
                 return True
             active = journal.active()
             if not active:
-                await query.message.reply_text("Нет активного setup для отметки.")
+                await query.message.reply_text(
+                    "Нет активного setup — бот уже сам закрыл исход, "
+                    "или сигнала ещё не было."
+                )
                 return True
             w = active[-1]
-            w.resolved = True
-            w.outcome = "manual_ok" if kind == "ok" else "manual_fail"
             from .oil_journal import format_outcome_message
 
             price = float(w.price_at_signal)
+            journal.mark_manual(w, ok=(kind == "ok"), price_now=price)
             try:
-                bundle_price = None
-                # мягко: оставляем цену сигнала если нет свежей
-                msg = format_outcome_message(w, price_now=price)
+                stats = journal.stats()
+                msg = format_outcome_message(w, price_now=price, stats=stats)
                 await query.message.reply_text(
                     msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
                 )
@@ -5648,6 +5819,10 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_russian_news", True))
             self.settings_manager.update(oil_russian_news=not cur)
             label = f"RU → {'ON' if not cur else 'OFF'}"
+        elif action == "signals":
+            cur = bool(getattr(s, "oil_entry_signals_enabled", True))
+            self.settings_manager.update(oil_entry_signals_enabled=not cur)
+            label = f"Входы → {'ON' if not cur else 'OFF'}"
         elif action == "levels":
             cur = bool(getattr(s, "oil_level_alerts_enabled", True))
             self.settings_manager.update(oil_level_alerts_enabled=not cur)
@@ -5655,7 +5830,7 @@ class TelegramBot:
         elif action == "micro":
             cur = bool(getattr(s, "oil_micro_signals_enabled", True))
             self.settings_manager.update(oil_micro_signals_enabled=not cur)
-            label = f"Сигналы → {'ON' if not cur else 'OFF'}"
+            label = f"Micro → {'ON' if not cur else 'OFF'}"
         elif action == "forecast":
             cur = bool(getattr(s, "oil_forecast_enabled", True))
             self.settings_manager.update(oil_forecast_enabled=not cur)

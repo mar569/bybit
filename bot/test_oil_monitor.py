@@ -40,6 +40,7 @@ def test_is_relevant_rejects_random():
 
 
 def test_pro_analyst_blas_kemp_priority():
+    import time
     from bot.oil_monitor import (
         detect_oil_news_theme,
         is_critical_oil_news,
@@ -60,7 +61,7 @@ def test_pro_analyst_blas_kemp_priority():
         title="Javier Blas: energy markets after Hormuz talks",
         url="https://bloomberg.com/x",
         source="Bloomberg",
-        published_ts=1_700_000_000.0,
+        published_ts=time.time() - 1800,
         impact="bearish",
         theme="analyst",
     )
@@ -163,6 +164,37 @@ def test_format_oil_news_message_batch():
     assert "example.com" in text
 
 
+def test_digest_keeps_entry_plan_when_session_closed():
+    """Дайджест всегда даёт рабочий план/скальп — ориентир даже на выходных."""
+    snap = OilMarketSnapshot(
+        label="Brent",
+        symbol="UKOUSD",
+        price=85.0,
+        high_7d=90.0,
+        low_7d=80.0,
+        verdict="LONG",
+        confidence=7,
+        support=84.0,
+        resistance=86.0,
+        breakdown=83.0,
+        breakout=87.0,
+        phase="impulse",
+        elliott="impulse",
+        reason="test",
+    )
+    bias = OilNewsBias(
+        bias="bullish",
+        weighted_score=3.0,
+        summary_ru="фон вверх",
+        how_to_use_ru="ждать открытие",
+    )
+    ta = TAAnalysisResult(verdict="LONG", verdict_confidence=7)
+    text = format_oil_market_digest([snap], ta=ta, news_bias=bias)
+    assert "фон вверх" in text
+    assert "Рабочий план" in text
+    # session_open больше не параметр — планы не прячем на выходных
+    assert "session_open" not in format_oil_market_digest.__code__.co_varnames
+
 def test_format_oil_market_digest():
     snap = OilMarketSnapshot(
         label="Brent",
@@ -186,14 +218,24 @@ def test_format_oil_market_digest():
 
 
 def test_news_critical_score_hormuz():
+    import time
+
     item = OilNewsItem(
         title="Iran threatens Strait of Hormuz blockade",
         url="",
         source="Reuters",
-        published_ts=1_700_000_000.0,
+        published_ts=time.time() - 600,
     )
     assert news_critical_score(item.title) >= 3
     assert is_critical_oil_news(item)
+    # Та же тема, но 3 дня назад — не критично для пуша
+    stale = OilNewsItem(
+        title=item.title,
+        url="",
+        source="Reuters",
+        published_ts=time.time() - 72 * 3600,
+    )
+    assert not is_critical_oil_news(stale)
 
 
 def test_news_critical_rejects_weak():
@@ -587,6 +629,22 @@ def test_resolve_oil_news_fresh_same_day_url():
     assert oil_news_is_fresh(ts, max_age_hours=18)
 
 
+def test_oil_news_hard_cap_two_days():
+    """Старше 2 суток никогда не «свежая», даже если settings = 100ч."""
+    import time
+    from bot.oil_monitor import oil_news_is_fresh, oil_news_freshness_weight
+
+    now = time.time()
+    assert oil_news_is_fresh(now - 3 * 3600, max_age_hours=24)
+    assert not oil_news_is_fresh(now - 50 * 3600, max_age_hours=100)
+    assert not oil_news_is_fresh(now - 49 * 3600, max_age_hours=48)
+    # Свежий импульс весит больше старого фона
+    assert oil_news_freshness_weight(now - 1 * 3600) > oil_news_freshness_weight(
+        now - 30 * 3600
+    )
+    assert oil_news_freshness_weight(now - 50 * 3600) == 0.0
+
+
 def test_parse_rss_pub_empty_is_none():
     from bot.oil_monitor import _parse_rss_pub
 
@@ -634,8 +692,65 @@ def test_fastlane_detects_wsj_reuters_blas():
     )
     assert "ВАЖНО" in text
     assert "Reuters" in text
-    assert "Главное" in text
+    assert "Разбор" in text or "Главное" in text or "Кратко" in text
     assert "опережает" in text
+
+
+def test_fastlane_rejects_edexlive_white_house_title():
+    """Слова White House в title + EdexLive ≠ primary White House."""
+    from bot.oil_fastlane import (
+        detect_fastlane_outlet,
+        is_fastlane_item,
+        is_syndicate_host,
+        strip_invented_trade_levels,
+    )
+
+    title = (
+        "White House signals President Donald Trump considering new strikes "
+        "on Iran as Strait of Hormuz truce collapses"
+    )
+    url = "https://www.edexlive.com/news/white-house-signals-trump-is-weighing-new-strikes-on-iran"
+    assert is_syndicate_host(url, "EdexLive")
+    assert detect_fastlane_outlet(title, "EdexLive", url) is None
+    item = OilNewsItem(
+        title=title,
+        url=url,
+        source="EdexLive",
+        published_ts=1_700_000_000.0,
+        impact="bullish",
+        theme="iran_geo",
+    )
+    assert not is_fastlane_item(item)
+
+    # Primary AP/Reuters с тем же заголовком — ок
+    ap = detect_fastlane_outlet(title, "AP", "https://apnews.com/article/iran-hormuz")
+    assert ap is not None
+    assert ap.outlet == "AP"
+
+    fake_ai = (
+        "ВЕРДИКТ: LONG, уверенность 8 из 10\n"
+        "Вход выше $74.50\n"
+        "Стоп 73.20\n"
+        "Страх поставок тянет цену вверх."
+    )
+    cleaned = strip_invented_trade_levels(fake_ai)
+    assert "$74.50" not in cleaned
+    assert "ВЕРДИКТ" not in cleaned
+    assert "вверх" in cleaned.lower()
+
+
+def test_news_story_key_esc_vs_deesc():
+    from bot.oil_monitor import _news_story_key
+
+    esc = _news_story_key(
+        "White House signals Trump considering new strikes on Iran Hormuz"
+    )
+    deesc = _news_story_key(
+        "Trump cancels Iran strike, deal to open Hormuz strait"
+    )
+    assert "esc" in esc
+    assert "deesc" in deesc
+    assert esc != deesc
 
 
 def test_fastlane_rejects_random_blog():

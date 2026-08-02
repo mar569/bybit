@@ -433,6 +433,7 @@ async def enrich_setup_with_gemini(
     news_items: Sequence[Any] | None = None,
     api_key: str | None = None,
     model: str = "gemini-3.6-flash",
+    memory_ru: str = "",
 ) -> OilConfluenceSetup:
     """Короткий AI-абзац; ошибка не ломает setup."""
     if not api_key or setup.side not in {"LONG", "SHORT"}:
@@ -446,6 +447,8 @@ async def enrich_setup_with_gemini(
             if t:
                 titles.append(f"- {t[:120]}")
         news_block = "\n".join(titles) if titles else "(нет)"
+        memory = (memory_ru or "").strip()
+        memory_block = f"\nОпыт прошлых сигналов бота:\n{memory}\n" if memory else ""
         ctx = (
             "Ты трейдер нефти. Пиши по-русски простыми словами, 5–8 строк: "
             "выжми важное, немного деталей, без простыни и без англ. жаргона.\n"
@@ -455,6 +458,7 @@ async def enrich_setup_with_gemini(
             f"Триггер: {setup.trigger_ru}\n"
             f"Факторы: {'; '.join(setup.factors_ru)}\n"
             f"Новости:\n{news_block}"
+            f"{memory_block}"
         )
         result = await ask_gemini(
             api_key=api_key,
@@ -462,7 +466,8 @@ async def enrich_setup_with_gemini(
             context_text=ctx,
             user_text=(
                 "Структура: главное ПОЧЕМУ вход валиден; куда цена; "
-                "один риск; когда отменять. Не меняй сторону. Не финсовет."
+                "один риск; когда отменять. Не меняй сторону. Не финсовет. "
+                "Свежие критичные новости (Ормуз/Иран) важнее старой статистики."
             ),
         )
         text = sanitize_ai_reply_for_telegram(result.text or "").strip()

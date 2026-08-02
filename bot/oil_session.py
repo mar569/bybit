@@ -66,8 +66,11 @@ def next_ukousd_open_msk(*, now: datetime | None = None) -> datetime:
     open_today = at_day(now, _WEEKDAY_OPEN_H)
     if now < open_today:
         return open_today
-    # После открытия будня — следующее открытие после ночного перерыва
-    return at_day(now + timedelta(days=1), _WEEKDAY_OPEN_H if wd < 4 else _MON_OPEN_H)
+    # Пятница после открытия → понедельник 01:00 (сб–вс закрыто)
+    if wd == 4:
+        return at_day(now + timedelta(days=3), _MON_OPEN_H)
+    # Пн–чт после открытия → следующий будний open (вт–пт 03:00)
+    return at_day(now + timedelta(days=1), _WEEKDAY_OPEN_H)
 
 
 def is_ukousd_session_open(*, now: datetime | None = None) -> bool:

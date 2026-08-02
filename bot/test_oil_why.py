@@ -1,10 +1,12 @@
 """Tests for oil why (plain-language drivers)."""
 from __future__ import annotations
 
+import time
+
 from bot.bybit_klines import KlineBar
 from bot.oil_flow import OilFlowProxy
 from bot.oil_monitor import OilNewsBias, OilNewsItem
-from bot.oil_why import build_oil_why_report, format_oil_why_report
+from bot.oil_why import _pick_news, build_oil_why_report, format_oil_why_report
 
 
 def _bars_up(n: int = 40) -> list[KlineBar]:
@@ -31,7 +33,7 @@ def test_why_plain_explains_hormuz_attack():
             title="Iran attack closes Strait of Hormuz oil tankers",
             url="https://x",
             source="Reuters",
-            published_ts=1.0,
+            published_ts=time.time() - 900,
             impact="bullish",
             theme="iran_geo",
         ),
@@ -62,13 +64,15 @@ def test_why_plain_explains_hormuz_attack():
         news_bias=bias,
         flow=flow,
         interval_minutes=15,
+        ai_now_ru="Главный драйвер: страх блока Ормуза.",
     )
     assert rep is not None
     assert rep.direction == "up"
     assert "Ормуз" in rep.plain_ru or "ормуз" in rep.plain_ru.lower()
     text = format_oil_why_report(rep)
     assert "Суть простыми словами" in text
-    assert "что они значат" in text
+    assert "Прямо сейчас" in text
+    assert "новостям" in text.lower()
     assert "war-premium" not in text.lower()
     assert "News-bias" not in text
 
@@ -80,7 +84,7 @@ def test_why_flags_open_hormuz_deal_vs_rising_price():
             title="US considering Iran’s offer to open Strait of Hormuz in exchange for lifting blockade",
             url="https://x",
             source="News",
-            published_ts=1.0,
+            published_ts=time.time() - 600,
             impact="bearish",
             theme="iran_geo",
         ),
@@ -99,4 +103,31 @@ def test_why_flags_open_hormuz_deal_vs_rising_price():
     assert rep.direction == "up"
     text = format_oil_why_report(rep)
     assert "открыт" in text.lower() or "сделк" in text.lower() or "пролив" in text.lower()
-    assert any("отскок" in c.lower() or "нестойк" in c.lower() or "осторож" in c.lower() for c in rep.careful_ru)
+    assert any(
+        "отскок" in c.lower() or "нестойк" in c.lower() or "осторож" in c.lower()
+        for c in rep.careful_ru
+    )
+
+
+def test_pick_news_prefers_fresh_matching_direction():
+    now = time.time()
+    old = OilNewsItem(
+        title="Iran attack closes Strait of Hormuz",
+        url="https://old",
+        source="Reuters",
+        published_ts=now - 20 * 3600,
+        impact="bullish",
+        theme="iran_geo",
+    )
+    fresh = OilNewsItem(
+        title="Trump cancels Iran strike, deal to open Hormuz",
+        url="https://fresh",
+        source="AP",
+        published_ts=now - 1800,
+        impact="bearish",
+        theme="iran_geo",
+    )
+    # При падении цены — свежий cancel выше старого attack
+    picked = _pick_news([old, fresh], limit=2, prefer_direction="down", max_age_hours=24)
+    assert picked
+    assert "cancel" in picked[0].title.lower() or "cancels" in picked[0].title.lower()

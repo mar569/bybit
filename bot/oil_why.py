@@ -20,6 +20,7 @@ class OilWhyReport:
     news_plain_ru: tuple[str, ...]
     careful_ru: tuple[str, ...]
     do_now_ru: str
+    ai_now_ru: str = ""  # свежий ИИ-сбор «прямо сейчас»
 
 
 def _pct(a: float, b: float) -> float:
@@ -124,18 +125,43 @@ def _explain_headline(title: str) -> tuple[str, str, str]:
     return (f"Новость: {short}", "Влияние на цену неоднозначное — смотри контекст Ормуза", "mix")
 
 
-def _pick_news(items: Sequence[Any], *, limit: int = 3) -> list[Any]:
-    """Важные сюжеты: гео сначала, без дублей."""
-    from .oil_monitor import news_critical_score
+def _pick_news(
+    items: Sequence[Any],
+    *,
+    limit: int = 5,
+    prefer_direction: str = "",
+    max_age_hours: float = 12.0,
+    now_ts: float | None = None,
+) -> list[Any]:
+    """Свежие важные сюжеты: сначала «здесь и сейчас», гео/импульс выше."""
+    import time
 
-    scored: list[tuple[int, Any]] = []
+    from .oil_monitor import news_critical_score, oil_news_freshness_weight
+
+    now = now_ts if now_ts is not None else time.time()
+    scored: list[tuple[float, Any]] = []
     for it in items:
         title = (getattr(it, "title", "") or "").strip()
         if not title:
             continue
+        ts = float(getattr(it, "published_ts", 0) or 0)
+        if ts > 0 and (now - ts) > max_age_hours * 3600:
+            continue
         theme = getattr(it, "theme", "") or ""
         bonus = 5 if theme == "iran_geo" else 2 if theme in {"inventory", "opec", "analyst"} else 0
-        scored.append((news_critical_score(title, source=getattr(it, "source", "")) + bonus, it))
+        base = news_critical_score(title, source=getattr(it, "source", "")) + bonus
+        fresh_w = oil_news_freshness_weight(ts if ts > 0 else None, now=now)
+        # Свежесть критична для «почему сейчас»
+        score = base * (0.35 + 0.65 * fresh_w)
+        _, _, side = _explain_headline(title)
+        if prefer_direction and side == prefer_direction:
+            score += 4
+        elif prefer_direction and side != "mix" and side != prefer_direction:
+            score -= 1
+        # Суперсвежие (<2ч) — отдельный буст
+        if ts > 0 and (now - ts) <= 2 * 3600:
+            score += 3
+        scored.append((score, it))
     scored.sort(key=lambda x: x[0], reverse=True)
     out: list[Any] = []
     seen: set[str] = set()
@@ -158,6 +184,7 @@ def build_oil_why_report(
     forecast: Any | None = None,
     flow: OilFlowProxy | None = None,
     interval_minutes: int = 15,
+    ai_now_ru: str = "",
 ) -> OilWhyReport | None:
     if not bars or len(bars) < 8:
         return None
@@ -212,13 +239,25 @@ def build_oil_why_report(
             "Если его боятся закрыть — цена растёт. Если танкеры снова ходят — цена часто падает."
         )
 
-    # --- новости: смысл, не сырой EN ---
-    picked = _pick_news(items, limit=3)
+    # --- новости: сначала то, что совпадает с движением цены ---
+    picked = _pick_news(items, limit=5, prefer_direction=direction, max_age_hours=12.0)
     up_news = down_news = mix_news = 0
     for it in picked:
         title = getattr(it, "title", "") or ""
         what, means, side = _explain_headline(title)
-        news_plain.append(f"<b>{what}</b>\n  → {means}")
+        src = (getattr(it, "source", "") or "").strip()
+        age = ""
+        ts = float(getattr(it, "published_ts", 0) or 0)
+        if ts > 0:
+            import time as _t
+
+            age_h = (_t.time() - ts) / 3600.0
+            if age_h < 1:
+                age = f" · {int(age_h * 60)}м"
+            elif age_h < 48:
+                age = f" · {age_h:.1f}ч"
+        tag = f" <i>({src}{age})</i>" if src or age else ""
+        news_plain.append(f"<b>{what}</b>{tag}\n  → {means}")
         if side == "up":
             up_news += 1
         elif side == "down":
@@ -227,7 +266,10 @@ def build_oil_why_report(
             mix_news += 1
 
     if not news_plain:
-        news_plain.append("Свежих сильных заголовков в ленте бота мало — объяснение слабее.")
+        news_plain.append(
+            "За последние часы сильных primary-заголовков мало — "
+            "движение могло быть от уровня/алго, а не от новой новости."
+        )
 
     # --- поток без жаргона ---
     if flow is not None:
@@ -342,9 +384,10 @@ def build_oil_why_report(
         confidence=conf,
         plain_ru=plain,
         facts_ru=tuple(facts[:5]),
-        news_plain_ru=tuple(news_plain[:4]),
+        news_plain_ru=tuple(news_plain[:5]),
         careful_ru=tuple(careful[:4]),
         do_now_ru=do_now,
+        ai_now_ru=(ai_now_ru or "").strip(),
     )
 
 
@@ -357,14 +400,17 @@ def format_oil_why_report(rep: OilWhyReport) -> str:
         "",
         "<b>Суть простыми словами</b>",
         _esc(rep.plain_ru),
-        "",
-        "<b>Факты</b>",
     ]
+    if rep.ai_now_ru:
+        lines.append("")
+        lines.append("🔥 <b>Прямо сейчас (свежий сбор)</b>")
+        lines.append(_esc(rep.ai_now_ru))
+    lines.append("")
+    lines.append("<b>Факты</b>")
     for f in rep.facts_ru:
-        # facts may contain intentional <b> — allow limited tags
         lines.append(f"• {_soft_html(f)}")
     lines.append("")
-    lines.append("<b>Новости и что они значат для цены</b>")
+    lines.append("<b>Что вышло по новостям (свежее сверху)</b>")
     for n in rep.news_plain_ru:
         lines.append(f"• {_soft_html(n)}")
     lines.append("")
@@ -375,7 +421,8 @@ def format_oil_why_report(rep: OilWhyReport) -> str:
     lines.append(f"<b>Что делать сейчас:</b> {_esc(rep.do_now_ru)}")
     lines.append("")
     lines.append(
-        "<i>Это объяснение по публичным новостям и графику, не секретный инсайд.</i>"
+        "<i>Собрано заново при нажатии «Почему так». "
+        "Кнопки ниже: Запасы / Ормуз. Не финансовый совет.</i>"
     )
     return "\n".join(lines)
 
@@ -390,14 +437,69 @@ def _esc(text: str) -> str:
 
 
 def _soft_html(text: str) -> str:
-    """Экранирует всё, кроме простых <b>...</b>."""
+    """Экранирует всё, кроме простых <b>...</b> и <i>...</i>."""
     import re
 
-    parts = re.split(r"(</?b>)", text or "")
+    parts = re.split(r"(</?[bi]>)", text or "")
     out: list[str] = []
     for p in parts:
-        if p in {"<b>", "</b>"}:
+        if p in {"<b>", "</b>", "<i>", "</i>"}:
             out.append(p)
         else:
             out.append(_esc(p))
     return "".join(out)
+
+
+async def enrich_why_with_gemini(
+    *,
+    direction: str,
+    move_1h: float,
+    move_4h: float,
+    price: float,
+    headlines: Sequence[str],
+    extra_context: str = "",
+    api_key: str | None,
+    model: str = "gemini-3.6-flash",
+) -> str:
+    """Свежий ИИ-разбор: что ИМЕННО сейчас двигает цену."""
+    if not api_key:
+        return ""
+    try:
+        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+
+        dir_ru = {"up": "растёт", "down": "падает", "flat": "почти стоит"}.get(
+            direction, direction
+        )
+        heads = "\n".join(f"- {h}" for h in headlines[:8]) or "- (мало заголовков)"
+        ctx = (
+            "Ты профессиональный аналитик нефти Brent/UKOUSD. "
+            "Отвечай ТОЛЬКО по-русски, коротко и по делу.\n"
+            f"Цена сейчас ≈${price:.2f}, за 1ч {move_1h:+.2f}%, за 4ч {move_4h:+.2f}% "
+            f"(нефть {dir_ru}).\n"
+            f"Свежие заголовки (только что собраны):\n{heads}\n"
+            f"Доп.контекст: {extra_context or 'нет'}\n"
+            "Задача: объяснить ЧТО ПРЯМО СЕЙЧАС двигает цену. "
+            "Если заголовки старые/не объясняют ход — скажи честно.\n"
+            "Не выдумывай entry/stop/TP. Не финансовый совет."
+        )
+        user = (
+            "5–8 строк:\n"
+            "1) Главный драйвер прямо сейчас (1–2 предложения)\n"
+            "2) Какие 1–2 новости это подтверждают (или «лента пустая»)\n"
+            "3) Риск сюрприза ±2–5% в ближайшие часы: низкий/средний/высокий\n"
+            "4) Что смотреть дальше (1 фраза)"
+        )
+        result = await ask_gemini(
+            api_key=api_key,
+            model=model,
+            context_text=ctx,
+            user_text=user,
+        )
+        text = sanitize_ai_reply_for_telegram(result.text or "").strip()
+        if result.error or not text:
+            return ""
+        if len(text) > 1200:
+            text = text[:1197] + "…"
+        return text
+    except Exception:
+        return ""

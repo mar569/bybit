@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 66
+SETTINGS_VERSION = 69
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -527,7 +527,7 @@ class ScannerSettings:
     oil_news_enabled: bool = False
     oil_news_interval_seconds: int = 180
     oil_news_max_per_poll: int = 1
-    oil_news_max_age_hours: float = 18.0
+    oil_news_max_age_hours: float = 24.0
     oil_digest_enabled: bool = True
     oil_digest_interval_hours: float = 4.0
     oil_chart_enabled: bool = True
@@ -539,18 +539,22 @@ class ScannerSettings:
     oil_include_wti: bool = False
     oil_russian_news: bool = True
     oil_news_critical_only: bool = True
-    oil_news_critical_min_score: int = 4
+    oil_news_critical_min_score: int = 5
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
     oil_fastlane_enabled: bool = True
     oil_fastlane_interval_seconds: int = 60
-    oil_fastlane_max_age_hours: float = 6.0
-    oil_fastlane_min_score: int = 7
+    oil_fastlane_max_age_hours: float = 4.0
+    oil_fastlane_min_score: int = 8
     oil_fastlane_max_per_poll: int = 2
     oil_fastlane_gemini: bool = True
     # Ормуз: пуш в Новостник при важном изменении AIS/статуса
     oil_hormuz_alerts_enabled: bool = True
     oil_hormuz_interval_seconds: int = 900
     oil_hormuz_alert_cooldown_seconds: int = 1800
+    # Мастер-тумблер сигналов входа (micro/levels/bounce/confluence) — панель Нефть
+    oil_entry_signals_enabled: bool = True
+    # Авто-журнал сбылось/нет + мягкая подстройка quality / память для Gemini
+    oil_outcome_learning_enabled: bool = True
     # Прямые RSS: OilPrice + EIA (+ Google-запросы прогнозов банков)
     oil_pro_feeds_enabled: bool = True
     # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
@@ -1102,7 +1106,7 @@ class ScannerSettings:
             oil_news_enabled=bool(base.get("oil_news_enabled", False)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
-            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 18.0)),
+            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 24.0)),
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
             oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
             oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
@@ -1114,15 +1118,15 @@ class ScannerSettings:
             oil_include_wti=bool(base.get("oil_include_wti", False)),
             oil_russian_news=bool(base.get("oil_russian_news", True)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
-            oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 4)),
+            oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 5)),
             oil_fastlane_enabled=bool(base.get("oil_fastlane_enabled", True)),
             oil_fastlane_interval_seconds=int(
                 base.get("oil_fastlane_interval_seconds", 60)
             ),
             oil_fastlane_max_age_hours=float(
-                base.get("oil_fastlane_max_age_hours", 6.0)
+                base.get("oil_fastlane_max_age_hours", 4.0)
             ),
-            oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 7)),
+            oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 8)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 2)),
             oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
             oil_hormuz_alerts_enabled=bool(base.get("oil_hormuz_alerts_enabled", True)),
@@ -1131,6 +1135,12 @@ class ScannerSettings:
             ),
             oil_hormuz_alert_cooldown_seconds=int(
                 base.get("oil_hormuz_alert_cooldown_seconds", 1800)
+            ),
+            oil_entry_signals_enabled=bool(
+                base.get("oil_entry_signals_enabled", True)
+            ),
+            oil_outcome_learning_enabled=bool(
+                base.get("oil_outcome_learning_enabled", True)
             ),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
@@ -1724,6 +1734,26 @@ class SettingsManager:
                 merged.setdefault("oil_hormuz_alerts_enabled", True)
                 merged.setdefault("oil_hormuz_interval_seconds", 900)
                 merged.setdefault("oil_hormuz_alert_cooldown_seconds", 1800)
+            if version < 67:
+                # Жёстко: не старше 2 суток; ‼️ только свежие часы; выше порог шума
+                merged["oil_news_max_age_hours"] = min(
+                    24.0, float(merged.get("oil_news_max_age_hours", 24) or 24)
+                )
+                if float(merged.get("oil_news_max_age_hours", 24) or 24) > 48:
+                    merged["oil_news_max_age_hours"] = 48.0
+                merged["oil_fastlane_max_age_hours"] = min(
+                    4.0, float(merged.get("oil_fastlane_max_age_hours", 4) or 4)
+                )
+                merged["oil_news_critical_min_score"] = max(
+                    5, int(merged.get("oil_news_critical_min_score", 5) or 5)
+                )
+                merged["oil_fastlane_min_score"] = max(
+                    8, int(merged.get("oil_fastlane_min_score", 8) or 8)
+                )
+            if version < 68:
+                merged.setdefault("oil_entry_signals_enabled", True)
+            if version < 69:
+                merged.setdefault("oil_outcome_learning_enabled", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

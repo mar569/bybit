@@ -224,11 +224,64 @@ def test_oil_session_bybit_schedule():
     tue = datetime(2026, 8, 4, 1, 0, tzinfo=msk)
     assert is_ukousd_session_open(now=tue) is False
 
-    # За 45 мин до пн 01:00 = вс 00:15... wait Mon 01:00 - 45min = Sun 00:15? 
-    # Mon 01:00 - 45 min = Mon 00:15
+    # Пятница после открытия → следующее = понедельник 01:00 (не суббота!)
+    fri = datetime(2026, 8, 7, 15, 0, tzinfo=msk)
+    assert is_ukousd_session_open(now=fri) is True
+    nxt_fri = next_ukousd_open_msk(now=fri)
+    assert nxt_fri.weekday() == 0 and nxt_fri.hour == 1
+
+    # За 45 мин до пн 01:00 = Mon 00:15
     pre = datetime(2026, 8, 3, 0, 15, tzinfo=msk)
     assert should_send_preopen_alert(now=pre) is True
     assert should_send_preopen_alert(now=mon) is False
+
+
+def test_no_entry_signals_when_master_toggle_off(monkeypatch):
+    """Мастер-тумблер Входы OFF — micro/levels молчат (сессия не блокирует)."""
+    import asyncio
+    from bot.oil_monitor import OilMonitorEngine
+
+    class _SM:
+        settings = type(
+            "S",
+            (),
+            {
+                "oil_entry_signals_enabled": False,
+                "oil_micro_signals_enabled": True,
+                "oil_micro_cooldown_seconds": 0,
+                "oil_micro_max_per_hour": 10,
+                "oil_level_alerts_enabled": True,
+            },
+        )()
+
+    async def _noop(_msg: str) -> bool:
+        return True
+
+    eng = OilMonitorEngine(_SM(), on_news=_noop, on_level_alert=_noop)
+    monkeypatch.setattr(
+        "bot.oil_session.is_ukousd_session_open", lambda **_kw: True
+    )
+    assert eng._oil_entry_signals_allowed(_SM.settings) is False
+    assert asyncio.run(eng._tick_micro_signals(_SM.settings)) == 0
+    assert asyncio.run(eng._tick_level_alerts(_SM.settings)) == 0
+
+
+def test_entry_signals_allowed_when_session_closed(monkeypatch):
+    """Закрытая сессия сама по себе не глушит сигналы — только тумблер."""
+    from bot.oil_monitor import OilMonitorEngine
+
+    class _SM:
+        settings = type("S", (), {"oil_entry_signals_enabled": True})()
+
+    async def _noop(_msg: str) -> bool:
+        return True
+
+    eng = OilMonitorEngine(_SM(), on_news=_noop, on_level_alert=_noop)
+    monkeypatch.setattr(
+        "bot.oil_session.is_ukousd_session_open", lambda **_kw: False
+    )
+    assert eng._bybit_tradfi_open() is False
+    assert eng._oil_entry_signals_allowed(_SM.settings) is True
 
 
 def test_oil_session_status_runs():
