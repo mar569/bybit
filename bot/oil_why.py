@@ -38,6 +38,45 @@ def _move_from_bars(bars: Sequence[KlineBar], *, bars_back: int) -> float:
 def _explain_headline(title: str) -> tuple[str, str, str]:
     """(коротко_по-русски, влияние_на_цену, side: up|down|mix)."""
     low = title.lower()
+    # Явное движение цены в заголовке — выше geo-слов
+    if any(
+        k in low
+        for k in (
+            "tumble", "slump", "plunge", "crash", "falls", "fell", "drops",
+            "dropped", "decline", "обвал", "обруш", "паден", "рухн",
+        )
+    ):
+        return (
+            "В заголовке — падение цены нефти",
+            "Рынок уже реагирует вниз (снятие geo-premium / деэскалация / фиксация)",
+            "down",
+        )
+    if any(
+        k in low
+        for k in (
+            "surge", "soar", "rally", "jumps", "spikes", "rises", "climb",
+            "подскоч", "взлет", "взлёт", "рекорд",
+        )
+    ):
+        return (
+            "В заголовке — рост цены нефти",
+            "Рынок уже реагирует вверх (страх поставок / эскалация)",
+            "up",
+        )
+    # Отмена ударов / TACO → вниз (проверять ДО attack/strike)
+    if any(
+        k in low
+        for k in (
+            "taco", "chickens out", "backs off", "calls off", "called off",
+            "cancels", "cancel", "pauses", "pause", "suspends", "suspend",
+            "отмен", "струсил", "приостан", "отказался",
+        )
+    ) and any(k in low for k in ("attack", "strike", "удар", "атак", "bomb", "iran", "иран")):
+        return (
+            "Трамп/США отложили или отменили удары по Ирану (деэскалация)",
+            "Страх войны слабеет → war-premium обычно снимают → нефть вниз",
+            "down",
+        )
     # Сделка / открытие пролива → обычно вниз
     if any(
         k in low

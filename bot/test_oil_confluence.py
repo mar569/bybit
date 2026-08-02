@@ -97,8 +97,9 @@ def test_short_setup_near_resistance_passes_gate():
     assert setup_passes_gate(setup, min_quality=7)
     text = format_oil_confluence_setup(setup)
     assert "SHORT" in text
-    assert "Стоп" in text or "стоп" in text.lower() or "Стоп" in text
-    assert "UKOUSD" in text
+    assert "Стоп" in text or "стоп" in text.lower()
+    assert "Чеклист" in text
+    assert "Иран" in text or "новост" in text.lower()
 
 
 def test_conflict_news_ta_does_not_pass_high_gate():
@@ -169,7 +170,7 @@ def test_wait_format_when_conflict_close():
     )
     if setup is not None and setup.side == "WAIT":
         text = format_oil_confluence_setup(setup)
-        assert "WAIT" in text
+        assert "ждать" in text.lower() or "WAIT" in text
     else:
         # Либо None, либо WAIT-обёртка — главное не PASS gate
         assert not setup_passes_gate(setup, min_quality=7)

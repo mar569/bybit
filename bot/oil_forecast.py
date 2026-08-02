@@ -65,6 +65,8 @@ def detect_oil_scenario(news_items: Sequence[Any] | None) -> str:
                 for k in (
                     "deal", "reopen", "ceasefire", "mou", "accord", "diplom",
                     "сделк", "перемир", "открыт", "unwind", "premium",
+                    "taco", "cancels", "cancel", "pauses", "pause", "suspend",
+                    "chickens out", "backs off", "calls off", "отмен", "струсил",
                 )
             ):
                 deal += 2
@@ -75,10 +77,17 @@ def detect_oil_scenario(news_items: Sequence[Any] | None) -> str:
                     "атак", "блок", "закрыт", "удар",
                 )
             ):
+                # «cancels attack» уже попало в deal выше; чистая эскалация → disrupt
                 disrupt += 2
             else:
                 disrupt += 1
                 deal += 1
+        # Явный обвал цены в заголовке усиливает deal_tape (снятие premium)
+        if any(
+            k in low
+            for k in ("tumble", "slump", "plunge", "crash", "обвал", "обруш")
+        ):
+            deal += 2
         if any(k in low for k in ("eia", "inventory", "запас", "spr", "steo")):
             inv += 2
         if any(k in low for k in ("opec", "опек", "quota", "квот")):
@@ -368,9 +377,10 @@ def _forecast_context_for_gemini(fc: OilForecast, snap: Any, news_items: Sequenc
             titles.append(f"- [{imp}] {t[:140]}")
     news_block = "\n".join(titles) if titles else "(нет свежих приоритетных новостей)"
     return (
-        "Ты — профессиональный трейдер сырой нефти (Brent / UKOUSD CFD). "
-        "Пиши коротко по-русски для Новостника. Не выдумывай цены уровней. "
-        "Не противоречь bias бота без явной причины. Не markdown.\n\n"
+        "Ты — профессиональный трейдер сырой нефти (Brent / UKOUSD). "
+        "Пиши по-русски простыми словами для Telegram. "
+        "Выжимай важное, с деталями, без простыни и без англ. жаргона. "
+        "Не выдумывай цены уровней. Не противоречь bias бота без причины.\n\n"
         f"BIAS бота: {fc.bias} (confidence {fc.confidence}/10)\n"
         f"Сценарий: {fc.scenario} — {fc.headline_ru}\n"
         f"Цена: ${float(getattr(snap, 'price', 0) or 0):.2f}\n"
@@ -398,10 +408,13 @@ async def enrich_oil_forecast_with_gemini(
 
         ctx = _forecast_context_for_gemini(fc, snap, news_items)
         user = (
-            "Сформулируй 4–6 строк: 1) сценарий дня одной фразой, "
-            "2) что делать трейдеру UKOUSD сейчас, "
-            "3) что сломает сценарий, "
-            "4) один риск. Без списков markdown, без эмодзи-спама."
+            "Сформулируй 6–10 строк по-русски простыми словами (не страница):\n"
+            "1) что сейчас главное для нефти,\n"
+            "2) самое громкое ПОЧЕМУ,\n"
+            "3) куда скорее цена (вверх/вниз/ждать),\n"
+            "4) что делать трейдеру UKOUSD сейчас,\n"
+            "5) что сломает сценарий.\n"
+            "Без англ. жаргона, без воды. Не финсовет."
         )
         result = await ask_gemini(
             api_key=api_key,

@@ -14,7 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable
@@ -88,18 +88,40 @@ _ANALYST_KEYWORDS = frozenset({
     "war premium", "cuts forecast", "raises forecast", "slashes forecast",
     "to average", "will average",
 })
-_BULL_NEWS = frozenset({
-    "surge", "rise", "rally", "jump", "spike", "attack", "strike", "block",
-    "close strait", "escalat", "sanction", "cut produc", "draw", "tighten",
-    "shortage", "deficit", "buy", "purchase", "рост", "подскоч", "атак",
-    "сокращен", "дефицит", "покуп", "upside", "raises forecast",
+# Движение ЦЕНЫ в заголовке — главный приоритет (иначе attack/strike ломают «tumbles»).
+_PRICE_UP = frozenset({
+    "surge", "surges", "rise", "rises", "rally", "rallies", "jump", "jumps",
+    "spike", "spikes", "soar", "soars", "climb", "climbs", "gain", "gains",
+    "рекорд", "рост", "подскоч", "взлет", "взлёт", "дорожает", "подорож",
+    "prices rise", "oil rises", "brent rises", "crude rises",
 })
+_PRICE_DOWN = frozenset({
+    "tumble", "tumbles", "tumbled", "slump", "slumps", "slumped", "crash",
+    "crashes", "crashed", "plunge", "plunges", "plunged", "fall", "falls",
+    "fell", "drop", "drops", "dropped", "decline", "declines", "slide",
+    "slides", "sink", "sinks", "sank", "retreat", "retreats", "weaken",
+    "паден", "обвал", "обруш", "рухн", "дешев", "снижен цен", "цены пад",
+    "price tumbles", "oil tumbles", "brent falls", "crude falls",
+    "oil drops", "prices fall", "prices drop",
+})
+# Катализатор вверх (эскалация / дефицит) — только если нет явного price-down.
+_BULL_NEWS = frozenset({
+    "attack", "strike", "block", "close strait", "escalat", "sanction",
+    "cut produc", "draw", "tighten", "shortage", "deficit", "buy", "purchase",
+    "атак", "удар", "сокращен", "дефицит", "покуп", "upside", "raises forecast",
+    "new strikes", "fresh strikes", "orders attack", "bomb",
+})
+# Катализатор вниз (деэскалация / сделка / отмена ударов).
 _BEAR_NEWS = frozenset({
-    "fall", "drop", "decline", "slide", "plunge", "deal", "reopen", "de-escal",
-    "ceasefire", "forecast cut", "cuts forecast", "slashes forecast", "build",
-    "oversupply", "release spr", "accord", "surplus", "sell", "dump", "паден",
-    "снижен", "сделк", "избыт", "продаж", "перемир", "downside", "war premium unwind",
-    "unwind", "cooling",
+    "deal", "reopen", "de-escal", "ceasefire", "forecast cut", "cuts forecast",
+    "slashes forecast", "build", "oversupply", "release spr", "accord",
+    "surplus", "sell", "dump", "сделк", "избыт", "продаж", "перемир",
+    "downside", "war premium unwind", "unwind", "cooling",
+    "taco", "chickens out", "backs off", "calls off", "called off",
+    "cancels attack", "cancel attack", "cancels strike", "cancel strike",
+    "pauses strike", "pause strike", "suspends strike", "suspend attack",
+    "abandons attack", "scraps strike", "no strike", "won't strike",
+    "отмен", "отказ от удар", "струсил", "приостан", "деэскал",
 })
 # Веса: чем выше — тем важнее для отправки в чат
 _CRITICAL_TERMS: dict[str, int] = {
@@ -176,6 +198,10 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "OPEC oil production quota when:1d",
     "SPR oil release OR strategic petroleum reserve when:1d",
     "crude oil tanker Hormuz when:12h",
+    "Strait of Hormuz tanker traffic OR shipping OR transit when:12h",
+    # Investing.com + wire (рано выходят)
+    "site:investing.com oil OR Brent OR WTI OR Hormuz OR Iran when:12h",
+    "site:investing.com crude oil price news when:12h",
     # Про-аналитика / прогнозы (Reuters, OilPrice, банки)
     "site:reuters.com Brent crude oil OR Hormuz when:1d",
     "site:oilprice.com Brent OR WTI OR OPEC when:1d",
@@ -186,6 +212,7 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "John Kemp oil OR crude OR inventories OR Brent when:2d",
     "John Kemp Reuters oil when:2d",
     "war premium oil unwind OR Hormuz deal oil prices when:1d",
+    "Trump TACO OR cancels Iran strike OR pauses attack oil when:12h",
 )
 NEWS_QUERIES_RU: tuple[str, ...] = (
     "нефть Иран Трамп санкции Ормуз when:12h",
@@ -194,8 +221,11 @@ NEWS_QUERIES_RU: tuple[str, ...] = (
     "ОПЕК квота добыча нефть when:1d",
     "СПР запасы нефть США when:1d",
     "Ормуз танкер нефть when:12h",
+    "Ормуз судоходство танкеры when:12h",
+    "site:ru.investing.com нефть OR Brent OR Ормуз OR Иран when:12h",
     "прогноз цена нефти Brent EIA OR ОПЕК when:2d",
     "нефть Ормуз сделка цена when:1d",
+    "Трамп отменил удар Иран нефть when:12h",
 )
 
 # Прямые RSS профи (отрасль / EIA) → новостник
@@ -538,15 +568,44 @@ def _clean_title(title: str) -> str:
     return t
 
 def classify_news_impact(title: str) -> str:
+    """Направление давления на нефть по заголовку.
+
+    Приоритет: явное движение цены (tumbles/surges) > деэскалация/TACO >
+    эскалация (attack) > прочие токены. Иначе «tumbles … attacks» → bullish.
+    """
     low = title.lower()
+    price_up = sum(1 for k in _PRICE_UP if k in low)
+    price_down = sum(1 for k in _PRICE_DOWN if k in low)
+
+    # Цена в заголовке важнее geo-слов (атака как фон, а не как bias).
+    if price_down > price_up and price_down > 0:
+        return "bearish"
+    if price_up > price_down and price_up > 0:
+        return "bullish"
+
     bull = sum(1 for k in _BULL_NEWS if k in low)
     bear = sum(1 for k in _BEAR_NEWS if k in low)
-    # «cuts Brent forecast» / «raises WTI outlook» — слова не подряд
+
+    # «cancels/pauses planned attacks» — attack есть, но смысл bearish.
+    if any(
+        k in low
+        for k in (
+            "cancel", "cancels", "cancelled", "canceled", "pause", "pauses",
+            "paused", "suspend", "suspends", "abandoned", "scraps", "calls off",
+            "called off", "backs off", "chickens out", "taco",
+            "отмен", "приостан", "струсил", "отказался",
+        )
+    ) and any(k in low for k in ("attack", "strike", "удар", "атак", "bomb")):
+        bear += 3
+        bull = max(0, bull - 2)
+
+    # «cuts Brent forecast» / «raises WTI outlook»
     if "forecast" in low or "outlook" in low or "прогноз" in low:
         if any(k in low for k in ("cut", "slash", "lower", "reduce", "trim", "сниж", "пониж")):
             bear += 1
         if any(k in low for k in ("raise", "hike", "lift", "boost", "повыш", "увеличен")):
             bull += 1
+
     if bull > bear and bull > 0:
         return "bullish"
     if bear > bull and bear > 0:
@@ -2377,9 +2436,17 @@ class OilMonitorEngine:
         self._micro_signal_hour: list[float] = []
         self._last_setup_ts: float = 0.0
         self._last_setup_side: str = ""
+        self._last_trade_brief_ts: float = 0.0
+        self._last_preopen_alert_ts: float = 0.0
         self._last_fastlane_ts: float = 0.0
         self._seen_fastlane: set[str] = set()
         self._last_regular_news_ts: float = 0.0
+        self._last_hormuz_check_ts: float = 0.0
+        self._last_hormuz_alert_ts: float = 0.0
+        self._hormuz_prev: Any = None
+        from .oil_journal import OilSetupJournal
+
+        self._setup_journal = OilSetupJournal()
 
     def _resolve_gemini_key(self) -> str | None:
         key = self._gemini_api_key
@@ -2620,7 +2687,7 @@ class OilMonitorEngine:
                 continue
             ai_ru = ""
             if use_gemini:
-                ai_ru = await enrich_fastlane_with_gemini(
+                ai_ru, bias_ov = await enrich_fastlane_with_gemini(
                     it.title,
                     source=it.source,
                     outlet=meta.outlet,
@@ -2637,11 +2704,22 @@ class OilMonitorEngine:
                         it.title[:90],
                     )
                     continue
-            # Убрать служебную строку OIL_RELEVANT из текста в чат
+                if bias_ov in {"bullish", "bearish", "neutral"} and bias_ov != it.impact:
+                    logger.info(
+                        "Oil fast-lane bias override %s→%s: %s",
+                        it.impact,
+                        bias_ov,
+                        it.title[:80],
+                    )
+                    it = replace(it, impact=bias_ov)
+                    for i, old in enumerate(self._recent_news):
+                        if (old.title or "").lower()[:120] == key:
+                            self._recent_news[i] = it
+                            break
             if ai_ru:
-                lines_ai = ai_ru.splitlines()
-                if lines_ai and "OIL_RELEVANT" in lines_ai[0].upper():
-                    ai_ru = "\n".join(lines_ai[1:]).strip()
+                from .oil_fastlane import strip_gemini_oil_meta
+
+                ai_ru = strip_gemini_oil_meta(ai_ru)
             msg = format_fastlane_flash(
                 it,
                 meta=meta,
@@ -2664,12 +2742,61 @@ class OilMonitorEngine:
                     meta.flash_score,
                     it.title[:80],
                 )
+                # Громкая новость, влияющая на сделку → ручной анализ
+                await self._maybe_forward_trade_brief(
+                    it,
+                    meta=meta,
+                    ai_ru=ai_ru,
+                    move_note=move_note,
+                    settings=settings,
+                )
                 if sent >= max_per:
                     break
 
         if len(self._seen_fastlane) > 300:
             self._seen_fastlane = set(list(self._seen_fastlane)[-150:])
         return sent
+
+    async def _maybe_forward_trade_brief(
+        self,
+        item: Any,
+        *,
+        meta: Any,
+        ai_ru: str,
+        move_note: str,
+        settings: Any,
+    ) -> None:
+        """Дублирует важное для сделки в чат ручного TA."""
+        if self._on_setup is None:
+            return
+        if not bool(getattr(settings, "oil_setup_enabled", True)):
+            return
+        from .oil_fastlane import (
+            format_trade_impact_for_manual_ta,
+            is_trade_critical_flash,
+        )
+
+        if not is_trade_critical_flash(item, meta, min_score=10):
+            return
+        now = time.time()
+        # Не спамить ручной TA чаще чем раз в 15 мин
+        if now - self._last_trade_brief_ts < 900:
+            return
+        brief = format_trade_impact_for_manual_ta(
+            item, meta=meta, ai_ru=ai_ru, move_note=move_note,
+        )
+        try:
+            ok = await self._on_setup(brief, None)
+        except Exception:
+            logger.exception("Oil trade-brief to manual TA failed")
+            return
+        if ok:
+            self._last_trade_brief_ts = now
+            logger.info(
+                "Oil trade-brief → manual TA (%s score=%d)",
+                meta.outlet,
+                meta.flash_score,
+            )
 
     async def poll_once(self) -> int:
         settings = self.settings_manager.settings
@@ -2682,6 +2809,9 @@ class OilMonitorEngine:
         sent += await self._tick_level_alerts(settings)
         sent += await self._tick_micro_signals(settings)
         sent += await self._tick_fastlane(settings)
+        sent += await self._tick_hormuz_alert(settings)
+        sent += await self._tick_preopen_alert(settings)
+        sent += await self._tick_setup_outcomes(settings)
 
         now = time.time()
         news_interval = float(getattr(settings, "oil_news_interval_seconds", 300.0))
@@ -2881,6 +3011,204 @@ class OilMonitorEngine:
             return True, format_oil_why_report(report)
         except Exception as exc:
             logger.exception("Oil why explain failed")
+            return False, f"ошибка: {exc}"
+
+    async def weekend_open_brief_now(self) -> tuple[bool, str]:
+        """Что ждать на открытии пн ~01:00 MSK по свежим новостям."""
+        settings = self.settings_manager.settings
+        try:
+            from .oil_session import (
+                build_weekend_open_brief,
+                format_weekend_open_brief,
+                oil_session_status,
+            )
+
+            session = oil_session_status()
+            interval_min = int(getattr(settings, "oil_interval_minutes", 15))
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=interval_min,
+                include_brent=True,
+                include_wti=False,
+            )
+            price = float(bundle.brent.price) if bundle else 0.0
+            sat_hi = sun_lo = None
+            if bundle and bundle.brent_bars:
+                recent = bundle.brent_bars[-min(len(bundle.brent_bars), 400) :]
+                if recent:
+                    sat_hi = max(float(b.high) for b in recent)
+                    sun_lo = min(float(b.low) for b in recent)
+
+            max_age_h = float(getattr(settings, "oil_news_max_age_hours", 18.0))
+            cutoff = time.time() - max_age_h * 3600.0
+            try:
+                fresh = await fetch_oil_news(
+                    max_items=20,
+                    include_russian=bool(getattr(settings, "oil_russian_news", True)),
+                    critical_only=False,
+                    critical_min_score=2,
+                    max_age_hours=max_age_h,
+                    include_pro_feeds=bool(getattr(settings, "oil_pro_feeds_enabled", True)),
+                )
+                self._remember_news(fresh, cutoff=cutoff)
+            except Exception:
+                logger.debug("Open-brief news refresh failed", exc_info=True)
+
+            news_bias = summarize_oil_news_bias(self._recent_news)
+            forecast = None
+            if bool(getattr(settings, "oil_forecast_enabled", True)) and bundle:
+                from .oil_forecast import build_oil_forecast
+
+                forecast = build_oil_forecast(
+                    bundle.brent,
+                    bundle.brent_ta,
+                    news_bias=news_bias,
+                    news_items=self._recent_news,
+                    market_mood=bundle.market_mood,
+                    interval_minutes=bundle.interval_minutes,
+                )
+
+            brief = build_weekend_open_brief(
+                price=price or float(getattr(bundle.brent, "price", 0) if bundle else 0),
+                news_items=self._recent_news,
+                news_bias=news_bias,
+                forecast=forecast,
+                session=session,
+                sat_high_hint=sat_hi,
+                sun_low_hint=sun_lo,
+            )
+            text = format_weekend_open_brief(brief, session=session)
+
+            # Опционально усилить Gemini
+            if bool(getattr(settings, "oil_forecast_gemini", True)):
+                key = self._resolve_gemini_key()
+                if key:
+                    try:
+                        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+
+                        tops = "\n".join(
+                            f"- {getattr(it, 'title', '')} [{getattr(it, 'impact', '')}]"
+                            for it in self._recent_news[:8]
+                        )
+                        ai = await ask_gemini(
+                            api_key=key,
+                            model=self._resolve_gemini_model(),
+                            context_text=(
+                                "Объясни нефть простыми словами по-русски. "
+                                "Без англ. жаргона. Выходные, биржа откроется ночью к понедельнику.\n"
+                                f"Цена-ориентир: {price}\n"
+                                f"Вывод бота: {brief.bias}\n"
+                                f"Новости:\n{tops}\n"
+                            ),
+                            user_text=(
+                                "Напиши коротко по-русски:\n"
+                                "1) Откроется скорее дороже или дешевле?\n"
+                                "2) Есть ли шанс уйти к 80$? низкий/средний/высокий\n"
+                                "3) Какая новость всё отменит?\n"
+                                "Максимум 8 простых предложений. Не финансовый совет."
+                            ),
+                        )
+                        ai_t = sanitize_ai_reply_for_telegram(ai.text or "").strip()
+                        if ai_t and not ai.error:
+                            text += "\n\n🤖 <b>Пояснение ИИ простыми словами</b>\n" + (
+                                ai_t.replace("&", "&amp;")
+                                .replace("<", "&lt;")
+                                .replace(">", "&gt;")
+                            )
+                    except Exception:
+                        logger.debug("Open-brief Gemini failed", exc_info=True)
+            return True, text
+        except Exception as exc:
+            logger.exception("Weekend open brief failed")
+            return False, f"ошибка: {exc}"
+
+    async def hormuz_status_now(self) -> tuple[bool, str]:
+        """Открыт ли Ормуз / ходят ли танкеры (новости ± API)."""
+        settings = self.settings_manager.settings
+        try:
+            from .oil_hormuz import build_hormuz_status, format_hormuz_status
+
+            max_age_h = min(24.0, float(getattr(settings, "oil_news_max_age_hours", 18.0)))
+            cutoff = time.time() - max_age_h * 3600.0
+            try:
+                fresh = await fetch_oil_news(
+                    max_items=16,
+                    include_russian=True,
+                    critical_only=False,
+                    critical_min_score=2,
+                    max_age_hours=max_age_h,
+                    include_pro_feeds=True,
+                )
+                self._remember_news(fresh, cutoff=cutoff)
+            except Exception:
+                logger.debug("Hormuz news refresh failed", exc_info=True)
+
+            import os
+
+            st = await build_hormuz_status(
+                self._recent_news,
+                api_key=os.getenv("HORMUZ_API_KEY"),
+            )
+            return True, format_hormuz_status(st)
+        except Exception as exc:
+            logger.exception("Hormuz status failed")
+            return False, f"ошибка: {exc}"
+
+    async def ask_oil_ai(self, question: str) -> tuple[bool, str]:
+        """Чат с ИИ по нефти: новости + цена + сессия."""
+        q = (question or "").strip()
+        if not q:
+            return False, "пустой вопрос"
+        key = self._resolve_gemini_key()
+        if not key:
+            return False, "нет GEMINI_API_KEY"
+        settings = self.settings_manager.settings
+        try:
+            from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+            from .oil_session import oil_session_status
+
+            session = oil_session_status()
+            interval_min = int(getattr(settings, "oil_interval_minutes", 15))
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=interval_min,
+                include_brent=True,
+                include_wti=False,
+            )
+            price = float(bundle.brent.price) if bundle else 0.0
+            news_bias = summarize_oil_news_bias(self._recent_news)
+            tops = "\n".join(
+                f"- [{getattr(it, 'impact', '')}] {getattr(it, 'title', '')}"
+                for it in self._recent_news[:10]
+            ) or "(нет свежих в памяти — сначала дождись poll новостей)"
+            ctx = (
+                "Ты аналитик нефти для обычного человека, не для терминала. "
+                "Отвечай ТОЛЬКО по-русски, простыми словами, без англ. жаргона "
+                "(никаких gap-down, deal-tape, bias, premium — говори «откроется ниже», "
+                "«страх войны ослаб», «скорее подешевеет»).\n"
+                f"Сейчас: {session.market_open_hint_ru}. {session.next_open_label_ru}\n"
+                f"Ориентир цены: {price}\n"
+                f"Тон новостей бота: {news_bias.bias} (число {news_bias.weighted_score})\n"
+                f"Заголовки:\n{tops}\n"
+            )
+            result = await ask_gemini(
+                api_key=key,
+                model=self._resolve_gemini_model(),
+                context_text=ctx,
+                user_text=(
+                    q
+                    + "\n\nОтвет по-русски: 6–10 строк, выжми важное, без простыни. "
+                    "Структура: что случилось → почему важно → куда цена → что делать → на что смотреть. "
+                    "Не финансовый совет. Если выходные — отдельно про открытие биржи."
+                ),
+            )
+            text = sanitize_ai_reply_for_telegram(result.text or "").strip()
+            if result.error or not text:
+                return False, result.error or "пустой ответ ИИ"
+            safe = (
+                text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            return True, f"🤖 <b>Нефть · ИИ</b>\n\n{safe}"
+        except Exception as exc:
+            logger.exception("Oil AI chat failed")
             return False, f"ошибка: {exc}"
 
     async def _send_digest_once(
@@ -3173,6 +3501,23 @@ class OilMonitorEngine:
             return 0
         self._last_setup_ts = now
         self._last_setup_side = setup.side
+        # Журнал исхода
+        entry = None
+        if setup.entry_lo is not None and setup.entry_hi is not None:
+            entry = (float(setup.entry_lo) + float(setup.entry_hi)) / 2.0
+        elif setup.price:
+            entry = float(setup.price)
+        if entry and setup.stop and setup.tp1:
+            self._setup_journal.register(
+                side=setup.side,
+                entry=entry,
+                stop=float(setup.stop),
+                tp1=float(setup.tp1),
+                tp2=float(setup.tp2) if setup.tp2 else None,
+                price=float(setup.price),
+                catalyst=setup.catalyst or "",
+                quality=int(setup.quality),
+            )
         logger.info(
             "Oil confluence setup %s quality=%d @ %.2f",
             setup.side,
@@ -3180,6 +3525,146 @@ class OilMonitorEngine:
             setup.price,
         )
         return 1
+
+    async def _tick_hormuz_alert(self, settings: Any) -> int:
+        """Пуш в Новостник, когда Ормуз меняется так, что это важно для цены."""
+        if not bool(getattr(settings, "oil_hormuz_alerts_enabled", True)):
+            return 0
+        now = time.time()
+        interval = float(getattr(settings, "oil_hormuz_interval_seconds", 900))
+        if now - self._last_hormuz_check_ts < max(300.0, interval):
+            return 0
+        self._last_hormuz_check_ts = now
+
+        from .oil_hormuz import build_hormuz_status, detect_hormuz_alert
+
+        try:
+            import os
+
+            st = await build_hormuz_status(
+                self._recent_news,
+                api_key=os.getenv("HORMUZ_API_KEY"),
+            )
+        except Exception:
+            logger.debug("Hormuz poll for alert failed", exc_info=True)
+            return 0
+
+        alert = detect_hormuz_alert(self._hormuz_prev, st)
+        self._hormuz_prev = st
+        if alert is None:
+            return 0
+
+        cooldown = float(getattr(settings, "oil_hormuz_alert_cooldown_seconds", 1800))
+        # Смена open↔closed / critical — короче кулдаун
+        min_cd = 600.0 if alert.trade_critical else cooldown
+        if now - self._last_hormuz_alert_ts < min_cd:
+            return 0
+
+        sent = 0
+        try:
+            if await self._on_news(alert.message_html):
+                sent += 1
+        except Exception:
+            logger.exception("Hormuz alert → news chat failed")
+
+        if (
+            sent
+            and alert.trade_critical
+            and self._on_setup is not None
+            and bool(getattr(settings, "oil_setup_enabled", True))
+        ):
+            brief = (
+                "🚢 <b>Ормуз → сделка</b>\n"
+                + alert.message_html
+                + "\n\n<i>Учти до входа: трафик пролива = риск премии/дисконта по нефти.</i>"
+            )
+            try:
+                if await self._on_setup(brief, None):
+                    sent += 1
+            except Exception:
+                logger.exception("Hormuz alert → manual TA failed")
+
+        if sent:
+            self._last_hormuz_alert_ts = now
+            logger.info(
+                "Hormuz alert sent (%d) critical=%s: %s",
+                sent,
+                alert.trade_critical,
+                "; ".join(alert.reasons_ru)[:160],
+            )
+        return sent
+
+    async def _tick_preopen_alert(self, settings: Any) -> int:
+        """За 30–70 мин до открытия пн — краткий план в Новостник + ручной TA."""
+        from .oil_session import should_send_preopen_alert
+
+        if not should_send_preopen_alert():
+            return 0
+        now = time.time()
+        # Не чаще 1 раза в 5 дней
+        if now - self._last_preopen_alert_ts < 5 * 24 * 3600:
+            return 0
+        ok, text = await self.weekend_open_brief_now()
+        if not ok:
+            return 0
+        header = (
+            "⏰ <b>Скоро открытие нефти</b> · осталось ~30–60 минут\n"
+            "Прочитай главное до входа. Новости США/Иран сейчас важнее графика.\n\n"
+        )
+        full = header + text
+        sent = 0
+        try:
+            if await self._on_news(full):
+                sent += 1
+        except Exception:
+            logger.exception("Pre-open → news chat failed")
+        if self._on_setup is not None and bool(getattr(settings, "oil_setup_enabled", True)):
+            try:
+                if await self._on_setup(full, None):
+                    sent += 1
+            except Exception:
+                logger.exception("Pre-open → manual TA failed")
+        if sent:
+            self._last_preopen_alert_ts = now
+            logger.info("Oil pre-open alert sent (%d)", sent)
+        return sent
+
+    async def _tick_setup_outcomes(self, settings: Any) -> int:
+        """Проверяет активные setup: сбылось / стоп / время вышло."""
+        if self._on_setup is None and self._on_news is None:
+            return 0
+        if not self._setup_journal.active():
+            return 0
+        try:
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=15,
+                include_brent=True,
+                include_wti=False,
+            )
+        except Exception:
+            logger.debug("Outcome bars failed", exc_info=True)
+            return 0
+        if not bundle:
+            return 0
+        price = float(bundle.brent.price)
+        from .oil_journal import format_outcome_message
+
+        done = self._setup_journal.check_price(price)
+        sent = 0
+        for w in done:
+            msg = format_outcome_message(w, price_now=price)
+            # Исход — в ручной TA (где был setup), иначе в Новостник
+            try:
+                if self._on_setup is not None:
+                    ok = await self._on_setup(msg, None)
+                else:
+                    ok = await self._on_news(msg)
+            except Exception:
+                logger.exception("Oil outcome dispatch failed")
+                ok = False
+            if ok:
+                sent += 1
+        return sent
 
     async def run_loop(self, interval: float | None = None) -> None:
         while True:

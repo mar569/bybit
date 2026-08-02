@@ -351,54 +351,55 @@ def build_oil_confluence_setup(
 
 
 def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
-    """HTML для Telegram (ручной TA)."""
+    """HTML для Telegram (ручной TA) — чеклист + детали без простыни."""
+    from .oil_journal import risk_checklist_lines
+
     if setup.side == "WAIT":
         mark = "⚪"
-        title = "UKOUSD · WAIT (confluence)"
+        title = "UKOUSD · ждать (нет сильного края)"
     elif setup.side == "LONG":
         mark = "🟢"
-        title = "UKOUSD SETUP · LONG"
+        title = "Вход LONG · нефть"
     else:
         mark = "🔴"
-        title = "UKOUSD SETUP · SHORT"
+        title = "Вход SHORT · нефть"
 
     lines = [
-        f"{mark} <b>{title}</b> · {setup.quality}/10",
-        f"<i>${setup.price:.2f} · {setup.horizon_ru}</i>",
+        f"{mark} <b>{title}</b> · качество {setup.quality}/10",
+        f"<i>Сейчас ≈${setup.price:.2f} · {setup.horizon_ru}</i>",
         "",
     ]
     if setup.side in {"LONG", "SHORT"}:
-        if setup.entry_lo is not None and setup.entry_hi is not None:
-            lines.append(
-                f"• Вход: <b>{fmt_price(setup.entry_lo)}–{fmt_price(setup.entry_hi)}</b>"
+        lines.extend(
+            risk_checklist_lines(
+                side=setup.side,
+                price=setup.price,
+                entry_lo=setup.entry_lo,
+                entry_hi=setup.entry_hi,
+                stop=setup.stop,
+                tp1=setup.tp1,
+                tp2=setup.tp2,
+                invalidation=setup.invalidation,
+                catalyst=setup.catalyst,
             )
-        if setup.stop is not None:
-            lines.append(f"• Стоп: <b>{fmt_price(setup.stop)}</b>")
-        tps = []
-        if setup.tp1 is not None:
-            tps.append(fmt_price(setup.tp1))
-        if setup.tp2 is not None:
-            tps.append(fmt_price(setup.tp2))
-        if tps:
-            lines.append(f"• TP: <b>{' / '.join(tps)}</b>")
-        if setup.invalidation is not None:
-            lines.append(f"• Отмена: ниже/выше <b>{fmt_price(setup.invalidation)}</b>")
+        )
+        lines.append("")
         lines.append(f"• Триггер: {_esc(setup.trigger_ru)}")
     else:
         lines.append(f"• {_esc(setup.trigger_ru)}")
 
-    if setup.catalyst:
-        lines.append(f"• Катализатор: <i>{_esc(setup.catalyst)}</i>")
     if setup.factors_ru:
-        lines.append("• Факторы:")
-        for f in setup.factors_ru:
-            lines.append(f"  – {_esc(f)}")
+        lines.append("")
+        lines.append("<b>Почему сейчас</b>")
+        for f in setup.factors_ru[:5]:
+            lines.append(f"• {_esc(f)}")
     if setup.gemini_ru:
         lines.append("")
-        lines.append(f"🤖 {_esc(setup.gemini_ru)}")
+        lines.append(f"🤖 <b>Главное от ИИ</b>\n{_esc(setup.gemini_ru)}")
     lines.append("")
     lines.append(
-        "<i>Confluence бота — не финсовет. Нет касания/пробоя — не входить.</i>"
+        "<i>Нефть сейчас в основном от новостей (США/Иран/Ормуз), не только от графика. "
+        "Нет касания уровня — не входить. Не финсовет.</i>"
     )
     return "\n".join(lines)
 
@@ -446,8 +447,8 @@ async def enrich_setup_with_gemini(
                 titles.append(f"- {t[:120]}")
         news_block = "\n".join(titles) if titles else "(нет)"
         ctx = (
-            "Ты трейдер Brent/UKOUSD. Не противоречь стороне setup. "
-            "Без markdown. 3–4 коротких строки по-русски.\n"
+            "Ты трейдер нефти. Пиши по-русски простыми словами, 5–8 строк: "
+            "выжми важное, немного деталей, без простыни и без англ. жаргона.\n"
             f"SETUP: {setup.side} quality={setup.quality}\n"
             f"Цена ${setup.price:.2f} entry={setup.entry_lo}-{setup.entry_hi} "
             f"stop={setup.stop} tp={setup.tp1}/{setup.tp2}\n"
@@ -460,8 +461,8 @@ async def enrich_setup_with_gemini(
             model=model,
             context_text=ctx,
             user_text=(
-                "Кратко: почему setup валиден сейчас, один риск, "
-                "когда отменять. Не меняй сторону."
+                "Структура: главное ПОЧЕМУ вход валиден; куда цена; "
+                "один риск; когда отменять. Не меняй сторону. Не финсовет."
             ),
         )
         text = sanitize_ai_reply_for_telegram(result.text or "").strip()

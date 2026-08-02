@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 65
+SETTINGS_VERSION = 66
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -525,7 +525,7 @@ class ScannerSettings:
 
     # Oil monitor — новости Iran/US + дайджест Brent/WTI
     oil_news_enabled: bool = False
-    oil_news_interval_seconds: int = 300
+    oil_news_interval_seconds: int = 180
     oil_news_max_per_poll: int = 1
     oil_news_max_age_hours: float = 18.0
     oil_digest_enabled: bool = True
@@ -547,6 +547,10 @@ class ScannerSettings:
     oil_fastlane_min_score: int = 7
     oil_fastlane_max_per_poll: int = 2
     oil_fastlane_gemini: bool = True
+    # Ормуз: пуш в Новостник при важном изменении AIS/статуса
+    oil_hormuz_alerts_enabled: bool = True
+    oil_hormuz_interval_seconds: int = 900
+    oil_hormuz_alert_cooldown_seconds: int = 1800
     # Прямые RSS: OilPrice + EIA (+ Google-запросы прогнозов банков)
     oil_pro_feeds_enabled: bool = True
     # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
@@ -1096,7 +1100,7 @@ class ScannerSettings:
             wave_watch_near_pct=float(base.get("wave_watch_near_pct", 0.35)),
             wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
             oil_news_enabled=bool(base.get("oil_news_enabled", False)),
-            oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 300)),
+            oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
             oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 18.0)),
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
@@ -1121,6 +1125,13 @@ class ScannerSettings:
             oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 7)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 2)),
             oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
+            oil_hormuz_alerts_enabled=bool(base.get("oil_hormuz_alerts_enabled", True)),
+            oil_hormuz_interval_seconds=int(
+                base.get("oil_hormuz_interval_seconds", 900)
+            ),
+            oil_hormuz_alert_cooldown_seconds=int(
+                base.get("oil_hormuz_alert_cooldown_seconds", 1800)
+            ),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
             oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
@@ -1615,7 +1626,7 @@ class SettingsManager:
                 merged.setdefault("oil_level_alert_cooldown_seconds", 1800)
             if version < 53:
                 merged.setdefault("oil_news_enabled", False)
-                merged.setdefault("oil_news_interval_seconds", 300)
+                merged.setdefault("oil_news_interval_seconds", 180)
                 merged.setdefault("oil_news_max_per_poll", 3)
                 merged.setdefault("oil_news_max_age_hours", 48.0)
                 merged.setdefault("oil_digest_enabled", True)
@@ -1709,6 +1720,10 @@ class SettingsManager:
                 merged.setdefault("oil_fastlane_min_score", 7)
                 merged.setdefault("oil_fastlane_max_per_poll", 2)
                 merged.setdefault("oil_fastlane_gemini", True)
+            if version < 66:
+                merged.setdefault("oil_hormuz_alerts_enabled", True)
+                merged.setdefault("oil_hormuz_interval_seconds", 900)
+                merged.setdefault("oil_hormuz_alert_cooldown_seconds", 1800)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

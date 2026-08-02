@@ -15,19 +15,23 @@ FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "site:wsj.com Iran OR Hormuz OR oil OR Trump when:12h",
     "site:reuters.com Iran OR Hormuz OR oil OR Trump when:12h",
     "site:bloomberg.com Iran OR Hormuz OR oil OR energy OR Trump when:12h",
+    "site:investing.com oil OR Brent OR WTI OR Hormuz OR Iran OR crude when:12h",
     "Javier Blas oil OR Hormuz OR Iran OR Brent when:12h",
     "site:ft.com oil OR Iran OR Hormuz OR Brent when:1d",
     "site:nytimes.com Iran OR Hormuz OR oil OR Trump when:1d",
     "White House Iran oil OR Pentagon Iran OR DoD Iran Hormuz when:12h",
     "EIA crude oil inventory OR STEO when:1d",
     "Trump orders attack Iran OR strike Iran oil when:12h",
-    "Strait of Hormuz tanker OR blockade OR reopen when:12h",
+    "Trump cancels OR pauses OR TACO Iran strike OR attack oil when:12h",
+    "Strait of Hormuz tanker OR blockade OR reopen OR traffic when:12h",
 )
 
 FAST_LANE_QUERIES_RU: tuple[str, ...] = (
     "WSJ Трамп Иран удар OR атака нефть when:12h",
     "Reuters Ормуз нефть Иран when:12h",
     "Bloomberg Ормуз OR Иран нефть when:12h",
+    "investing.com нефть OR Brent OR Ормуз OR Иран when:12h",
+    "Трамп отменил удар Иран нефть when:12h",
 )
 
 # (needle in source/title/url, display, tier 1=highest)
@@ -38,6 +42,8 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("reuters", "Reuters", 1),
     ("bloomberg", "Bloomberg", 1),
     ("javier blas", "Javier Blas", 1),
+    ("investing.com", "Investing.com", 1),
+    ("investing", "Investing.com", 2),
     ("financial times", "FT", 2),
     ("ft.com", "FT", 2),
     ("new york times", "NYT", 2),
@@ -58,6 +64,13 @@ _FLASH_TERMS: dict[str, int] = {
     "атак": 5,
     "orders attack": 6,
     "ordered a": 4,
+    "taco": 5,
+    "cancels": 4,
+    "pauses": 4,
+    "tumble": 4,
+    "tumbles": 4,
+    "slump": 3,
+    "plunge": 3,
     "hormuz": 5,
     "ормуз": 5,
     "blockade": 4,
@@ -228,28 +241,29 @@ def _price_move_note(bars: Sequence[KlineBar] | None, *, interval_minutes: int =
 
 
 def _bounce_hint(impact: str, move_note: str) -> str:
-    """После сильного импульса часто бывает отскок."""
+    """После сильного импульса часто бывает отскок — простыми словами."""
     strong = "опережает" in move_note or "уже" in move_note
     if impact == "bullish":
         if strong:
             return (
-                "Сценарий: импульс вверх на geo → часто короткий <b>отскок вниз</b> "
-                "для фиксации. Лонг только от поддержки / не chase хай."
+                "Цена уже сильно скакнула вверх — часто потом чуть откатывает. "
+                "Не догонять хай; лонг только от уровня."
             )
         return (
-            "Сценарий: давление вверх (страх поставок). Шорт против премии — осторожно; "
-            "лонг от уровня, не в середине импульса."
+            "Страх поставок тянет цену вверх. Против тренда шортить опасно; "
+            "лонг — от поддержки, не в середине импульса."
         )
     if impact == "bearish":
         if strong:
             return (
-                "Сценарий: снятие premium / deal-tape → часто <b>отскок вверх</b> "
-                "после слива. Шорт от сопротивления, не ловить нож."
+                "Цена уже сильно упала — часто бывает короткий отскок вверх. "
+                "Не ловить нож лонгом; шорт от сопротивления."
             )
         return (
-            "Сценарий: давление вниз (танкеры/сделка). Лонг только от сильной поддержки."
+            "Страх войны/блока слабеет — давление вниз. "
+            "Лонг только от сильной поддержки."
         )
-    return "Сценарий смешанный — ждать уровень и подтверждение следующего заголовка."
+    return "Картина смешанная — ждать уровень и следующий сильный заголовок."
 
 
 async def enrich_fastlane_with_gemini(
@@ -261,35 +275,42 @@ async def enrich_fastlane_with_gemini(
     move_note: str,
     api_key: str | None,
     model: str = "gemini-3.6-flash",
-) -> str:
-    """Короткий ИИ-разбор для UKOUSD; пустая строка при ошибке.
+) -> tuple[str, str | None]:
+    """Короткий ИИ-разбор для UKOUSD.
 
-    Первая строка ответа: OIL_RELEVANT: YES|NO — для отсева моды/спорта и т.п.
+    Returns (text, bias_override) where bias_override is bullish|bearish|neutral|None.
+    Первые строки: OIL_RELEVANT + OIL_BIAS.
     """
     if not api_key:
-        return ""
+        return "", None
     try:
         from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
 
         ctx = (
-            "Ты профессиональный трейдер Brent/UKOUSD. Пиши по-русски, просто и жёстко. "
-            "Без markdown.\n"
+            "Ты профессиональный трейдер нефти (Brent / UKOUSD). "
+            "Пиши ТОЛЬКО по-русски, простыми словами, без англ. жаргона "
+            "(не пиши gap, bias, deal-tape — говори «скорее подешевеет», «страх войны»).\n"
             f"Источник: {outlet} ({source})\n"
             f"Заголовок: {title}\n"
-            f"Тон заголовка (бот): {impact}\n"
+            f"Черновой тон бота (может ОШИБАТЬСЯ): {impact} — НЕ копируй слепо.\n"
             f"Цена: {move_note or 'без сильного сдвига до новости'}\n"
+            "Правила направления:\n"
+            "- tumbles/falls/обвал → вниз.\n"
+            "- отмена/пауза ударов, TACO, сделка, открытие Ормуза → вниз.\n"
+            "- новые удары/блок пролива без отмены → вверх.\n"
+            "- attack само по себе НЕ вверх, если рядом cancel/pause/TACO.\n"
         )
         user = (
-            "Первая строка СТРОГО одна из двух:\n"
-            "OIL_RELEVANT: YES\n"
-            "или\n"
-            "OIL_RELEVANT: NO\n"
-            "YES — только если влияет на нефть/Brent/Ормуз/санкции/запасы/ОПЕК/танкеры.\n"
-            "NO — мода, спорт, культура, быт, чистая политика без энергии.\n\n"
-            "Если YES, дальше 5 коротких пунктов:\n"
-            "1) Суть\n2) Почему влияет на нефть\n3) Bias вверх/вниз/mixed\n"
-            "4) Отскок после импульса?\n5) Что делать (не финсовет)\n"
-            "Если NO — одной фразой почему это шум. Не выдумывай факты."
+            "Строка 1 СТРОГО: OIL_RELEVANT: YES или OIL_RELEVANT: NO\n"
+            "Строка 2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n\n"
+            "YES — только нефть/Ормуз/санкции/запасы/ОПЕК. NO — одной фразой почему шум.\n\n"
+            "Если YES — 6–10 строк (не страница!), выжми важное:\n"
+            "• Что случилось (1–2 предложения)\n"
+            "• Главное ПОЧЕМУ это важно для нефти (самое громкое)\n"
+            "• Куда давит цену: вверх / вниз / неясно\n"
+            "• Что делать сейчас (1–2 предложения, не финсовет)\n"
+            "• На что смотреть дальше (1 фраза)\n"
+            "Без воды и повторов. Не выдумывай факты."
         )
         result = await ask_gemini(
             api_key=api_key,
@@ -299,13 +320,41 @@ async def enrich_fastlane_with_gemini(
         )
         text = sanitize_ai_reply_for_telegram(result.text or "").strip()
         if result.error or not text:
-            return ""
-        if len(text) > 1100:
-            text = text[:1097] + "…"
-        return text
+            return "", None
+        bias_override = parse_gemini_oil_bias(text)
+        if len(text) > 1400:
+            text = text[:1397] + "…"
+        return text, bias_override
     except Exception:
         logger.exception("Fast-lane Gemini failed")
-        return ""
+        return "", None
+
+
+def parse_gemini_oil_bias(ai_text: str) -> str | None:
+    """Извлекает OIL_BIAS: UP|DOWN|MIXED → bullish|bearish|neutral."""
+    for line in (ai_text or "").splitlines()[:6]:
+        up = line.upper().replace(" ", "")
+        if "OIL_BIAS:UP" in up or "OIL_BIAS：UP" in up:
+            return "bullish"
+        if "OIL_BIAS:DOWN" in up or "OIL_BIAS：DOWN" in up:
+            return "bearish"
+        if "OIL_BIAS:MIXED" in up or "OIL_BIAS:NEUTRAL" in up:
+            return "neutral"
+    return None
+
+
+def strip_gemini_oil_meta(ai_text: str) -> str:
+    """Убирает служебные OIL_RELEVANT / OIL_BIAS из текста для чата."""
+    lines = (ai_text or "").splitlines()
+    kept: list[str] = []
+    for line in lines:
+        u = line.upper().replace(" ", "")
+        if u.startswith("OIL_RELEVANT:") or u.startswith("OIL_BIAS:"):
+            continue
+        if "OIL_RELEVANT" in u and len(u) < 24:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def format_fastlane_flash(
@@ -316,19 +365,19 @@ def format_fastlane_flash(
     move_note: str = "",
     age_label: str = "",
 ) -> str:
-    """Сообщение ‼️ КРИТИЧНО в Новостник."""
+    """Сообщение ‼️ КРИТИЧНО в Новостник — суть сверху, детали без простыни."""
     title = (getattr(item, "title", "") or "").replace("<", "&lt;").replace(">", "&gt;")
     url = getattr(item, "url", "") or ""
     impact = getattr(item, "impact", "neutral") or "neutral"
     impact_ru = {
-        "bullish": "🟢 давление на нефть ВВЕРХ",
-        "bearish": "🔴 давление на нефть ВНИЗ",
-        "neutral": "⚪ влияние смешанное / уточнять",
+        "bullish": "🟢 нефть скорее ВВЕРХ",
+        "bearish": "🔴 нефть скорее ВНИЗ",
+        "neutral": "⚪ влияние смешанное",
     }.get(impact, "⚪ контекст")
     bang = "‼️‼️" if meta.tier == 1 and meta.flash_score >= 12 else "‼️"
     lines = [
-        f"{bang} <b>КРИТИЧНО · НЕФТЬ</b> · {meta.outlet}",
-        f"<i>fast-lane · score {meta.flash_score} · tier {meta.tier}</i>",
+        f"{bang} <b>ВАЖНО ДЛЯ НЕФТИ</b> · {meta.outlet}",
+        f"{impact_ru}",
         "",
     ]
     if url:
@@ -336,23 +385,82 @@ def format_fastlane_flash(
     else:
         lines.append(f"<b>{title}</b>")
     lines.append("")
-    lines.append(impact_ru)
     lines.append(_bounce_hint(impact, move_note))
     if move_note:
         lines.append("")
-        lines.append(f"<b>{_esc(move_note)}</b>")
+        lines.append(_esc(move_note))
     if ai_ru:
         lines.append("")
-        lines.append("🤖 <b>Разбор ИИ</b>")
+        lines.append("🤖 <b>Главное</b>")
         lines.append(_esc(ai_ru))
     lines.append("")
     src = getattr(item, "source", "") or meta.outlet
     age = age_label or ""
-    lines.append(f"<i>🇬🇧 {src}" + (f" · {age}" if age else "") + "</i>")
-    if url:
-        lines.append(f"🔗 <a href=\"{url}\">Открыть источник</a>")
     lines.append(
-        "<i>Топ-wire (WSJ/Reuters/Bloomberg/Blas/FT/NYT/official). Не финсовет.</i>"
+        f"<i>{src}"
+        + (f" · {age}" if age else "")
+        + f" · вес {meta.flash_score}</i>"
+    )
+    if url:
+        lines.append(f"🔗 <a href=\"{url}\">Источник</a>")
+    lines.append("<i>Не финансовый совет.</i>")
+    return "\n".join(lines)
+
+
+def is_trade_critical_flash(
+    item: Any,
+    meta: FastLaneMeta,
+    *,
+    min_score: int = 10,
+) -> bool:
+    """Достаточно громко, чтобы дублировать в ручной анализ (сделка)."""
+    impact = getattr(item, "impact", "neutral") or "neutral"
+    if impact not in {"bullish", "bearish"}:
+        return False
+    if meta.flash_score < min_score and meta.tier > 1:
+        return False
+    if meta.tier == 1 and meta.flash_score >= min_score:
+        return True
+    # Tier-2 Investing и т.п. — только очень громкий score
+    return meta.flash_score >= min_score + 3
+
+
+def format_trade_impact_for_manual_ta(
+    item: Any,
+    *,
+    meta: FastLaneMeta,
+    ai_ru: str = "",
+    move_note: str = "",
+) -> str:
+    """Краткий разбор для чата ручного TA — влияет на сделку."""
+    title = (getattr(item, "title", "") or "").replace("<", "&lt;").replace(">", "&gt;")
+    url = getattr(item, "url", "") or ""
+    impact = getattr(item, "impact", "neutral") or "neutral"
+    dir_ru = {
+        "bullish": "🟢 вверх",
+        "bearish": "🔴 вниз",
+    }.get(impact, "⚪ смешанно")
+    lines = [
+        "🛢 <b>Новость влияет на сделку</b>",
+        f"Направление: <b>{dir_ru}</b> · {meta.outlet}",
+        "",
+    ]
+    if url:
+        lines.append(f"<a href=\"{url}\"><b>{title}</b></a>")
+    else:
+        lines.append(f"<b>{title}</b>")
+    lines.append("")
+    lines.append(_bounce_hint(impact, move_note))
+    if move_note:
+        lines.append(_esc(move_note))
+    if ai_ru:
+        lines.append("")
+        lines.append("🤖 <b>Главное</b>")
+        lines.append(_esc(ai_ru))
+    lines.append("")
+    lines.append(
+        "<i>Сверь с графиком UKOUSD. Не финсовет. "
+        "Кнопки ниже — почему / открытие / Ормуз / ИИ.</i>"
     )
     return "\n".join(lines)
 

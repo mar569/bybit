@@ -113,6 +113,25 @@ def test_classify_news_impact():
     assert classify_news_impact("Oil prices surge on Hormuz block") == "bullish"
     assert classify_news_impact("Brent falls after US Iran deal") == "bearish"
     assert classify_news_impact("EIA STEO cuts Brent forecast after Hormuz MOU") == "bearish"
+    # Критический баг: tumble + attacks ≠ bullish
+    assert (
+        classify_news_impact(
+            "Crude oil price tumbles on Hyperliquid as Trump TACOs on planned Iran attacks"
+        )
+        == "bearish"
+    )
+    assert (
+        classify_news_impact(
+            "Trump pauses strike to allow quick Iran deal and restore Strait of Hormuz"
+        )
+        == "bearish"
+    )
+    assert (
+        classify_news_impact(
+            "Iran Warns of Targeting Gulf Oil Infrastructure If US Launches Fresh Strikes"
+        )
+        == "bullish"
+    )
 
 
 def test_format_single_oil_news_has_link():
@@ -613,9 +632,9 @@ def test_fastlane_detects_wsj_reuters_blas():
         move_note="⚠️ Движение опережает новость: прокси-цена уже +1.2% / 30м",
         age_label="5 мин",
     )
-    assert "КРИТИЧНО" in text
+    assert "ВАЖНО" in text
     assert "Reuters" in text
-    assert "Разбор ИИ" in text
+    assert "Главное" in text
     assert "опережает" in text
 
 
@@ -669,8 +688,10 @@ def test_fastlane_rejects_wsj_fashion_noise():
 def test_fastlane_bounce_hint_after_spike():
     from bot.oil_fastlane import _bounce_hint, _price_move_note
 
-    assert "отскок вниз" in _bounce_hint("bullish", "движение опережает новость")
-    assert "отскок вверх" in _bounce_hint("bearish", "уже сдвинулась")
+    bull = _bounce_hint("bullish", "движение опережает новость")
+    bear = _bounce_hint("bearish", "уже сдвинулась")
+    assert "откатывает" in bull or "Не догонять" in bull
+    assert "отскок" in bear or "нож" in bear
 
     # Flat bars → no move note
     bars = [
