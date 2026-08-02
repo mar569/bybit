@@ -111,9 +111,9 @@ def _release_note(html: str) -> str:
     nxt = re.search(r"Next Release Date:\s*([^<\n]+)", html or "", re.I)
     bits = []
     if rel:
-        bits.append(f"релиз {rel.group(1).strip()}")
+        bits.append(f"опубликовано {rel.group(1).strip()}")
     if nxt:
-        bits.append(f"следующий {nxt.group(1).strip()}")
+        bits.append(f"следующий отчёт {nxt.group(1).strip()}")
     return " · ".join(bits)
 
 
@@ -141,58 +141,94 @@ def _snapshot(
 
 
 def interpret_spr(mb: float, wow: float | None) -> tuple[str, str]:
-    """(уровень_ru, смысл_для_цены)."""
+    """(уровень_ru, смысл_для_цены) — простыми словами."""
     pct_cap = 100.0 * mb / _SPR_CAPACITY_MB
     if mb < _SPR_LOW_MB:
-        level = f"очень мало (~{pct_cap:.0f}% ёмкости)"
-        sense = "буфер SPR тонкий — при геошоке меньше «подушки» на выброс в рынок"
+        level = f"очень мало (заполнено примерно на {pct_cap:.0f}%)"
+        sense = (
+            "госрезерв тонкий: если случится геошок (Иран/пролив), "
+            "у США меньше «подушки», чтобы быстро выкинуть нефть на рынок"
+        )
     elif mb < _SPR_COMFORT_MB:
-        level = f"ниже комфорта (~{pct_cap:.0f}% ёмкости)"
-        sense = "запас ещё не восстановлен до «нормы» докризисных лет"
+        level = f"ниже привычного уровня (заполнено примерно на {pct_cap:.0f}%)"
+        sense = "запас ещё не вернулся к «норме» спокойных лет"
     else:
-        level = f"относительно комфортно (~{pct_cap:.0f}% ёмкости)"
-        sense = "есть пространство для релиза при шоке (медвежий фактор при угрозе)"
+        level = f"относительно нормально (заполнено примерно на {pct_cap:.0f}%)"
+        sense = (
+            "при шоке у США есть чем «залить» рынок — это может сдерживать рост цены"
+        )
     wow_ru = ""
     if wow is not None:
         if wow <= -2.0:
-            wow_ru = f" сильный отток SPR за неделю ({wow:+.1f} млн) — обычно поддержка цене"
+            wow_ru = (
+                f" За неделю из резерва ушло {abs(wow):.1f} млн баррелей — "
+                f"обычно это скорее поддержка цене (нефти на складе стало меньше)."
+            )
         elif wow >= 2.0:
-            wow_ru = f" идёт дозаправка SPR ({wow:+.1f} млн) — чаще давление вниз"
+            wow_ru = (
+                f" За неделю в резерв залили {wow:.1f} млн баррелей — "
+                f"чаще это давление вниз на цену."
+            )
         else:
-            wow_ru = f" неделя почти без изменений ({wow:+.1f} млн)"
+            wow_ru = f" За неделю почти без изменений ({wow:+.1f} млн баррелей)."
     return level, sense + "." + wow_ru
 
 
 def interpret_commercial(mb: float, wow: float | None) -> tuple[str, str]:
     vs = mb - _COMM_TYPICAL_MB
     if vs <= -25:
-        level = "коммерческие запасы ниже обычного диапазона"
-        sense = "рынок туже → при сюрпризе draw чаще вверх"
+        level = "на складах компаний меньше обычного"
+        sense = (
+            "рынок «тугой»: если в отчёте в среду запасов убавится сильнее ожидания — "
+            "цене чаще легче расти"
+        )
     elif vs >= 25:
-        level = "коммерческие запасы выше обычного"
-        sense = "избыток → при build легче давление вниз"
+        level = "на складах компаний больше обычного"
+        sense = (
+            "нефти много: если запасы ещё вырастут сильнее ожидания — "
+            "легче давление вниз на цену"
+        )
     else:
-        level = "коммерческие запасы около середины диапазона"
-        sense = "нейтральный фон по складу"
+        level = "на складах компаний примерно как обычно"
+        sense = "по складу фон спокойный, сам по себе мало двигает цену"
     if wow is not None:
         if wow <= -3.0:
-            sense += f". Сильный draw ({wow:+.1f} млн) — бычий для цены на часы/дни"
+            sense += (
+                f". За неделю запасов убавилось на {abs(wow):.1f} млн баррелей — "
+                f"для цены на часы/дни это обычно плюс (поддержка)."
+            )
         elif wow >= 3.0:
-            sense += f". Сильный build ({wow:+.1f} млн) — медвежий на часы/дни"
+            sense += (
+                f". За неделю запасов прибавилось на {wow:.1f} млн баррелей — "
+                f"для цены на часы/дни это обычно минус (давление вниз)."
+            )
         else:
-            sense += f". WoW {wow:+.1f} млн — без шока"
+            sense += (
+                f". За неделю изменение небольшое ({wow:+.1f} млн) — без шока."
+            )
     return level, sense
 
 
 def interpret_cushing(mb: float, wow: float | None) -> str:
+    """Хаб Cushing (Оклахома) — главный склад для американской нефти WTI."""
     if mb <= _CUSHING_LOW_MB:
-        base = "Cushing низкий — WTI чувствительнее к любому draw"
+        base = (
+            "на главном складе США (Кашинг) мало нефти — "
+            "американская нефть (WTI) сильнее реагирует, если запасов ещё убавится"
+        )
     elif mb >= _CUSHING_HIGH_MB:
-        base = "Cushing высокий — проще давить WTI вниз при build"
+        base = (
+            "на главном складе США (Кашинг) много нефти — "
+            "при росте запасов WTI проще давить вниз"
+        )
     else:
-        base = "Cushing в середине"
+        base = "на главном складе США (Кашинг) запасы в середине диапазона"
     if wow is not None:
-        return f"{base} (WoW {wow:+.1f} млн)"
+        if wow <= -0.5:
+            return f"{base}. За неделю −{abs(wow):.1f} млн баррелей."
+        if wow >= 0.5:
+            return f"{base}. За неделю +{wow:.1f} млн баррелей."
+        return f"{base}. За неделю почти без изменений ({wow:+.1f} млн)."
     return base
 
 
@@ -210,30 +246,39 @@ def build_inventory_status(
     if spr:
         lvl, sense = interpret_spr(spr.latest.mbbl, spr.wow_mb)
         bits.append(
-            f"SPR: <b>{spr.latest.mbbl:.1f}</b> млн барр. на {spr.latest.date_label} "
-            f"— {lvl}."
+            f"<b>Госрезерв США</b> (стратегический запас на ЧП): "
+            f"<b>{spr.latest.mbbl:.1f}</b> млн баррелей на {spr.latest.date_label} — {lvl}."
         )
         bits.append(sense)
         verdict_bits.append(lvl)
         if spr.wow_mb is not None and abs(spr.wow_mb) >= 2:
-            surprise.append("резкий ход SPR (релиз/закупка)")
-        watch.append("DOE: анонсы release/refill SPR")
+            surprise.append(
+                "резкий ход госрезерва (выброс нефти на рынок или закупка обратно)"
+            )
+        watch.append(
+            "сообщения минэнерго США: выкинут ли нефть из резерва или начнут покупать"
+        )
 
     if commercial:
         lvl, sense = interpret_commercial(commercial.latest.mbbl, commercial.wow_mb)
         bits.append(
-            f"Коммерческая нефть (без SPR): <b>{commercial.latest.mbbl:.1f}</b> млн "
+            f"<b>Склады компаний</b> (обычные коммерческие запасы, без госрезерва): "
+            f"<b>{commercial.latest.mbbl:.1f}</b> млн баррелей "
             f"на {commercial.latest.date_label} — {lvl}."
         )
         bits.append(sense)
         verdict_bits.append(lvl)
         if commercial.wow_mb is not None and abs(commercial.wow_mb) >= 3:
-            surprise.append("сюрприз EIA draw/build vs ожидания")
-        watch.append("EIA Weekly (обычно ср ~17:30 МСК)")
+            surprise.append(
+                "в среду отчёт по запасам сильнее/слабее, чем ждал рынок"
+            )
+        watch.append(
+            "еженедельный отчёт по запасам США (обычно среда ~17:30 по Москве)"
+        )
 
     if cushing:
         bits.append(
-            f"Cushing: <b>{cushing.latest.mbbl:.1f}</b> млн — "
+            f"<b>Главный склад США (Кашинг)</b>: <b>{cushing.latest.mbbl:.1f}</b> млн баррелей — "
             f"{interpret_cushing(cushing.latest.mbbl, cushing.wow_mb)}."
         )
 
@@ -242,10 +287,13 @@ def build_inventory_status(
             spr=None,
             commercial=None,
             cushing=None,
-            summary_ru="Не удалось загрузить цифры EIA. Смотри weekly petroleum status report.",
+            summary_ru=(
+                "Не удалось загрузить цифры с сайта энергостатистики США. "
+                "Открой отчёт по ссылке ниже."
+            ),
             verdict_ru="нет данных",
-            watch_ru="Открыть eia.gov/petroleum/supply/weekly",
-            surprise_ru="Без цифр — только заголовки по запасам",
+            watch_ru="Открыть еженедельный отчёт по запасам США",
+            surprise_ru="Без цифр — ориентируйся только на заголовки новостей",
             confidence=2,
         )
 
@@ -264,11 +312,20 @@ def build_inventory_status(
             bear += 1
 
     if bull > bear:
-        price_hint = "фон запасов скорее поддерживает цену (тугой склад / тонкий SPR)"
+        price_hint = (
+            "по складам фон скорее за рост цены "
+            "(нефти на складах мало / госрезерв тонкий)"
+        )
     elif bear > bull:
-        price_hint = "фон запасов скорее давит цену (build / дозаправка SPR)"
+        price_hint = (
+            "по складам фон скорее за снижение цены "
+            "(запасов много / госрезерв пополняют)"
+        )
     else:
-        price_hint = "фон запасов смешанный — решают геоновости и сюрприз vs consensus"
+        price_hint = (
+            "по складам картина смешанная — сильнее решают новости "
+            "(пролив/Трамп) и сюрприз в среду vs то, что ждал рынок"
+        )
 
     conf = 7 if spr and commercial else 5 if spr or commercial else 3
     return UsOilInventoryStatus(
@@ -277,8 +334,12 @@ def build_inventory_status(
         cushing=cushing,
         summary_ru=" ".join(bits),
         verdict_ru=price_hint,
-        watch_ru="; ".join(watch) if watch else "EIA weekly",
-        surprise_ru="; ".join(surprise) if surprise else "обычный EIA без шока по складу",
+        watch_ru="; ".join(watch) if watch else "еженедельный отчёт по запасам США",
+        surprise_ru=(
+            "; ".join(surprise)
+            if surprise
+            else "обычный отчёт без сильного сюрприза по складу"
+        ),
         confidence=conf,
     )
 
@@ -321,23 +382,32 @@ async def fetch_us_oil_inventory() -> UsOilInventoryStatus:
 
 def format_inventory_status(st: UsOilInventoryStatus) -> str:
     lines = [
-        "📦 <b>Запасы США · EIA / SPR</b>",
-        f"Уверенность цифр {st.confidence}/10",
+        "📦 <b>Запасы нефти в США</b>",
+        f"Насколько цифрам можно верить: {st.confidence}/10",
+        "",
+        "<i>Коротко словами:</i>",
+        "• <b>Госрезерв</b> — стратегический запас США на ЧП (его ещё называют SPR).",
+        "• <b>Склады компаний</b> — обычная нефть у рынка, не у государства.",
+        "• <b>Кашинг</b> — главный складский хаб США; от него сильнее зависит "
+        "американская нефть (WTI).",
+        "• Если запасов <b>убавилось</b> — чаще поддержка цене; "
+        "если <b>прибавилось</b> — чаще давление вниз.",
         "",
         st.summary_ru,
         "",
         f"<b>Итог для нефти:</b> {st.verdict_ru}",
         f"<b>Что ждать:</b> {_esc(st.watch_ru)}",
-        f"<b>Риск сюрприза:</b> {_esc(st.surprise_ru)}",
+        f"<b>Где может быть сюрприз:</b> {_esc(st.surprise_ru)}",
         "",
-        "<b>Ссылки</b>",
-        f"• <a href=\"{_SPR_PAGE}\">SPR (WCSSTUS1)</a>",
-        f"• <a href=\"{_COMM_PAGE}\">Commercial excl SPR</a>",
-        f"• <a href=\"{_CUSHING_PAGE}\">Cushing</a>",
-        f"• <a href=\"{_EIA_WPSR}\">Weekly Petroleum Status</a>",
+        "<b>Ссылки на цифры</b>",
+        f"• <a href=\"{_SPR_PAGE}\">Госрезерв США</a>",
+        f"• <a href=\"{_COMM_PAGE}\">Склады компаний</a>",
+        f"• <a href=\"{_CUSHING_PAGE}\">Главный склад (Кашинг)</a>",
+        f"• <a href=\"{_EIA_WPSR}\">Полный еженедельный отчёт</a>",
         "",
-        "<i>Цифры weekly (лаг несколько дней). Для сделки важнее сюрприз vs ожидания "
-        "в среду, плюс гео (Ормуз/Трамп) — склад сам по себе редко даёт ±5%.</i>",
+        "<i>Цифры за неделю, с задержкой в несколько дней. Для сделки важнее, "
+        "насколько среда удивит рынок (сильнее/слабее ждали), плюс геоновости "
+        "(пролив Ормуз / Трамп). Один только склад редко даёт ход ±5%.</i>",
     ]
     if st.spr and st.spr.release_ru:
         lines.insert(2, f"<i>{_esc(st.spr.release_ru)}</i>")
@@ -349,10 +419,14 @@ def format_inventory_short(st: UsOilInventoryStatus) -> str:
     parts: list[str] = []
     if st.spr:
         wow = f" ({st.spr.wow_mb:+.1f})" if st.spr.wow_mb is not None else ""
-        parts.append(f"SPR {st.spr.latest.mbbl:.0f} млн{wow}")
+        parts.append(f"госрезерв {st.spr.latest.mbbl:.0f} млн{wow}")
     if st.commercial:
-        wow = f" ({st.commercial.wow_mb:+.1f})" if st.commercial.wow_mb is not None else ""
-        parts.append(f"comm {st.commercial.latest.mbbl:.0f} млн{wow}")
+        wow = (
+            f" ({st.commercial.wow_mb:+.1f})"
+            if st.commercial.wow_mb is not None
+            else ""
+        )
+        parts.append(f"склады {st.commercial.latest.mbbl:.0f} млн{wow}")
     if not parts:
         return ""
     return "📦 " + " · ".join(parts) + f" — {st.verdict_ru}"

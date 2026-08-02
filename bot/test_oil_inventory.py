@@ -45,7 +45,7 @@ def test_parse_eia_hist_html_latest():
 def test_interpret_spr_very_low():
     level, sense = interpret_spr(307.65, -3.8)
     assert "мало" in level.lower() or "очень" in level.lower()
-    assert "отток" in sense.lower() or "SPR" in sense
+    assert "ушло" in sense.lower() or "резерв" in sense.lower() or "поддерж" in sense.lower()
 
 
 def test_build_inventory_status_verdict():
@@ -75,5 +75,8 @@ def test_build_inventory_status_verdict():
     text = format_inventory_status(st)
     assert "307.7" in text or "307.6" in text
     assert "Итог для нефти" in text
-    assert "Сюрприз" in text or "сюрприз" in text
-    assert "поддерживает" in st.verdict_ru or "смешан" in st.verdict_ru
+    assert "сюрприз" in text.lower()
+    assert "Госрезерв" in text or "госрезерв" in text
+    assert "draw" not in text.lower()
+    assert "Cushing" not in text
+    assert "поддерживает" in st.verdict_ru or "рост" in st.verdict_ru or "смешан" in st.verdict_ru

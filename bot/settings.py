@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 69
+SETTINGS_VERSION = 71
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -338,7 +338,7 @@ class ScannerSettings:
     min_signal_score: float = 2.0
     top_n_symbols: int | None = 150
     priority_score_max: int = 3
-    signals_enabled: bool = True
+    signals_enabled: bool = False
     bot_paused: bool = False
     price_only_min_percent: float = 3.0
     telegram_max_per_minute: int = 10
@@ -387,7 +387,7 @@ class ScannerSettings:
     outcome_tracking_enabled: bool = True
 
     # Фаза 2: watch после WAIT+прогноз, пуш при старте отката/продолжения
-    scenario_watch_enabled: bool = True
+    scenario_watch_enabled: bool = False
     scenario_watch_minutes: int = 45
     scenario_watch_pullback_pct: float = 3.0
     scenario_watch_continuation_pct: float = 1.5
@@ -400,7 +400,7 @@ class ScannerSettings:
     scenario_watch_opposite_cancel_pct: float = 1.2
 
     # Алерты ручного TA (пробой / ретест / объём)
-    manual_ta_alerts_enabled: bool = True
+    manual_ta_alerts_enabled: bool = False
 
     # Мульти-часовой контекст (Bybit: свечи 5m + OI-бары)
     market_structure_enabled: bool = True
@@ -451,7 +451,7 @@ class ScannerSettings:
     signal_outcome_min_winrate: float = 35.0
 
       # Алерты по крупным ликвидациям (REKT-style) → TELEGRAM_ALERT_CHAT_ID
-    liquidation_alerts_enabled: bool = True
+    liquidation_alerts_enabled: bool = False
     liquidation_min_usd: float = 10_000.0
     liquidation_burst_window_seconds: float = 2.0
     liquidation_sliding_window_seconds: float = 300.0
@@ -485,7 +485,7 @@ class ScannerSettings:
     anomaly_min_importance: float = 55.0
 
     # Wave Watcher — только Elliott 1–5 + Fib → TELEGRAM_WAVE_CHAT_ID / anomaly / analysis
-    wave_enabled: bool = True
+    wave_enabled: bool = False
     wave_min_importance: float = 72.0
     wave_min_confidence: int = 6
     wave_min_impulse_quality: int = 65
@@ -524,7 +524,7 @@ class ScannerSettings:
     wave_watch_tick_seconds: float = 15.0
 
     # Oil monitor — новости Iran/US + дайджест Brent/WTI
-    oil_news_enabled: bool = False
+    oil_news_enabled: bool = True
     oil_news_interval_seconds: int = 180
     oil_news_max_per_poll: int = 1
     oil_news_max_age_hours: float = 24.0
@@ -563,8 +563,12 @@ class ScannerSettings:
     # Confluence-setup → чат ручного TA (только сильные LONG/SHORT)
     oil_setup_enabled: bool = True
     oil_setup_min_quality: int = 7
-    oil_setup_cooldown_seconds: int = 3600
+    oil_setup_cooldown_seconds: int = 14400  # 4ч — не спамить «Вход»
     oil_setup_near_pct: float = 0.35
+    # Не слать карточку «Вход» сразу после дайджеста (там уже план)
+    oil_setup_with_digest: bool = False
+    # Мин. пауза между торговыми пушами в ручной TA (дайджест/вход)
+    oil_ta_signal_gap_seconds: int = 10800  # 3ч
     oil_level_alerts_enabled: bool = True
     oil_level_alert_cooldown_seconds: int = 1800
     oil_bounce_alerts_enabled: bool = True
@@ -582,7 +586,7 @@ class ScannerSettings:
     oil_micro_max_per_hour: int = 3
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
-    analysis_enabled: bool = True
+    analysis_enabled: bool = False
     analysis_min_liq_usd: float = 10_000.0
     analysis_major_min_liq_usd: float = 10_000.0
     analysis_alt_min_liq_usd: float = 10_000.0
@@ -908,7 +912,7 @@ class ScannerSettings:
             min_signal_score=float(base.get("min_signal_score", 1.0)),
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(base.get("priority_score_max", 5)),
-            signals_enabled=bool(base.get("signals_enabled", True)),
+            signals_enabled=bool(base.get("signals_enabled", False)),
             bot_paused=bool(base.get("bot_paused", False)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 10)),
@@ -948,7 +952,7 @@ class ScannerSettings:
             signal_skip_noise=bool(base.get("signal_skip_noise", True)),
             signal_ta_compact=bool(base.get("signal_ta_compact", True)),
             outcome_tracking_enabled=bool(base.get("outcome_tracking_enabled", True)),
-            scenario_watch_enabled=bool(base.get("scenario_watch_enabled", True)),
+            scenario_watch_enabled=bool(base.get("scenario_watch_enabled", False)),
             scenario_watch_minutes=int(base.get("scenario_watch_minutes", 45)),
             scenario_watch_pullback_pct=float(base.get("scenario_watch_pullback_pct", 3.0)),
             scenario_watch_continuation_pct=float(base.get("scenario_watch_continuation_pct", 1.5)),
@@ -965,7 +969,7 @@ class ScannerSettings:
             scenario_watch_opposite_cancel_pct=float(
                 base.get("scenario_watch_opposite_cancel_pct", 1.2)
             ),
-            manual_ta_alerts_enabled=bool(base.get("manual_ta_alerts_enabled", True)),
+            manual_ta_alerts_enabled=bool(base.get("manual_ta_alerts_enabled", False)),
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
@@ -1006,7 +1010,7 @@ class ScannerSettings:
             signal_cooldown_seconds=clamp_cooldown_seconds(
                 base.get("signal_cooldown_seconds"), default=120,
             ),
-            liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", True)),
+            liquidation_alerts_enabled=bool(base.get("liquidation_alerts_enabled", False)),
             liquidation_min_usd=float(base.get("liquidation_min_usd", 50_000.0)),
             liquidation_burst_window_seconds=float(
                 base.get("liquidation_burst_window_seconds", 2.0)
@@ -1055,7 +1059,7 @@ class ScannerSettings:
                 base.get("anomaly_symbol_cooldown_seconds", 1800)
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
-            wave_enabled=bool(base.get("wave_enabled", True)),
+            wave_enabled=bool(base.get("wave_enabled", False)),
             wave_min_importance=float(base.get("wave_min_importance", 72.0)),
             wave_min_confidence=int(base.get("wave_min_confidence", 6)),
             wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 65)),
@@ -1103,7 +1107,7 @@ class ScannerSettings:
             ),
             wave_watch_near_pct=float(base.get("wave_watch_near_pct", 0.35)),
             wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
-            oil_news_enabled=bool(base.get("oil_news_enabled", False)),
+            oil_news_enabled=bool(base.get("oil_news_enabled", True)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
             oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 24.0)),
@@ -1147,8 +1151,14 @@ class ScannerSettings:
             oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
             oil_setup_enabled=bool(base.get("oil_setup_enabled", True)),
             oil_setup_min_quality=int(base.get("oil_setup_min_quality", 7)),
-            oil_setup_cooldown_seconds=int(base.get("oil_setup_cooldown_seconds", 3600)),
+            oil_setup_cooldown_seconds=int(
+                base.get("oil_setup_cooldown_seconds", 14400)
+            ),
             oil_setup_near_pct=float(base.get("oil_setup_near_pct", 0.35)),
+            oil_setup_with_digest=bool(base.get("oil_setup_with_digest", False)),
+            oil_ta_signal_gap_seconds=int(
+                base.get("oil_ta_signal_gap_seconds", 10800)
+            ),
             oil_level_alerts_enabled=bool(base.get("oil_level_alerts_enabled", True)),
             oil_level_alert_cooldown_seconds=int(
                 base.get("oil_level_alert_cooldown_seconds", 1800)
@@ -1167,7 +1177,7 @@ class ScannerSettings:
             oil_micro_lookback_bars=int(base.get("oil_micro_lookback_bars", 4)),
             oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1200)),
             oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 3)),
-            analysis_enabled=bool(base.get("analysis_enabled", True)),
+            analysis_enabled=bool(base.get("analysis_enabled", False)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
                 base.get("analysis_major_min_liq_usd", 35_000.0)
@@ -1754,6 +1764,27 @@ class SettingsManager:
                 merged.setdefault("oil_entry_signals_enabled", True)
             if version < 69:
                 merged.setdefault("oil_outcome_learning_enabled", True)
+            if version < 70:
+                # Антиспам: не дублировать дайджест+вход; пауза 3–4ч
+                merged["oil_setup_with_digest"] = False
+                merged["oil_ta_signal_gap_seconds"] = int(
+                    merged.get("oil_ta_signal_gap_seconds", 10800) or 10800
+                )
+                cur_cd = int(merged.get("oil_setup_cooldown_seconds", 3600) or 3600)
+                if cur_cd < 10800:
+                    merged["oil_setup_cooldown_seconds"] = 14400
+            if version < 71:
+                # Режим «только нефть»: крипто-каналы OFF, UKOUSD ON
+                merged["signals_enabled"] = False
+                merged["liquidation_alerts_enabled"] = False
+                merged["analysis_enabled"] = False
+                merged["anomaly_enabled"] = False
+                merged["wave_enabled"] = False
+                merged["scenario_watch_enabled"] = False
+                merged["manual_ta_alerts_enabled"] = False
+                merged["oil_news_enabled"] = True
+                merged["oil_include_brent"] = True
+                merged["bot_paused"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

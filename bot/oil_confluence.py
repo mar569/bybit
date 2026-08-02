@@ -356,17 +356,17 @@ def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
 
     if setup.side == "WAIT":
         mark = "⚪"
-        title = "UKOUSD · ждать (нет сильного края)"
+        title = "Bybit UKOUSD.s · ждать (нет сильного края)"
     elif setup.side == "LONG":
         mark = "🟢"
-        title = "Вход LONG · нефть"
+        title = "Вход LONG · Bybit UKOUSD.s"
     else:
         mark = "🔴"
-        title = "Вход SHORT · нефть"
+        title = "Вход SHORT · Bybit UKOUSD.s"
 
     lines = [
         f"{mark} <b>{title}</b> · качество {setup.quality}/10",
-        f"<i>Сейчас ≈${setup.price:.2f} · {setup.horizon_ru}</i>",
+        f"<i>Сейчас ≈${setup.price:.2f} · {setup.horizon_ru} · только Bybit TradFi</i>",
         "",
     ]
     if setup.side in {"LONG", "SHORT"}:
@@ -398,7 +398,8 @@ def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
         lines.append(f"🤖 <b>Главное от ИИ</b>\n{_esc(setup.gemini_ru)}")
     lines.append("")
     lines.append(
-        "<i>Нефть сейчас в основном от новостей (США/Иран/Ормуз), не только от графика. "
+        "<i>Инструмент: только Bybit TradFi <b>UKOUSD.s</b>. "
+        "Новости США/Иран/Ормуз важнее «красивого» чужого графика. "
         "Нет касания уровня — не входить. Не финсовет.</i>"
     )
     return "\n".join(lines)

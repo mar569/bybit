@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .bybit_klines import BYBIT_KLINE_URL, KlineBar
@@ -24,6 +25,8 @@ from .oil_level_watcher import OilLevelWatcher
 from .ta_analysis import TAAnalysisResult, TradeScenario, fmt_price, run_ta_analysis
 
 logger = logging.getLogger(__name__)
+
+_OIL_RUNTIME_FILE = Path(__file__).resolve().parent / "oil_runtime.json"
 
 # UI-символы (как на Bybit TradFi) + источники свечей
 OIL_BRENT_SYMBOL = "UKOUSD"
@@ -370,7 +373,7 @@ def theme_label_ru(theme: str) -> str:
     return {
         "iran_geo": "🇮🇷 Иран / Ормуз",
         "trump_us": "🇺🇸 Трамп / США",
-        "inventory": "📦 Запасы EIA/SPR",
+        "inventory": "📦 Запасы США",
         "opec": "🛢️ ОПЕК / добыча",
         "flow_deal": "🚢 Покупки / объёмы / поставки",
         "analyst": "📊 Аналитика / прогноз",
@@ -809,7 +812,7 @@ def summarize_oil_news_bias(
 
     basis_parts = [
         f"Считаем уникальные сюжеты (дубли одной темы схлопнуты), не каждый RSS-заголовок.",
-        f"Давление {weighted:+.1f}/10 из весов тем: Иран/Ормуз, Трамп/США, EIA/SPR, ОПЕК, объёмы.",
+        f"Давление {weighted:+.1f}/10 из весов тем: Иран/пролив, Трамп/США, запасы США, ОПЕК, объёмы.",
     ]
     if catalyst:
         basis_parts.append(f"Главный катализатор: «{catalyst[:100]}».")
@@ -1299,20 +1302,20 @@ def format_oil_micro_signal(sig: OilMicroSignal) -> str:
             f"стоп: <b>+{sig.sl_pct:.2f}%</b> от входа."
         )
     return "\n".join([
-        f"🛢 <b>{sig.label} · сигнал {side}</b> {emoji}",
+        f"🛢 <b>Bybit UKOUSD.s · сигнал {side}</b> {emoji}",
         f"<b>Микро-сделка</b> · качество <b>{sig.quality}/10</b>",
         "",
         how,
         "",
-        f"<i>Ориентир прокси (Yahoo BZ≈ / не тик TradFi): "
+        f"<i>Ориентир уровней (на Bybit цена может отличаться на $0.5–2): "
         f"вход {fmt_price(sig.entry)} · TP {fmt_price(sig.target)} · "
         f"стоп {fmt_price(sig.stop)}</i>",
         f"R:R ≈ <b>{rr:.1f}</b> · держать <b>{sig.hold_min}–{sig.hold_max} мин</b>",
-        f"Импульс на прокси: <b>{sig.impulse_pct:+.2f}%</b>",
+        f"Импульс: <b>{sig.impulse_pct:+.2f}%</b>",
         "",
         f"<i>{sig.reason_ru}</i>",
-        "<i>Цена UKOUSD.s на Bybit часто отличается от прокси на $0.5–2. "
-        "Считай TP/стоп в % от своей цены. Малый размер. Не финсовет.</i>",
+        "<i>Торгуй только UKOUSD.s на Bybit TradFi. Считай TP/стоп в % "
+        "от своей цены. Малый размер. Не финсовет.</i>",
     ])
 
 
@@ -2358,7 +2361,8 @@ def format_oil_market_digest(
     primary = snaps[0] if snaps else None
     lines = [
         "📊 <b>Нефть · разбор</b>",
-        f"<i>UKOUSD.s (Brent) · TF {interval_minutes}m · цена ≈ Yahoo BZ=F</i>",
+        f"<i>Bybit TradFi · <b>UKOUSD.s</b> · TF {interval_minutes}m</i>",
+        "<i>Смотри только цену на Bybit. Другие графики (TV/Hyperliquid) — не для входа.</i>",
         "",
     ]
     if forecast is not None:
@@ -2499,6 +2503,49 @@ class OilMonitorEngine:
         from .oil_journal import OilSetupJournal
 
         self._setup_journal = OilSetupJournal()
+        self._last_ta_push_ts: float = 0.0
+        self._load_oil_runtime_timing()
+
+    def _load_oil_runtime_timing(self) -> None:
+        """Паузы дайджест/setup переживают рестарт — не спамить сразу после reboot."""
+        try:
+            if not _OIL_RUNTIME_FILE.exists():
+                return
+            raw = json.loads(_OIL_RUNTIME_FILE.read_text(encoding="utf-8"))
+            self._last_digest_ts = float(raw.get("last_digest_ts") or 0)
+            self._last_setup_ts = float(raw.get("last_setup_ts") or 0)
+            self._last_ta_push_ts = float(raw.get("last_ta_push_ts") or 0)
+            self._last_setup_side = str(raw.get("last_setup_side") or "")
+        except Exception:
+            logger.debug("Oil runtime timing load failed", exc_info=True)
+
+    def _save_oil_runtime_timing(self) -> None:
+        try:
+            payload = {
+                "last_digest_ts": self._last_digest_ts,
+                "last_setup_ts": self._last_setup_ts,
+                "last_ta_push_ts": self._last_ta_push_ts,
+                "last_setup_side": self._last_setup_side,
+                "updated_ts": time.time(),
+            }
+            tmp = _OIL_RUNTIME_FILE.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(_OIL_RUNTIME_FILE)
+        except Exception:
+            logger.debug("Oil runtime timing save failed", exc_info=True)
+
+    def _oil_ta_gap_ok(self, settings: Any) -> bool:
+        gap = float(getattr(settings, "oil_ta_signal_gap_seconds", 10800))
+        if gap <= 0:
+            return True
+        return (time.time() - self._last_ta_push_ts) >= gap
+
+    def _mark_oil_ta_push(self) -> None:
+        self._last_ta_push_ts = time.time()
+        self._save_oil_runtime_timing()
 
     def _bybit_tradfi_open(self) -> bool:
         """True если UKOUSD.s сейчас торгуется на Bybit TradFi."""
@@ -3263,45 +3310,7 @@ class OilMonitorEngine:
                 sun_low_hint=sun_lo,
             )
             text = format_weekend_open_brief(brief, session=session)
-
-            # Опционально усилить Gemini
-            if bool(getattr(settings, "oil_forecast_gemini", True)):
-                key = self._resolve_gemini_key()
-                if key:
-                    try:
-                        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
-
-                        tops = "\n".join(
-                            f"- {getattr(it, 'title', '')} [{getattr(it, 'impact', '')}]"
-                            for it in self._recent_news[:8]
-                        )
-                        ai = await ask_gemini(
-                            api_key=key,
-                            model=self._resolve_gemini_model(),
-                            context_text=(
-                                "Объясни нефть простыми словами по-русски. "
-                                "Без англ. жаргона. Выходные, биржа откроется ночью к понедельнику.\n"
-                                f"Цена-ориентир: {price}\n"
-                                f"Вывод бота: {brief.bias}\n"
-                                f"Новости:\n{tops}\n"
-                            ),
-                            user_text=(
-                                "Напиши коротко по-русски:\n"
-                                "1) Откроется скорее дороже или дешевле?\n"
-                                "2) Есть ли шанс уйти к 80$? низкий/средний/высокий\n"
-                                "3) Какая новость всё отменит?\n"
-                                "Максимум 8 простых предложений. Не финансовый совет."
-                            ),
-                        )
-                        ai_t = sanitize_ai_reply_for_telegram(ai.text or "").strip()
-                        if ai_t and not ai.error:
-                            text += "\n\n🤖 <b>Пояснение ИИ простыми словами</b>\n" + (
-                                ai_t.replace("&", "&amp;")
-                                .replace("<", "&lt;")
-                                .replace(">", "&gt;")
-                            )
-                    except Exception:
-                        logger.debug("Open-brief Gemini failed", exc_info=True)
+            # Без длинного ИИ-блока — короткий бриф сам по делу
             return True, text
         except Exception as exc:
             logger.exception("Weekend open brief failed")
@@ -3555,18 +3564,21 @@ class OilMonitorEngine:
                 return 0
             if update_last_ts:
                 self._last_digest_ts = time.time()
+                self._mark_oil_ta_push()
             sent = 1
-            sent += await self._maybe_dispatch_confluence_setup(
-                settings,
-                bundle=bundle,
-                forecast=forecast,
-                news_bias=news_bias,
-                scalp=scalp,
-                bounce=bounce,
-                ta_verdict_raw=ta_verdict_raw,
-                ta_conf_raw=ta_conf_raw,
-                png=png,
-            )
+            # По умолчанию НЕ шлём «Вход» следом — в дайджесте уже план/прогноз
+            if bool(getattr(settings, "oil_setup_with_digest", False)):
+                sent += await self._maybe_dispatch_confluence_setup(
+                    settings,
+                    bundle=bundle,
+                    forecast=forecast,
+                    news_bias=news_bias,
+                    scalp=scalp,
+                    bounce=bounce,
+                    ta_verdict_raw=ta_verdict_raw,
+                    ta_conf_raw=ta_conf_raw,
+                    png=png,
+                )
             if (
                 chart_enabled
                 and bundle.wti_bars
@@ -3639,6 +3651,10 @@ class OilMonitorEngine:
         if not self._oil_entry_signals_allowed(settings):
             logger.debug("Oil confluence skipped: entry signals toggled OFF")
             return 0
+        # Антиспам: не дублировать торговые пуши в ручной TA
+        if not self._oil_ta_gap_ok(settings):
+            logger.debug("Oil confluence skipped: TA signal gap")
+            return 0
         base_q = int(getattr(settings, "oil_setup_min_quality", 7))
         from .oil_journal import adaptive_min_quality, gemini_memory_block
 
@@ -3649,7 +3665,7 @@ class OilMonitorEngine:
             else base_q
         )
         near_pct = float(getattr(settings, "oil_setup_near_pct", 0.35))
-        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 3600))
+        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 14400))
         now = time.time()
         if now - self._last_setup_ts < cooldown:
             return 0
@@ -3727,6 +3743,7 @@ class OilMonitorEngine:
             return 0
         self._last_setup_ts = now
         self._last_setup_side = setup.side
+        self._mark_oil_ta_push()
         # Журнал исхода
         entry = None
         if setup.entry_lo is not None and setup.entry_hi is not None:

@@ -95,13 +95,10 @@ def oil_session_status(*, now: datetime | None = None) -> OilSessionStatus:
 
     if wd >= 5 or (wd == 0 and not is_open):
         label = (
-            f"Bybit UKOUSD.s откроется <b>{next_open.strftime('%d.%m в %H:%M')} по Москве (GMT+3)</b> "
-            f"— понедельник с 01:00"
+            f"Открытие: <b>{next_open.strftime('%d.%m в %H:%M')} МСК</b> (пн)"
         )
         caution = (
-            "Сейчас <b>выходные</b>: на Bybit TradFi (UKOUSD.s) торговля недоступна "
-            "(сб–вс закрыто). Бот читает новости и готовит план на открытие в "
-            "<b>пн 01:00 MSK</b>. Это не сигнал входить сейчас."
+            "Выходные: UKOUSD.s на Bybit закрыт. Это план на открытие, не вход сейчас."
         )
         return OilSessionStatus(
             is_weekend_gap=True,
@@ -115,8 +112,7 @@ def oil_session_status(*, now: datetime | None = None) -> OilSessionStatus:
     if not is_open:
         # Ночной перерыв вт–пт 00:00–03:00
         label = (
-            f"Ночной перерыв Bybit. Открытие <b>{next_open.strftime('%d.%m в %H:%M')} MSK</b> "
-            f"(вт–пт с 03:00)"
+            f"Ночной перерыв. Открытие <b>{next_open.strftime('%d.%m в %H:%M')} МСК</b>"
         )
         return OilSessionStatus(
             is_weekend_gap=False,
@@ -124,9 +120,7 @@ def oil_session_status(*, now: datetime | None = None) -> OilSessionStatus:
             market_open_hint_ru="Ночной перерыв UKOUSD.s (примерно до 03:00 MSK)",
             next_open_msk=next_open,
             next_open_label_ru=label,
-            caution_ru=(
-                "Котировки/торговля на паузе до 03:00. Не путать с выходным gap."
-            ),
+            caution_ru="Пауза до 03:00 МСК. Не путать с выходными.",
         )
 
     return OilSessionStatus(
@@ -165,12 +159,11 @@ def build_weekend_open_brief(
     sat_high_hint: float | None = None,
     sun_low_hint: float | None = None,
 ) -> OilOpenBrief:
-    """Сводка: что ждать на открытии пн 01:00 MSK (Bybit UKOUSD.s)."""
+    """Коротко: что ждать на открытии пн 01:00 MSK (Bybit UKOUSD.s)."""
     session = session or oil_session_status()
     bias_n = getattr(news_bias, "bias", "neutral") if news_bias else "neutral"
     w = float(getattr(news_bias, "weighted_score", 0) or 0) if news_bias else 0.0
     fc_bias = (getattr(forecast, "bias", "") or "").upper() if forecast else ""
-    fc_scen = getattr(forecast, "scenario", "") or "" if forecast else ""
 
     tops: list[str] = []
     for it in list(news_items or [])[:8]:
@@ -179,8 +172,8 @@ def build_weekend_open_brief(
             continue
         imp = getattr(it, "impact", "neutral")
         mark = {"bullish": "↑", "bearish": "↓"}.get(imp, "·")
-        tops.append(f"{mark} {t[:110]}")
-        if len(tops) >= 5:
+        tops.append(f"{mark} {t[:90]}")
+        if len(tops) >= 3:
             break
 
     dealish = any(
@@ -188,7 +181,7 @@ def build_weekend_open_brief(
             k in (getattr(it, "title", "") or "").lower()
             for k in (
                 "taco", "cancel", "pause", "deal", "reopen", "tumble", "slump",
-                "отмен", "струсил", "сделк",
+                "отмен", "струсил", "сделк", "holds off", "hold off",
             )
         )
         for it in (news_items or [])
@@ -200,78 +193,75 @@ def build_weekend_open_brief(
         )
         and not any(
             k in (getattr(it, "title", "") or "").lower()
-            for k in ("cancel", "pause", "taco", "отмен")
+            for k in ("cancel", "pause", "taco", "отмен", "holds off", "hold off")
+        )
+        for it in (news_items or [])
+    )
+    opec_hike = any(
+        any(
+            k in (getattr(it, "title", "") or "").lower()
+            for k in ("quota", "hike", "increase", "квот", "повыс", "добыч")
         )
         for it in (news_items or [])
     )
 
-    if bias_n == "bearish" or fc_bias == "SHORT" or (dealish and not hot_geo):
+    # Новости важнее прогноза графика: сделка/ОПЕК → вниз; удары → вверх
+    if dealish and not hot_geo:
         bias = "DOWN"
         conf = 7 if abs(w) >= 2 or dealish else 5
+        if opec_hike:
+            conf = min(8, conf + 1)
         headline = (
-            f"Простыми словами: в <b>пн в 01:00 по Москве</b> Bybit UKOUSD.s "
-            f"скорее откроется <b>дешевле</b>. Ориентир сейчас ≈<b>${price:.2f}</b> "
-            f"(на сторонних площадках цена уже могла уйти сильно вниз с ~92)."
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
         )
         base = (
-            "За выходные: удары по Ирану отложили/отменили, страх войны ослаб. "
-            "На Bybit в сб–вс торгов нет — в понедельник в 01:00 часто бывает "
-            "резкий старт (gap). Реалистичная зона дальше — <b>около 80–82</b>, "
-            "если не выйдет новая пугающая новость до открытия. "
-            "Спред на старте может быть шире обычного."
+            "Страх войны ослаб (пауза/отмена ударов). "
+            + (
+                "Плюс ОПЕК может добавить добычу — тоже давит вниз. "
+                if opec_hike
+                else ""
+            )
+            + "На старте возможен резкий разрыв цены."
         )
-        alt = (
-            "Другой вариант: отскок вверх к 85–88, если до 01:00 Трамп снова "
-            "угрожает ударами. Тогда падение могут частично выкупить."
+        alt = "Если ночью снова про удары/пролив — может развернуться вверх."
+    elif bias_n == "bearish" or fc_bias == "SHORT" or opec_hike:
+        bias = "DOWN"
+        conf = 6 if opec_hike or abs(w) >= 2 else 5
+        headline = (
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дешевле</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
         )
-    elif bias_n == "bullish" or fc_bias == "LONG" or hot_geo:
+        base = (
+            "Новости давят цену вниз. "
+            "Подожди первый час после открытия."
+        )
+        alt = "Резкая новость про конфликт/пролив может подбросить вверх."
+    elif hot_geo or bias_n == "bullish":
         bias = "UP"
         conf = 6
         headline = (
-            f"Простыми словами: на открытии пн 01:00 MSK есть риск, что "
-            f"UKOUSD.s <b>откроется дороже</b>. Ориентир ≈${price:.2f}."
+            f"На открытии пн <b>01:00 МСК</b> скорее <b>дороже</b> "
+            f"(сейчас ориентир ≈${price:.2f})."
         )
-        base = (
-            "В новостях снова про удары или закрытие пролива. "
-            "Рынок может открыться выше — снова боятся перебоев с поставками."
-        )
-        alt = (
-            "Другой вариант: если перед 01:00 скажут про сделку/паузу — "
-            "цена может резко развернуться вниз."
-        )
+        base = "В ленте риски по Ирану/проливу — рынок может открыться выше."
+        alt = "Если до открытия скажут про сделку или паузу — может резко вниз."
     else:
         bias = "MIXED"
         conf = 4
         headline = (
-            f"Простыми словами: на пн 01:00 MSK картина смешанная. "
-            f"Ориентир ≈${price:.2f}. Лучше подождать первый час сессии."
+            f"На открытии пн <b>01:00 МСК</b> пока <b>неясно</b> "
+            f"(ориентир ≈${price:.2f}). Лучше подождать первый час."
         )
-        base = (
-            "Новости тянут и вверх, и вниз. Без ясного сигнала не стоит "
-            "угадывать gap заранее."
-        )
-        alt = "Сильная новость по Ормузу поздним вечером воскресенья может всё перевернуть."
+        base = "Новости тянут в разные стороны. Без ясного сигнала не входи вслепую."
+        alt = "Сильная новость ночью может всё перевернуть."
 
-    levels = []
-    if sun_low_hint:
-        levels.append(f"ближайшее дно прокси ≈${sun_low_hint:.2f}")
-    levels.append("важная круглая отметка <b>$80</b>")
-    if sat_high_hint:
-        levels.append(
-            f"если вернётся выше ≈${sat_high_hint:.2f} — сценарий падения слабеет"
-        )
-    levels_ru = "; ".join(levels)
-
-    scen_plain = {
-        "deal_tape": "фон «сделка / меньше страха»",
-        "disruption": "фон «сбои поставок / война»",
-        "mixed_geo": "фон смешанный по Ормузу",
-        "inventory": "фон запасов США",
-        "opec_supply": "фон ОПЕК",
-        "range": "нет сильного драйвера",
-    }.get(fc_scen, "")
-    if scen_plain:
-        base = f"{base} Сейчас бот видит: {scen_plain}."
+    levels: list[str] = []
+    if sun_low_hint and sun_low_hint > 0:
+        levels.append(f"низ ≈${sun_low_hint:.2f}")
+    if sat_high_hint and sat_high_hint > 0:
+        levels.append(f"верх ≈${sat_high_hint:.2f}")
+    levels_ru = " · ".join(levels) if levels else "смотри цену на Bybit после 01:00"
 
     return OilOpenBrief(
         bias=bias,
@@ -283,17 +273,14 @@ def build_weekend_open_brief(
         levels_ru=levels_ru,
         news_digest_ru=tuple(tops),
         session_ru=session.next_open_label_ru or session.market_open_hint_ru,
-        disclaimer_ru=(
-            "Это не финансовый совет. Bybit UKOUSD.s на выходных закрыт; "
-            "цена на Hyperliquid/Yahoo может сильно отличаться до пн 01:00 MSK. "
-            "Отметка $80 — ориентир, не гарантия."
-        ),
+        disclaimer_ru="Не финсовет. Смотри только Bybit UKOUSD.s.",
     )
 
 
 def format_weekend_open_brief(
     brief: OilOpenBrief, *, session: OilSessionStatus | None = None
 ) -> str:
+    """Короткий текст без простыни — только по делу."""
     session = session or oil_session_status()
     mark = {"DOWN": "🔴", "UP": "🟢", "MIXED": "⚪", "WAIT": "⚪"}.get(brief.bias, "⚪")
     dir_ru = {
@@ -303,32 +290,27 @@ def format_weekend_open_brief(
         "WAIT": "ждать",
     }.get(brief.bias, "")
     lines = [
-        f"{mark} <b>Что будет с нефтью на открытии Bybit</b>",
-        f"<i>Пн 01:00 MSK (GMT+3) · уверенность {brief.confidence} из 10 · {dir_ru}</i>",
-        brief.session_ru,
+        f"{mark} <b>Открытие UKOUSD.s</b> · пн 01:00 МСК",
+        f"<i>{dir_ru} · уверенность {brief.confidence}/10</i>",
         "",
         brief.headline_ru,
         "",
-        "<b>Главный сценарий</b>",
-        brief.base_case_ru,
-        "",
-        "<b>Что может пойти иначе</b>",
-        brief.alt_case_ru,
-        "",
-        f"<b>На какие цены смотреть:</b> {brief.levels_ru}",
+        f"<b>Главное:</b> {brief.base_case_ru}",
+        f"<b>Иначе:</b> {brief.alt_case_ru}",
+        f"<b>Ориентиры:</b> {brief.levels_ru}",
     ]
     if brief.news_digest_ru:
         lines.append("")
-        lines.append("<b>Из последних новостей</b>")
-        for n in brief.news_digest_ru:
+        lines.append("<b>Новости</b>")
+        for n in brief.news_digest_ru[:3]:
             lines.append(f"• {_esc(n)}")
-    if session.caution_ru:
+    if session.caution_ru or session.is_weekend_gap:
         lines.append("")
-        lines.append(f"⚠️ {session.caution_ru}")
+        lines.append(
+            "⚠️ Сейчас выходные: на Bybit UKOUSD.s торгов нет. "
+            "Это план на открытие, не вход сейчас."
+        )
     lines.append("")
-    lines.append(
-        "<i>Расписание UKOUSD.s: пн 01:00–24:00 · вт–пт 03:00–24:00 · сб–вс закрыто.</i>"
-    )
     lines.append(f"<i>{brief.disclaimer_ru}</i>")
     return "\n".join(lines)
 

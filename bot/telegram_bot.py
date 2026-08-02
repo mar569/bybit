@@ -252,7 +252,7 @@ class TelegramBot:
         ("wave_enabled", "wave", "🌊 Волны Эллиотта"),
         ("scenario_watch_enabled", "scenario", "🔮 Сценарии (фаза 2)"),
         ("manual_ta_alerts_enabled", "mta_alert", "🔔 Алерты ручного TA"),
-        ("oil_news_enabled", "oil", "🛢 Нефть Brent/WTI"),
+        ("oil_news_enabled", "oil", "🛢 Нефть UKOUSD Bybit"),
     )
 
     def _bot_notifications_blocked(self) -> bool:
@@ -2124,12 +2124,8 @@ class TelegramBot:
         ])
 
     def _oil_signal_keyboard(self) -> InlineKeyboardMarkup:
-        """Кнопки под oil setup / графиком в ручном TA."""
+        """Кнопки под oil-сигналом: только контекст Bybit UKOUSD, без TradingView."""
         return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Сбылось", callback_data="oil:out:ok"),
-                InlineKeyboardButton("❌ Не сбылось", callback_data="oil:out:fail"),
-            ],
             [
                 InlineKeyboardButton("❓ Почему так", callback_data="oil:why"),
                 InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
@@ -2141,12 +2137,6 @@ class TelegramBot:
             [
                 InlineKeyboardButton("📦 Запасы США", callback_data="oil:spr"),
                 InlineKeyboardButton("🤖 Спросить ИИ", callback_data="oil:ai"),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📈 Brent TV",
-                    url="https://www.tradingview.com/chart/?symbol=TVC%3AUKOIL",
-                ),
             ],
         ])
 
@@ -4053,7 +4043,7 @@ class TelegramBot:
             await update.message.reply_text("Нефтяной монитор ещё не подключен.")
             return
         wait = await update.message.reply_text(
-            "⏳ Гружу EIA: SPR / коммерция / Cushing…",
+            "⏳ Гружу запасы США: госрезерв / склады компаний / Кашинг…",
             parse_mode=ParseMode.HTML,
         )
         ok, text = await self.oil_monitor.inventory_status_now()
@@ -4587,7 +4577,7 @@ class TelegramBot:
             return "Журнал исходов: ошибка чтения\n"
         if st.samples <= 0 and active_n <= 0:
             return (
-                "Журнал: авто «сбылось/нет» в фоне · кнопок на сигналах ждут первые сделки\n"
+                "Журнал: авто «сбылось/нет» по цене · без ручных кнопок\n"
             )
         wr = f"{st.winrate_pct:.0f}%" if st.winrate_pct is not None else "—"
         lesson = f" · {st.recent_lesson_ru}" if st.recent_lesson_ru else ""
@@ -4610,7 +4600,8 @@ class TelegramBot:
             else "графики → oil-чат (нет TELEGRAM_MANUAL_TA_CHAT_ID)"
         )
         return (
-            "<b>🛢 Нефть UKOUSD / USOIL</b>\n"
+            "<b>🛢 Нефть · только Bybit TradFi</b>\n"
+            "Инструмент: <b>UKOUSD.s</b> (Brent cash). Другие графики/биржи не смотри.\n"
             f"Канал: {chat_line}\n"
             f"{chart_line}\n"
             f"Статус: <b>{'ON' if s.oil_news_enabled else 'OFF'}</b>\n\n"
@@ -4639,13 +4630,15 @@ class TelegramBot:
             f"{' · ключ OK' if self.config.gemini_configured else ' · нет GEMINI_API_KEY'}\n"
             f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
             f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 7)}</b> · "
-            f"CD <b>{getattr(s, 'oil_setup_cooldown_seconds', 3600)}с</b>\n"
+            f"CD <b>{int(getattr(s, 'oil_setup_cooldown_seconds', 14400) / 3600)}ч</b> · "
+            f"с дайджестом <b>{'ON' if getattr(s, 'oil_setup_with_digest', False) else 'OFF'}</b>\n"
+            f"Пауза торговых пушей в TA: <b>{int(getattr(s, 'oil_ta_signal_gap_seconds', 10800) / 3600)}ч</b>\n"
             f"{self._oil_journal_stats_line()}"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "
             f"WTI <b>{'ON' if getattr(s, 'oil_include_wti', True) else 'OFF'}</b>\n\n"
             "<b>Кнопки сверху панели</b>\n"
-            "📊 Сейчас · ❓ Почему так · 🗓 Что на открытии · 🚢 Ормуз · 📦 Запасы · 🤖 ИИ\n"
-            "<i>Прогнозы — простыми словами на русском. Команды: /hormuz /spr /oilai</i>"
+            "📊 Сейчас · ❓ Почему так · 🗓 На открытии · 🚢 Ормуз · 📦 Запасы · 🤖 ИИ\n"
+            "<i>Торгуем только UKOUSD.s на Bybit TradFi. TradingView не используем.</i>"
         ).replace(",", " ")
 
     def _oil_keyboard(self) -> InlineKeyboardMarkup:

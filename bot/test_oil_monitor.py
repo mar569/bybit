@@ -214,7 +214,7 @@ def test_format_oil_market_digest():
     )
     text = format_oil_market_digest([snap])
     assert "Brent" in text
-    assert "UKOUSD" in text or "Brent" in text or "Yahoo" in text or "BZ=F" in text
+    assert "UKOUSD" in text or "Bybit" in text or "Brent" in text
 
 
 def test_news_critical_score_hormuz():

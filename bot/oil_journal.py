@@ -225,8 +225,7 @@ def format_outcome_message(
             lines.append(f"• Урок: <i>{_esc(stats.recent_lesson_ru)}</i>")
     lines.append("")
     lines.append(
-        "<i>Авто-журнал в фоне. Кнопки «Сбылось/Не сбылось» — если хочешь "
-        "поправить вручную. Не финсовет.</i>"
+        "<i>Итог посчитан автоматически по цене (цель / стоп / время). Не финсовет.</i>"
     )
     return "\n".join(lines)
 

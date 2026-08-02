@@ -25,7 +25,7 @@ def _lvls(*prices: float | None, sep: str = " / ") -> str:
 _SCENARIO_LABEL = {
     "deal_tape": "Deal-tape (Ормуз/перемирие → снятие premium)",
     "disruption": "Disruption (блок/атаки → geo-premium)",
-    "inventory": "Inventory (EIA/SPR → спрос/предложение)",
+    "inventory": "Запасы США (госрезерв / склады компаний → спрос и предложение)",
     "opec_supply": "OPEC/supply (квоты/добыча)",
     "range": "Range (нет сильного катализатора)",
     "mixed_geo": "Mixed geo (сигналы в обе стороны)",
@@ -201,7 +201,7 @@ def build_oil_forecast(
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
         horizon = "свинг 1–3д · intraday по уровням"
     elif scenario == "inventory":
-        horizon = "до следующего EIA / 1–2 сессии"
+        horizon = "до следующего отчёта по запасам / 1–2 сессии"
 
     scen_ru = _SCENARIO_LABEL.get(scenario, scenario)
     catalyst = ""
@@ -254,7 +254,7 @@ def build_oil_forecast(
             + " или после подтверждённого пробоя↑."
         )
         alt = (
-            "Альт: deal-tape / сильный build запасов → откат "
+            "Альт: новости про сделку / запасы сильно выросли → откат "
             + (f"к {_lvl(s or bd)}" if (s or bd) else "к поддержке")
             + " или WAIT."
         )
@@ -288,10 +288,12 @@ def build_oil_forecast(
             f"Торговать только от уровня или после close {interval_minutes}m за границей range."
         )
         alt = (
-            "Альт LONG: disruption / пробой↑. "
-            "Альт SHORT: deal-tape / пробой↓."
+            "Альт вверх: срыв поставок / пробой вверх. "
+            "Альт вниз: новости про сделку / пробой вниз."
         )
-        inv = "Ждать clarifier: танкеры Ормуз, EIA, тон переговоров."
+        inv = (
+            "Ждать ясности: танкеры в проливе, отчёт по запасам, тон переговоров."
+        )
         entry = (
             "План: без касания S/R или пробоя — снаружи. "
             + (f"Range {_lvl(s)}–{_lvl(r)}." if s and r else "")
@@ -301,14 +303,14 @@ def build_oil_forecast(
         base = f"{base} Катализатор: «{catalyst}»."
 
     watch: list[str] = [
-        "Танкеры / статус Ормуза (deal vs block)",
-        "EIA weekly (ср/чт) + Cushing",
-        "OPEC+ квоты / комментарии Саудов",
+        "Танкеры / статус пролива (сделка vs блок)",
+        "еженедельный отчёт по запасам США (среда/четверг) и склад Кашинг",
+        "ОПЕК+: квоты / комментарии Саудовской Аравии",
     ]
     if scenario == "inventory":
-        watch.insert(0, "Сюрприз EIA draw/build vs consensus")
+        watch.insert(0, "Сюрприз в отчёте по запасам vs то, что ждал рынок")
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
-        watch.insert(0, "Дипломатия Muscat / MOU / удары по инфраструктуре")
+        watch.insert(0, "Дипломатия / договорённости / удары по инфраструктуре")
     if market_mood:
         watch.append(f"Режим графика: {market_mood.split('—')[0].strip()[:48]}")
 

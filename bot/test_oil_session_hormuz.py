@@ -184,6 +184,7 @@ def test_weekend_open_brief_down_on_taco():
         )
     ]
     from bot.oil_monitor import summarize_oil_news_bias
+    from bot.oil_session import format_weekend_open_brief
 
     bias = summarize_oil_news_bias(items)
     brief = build_weekend_open_brief(
@@ -194,7 +195,11 @@ def test_weekend_open_brief_down_on_taco():
         sun_low_hint=83.0,
     )
     assert brief.bias == "DOWN"
-    assert "80" in brief.base_case_ru or "80" in brief.levels_ru
+    text = format_weekend_open_brief(brief)
+    assert "дешевле" in text.lower() or "вниз" in text.lower()
+    assert "Hyperliquid" not in text
+    assert "CONFLUENCE" not in text
+    assert text.count("\n") < 25
 
 
 def test_oil_session_bybit_schedule():
