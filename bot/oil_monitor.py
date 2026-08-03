@@ -1,8 +1,10 @@
 """Нефть: отдельный чат — свежие новости (ссылки) + техразбор + прогноз.
 
-Торговый UI Bybit TradFi (MT5): UKOUSD.s (Brent cash) / USOIL — публичных kline нет.
-Свечи: форма Bybit BZUSDT/CLUSDT (ровный ряд), цена сдвинута к Yahoo BZ=F/CL=F
-(≈ уровень UKOUSD). Fallback — sanitized Yahoo без дыр сессии.
+Торговый UI Bybit TradFi (MT5): UKOUSD.s = Brent Crude Oil Cash.
+Источник цены (приоритет):
+  1) MetaTrader5 → UKOUSD.s (тот же инструмент, что в терминале)
+  2) Bybit linear BZUSDT (другой продукт — Brent perp, только fallback)
+  3) Yahoo BZ=F (редко, если оба недоступны)
 """
 from __future__ import annotations
 
@@ -31,11 +33,12 @@ _OIL_RUNTIME_FILE = Path(__file__).resolve().parent / "oil_runtime.json"
 # UI-символы (как на Bybit TradFi) + источники свечей
 OIL_BRENT_SYMBOL = "UKOUSD"
 OIL_WTI_SYMBOL = "USOIL"
-OIL_BRENT_LABEL = "Brent · UKOUSD"
+OIL_BRENT_LABEL = "Brent Cash · UKOUSD.s"
 OIL_WTI_LABEL = "WTI · USOIL"
 OIL_BRENT_YAHOO = "BZ=F"
 OIL_WTI_YAHOO = "CL=F"
-OIL_BRENT_BYBIT = "BZUSDT"  # fallback, другой basis
+# Fallback, если MT5 UKOUSD.s недоступен (это НЕ Brent Cash)
+OIL_BRENT_BYBIT = "BZUSDT"
 OIL_WTI_BYBIT = "CLUSDT"
 
 _OIL_KEYWORDS = frozenset({
@@ -1471,37 +1474,39 @@ def format_oil_micro_signal(sig: OilMicroSignal) -> str:
     side = "LONG" if sig.side == "long" else "SHORT"
     emoji = "🟢" if sig.side == "long" else "🔴"
     rr = abs(sig.target - sig.entry) / max(abs(sig.stop - sig.entry), 1e-9)
-    # Абсолютные уровни — только ориентир с прокси-цены (Yahoo BZ / BZUSDT),
-    # не тик Bybit TradFi UKOUSD.s (часто +0.5…2$).
+    # Уровни: предпочтительно MT5 UKOUSD.s (Brent Cash); иначе fallback.
     if sig.side == "long":
         how = (
-            f"На Bybit жми <b>Buy</b> по <b>текущей</b> цене UKOUSD.s "
-            f"(не копируй {fmt_price(sig.entry)} слепо).\n"
+            f"На Bybit TradFi жми <b>Buy</b> по <b>текущей</b> цене <b>UKOUSD.s</b> "
+            f"(Brent Crude Oil Cash).\n"
             f"TP: <b>+{sig.tp_pct:.2f}%</b> от твоей цены входа · "
             f"стоп: <b>−{sig.sl_pct:.2f}%</b> от входа."
         )
     else:
         how = (
-            f"На Bybit жми <b>Sell</b> по <b>текущей</b> цене UKOUSD.s "
-            f"(не копируй {fmt_price(sig.entry)} слепо).\n"
+            f"На Bybit TradFi жми <b>Sell</b> по <b>текущей</b> цене <b>UKOUSD.s</b> "
+            f"(Brent Crude Oil Cash).\n"
             f"TP: <b>−{sig.tp_pct:.2f}%</b> от твоей цены входа · "
             f"стоп: <b>+{sig.sl_pct:.2f}%</b> от входа."
         )
+    from .oil_mt5 import get_oil_price_source
+
+    src = get_oil_price_source() or "источник цены"
     return "\n".join([
         f"🛢 <b>Bybit UKOUSD.s · сигнал {side}</b> {emoji}",
         f"<b>Микро-сделка</b> · качество <b>{sig.quality}/10</b>",
         "",
         how,
         "",
-        f"<i>Ориентир уровней (на Bybit цена может отличаться на $0.5–2): "
+        f"<i>Уровни ({src}): "
         f"вход {fmt_price(sig.entry)} · TP {fmt_price(sig.target)} · "
         f"стоп {fmt_price(sig.stop)}</i>",
         f"R:R ≈ <b>{rr:.1f}</b> · держать <b>{sig.hold_min}–{sig.hold_max} мин</b>",
         f"Импульс: <b>{sig.impulse_pct:+.2f}%</b>",
         "",
         f"<i>{sig.reason_ru}</i>",
-        "<i>Торгуй только UKOUSD.s на Bybit TradFi. Считай TP/стоп в % "
-        "от своей цены. Малый размер. Не финсовет.</i>",
+        "<i>Торгуй только UKOUSD.s (Brent Cash) на Bybit TradFi. "
+        "Считай TP/стоп в % от своей цены. Малый размер. Не финсовет.</i>",
     ])
 
 
@@ -2281,30 +2286,42 @@ def _fetch_oil_bars(
     interval_minutes: int = 15,
     limit: int | None = None,
 ) -> list[KlineBar]:
-    """Непрерывные свечи как на терминале + цена ≈ UKOUSD/USOIL.
+    """Свечи нефти: сначала MT5 UKOUSD.s (Brent Cash), иначе fallback.
 
-    Yahoo BZ=F даёт дыры сессии и нулевые бары → «точки» на графике.
-    Берём форму Bybit (ровный 5m), сдвигаем к последней цене Yahoo.
-    Если Bybit недоступен — sanitized Yahoo.
+    UKOUSD.s = Brent Crude Oil Cash на Bybit TradFi — публичного REST нет.
+    Точная цена только через MetaTrader 5 (см. bot/oil_mt5.py).
+    BZUSDT / Yahoo — другие инструменты, используем только если MT5 молчит.
     """
-    yahoo_last: float | None = None
-    yahoo_bars: list[KlineBar] = []
+    from .oil_mt5 import (
+        OIL_MT5_BRENT,
+        OIL_MT5_WTI,
+        fetch_mt5_oil_bars,
+        set_oil_price_source,
+    )
+
+    mt5_symbol = OIL_MT5_BRENT if bybit_symbol.upper() == OIL_BRENT_BYBIT else OIL_MT5_WTI
     try:
-        yahoo_bars = _fetch_yahoo_oil_bars(
-            yahoo_symbol, interval_minutes=interval_minutes, limit=limit,
+        mt5_bars = fetch_mt5_oil_bars(
+            mt5_symbol,
+            interval_minutes=interval_minutes,
+            limit=limit,
         )
-        if yahoo_bars:
-            yahoo_last = float(yahoo_bars[-1].close)
+        if len(mt5_bars) >= 24:
+            return mt5_bars
     except Exception:
-        logger.warning("Yahoo oil %s failed", yahoo_symbol, exc_info=True)
+        logger.warning("MT5 oil %s failed", mt5_symbol, exc_info=True)
 
     try:
         bybit_bars = _fetch_bybit_oil_bars(
             bybit_symbol, interval_minutes=interval_minutes, limit=limit,
         )
         if len(bybit_bars) >= 24:
-            if yahoo_last and yahoo_last > 0:
-                return _shift_bars_to_price(bybit_bars, yahoo_last)
+            set_oil_price_source(f"Bybit {bybit_symbol} (не UKOUSD.s Cash)")
+            logger.warning(
+                "Oil using Bybit %s fallback — not Brent Cash UKOUSD.s. "
+                "Start MT5 Bybit TradFi for exact prices.",
+                bybit_symbol,
+            )
             return bybit_bars
     except Exception:
         logger.warning(
@@ -2313,19 +2330,42 @@ def _fetch_oil_bars(
             exc_info=True,
         )
 
-    if len(yahoo_bars) >= 24:
-        return yahoo_bars
-    raise RuntimeError(f"Oil bars unavailable ({yahoo_symbol}/{bybit_symbol})")
+    try:
+        yahoo_bars = _fetch_yahoo_oil_bars(
+            yahoo_symbol, interval_minutes=interval_minutes, limit=limit,
+        )
+        if len(yahoo_bars) >= 24:
+            set_oil_price_source(f"Yahoo {yahoo_symbol} (не UKOUSD.s Cash)")
+            logger.info(
+                "Oil bars fallback Yahoo %s (MT5/Bybit unavailable)",
+                yahoo_symbol,
+            )
+            return yahoo_bars
+    except Exception:
+        logger.warning("Yahoo oil %s failed", yahoo_symbol, exc_info=True)
+
+    raise RuntimeError(f"Oil bars unavailable ({yahoo_symbol}/{bybit_symbol}/MT5)")
 
 
 async def fetch_oil_last_prices() -> dict[str, float]:
     """Быстрый тик для level-alerts — ключи UKOUSD / USOIL."""
+    from .oil_mt5 import OIL_MT5_BRENT, OIL_MT5_WTI, fetch_mt5_oil_tick
+
     out: dict[str, float] = {}
+    mt5_brent = await asyncio.to_thread(fetch_mt5_oil_tick, OIL_MT5_BRENT)
+    if mt5_brent and mt5_brent > 0:
+        out["UKOUSD"] = float(mt5_brent)
+    mt5_wti = await asyncio.to_thread(fetch_mt5_oil_tick, OIL_MT5_WTI)
+    if mt5_wti and mt5_wti > 0:
+        out["USOIL"] = float(mt5_wti)
+
     pairs = (
         ("UKOUSD", OIL_BRENT_YAHOO, OIL_BRENT_BYBIT),
         ("USOIL", OIL_WTI_YAHOO, OIL_WTI_BYBIT),
     )
     for label, ysym, bsym in pairs:
+        if label in out:
+            continue
         try:
             bars = await asyncio.to_thread(
                 _fetch_oil_bars,
@@ -2384,7 +2424,7 @@ async def build_oil_analysis_bundle(
     include_brent: bool = True,
     include_wti: bool = True,
 ) -> OilAnalysisBundle | None:
-    """Brent (UKOUSD ≈ BZ=F) + WTI (USOIL ≈ CL=F)."""
+    """Brent (UKOUSD.s ≈ Bybit BZUSDT) + WTI (USOIL ≈ Bybit CLUSDT)."""
     im = max(5, min(60, int(interval_minutes)))
 
     brent_bars: list[KlineBar] = []
@@ -2400,7 +2440,7 @@ async def build_oil_analysis_bundle(
                 interval_minutes=im,
             )
         except Exception:
-            logger.warning("Brent UKOUSD/BZ=F fetch failed", exc_info=True)
+            logger.warning("Brent UKOUSD/BZUSDT fetch failed", exc_info=True)
             return None
         if len(brent_bars) < 24:
             return None
@@ -3019,10 +3059,17 @@ def format_oil_market_digest(
     bars: list[KlineBar] | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
+    from .oil_mt5 import get_oil_price_source
+
+    src = get_oil_price_source()
+    src_line = f"<i>Источник цены: <b>{src}</b></i>" if src else (
+        "<i>Источник: MT5 UKOUSD.s (если терминал запущен) или fallback</i>"
+    )
     lines = [
         "📊 <b>Нефть · разбор</b>",
-        f"<i>Bybit TradFi · <b>UKOUSD.s</b> · TF {interval_minutes}m</i>",
-        "<i>Смотри только цену на Bybit. Другие графики (TV/Hyperliquid) — не для входа.</i>",
+        f"<i>Bybit TradFi · <b>UKOUSD.s</b> Brent Crude Oil Cash · TF {interval_minutes}m</i>",
+        src_line,
+        "<i>Вход только по UKOUSD.s на Bybit. TV/Hyperliquid/Yahoo — не для входа.</i>",
         "",
     ]
     if forecast is not None:

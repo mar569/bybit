@@ -616,7 +616,7 @@ def test_oil_micro_signal_short_on_dump():
     text = format_oil_micro_signal(sig)
     assert "SHORT" in text
     assert "TP" in text
-    assert "текущей" in text or "прокси" in text
+    assert "текущей" in text or "UKOUSD.s" in text
     assert "UKOUSD.s" in text
 
 
@@ -1039,3 +1039,81 @@ def test_fastlane_bounce_hint_after_spike():
     # last close 81.5 vs earlier 80 → ~1.875%
     note = _price_move_note(spiked)
     assert "опережает" in note or "сдвинулась" in note
+
+
+def test_fetch_oil_bars_prefers_mt5_ukousd(monkeypatch):
+    """Приоритет — MT5 UKOUSD.s (Brent Cash), не BZUSDT."""
+    from bot.oil_monitor import _fetch_oil_bars, KlineBar
+    from bot import oil_mt5
+
+    mt5_bars = [
+        KlineBar(open_time=float(i), open=84.5, high=84.8, low=84.3, close=84.7, volume=1.0)
+        for i in range(30)
+    ]
+    bybit = [
+        KlineBar(open_time=float(i), open=83.0, high=83.2, low=82.8, close=83.1, volume=1.0)
+        for i in range(30)
+    ]
+
+    monkeypatch.setattr(oil_mt5, "fetch_mt5_oil_bars", lambda *a, **k: mt5_bars)
+    monkeypatch.setattr("bot.oil_monitor._fetch_bybit_oil_bars", lambda *a, **k: bybit)
+
+    bars = _fetch_oil_bars(
+        yahoo_symbol="BZ=F",
+        bybit_symbol="BZUSDT",
+        interval_minutes=5,
+        limit=30,
+    )
+    assert abs(bars[-1].close - 84.7) < 1e-9
+
+
+def test_fetch_oil_bars_prefers_bybit_without_yahoo_shift(monkeypatch):
+    """Без MT5: Bybit BZUSDT as-is; не сдвигаем к Yahoo ~90."""
+    from bot.oil_monitor import _fetch_oil_bars, KlineBar
+    from bot import oil_mt5
+
+    bybit = [
+        KlineBar(open_time=float(i), open=83.0, high=83.2, low=82.8, close=83.1, volume=1.0)
+        for i in range(30)
+    ]
+    yahoo = [
+        KlineBar(open_time=float(i), open=90.0, high=90.2, low=89.8, close=90.1, volume=1.0)
+        for i in range(30)
+    ]
+    monkeypatch.setattr(oil_mt5, "fetch_mt5_oil_bars", lambda *a, **k: [])
+    monkeypatch.setattr("bot.oil_monitor._fetch_bybit_oil_bars", lambda *a, **k: bybit)
+    monkeypatch.setattr("bot.oil_monitor._fetch_yahoo_oil_bars", lambda *a, **k: yahoo)
+
+    bars = _fetch_oil_bars(
+        yahoo_symbol="BZ=F",
+        bybit_symbol="BZUSDT",
+        interval_minutes=5,
+        limit=30,
+    )
+    assert abs(bars[-1].close - 83.1) < 1e-9
+    assert abs(bars[-1].close - 90.1) > 1.0
+
+
+def test_fetch_oil_bars_yahoo_fallback(monkeypatch):
+    from bot.oil_monitor import _fetch_oil_bars, KlineBar
+    from bot import oil_mt5
+
+    yahoo = [
+        KlineBar(open_time=float(i), open=90.0, high=90.2, low=89.8, close=90.1, volume=1.0)
+        for i in range(30)
+    ]
+
+    def _bybit_fail(*_a, **_k):
+        raise RuntimeError("bybit down")
+
+    monkeypatch.setattr(oil_mt5, "fetch_mt5_oil_bars", lambda *a, **k: [])
+    monkeypatch.setattr("bot.oil_monitor._fetch_bybit_oil_bars", _bybit_fail)
+    monkeypatch.setattr("bot.oil_monitor._fetch_yahoo_oil_bars", lambda *a, **k: yahoo)
+
+    bars = _fetch_oil_bars(
+        yahoo_symbol="BZ=F",
+        bybit_symbol="BZUSDT",
+        interval_minutes=5,
+        limit=30,
+    )
+    assert abs(bars[-1].close - 90.1) < 1e-9

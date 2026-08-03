@@ -4623,7 +4623,8 @@ class TelegramBot:
         )
         return (
             "<b>🛢 Нефть · только Bybit TradFi</b>\n"
-            "Инструмент: <b>UKOUSD.s</b> (Brent cash). Другие графики/биржи не смотри.\n"
+            "Инструмент: <b>UKOUSD.s</b> — Brent Crude Oil Cash (Bybit TradFi).\n"
+            "Цена: <b>MT5 UKOUSD.s</b> (тот же терминал). Без MT5 — fallback BZUSDT ≠ Cash.\n"
             f"Канал: {chat_line}\n"
             f"{chart_line}\n"
             f"Статус: <b>{'ON' if s.oil_news_enabled else 'OFF'}</b>\n\n"

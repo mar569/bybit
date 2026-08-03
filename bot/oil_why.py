@@ -333,7 +333,8 @@ def build_oil_why_report(
 
     careful.append(
         "Мы не видим живую ленту сделок на большой бирже нефти (ICE). "
-        "Цена на Bybit (UKOUSD) — это CFD, иногда на минуты чуть отличается от Brent."
+        "График бота старается брать MT5 <b>UKOUSD.s</b> (Brent Crude Oil Cash) — "
+        "тот же инструмент, что в Bybit TradFi. Без MT5 будет другой feed (не Cash)."
     )
 
     # --- суть ---
