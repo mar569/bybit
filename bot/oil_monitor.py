@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from .bybit_klines import BYBIT_KLINE_URL, KlineBar
 from .oil_level_watcher import OilLevelWatcher
@@ -870,23 +870,44 @@ def _google_news_undated(url: str) -> bool:
 
 
 def oil_news_freshness_weight(published_ts: float | None, *, now: float | None = None) -> float:
-    """Вес сюжета для bias/прогноза: свежие сильнее, >24ч почти не влияют."""
+    """Вес сюжета: импульс ≤~1ч, дальше быстро глохнет (фон, не вход)."""
     if published_ts is None or published_ts <= 0:
         return 0.0
     age_h = ((now if now is not None else time.time()) - published_ts) / 3600.0
     if age_h < 0:
         return 0.0
-    if age_h <= 2.0:
+    if age_h <= 0.5:
         return 1.0
-    if age_h <= 6.0:
-        return 0.85
-    if age_h <= 12.0:
-        return 0.6
-    if age_h <= 24.0:
+    if age_h <= 1.0:
+        return 0.75
+    if age_h <= 1.5:
         return 0.35
-    if age_h <= 48.0:
+    if age_h <= 4.0:
         return 0.15
+    if age_h <= 12.0:
+        return 0.08
+    if age_h <= 24.0:
+        return 0.04
+    if age_h <= 48.0:
+        return 0.02
     return 0.0
+
+
+def oil_news_freshest_age_hours(
+    items: Sequence[Any] | None,
+    *,
+    now: float | None = None,
+) -> float | None:
+    """Возраст самого свежего заголовка в часах; None если нет дат."""
+    if not items:
+        return None
+    t0 = now if now is not None else time.time()
+    ages: list[float] = []
+    for it in items:
+        ts = float(getattr(it, "published_ts", 0) or 0)
+        if ts > 0:
+            ages.append(max(0.0, (t0 - ts) / 3600.0))
+    return min(ages) if ages else None
 
 
 def _clean_title(title: str) -> str:
@@ -3845,7 +3866,7 @@ class OilMonitorEngine:
             _price_move_note,
         )
 
-        max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 4.0))
+        max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 1.5))
         min_score = int(getattr(settings, "oil_fastlane_min_score", 9))
         max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 1))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
@@ -4232,7 +4253,7 @@ class OilMonitorEngine:
             # Жёсткий свежий сбор: fast-lane ≤4ч + обычные ≤8ч (не старый кэш)
             fresh_h = 8.0
             flash_h = min(
-                4.0, float(getattr(settings, "oil_fastlane_max_age_hours", 4.0))
+                1.5, float(getattr(settings, "oil_fastlane_max_age_hours", 1.5))
             )
             cutoff = time.time() - fresh_h * 3600.0
             try:
@@ -5005,6 +5026,9 @@ class OilMonitorEngine:
             apply_session_filter=bool(getattr(settings, "oil_entry_session_filter", True)),
             apply_chase_filter=bool(getattr(settings, "oil_entry_chase_filter", True)),
             require_close_break=bool(getattr(settings, "oil_entry_require_close", True)),
+            news_entry_max_age_hours=float(
+                getattr(settings, "oil_news_entry_max_age_hours", 1.0)
+            ),
         )
         if not setup_passes_gate(setup, min_quality=min_q):
             return 0

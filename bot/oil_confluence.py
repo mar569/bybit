@@ -1,6 +1,7 @@
 """Confluence-setup UKOUSD: все факторы → редкий LONG/SHORT в ручной TA."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
@@ -80,6 +81,7 @@ def build_oil_confluence_setup(
     apply_session_filter: bool = True,
     apply_chase_filter: bool = True,
     require_close_break: bool = True,
+    news_entry_max_age_hours: float = 1.0,
 ) -> OilConfluenceSetup | None:
     """Голосование факторов. None / WAIT-side если нет сильного края."""
     from .oil_entry_filters import (
@@ -136,15 +138,40 @@ def build_oil_confluence_setup(
     elif forecast is not None:
         factors.append(f"прогноз WAIT · {fc_scen or 'range'}")
 
-    # News bias
+    # News bias: очки только если импульс ещё «горячий» (≤~1ч)
+    news_age_h = None
+    if news_items:
+        ages = []
+        now_ts = time.time()
+        for it in news_items:
+            ts = float(getattr(it, "published_ts", 0) or 0)
+            if ts > 0:
+                ages.append(max(0.0, (now_ts - ts) / 3600.0))
+        if ages:
+            news_age_h = min(ages)
+    news_entry_max_h = float(news_entry_max_age_hours)
+    if news_items and news_age_h is not None:
+        news_for_entry = news_age_h <= news_entry_max_h
+        age_note = f"{news_age_h:.1f}ч"
+    else:
+        # Нет дат в батче — доверяем уже посчитанному bias (тесты / fallback)
+        news_for_entry = True
+        age_note = "bias"
+
     if news == "bullish":
-        add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
-        long_pts += add
-        factors.append(f"новости↑ {news_w:+.1f}/10")
+        if news_for_entry:
+            add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
+            long_pts += add
+            factors.append(f"новости↑ {news_w:+.1f}/10 · {age_note}")
+        else:
+            factors.append(f"новости↑ фон ({age_note}) — без очков входа")
     elif news == "bearish":
-        add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
-        short_pts += add
-        factors.append(f"новости↓ {news_w:+.1f}/10")
+        if news_for_entry:
+            add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
+            short_pts += add
+            factors.append(f"новости↓ {news_w:+.1f}/10 · {age_note}")
+        else:
+            factors.append(f"новости↓ фон ({age_note}) — без очков входа")
     elif news == "mixed":
         factors.append("новости mixed")
     elif news_bias is not None:

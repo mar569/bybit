@@ -680,7 +680,8 @@ def test_resolve_oil_news_fresh_same_day_url():
     url = f"https://example.com/{today.year:04d}/{today.month:02d}/{today.day:02d}/oil-update/"
     ts = resolve_oil_news_published_ts(rss_pub="", url=url)
     assert ts is not None
-    assert oil_news_is_fresh(ts, max_age_hours=18)
+    # URL-дата = 00:00 UTC дня → к вечеру уже >18ч; достаточно «сегодня не 2 суток»
+    assert oil_news_is_fresh(ts, max_age_hours=36)
 
 
 def test_oil_news_hard_cap_two_days():
@@ -693,9 +694,15 @@ def test_oil_news_hard_cap_two_days():
     assert not oil_news_is_fresh(now - 50 * 3600, max_age_hours=100)
     assert not oil_news_is_fresh(now - 49 * 3600, max_age_hours=48)
     # Свежий импульс весит больше старого фона
+    assert oil_news_freshness_weight(now - 0.4 * 3600) == 1.0
+    assert oil_news_freshness_weight(now - 0.4 * 3600) > oil_news_freshness_weight(
+        now - 2 * 3600
+    )
     assert oil_news_freshness_weight(now - 1 * 3600) > oil_news_freshness_weight(
         now - 30 * 3600
     )
+    # После ~1.5ч вес уже слабый (фон, не вход)
+    assert oil_news_freshness_weight(now - 2 * 3600) <= 0.35
     assert oil_news_freshness_weight(now - 50 * 3600) == 0.0
 
 

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 78
+SETTINGS_VERSION = 79
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -527,7 +527,7 @@ class ScannerSettings:
     oil_news_enabled: bool = True
     oil_news_interval_seconds: int = 180
     oil_news_max_per_poll: int = 1
-    oil_news_max_age_hours: float = 24.0
+    oil_news_max_age_hours: float = 12.0
     oil_digest_enabled: bool = True
     oil_digest_interval_hours: float = 4.0
     oil_chart_enabled: bool = True
@@ -543,7 +543,9 @@ class ScannerSettings:
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
     oil_fastlane_enabled: bool = True
     oil_fastlane_interval_seconds: int = 45
-    oil_fastlane_max_age_hours: float = 4.0
+    oil_fastlane_max_age_hours: float = 1.5
+    # Новости дают очки входа в confluence только пока ≤ этого возраста
+    oil_news_entry_max_age_hours: float = 1.0
     oil_fastlane_min_score: int = 9
     oil_fastlane_max_per_poll: int = 1
     # ИИ-разбор только важных (Трамп/Бессент/Ормуз), короткий текст
@@ -1130,7 +1132,7 @@ class ScannerSettings:
             oil_news_enabled=bool(base.get("oil_news_enabled", True)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
-            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 24.0)),
+            oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 12.0)),
             oil_digest_enabled=bool(base.get("oil_digest_enabled", True)),
             oil_digest_interval_hours=float(base.get("oil_digest_interval_hours", 4.0)),
             oil_chart_enabled=bool(base.get("oil_chart_enabled", True)),
@@ -1148,7 +1150,10 @@ class ScannerSettings:
                 base.get("oil_fastlane_interval_seconds", 45)
             ),
             oil_fastlane_max_age_hours=float(
-                base.get("oil_fastlane_max_age_hours", 4.0)
+                base.get("oil_fastlane_max_age_hours", 1.5)
+            ),
+            oil_news_entry_max_age_hours=float(
+                base.get("oil_news_entry_max_age_hours", 1.0)
             ),
             oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 9)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 1)),
@@ -1879,6 +1884,15 @@ class SettingsManager:
                     merged["oil_setup_cooldown_seconds"] = 10800
                 merged["oil_setup_to_news_chat"] = True
                 merged["oil_micro_signals_enabled"] = False
+            if version < 79:
+                # News impulse: flash ≤90м, entry points ≤1ч, chat ≤12ч
+                merged["oil_fastlane_max_age_hours"] = min(
+                    1.5, float(merged.get("oil_fastlane_max_age_hours", 1.5) or 1.5)
+                )
+                merged["oil_news_max_age_hours"] = min(
+                    12.0, float(merged.get("oil_news_max_age_hours", 12) or 12)
+                )
+                merged["oil_news_entry_max_age_hours"] = 1.0
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

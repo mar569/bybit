@@ -293,3 +293,38 @@ def test_pro_format_card_title():
     text = format_oil_confluence_setup(setup)
     assert "ПРО" in text
     assert "Чтение графика" in text or "План сделки" in text
+
+
+def test_stale_news_no_entry_points():
+    import time
+
+    stale = [
+        SimpleNamespace(
+            title="Iran Hormuz",
+            published_ts=time.time() - 3 * 3600,
+            impact="bullish",
+            source="Reuters",
+        )
+    ]
+    setup = build_oil_confluence_setup(
+        _snap(price=85.55, support=85.5, resistance=88.0, verdict="WAIT", confidence=3),
+        TAAnalysisResult(verdict="WAIT", verdict_confidence=3),
+        news_bias=OilNewsBias(
+            bias="bullish",
+            weighted_score=5.0,
+            summary_ru="up",
+            how_to_use_ru="long",
+            top_catalyst="Hormuz",
+        ),
+        news_items=stale,
+        ta_verdict_raw="WAIT",
+        ta_confidence_raw=3,
+        min_quality=7,
+        near_pct=0.35,
+        news_entry_max_age_hours=1.0,
+    )
+    # Без TA/прогноза и без очков новостей — не должно пройти как A+ LONG
+    assert not setup_passes_gate(setup, min_quality=7)
+    if setup is not None:
+        joined = " ".join(setup.factors_ru)
+        assert "без очков входа" in joined
