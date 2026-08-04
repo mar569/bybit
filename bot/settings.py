@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 72
+SETTINGS_VERSION = 76
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -542,11 +542,23 @@ class ScannerSettings:
     oil_news_critical_min_score: int = 5
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
     oil_fastlane_enabled: bool = True
-    oil_fastlane_interval_seconds: int = 60
+    oil_fastlane_interval_seconds: int = 45
     oil_fastlane_max_age_hours: float = 4.0
-    oil_fastlane_min_score: int = 8
-    oil_fastlane_max_per_poll: int = 2
-    oil_fastlane_gemini: bool = False
+    oil_fastlane_min_score: int = 9
+    oil_fastlane_max_per_poll: int = 1
+    # ИИ-разбор только важных (Трамп/Бессент/Ормуз), короткий текст
+    oil_fastlane_gemini: bool = True
+    oil_fastlane_ai_min_score: int = 11
+    # Прямые RSS FinancialJuice / ForexLive (раньше Google News)
+    oil_wire_feeds_enabled: bool = True
+    # Анти-спам: Jaccard похожести заголовков (0.5–0.65)
+    oil_dedupe_similarity: float = 0.55
+    # Обвал цены без новостей — must для защиты депозита
+    oil_crash_alerts_enabled: bool = True
+    oil_crash_pct_15m: float = 1.5
+    oil_crash_pct_30m: float = 3.0
+    oil_crash_pct_60m: float = 4.0
+    oil_crash_cooldown_seconds: int = 600
     # Ормуз: пуш в Новостник при важном изменении AIS/статуса
     oil_hormuz_alerts_enabled: bool = True
     oil_hormuz_interval_seconds: int = 900
@@ -584,6 +596,11 @@ class ScannerSettings:
     oil_micro_lookback_bars: int = 4
     oil_micro_cooldown_seconds: int = 1200
     oil_micro_max_per_hour: int = 3
+    # Качество входа: сессия / anti-chase / close за уровнем
+    oil_entry_session_filter: bool = True
+    oil_session_block_minutes: float = 20.0
+    oil_entry_chase_filter: bool = True
+    oil_entry_require_close: bool = True
 
     # Аналитический чат — сильные монеты, liq от $10k, движение цены 2–3%
     analysis_enabled: bool = False
@@ -1125,14 +1142,22 @@ class ScannerSettings:
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 5)),
             oil_fastlane_enabled=bool(base.get("oil_fastlane_enabled", True)),
             oil_fastlane_interval_seconds=int(
-                base.get("oil_fastlane_interval_seconds", 60)
+                base.get("oil_fastlane_interval_seconds", 45)
             ),
             oil_fastlane_max_age_hours=float(
                 base.get("oil_fastlane_max_age_hours", 4.0)
             ),
-            oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 8)),
-            oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 2)),
-            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", False)),
+            oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 9)),
+            oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 1)),
+            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
+            oil_fastlane_ai_min_score=int(base.get("oil_fastlane_ai_min_score", 11)),
+            oil_wire_feeds_enabled=bool(base.get("oil_wire_feeds_enabled", True)),
+            oil_dedupe_similarity=float(base.get("oil_dedupe_similarity", 0.55)),
+            oil_crash_alerts_enabled=bool(base.get("oil_crash_alerts_enabled", True)),
+            oil_crash_pct_15m=float(base.get("oil_crash_pct_15m", 1.5)),
+            oil_crash_pct_30m=float(base.get("oil_crash_pct_30m", 3.0)),
+            oil_crash_pct_60m=float(base.get("oil_crash_pct_60m", 4.0)),
+            oil_crash_cooldown_seconds=int(base.get("oil_crash_cooldown_seconds", 600)),
             oil_hormuz_alerts_enabled=bool(base.get("oil_hormuz_alerts_enabled", True)),
             oil_hormuz_interval_seconds=int(
                 base.get("oil_hormuz_interval_seconds", 900)
@@ -1177,6 +1202,10 @@ class ScannerSettings:
             oil_micro_lookback_bars=int(base.get("oil_micro_lookback_bars", 4)),
             oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1200)),
             oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 3)),
+            oil_entry_session_filter=bool(base.get("oil_entry_session_filter", True)),
+            oil_session_block_minutes=float(base.get("oil_session_block_minutes", 20.0)),
+            oil_entry_chase_filter=bool(base.get("oil_entry_chase_filter", True)),
+            oil_entry_require_close=bool(base.get("oil_entry_require_close", True)),
             analysis_enabled=bool(base.get("analysis_enabled", False)),
             analysis_min_liq_usd=float(base.get("analysis_min_liq_usd", 25_000.0)),
             analysis_major_min_liq_usd=float(
@@ -1790,6 +1819,42 @@ class SettingsManager:
                 # «Спросить ИИ» и ручной AI важнее. Включить снова кнопкой в панели.
                 merged["oil_fastlane_gemini"] = False
                 merged["oil_forecast_gemini"] = False
+            if version < 73:
+                merged.setdefault("oil_entry_session_filter", True)
+                merged.setdefault("oil_session_block_minutes", 20.0)
+                merged.setdefault("oil_entry_chase_filter", True)
+                merged.setdefault("oil_entry_require_close", True)
+            if version < 74:
+                # После обвала −7%: crash по цене + FJ/ForexLive + быстрее flash
+                merged["oil_wire_feeds_enabled"] = True
+                merged["oil_crash_alerts_enabled"] = True
+                merged.setdefault("oil_crash_pct_15m", 1.5)
+                merged.setdefault("oil_crash_pct_30m", 3.0)
+                merged.setdefault("oil_crash_pct_60m", 4.0)
+                merged.setdefault("oil_crash_cooldown_seconds", 600)
+                merged["oil_fastlane_interval_seconds"] = min(
+                    45, int(merged.get("oil_fastlane_interval_seconds", 45) or 45)
+                )
+                merged["oil_fastlane_min_score"] = min(
+                    7, int(merged.get("oil_fastlane_min_score", 7) or 7)
+                )
+                merged["oil_fastlane_gemini"] = False
+            if version < 75:
+                # Анти-спам: только market-moving, 1 flash за poll, выше score
+                merged["oil_fastlane_max_per_poll"] = 1
+                merged["oil_news_max_per_poll"] = 1
+                merged["oil_fastlane_min_score"] = max(
+                    9, int(merged.get("oil_fastlane_min_score", 9) or 9)
+                )
+                merged["oil_news_critical_min_score"] = max(
+                    6, int(merged.get("oil_news_critical_min_score", 6) or 6)
+                )
+                merged.setdefault("oil_dedupe_similarity", 0.55)
+            if version < 76:
+                # Короткие алерты + ИИ только на Трамп/Бессент/Ормуз
+                merged["oil_fastlane_gemini"] = True
+                merged.setdefault("oil_fastlane_ai_min_score", 11)
+                merged["oil_fastlane_max_per_poll"] = 1
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

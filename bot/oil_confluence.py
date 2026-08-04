@@ -75,8 +75,19 @@ def build_oil_confluence_setup(
     ta_confidence_raw: int | None = None,
     min_quality: int = 7,
     near_pct: float = 0.35,
+    bars: Sequence[Any] | None = None,
+    session_block_minutes: float = 20.0,
+    apply_session_filter: bool = True,
+    apply_chase_filter: bool = True,
+    require_close_break: bool = True,
 ) -> OilConfluenceSetup | None:
     """Голосование факторов. None / WAIT-side если нет сильного края."""
+    from .oil_entry_filters import (
+        is_session_open_fragile,
+        last_bar_closes_beyond,
+        measure_recent_move,
+    )
+
     px = float(getattr(snap, "price", 0) or 0)
     if px <= 0:
         return None
@@ -323,6 +334,62 @@ def build_oil_confluence_setup(
         near_level=near_level,
         price=px,
     )
+
+    # Сессия / chase / close за уровнем
+    break_level = None
+    need_close = False
+    if side == "LONG" and near_bo and bo:
+        break_level = float(bo)
+        need_close = bool(require_close_break)
+    elif side == "SHORT" and near_bd and bd:
+        break_level = float(bd)
+        need_close = bool(require_close_break)
+
+    if apply_session_filter and is_session_open_fragile(
+        block_minutes=session_block_minutes,
+    ):
+        return replace(
+            setup,
+            side="WAIT",
+            trigger_ru=(
+                f"Bias {side}, но открытие сессии (<{session_block_minutes:.0f}м) — "
+                f"ждать: {trigger}"
+            ),
+            quality=min(quality, int(min_quality) - 1),
+            factors_ru=tuple(list(factors[:7]) + ["фильтр: открытие сессии"]),
+        )
+
+    move = measure_recent_move(bars, interval_minutes=interval_minutes)
+    if apply_chase_filter and move and move.priced_in and not near_level:
+        # Уже уехали в сторону сигнала — только WAIT у уровня
+        chased = (
+            (side == "LONG" and (move.move_30m_pct >= 0.55 or move.move_60m_pct >= 0.9))
+            or (side == "SHORT" and (move.move_30m_pct <= -0.55 or move.move_60m_pct <= -0.9))
+        )
+        if chased:
+            return replace(
+                setup,
+                side="WAIT",
+                trigger_ru=(
+                    f"Bias {side}, но {move.note_ru or 'ход уже сделан'} — "
+                    f"ждать уровень: {trigger}"
+                ),
+                quality=min(quality, int(min_quality) - 1),
+                factors_ru=tuple(list(factors[:7]) + ["фильтр: не chase"]),
+            )
+
+    if need_close and break_level is not None:
+        if not last_bar_closes_beyond(bars, side=side.lower(), level=break_level):
+            return replace(
+                setup,
+                side="WAIT",
+                trigger_ru=(
+                    f"Bias {side}: ждать close за {fmt_price(break_level)} "
+                    f"(сейчас только касание)"
+                ),
+                quality=min(quality, int(min_quality) - 1),
+                factors_ru=tuple(list(factors[:7]) + ["фильтр: нет close-триггера"]),
+            )
 
     # High-conviction gate: quality + (near level OR bounce aligned OR scalp open)
     ready = (

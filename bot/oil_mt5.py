@@ -3,7 +3,10 @@
 Публичного API у Bybit для CFD UKOUSD.s нет. Единственный точный источник —
 локальный терминал MT5, залогиненный в Bybit TradFi (как на вашем графике).
 
-Требования (Windows):
+Важно: MetaTrader5 работает только на Windows. В Docker/Linux MT5 недоступен —
+бот использует Bybit BZUSDT/CLUSDT как fallback.
+
+Требования (Windows host, не Docker Linux):
   1) Установить MetaTrader 5 от Bybit TradFi и войти в аккаунт
   2) pip install MetaTrader5
   3) (опц.) MT5_TERMINAL_PATH / MT5_LOGIN / MT5_PASSWORD / MT5_SERVER в .env
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any
 
 from .bybit_klines import KlineBar
@@ -33,6 +37,7 @@ _TIMEFRAME_MAP = {
 
 # Последний успешный источник (для подписей в чате)
 _last_source: str = ""
+_mt5_skip_logged = False
 
 
 def get_oil_price_source() -> str:
@@ -44,7 +49,14 @@ def set_oil_price_source(source: str) -> None:
     _last_source = source
 
 
+def mt5_supported_platform() -> bool:
+    """MetaTrader5 Python package — только Windows (не Linux Docker)."""
+    return sys.platform.startswith("win")
+
+
 def mt5_available() -> bool:
+    if not mt5_supported_platform():
+        return False
     try:
         import MetaTrader5 as mt5  # noqa: F401
         return True
@@ -70,10 +82,23 @@ def _ensure_symbol_visible(mt5: Any, symbol: str) -> bool:
 
 
 def _initialize_mt5() -> Any | None:
+    global _mt5_skip_logged
+    if not mt5_supported_platform():
+        if not _mt5_skip_logged:
+            logger.info(
+                "MT5 UKOUSD.s unavailable on %s (Docker/Linux). "
+                "Using Bybit BZUSDT/CLUSDT fallback — not Brent Cash.",
+                sys.platform,
+            )
+            _mt5_skip_logged = True
+        return None
+
     try:
         import MetaTrader5 as mt5
     except ImportError:
-        logger.debug("MetaTrader5 package not installed")
+        if not _mt5_skip_logged:
+            logger.info("MetaTrader5 package not installed — oil fallback to Bybit perps")
+            _mt5_skip_logged = True
         return None
 
     path = (os.getenv("MT5_TERMINAL_PATH") or "").strip() or None
@@ -96,7 +121,9 @@ def _initialize_mt5() -> Any | None:
     ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
     if not ok:
         err = mt5.last_error()
-        logger.info("MT5 initialize failed: %s", err)
+        if not _mt5_skip_logged:
+            logger.info("MT5 initialize failed: %s — oil fallback to Bybit perps", err)
+            _mt5_skip_logged = True
         return None
     return mt5
 
@@ -119,7 +146,6 @@ def fetch_mt5_oil_bars(
             return []
 
         if not _ensure_symbol_visible(mt5, symbol):
-            # иногда брокер отдаёт без .s
             alt = symbol.replace(".s", "") if symbol.endswith(".s") else f"{symbol}.s"
             if alt != symbol and _ensure_symbol_visible(mt5, alt):
                 symbol = alt

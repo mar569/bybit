@@ -2041,7 +2041,16 @@ class TelegramBot:
         chat_id = self.config.oil_news_chat_id
         if chat_id is None:
             return False
-        return await self._send_to_chat(chat_id, message, None, is_priority=False)
+        priority = bool(
+            message
+            and (
+                message.lstrip().startswith("‼️")
+                or message.lstrip().startswith("🚨")
+                or "ОБВАЛ UKOUSD" in message
+                or "СКАЧОК UKOUSD" in message
+            )
+        )
+        return await self._send_to_chat(chat_id, message, None, is_priority=priority)
 
     def _oil_chart_chat_id(self) -> int | None:
         """Графики нефти → чат ручного TA; fallback на oil-чат."""
@@ -4624,7 +4633,7 @@ class TelegramBot:
         return (
             "<b>🛢 Нефть · только Bybit TradFi</b>\n"
             "Инструмент: <b>UKOUSD.s</b> — Brent Crude Oil Cash (Bybit TradFi).\n"
-            "Цена: <b>MT5 UKOUSD.s</b> (тот же терминал). Без MT5 — fallback BZUSDT ≠ Cash.\n"
+            "Цена: <b>MT5 UKOUSD.s</b> на Windows. В Docker/Linux — Bybit BZUSDT (не Cash).\n"
             f"Канал: {chat_line}\n"
             f"{chart_line}\n"
             f"Статус: <b>{'ON' if s.oil_news_enabled else 'OFF'}</b>\n\n"
@@ -4638,9 +4647,14 @@ class TelegramBot:
             f"свежесть ≤<b>{getattr(s, 'oil_news_max_age_hours', 18):g}ч</b> · "
             f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
             f"Fast-lane ‼️: <b>{'ON' if getattr(s, 'oil_fastlane_enabled', True) else 'OFF'}</b> · "
-            f"каждые <b>{getattr(s, 'oil_fastlane_interval_seconds', 60)}с</b> · "
+            f"каждые <b>{getattr(s, 'oil_fastlane_interval_seconds', 45)}с</b> · "
             f"score≥<b>{getattr(s, 'oil_fastlane_min_score', 7)}</b> · "
-            f"Gemini <b>{'ON' if getattr(s, 'oil_fastlane_gemini', True) else 'OFF'}</b>\n"
+            f"Gemini <b>{'ON' if getattr(s, 'oil_fastlane_gemini', True) else 'OFF'}</b> "
+            f"(ИИ≥{getattr(s, 'oil_fastlane_ai_min_score', 11)})\n"
+            f"Wire FJ/FXLive: <b>{'ON' if getattr(s, 'oil_wire_feeds_enabled', True) else 'OFF'}</b> · "
+            f"Crash-алерт: <b>{'ON' if getattr(s, 'oil_crash_alerts_enabled', True) else 'OFF'}</b> "
+            f"(≥{getattr(s, 'oil_crash_pct_15m', 1.5):g}%/15м · "
+            f"≥{getattr(s, 'oil_crash_pct_30m', 3):g}%/30м)\n"
             f"Сигналы входа: <b>{'ON' if getattr(s, 'oil_entry_signals_enabled', True) else 'OFF'}</b> "
             f"(мастер: уровни/micro/bounce/confluence)\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "

@@ -135,6 +135,9 @@ _BEAR_NEWS = frozenset({
     "pauses strike", "pause strike", "suspends strike", "suspend attack",
     "abandons attack", "scraps strike", "no strike", "won't strike",
     "отмен", "отказ от удар", "струсил", "приостан", "деэскал",
+    # Бессент / Treasury: риторика сделки / открытия пролива → вниз
+    "open hormuz", "reopen hormuz", "open the strait", "energy prices to settle",
+    "settle down", "deal tomorrow", "iran deal",
 })
 # Отрицание reopen/сделки по Ормузу — эскалация риска поставок (не медвежий reopen).
 _DENY_REOPEN_PHRASES: tuple[str, ...] = (
@@ -190,6 +193,9 @@ _CRITICAL_TERMS: dict[str, int] = {
     "тегеран": 3,
     "trump": 3,
     "трамп": 3,
+    "truth social": 4,
+    "bessent": 5,
+    "treasury secretary": 4,
     "sanction": 3,
     "санкц": 3,
     "opec": 4,
@@ -249,6 +255,9 @@ _PRIORITY_THEMES = frozenset({
 NEWS_QUERIES_EN: tuple[str, ...] = (
     "Iran oil Trump sanctions Hormuz when:12h",
     "Trump Iran oil when:12h",
+    "Trump Truth Social OR tweet Iran OR Hormuz when:12h",
+    "Bessent Treasury Iran OR Hormuz OR oil OR energy deal when:12h",
+    "Iran reopen OR refuse OR deny Hormuz strait when:12h",
     "US Iran crude oil sanctions when:12h",
     "EIA crude oil inventory stocks when:12h",
     "OPEC oil production quota when:1d",
@@ -273,6 +282,8 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "John Kemp Reuters oil when:1d",
     "war premium oil unwind OR Hormuz deal oil prices when:12h",
     "Trump TACO OR cancels Iran strike OR pauses attack oil when:12h",
+    "Trump called off OR delays Iran strike OR Truth Social Hormuz when:12h",
+    "Trump Iran negotiations OR last chance OR Hormuz reopen when:12h",
     # Иранская гос. линия (Fars / IRGC-adjacent) — важно для Ормуза
     "site:farsnews.ir Hormuz OR Strait OR Iran oil OR tanker when:1d",
     "site:farsnews.ir Iran refuse OR reject OR will not negotiate OR reopen Hormuz when:1d",
@@ -429,15 +440,136 @@ def is_critical_oil_news(item: OilNewsItem, min_score: int = 5) -> bool:
     # Старше 2 суток — не «критично» для пуша (рынок уже отыграл)
     if not oil_news_is_fresh(getattr(item, "published_ts", None), max_age_hours=48.0):
         return False
+    # Только то, что реально двигает нефть — не «ещё одна похожая статья»
+    if not is_oil_market_moving_headline(item.title):
+        return False
     score = news_critical_score(item.title, source=item.source)
     # Аналитика без гео/запасов — выше порог (иначе шум прогнозов)
     need = min_score
     if theme == "analyst":
+        need = min_score + 2
+    if theme in {"inventory", "opec", "flow_deal"}:
         need = min_score + 1
     # Blas / Kemp — чуть мягче (их колонки важны)
     if match_pro_oil_analyst(item.title, item.source) is not None:
-        need = max(4, min_score - 1)
+        need = max(5, min_score - 1)
     return score >= need
+
+
+_OIL_NOISE_PHRASES: tuple[str, ...] = (
+    "oil import price",
+    "oil export price",
+    "biofuel",
+    "biofuels",
+    "fx news wrap",
+    "morning kickstart",
+    "markets open with",
+    "gasoline inventory",  # слабый routine без EIA surprise
+    "crack spread",
+)
+
+
+def is_oil_market_moving_headline(title: str) -> bool:
+    """Жёсткий фильтр: пушим только катализаторы, не «ещё раз про нефть»."""
+    low = (title or "").lower().strip()
+    if not low:
+        return False
+    if any(p in low for p in _OIL_NOISE_PHRASES):
+        return False
+
+    # Именованный топ-аналитик Blas/Kemp про нефть/гео — раньше geo-веток
+    if match_pro_oil_analyst(title):
+        if any(
+            k in low
+            for k in (
+                "oil", "crude", "brent", "hormuz", "ормуз", "opec", "energy",
+                "iran", "иран", "wti",
+            )
+        ):
+            return True
+
+    # 1) Трамп / Truth Social — только с geo/deal/ударом
+    if any(k in low for k in ("trump", "трамп", "truth social")):
+        return any(
+            k in low
+            for k in (
+                "iran", "иран", "hormuz", "ормуз", "strike", "attack", "удар", "атак",
+                "taco", "deal", "сделк", "reopen", "negotiat", "переговор",
+                "called off", "cancel", "pause", "sanction", "санкц", "oil", "crude",
+            )
+        )
+
+    # 2) Бессент — только энергия/Иран/Ормуз/сделка
+    if any(k in low for k in ("bessent", "treasury secretary", "scott bessent", "бессент")):
+        return any(
+            k in low
+            for k in (
+                "iran", "иран", "hormuz", "ормуз", "oil", "crude", "energy", "энерг",
+                "deal", "сделк", "reopen", "negotiat", "переговор", "settle",
+            )
+        )
+
+    # 3) Ормуз / Иран — открытие, отказ, удар, танкеры, блок
+    if any(k in low for k in ("hormuz", "ормуз", "iran", "иран", "tehran", "тегеран")):
+        return any(
+            k in low
+            for k in (
+                "reopen", "open", "откры", "deny", "denied", "refuse", "reject",
+                "отриц", "не откро", "block", "блок", "close", "закры",
+                "tanker", "танкер", "strike", "attack", "удар", "атак",
+                "deal", "сделк", "negotiat", "переговор", "talks", "sanction", "санкц",
+                "trump", "трамп", "bessent", "shipping", "transit", "strait",
+                "oil", "crude", "нефт", "brent", "energy",
+            )
+        )
+
+    # 4) Явный обвал/скачок цены нефти в заголовке
+    if any(k in low for k in ("oil", "crude", "brent", "wti", "нефт")):
+        if any(
+            k in low
+            for k in (
+                "tumble", "plunge", "slump", "crash", "surge", "soar", "spike",
+                "обвал", "обруш", "рухн", "подскоч",
+            )
+        ):
+            return True
+        # EIA / OPEC — только с действием (не просто слово oil)
+        if any(k in low for k in ("eia", "opec", "опек", "spr")) and any(
+            k in low
+            for k in (
+                "inventory", "inventories", "stock", "запас", "quota", "квот",
+                "cut", "hike", "boost", "draw", "build", "release",
+            )
+        ):
+            return True
+
+    # 5) запасной — уже покрыто выше
+    return False
+
+
+_TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "as",
+    "is", "are", "be", "by", "from", "at", "after", "over", "says", "say",
+    "vs", "into", "about", "that", "this", "it", "its", "will", "may", "new",
+    "и", "в", "на", "по", "с", "к", "из", "о", "об", "за", "не", "что",
+})
+
+
+def _title_token_set(title: str) -> set[str]:
+    low = re.sub(r"[^a-zа-я0-9\s]", " ", (title or "").lower())
+    return {w for w in low.split() if len(w) > 2 and w not in _TITLE_STOPWORDS}
+
+
+def titles_too_similar(a: str, b: str, *, threshold: float = 0.55) -> bool:
+    """Похожие перепечатки одной новости (Jaccard по токенам)."""
+    ta, tb = _title_token_set(a), _title_token_set(b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    if union <= 0:
+        return False
+    return (inter / union) >= threshold
 
 
 def theme_label_ru(theme: str) -> str:
@@ -806,6 +938,21 @@ def classify_news_impact(title: str) -> str:
         bull += 3
         bear = max(0, bear - 1)
 
+    # Бессент: сделка / reopen / energy settle → bearish (снятие premium)
+    if any(k in low for k in ("bessent", "treasury secretary", "scott bessent", "бессент")):
+        if any(
+            k in low
+            for k in (
+                "deal", "сделк", "reopen", "open hormuz", "open the strait",
+                "settle", "negotiat", "переговор", "tomorrow",
+            )
+        ):
+            bear += 3
+            bull = max(0, bull - 1)
+        elif any(k in low for k in ("iran", "иран", "hormuz", "ормуз", "oil", "energy")):
+            # Упоминание без ясного deal — лёгкий вес к деэскалации (часто так и есть)
+            bear += 1
+
     # «cuts Brent forecast» / «raises WTI outlook»
     if "forecast" in low or "outlook" in low or "прогноз" in low:
         if any(k in low for k in ("cut", "slash", "lower", "reduce", "trim", "сниж", "пониж")):
@@ -844,9 +991,9 @@ def _news_story_key(title: str) -> str:
     tags: list[str] = []
     for t in (
         "hormuz", "ормуз", "iran", "иран", "sanction", "санкц", "trump", "трамп",
-        "eia", "opec", "опек", "spr", "inventory", "запас", "tanker", "танкер",
+        "bessent", "eia", "opec", "опек", "spr", "inventory", "запас", "tanker", "танкер",
         "quota", "квот", "forecast", "прогноз", "steo", "barclays",
-        "blas", "kemp",
+        "blas", "kemp", "truth",
     ):
         if t in low:
             tags.append(t)
@@ -879,8 +1026,8 @@ def _news_story_key(title: str) -> str:
     return low[:48]
 
 
-# Один сюжет fast-lane не блокируем навсегда — иначе Ормуз-лента замирает на часы.
-_FASTLANE_STORY_TTL_SEC = 75 * 60.0
+# Один сюжет fast-lane: 3ч — не спамить перепечатками Trump/Bessent/Hormuz
+_FASTLANE_STORY_TTL_SEC = 180 * 60.0
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
@@ -1368,6 +1515,9 @@ def detect_oil_micro_signal(
     min_impulse_pct: float = 0.12,
     max_impulse_pct: float = 0.55,
     lookback_bars: int = 4,
+    session_block_minutes: float = 20.0,
+    apply_session_filter: bool = True,
+    apply_chase_filter: bool = True,
 ) -> OilMicroSignal | None:
     """Импульс 5m UKOUSD → SHORT/LONG на микротейк 0.2–0.3%.
 
@@ -1375,7 +1525,11 @@ def detect_oil_micro_signal(
     - импульс уже есть, но не «догоняем» большой ход (>max)
     - 2+ закрытия в сторону / тело не doji
     - новости не против сильного импульса
+    - не в первые N минут сессии
+    - не chase, если цена уже сильно уехала за 30–60м
     """
+    from .oil_entry_filters import oil_entry_block_reason
+
     if len(bars) < max(12, lookback_bars + 2):
         return None
     tp = max(0.15, min(0.45, float(tp_pct)))
@@ -1403,6 +1557,18 @@ def detect_oil_micro_signal(
         if ascending < max(1, lb // 2):
             return None
         side = "long"
+
+    block = oil_entry_block_reason(
+        bars=bars,
+        side=side,
+        near_level=False,
+        interval_minutes=5,
+        session_block_minutes=session_block_minutes,
+        apply_session_filter=apply_session_filter,
+        apply_chase_filter=apply_chase_filter,
+    )
+    if block:
+        return None
 
     last = window[-1]
     body = abs(float(last.close) - float(last.open))
@@ -1997,9 +2163,11 @@ async def fetch_oil_fastlane_news(
     max_age_hours: float = 4.0,
     min_flash_score: int = 7,
     include_russian: bool = True,
+    include_wire_feeds: bool = True,
 ) -> list[OilNewsItem]:
-    """Узкий быстрый пул: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official."""
+    """Быстрый пул: прямые wire RSS + Google News Tier‑1 (параллельно)."""
     from .oil_fastlane import FAST_LANE_QUERIES_EN, FAST_LANE_QUERIES_RU, is_fastlane_item
+    from .oil_wire import fetch_oil_wire_headlines
 
     seen: set[str] = set()
     merged: list[OilNewsItem] = []
@@ -2007,19 +2175,63 @@ async def fetch_oil_fastlane_news(
     if include_russian:
         queries.extend((q, "ru") for q in FAST_LANE_QUERIES_RU)
 
-    for query, lang in queries:
-        items = await asyncio.to_thread(_fetch_google_news_rss, query, lang=lang)
-        for it in items:
-            if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+    sem = asyncio.Semaphore(10)
+
+    async def _one_query(query: str, lang: str) -> list[OilNewsItem]:
+        async with sem:
+            return await asyncio.to_thread(_fetch_google_news_rss, query, lang=lang)
+
+    tasks: list = [_one_query(q, lang) for q, lang in queries]
+    if include_wire_feeds:
+        tasks.append(
+            asyncio.to_thread(
+                fetch_oil_wire_headlines,
+                max_age_hours=min(6.0, max(2.0, max_age_hours + 1.0)),
+                max_items=24,
+            )
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _accept(it: OilNewsItem) -> bool:
+        if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+            return False
+        # Без мягкого −2: иначе сыпятся похожие «почти flash»
+        return is_fastlane_item(it, min_flash_score=min_flash_score)
+
+    for res in results:
+        if isinstance(res, Exception):
+            logger.debug("Oil fast-lane fetch piece failed: %s", res)
+            continue
+        if not res:
+            continue
+        from .oil_wire import OilWireItem
+
+        if isinstance(res[0], OilWireItem):
+            for w in res:
+                if not isinstance(w, OilWireItem):
+                    continue
+                it = OilNewsItem(
+                    title=w.title,
+                    url=w.url,
+                    source=w.source,
+                    published_ts=w.published_ts,
+                    impact=classify_news_impact(w.title),
+                    query="wire_rss",
+                    lang="en",
+                    theme=detect_oil_news_theme(w.title, source=w.source) or "trump_us",
+                )
+                if not _accept(it):
+                    continue
+                key = it.title.lower()[:120]
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(it)
+            continue
+        for it in res:
+            if not _accept(it):
                 continue
-            # Fast-lane: не требуем общий critical_only — свой score по outlet
-            if not is_fastlane_item(it, min_flash_score=min_flash_score):
-                # Всё же пропустим geo tier1 с чуть более мягким порогом
-                if not is_fastlane_item(it, min_flash_score=max(5, min_flash_score - 2)):
-                    continue
-                theme = it.theme or detect_oil_news_theme(it.title, source=it.source)
-                if theme not in {"iran_geo", "trump_us"}:
-                    continue
             key = it.title.lower()[:120]
             if key in seen:
                 continue
@@ -2279,6 +2491,35 @@ def _fetch_bybit_oil_bars(
     return bars
 
 
+# Антиспам: fallback Bybit — один WARN на символ раз в час
+_oil_fallback_warn_at: dict[str, float] = {}
+_OIL_FALLBACK_WARN_COOLDOWN = 3600.0
+
+
+def _log_oil_bybit_fallback(bybit_symbol: str) -> None:
+    import time
+
+    now = time.time()
+    key = bybit_symbol.upper()
+    last = _oil_fallback_warn_at.get(key, 0.0)
+    if now - last < _OIL_FALLBACK_WARN_COOLDOWN:
+        logger.debug("Oil Bybit fallback %s (suppressed)", bybit_symbol)
+        return
+    _oil_fallback_warn_at[key] = now
+    if key == "BZUSDT":
+        note = "not Brent Cash UKOUSD.s"
+    elif key == "CLUSDT":
+        note = "not WTI cash USOIL"
+    else:
+        note = "not TradFi cash CFD"
+    logger.warning(
+        "Oil using Bybit %s fallback — %s. "
+        "Exact Cash prices need MT5 on Windows (unavailable in Linux/Docker).",
+        bybit_symbol,
+        note,
+    )
+
+
 def _fetch_oil_bars(
     *,
     yahoo_symbol: str,
@@ -2289,8 +2530,8 @@ def _fetch_oil_bars(
     """Свечи нефти: сначала MT5 UKOUSD.s (Brent Cash), иначе fallback.
 
     UKOUSD.s = Brent Crude Oil Cash на Bybit TradFi — публичного REST нет.
-    Точная цена только через MetaTrader 5 (см. bot/oil_mt5.py).
-    BZUSDT / Yahoo — другие инструменты, используем только если MT5 молчит.
+    Точная цена только через MetaTrader 5 на Windows (см. bot/oil_mt5.py).
+    В Docker/Linux — Bybit BZUSDT/CLUSDT. Yahoo — последний fallback.
     """
     from .oil_mt5 import (
         OIL_MT5_BRENT,
@@ -2316,12 +2557,11 @@ def _fetch_oil_bars(
             bybit_symbol, interval_minutes=interval_minutes, limit=limit,
         )
         if len(bybit_bars) >= 24:
-            set_oil_price_source(f"Bybit {bybit_symbol} (не UKOUSD.s Cash)")
-            logger.warning(
-                "Oil using Bybit %s fallback — not Brent Cash UKOUSD.s. "
-                "Start MT5 Bybit TradFi for exact prices.",
-                bybit_symbol,
-            )
+            if bybit_symbol.upper() == OIL_BRENT_BYBIT:
+                set_oil_price_source(f"Bybit {bybit_symbol} (не UKOUSD.s Cash)")
+            else:
+                set_oil_price_source(f"Bybit {bybit_symbol} (не USOIL Cash)")
+            _log_oil_bybit_fallback(bybit_symbol)
             return bybit_bars
     except Exception:
         logger.warning(
@@ -2335,7 +2575,7 @@ def _fetch_oil_bars(
             yahoo_symbol, interval_minutes=interval_minutes, limit=limit,
         )
         if len(yahoo_bars) >= 24:
-            set_oil_price_source(f"Yahoo {yahoo_symbol} (не UKOUSD.s Cash)")
+            set_oil_price_source(f"Yahoo {yahoo_symbol} (не TradFi Cash)")
             logger.info(
                 "Oil bars fallback Yahoo %s (MT5/Bybit unavailable)",
                 yahoo_symbol,
@@ -3203,10 +3443,13 @@ class OilMonitorEngine:
         self._last_fastlane_ts: float = 0.0
         self._seen_fastlane: set[str] = set()
         self._seen_fastlane_stories: dict[str, float] = {}
+        self._recent_sent_titles: list[str] = []
         self._last_regular_news_ts: float = 0.0
         self._last_hormuz_check_ts: float = 0.0
         self._last_hormuz_alert_ts: float = 0.0
         self._hormuz_prev: Any = None
+        self._last_crash_alert_ts: float = 0.0
+        self._last_crash_abs_move: float = 0.0
         from .oil_journal import OilSetupJournal
 
         self._setup_journal = OilSetupJournal()
@@ -3309,6 +3552,14 @@ class OilMonitorEngine:
             return 0
         if not plan.strong:
             return 0
+        from .oil_entry_filters import is_session_open_fragile
+
+        session_block = float(getattr(settings, "oil_session_block_minutes", 20.0))
+        if bool(getattr(settings, "oil_entry_session_filter", True)) and is_session_open_fragile(
+            block_minutes=session_block,
+        ):
+            logger.debug("Oil bounce skipped: session open fragile")
+            return 0
         near_pct = float(getattr(settings, "oil_bounce_near_pct", 0.4))
         if not bounce_plan_near_level(plan, near_pct=near_pct):
             return 0
@@ -3369,6 +3620,73 @@ class OilMonitorEngine:
                 breakdown=bundle.wti.breakdown,
                 symbol=OIL_WTI_SYMBOL,
             )
+
+    async def _tick_price_crash(self, settings: Any) -> int:
+        """Обвал/скачок цены UKOUSD — без ожидания новостей (защита депозита)."""
+        if not getattr(settings, "oil_crash_alerts_enabled", True):
+            return 0
+        now = time.time()
+        cooldown = float(getattr(settings, "oil_crash_cooldown_seconds", 600.0))
+        cooldown = max(120.0, cooldown)
+
+        from .oil_wire import detect_oil_price_crash, format_oil_crash_alert
+
+        try:
+            bars = await asyncio.to_thread(
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=5,
+                limit=80,
+            )
+        except Exception:
+            logger.debug("Oil crash bars failed", exc_info=True)
+            return 0
+
+        alert = detect_oil_price_crash(
+            bars,
+            interval_minutes=5,
+            pct_15m=float(getattr(settings, "oil_crash_pct_15m", 1.5)),
+            pct_30m=float(getattr(settings, "oil_crash_pct_30m", 3.0)),
+            pct_60m=float(getattr(settings, "oil_crash_pct_60m", 4.0)),
+        )
+        if alert is None:
+            return 0
+
+        abs_move = max(
+            abs(alert.move_15m_pct),
+            abs(alert.move_30m_pct),
+            abs(alert.move_60m_pct),
+            alert.range_60m_pct,
+        )
+        # Повтор только если ход заметно усилился (+1.5пп) или cooldown прошёл
+        if now - self._last_crash_alert_ts < cooldown:
+            if abs_move < self._last_crash_abs_move + 1.5:
+                return 0
+
+        headlines = [
+            f"{it.source}: {it.title}"
+            for it in list(self._recent_news)[:6]
+            if (it.title or "").strip()
+        ]
+        msg = format_oil_crash_alert(alert, recent_headlines=headlines)
+        try:
+            ok = await self._on_news(msg)
+        except Exception:
+            logger.exception("Oil crash alert dispatch failed")
+            return 0
+        if not ok:
+            return 0
+        self._last_crash_alert_ts = now
+        self._last_crash_abs_move = abs_move
+        logger.info(
+            "Oil CRASH alert %s sev=%s move30=%.2f%% px=%.3f",
+            alert.direction,
+            alert.severity,
+            alert.move_30m_pct,
+            alert.price,
+        )
+        return 1
 
     async def _tick_level_alerts(self, settings: Any) -> int:
         if not getattr(settings, "oil_level_alerts_enabled", True):
@@ -3438,6 +3756,9 @@ class OilMonitorEngine:
             min_impulse_pct=float(getattr(settings, "oil_micro_min_impulse_pct", 0.12)),
             max_impulse_pct=float(getattr(settings, "oil_micro_max_impulse_pct", 0.55)),
             lookback_bars=int(getattr(settings, "oil_micro_lookback_bars", 4)),
+            session_block_minutes=float(getattr(settings, "oil_session_block_minutes", 20.0)),
+            apply_session_filter=bool(getattr(settings, "oil_entry_session_filter", True)),
+            apply_chase_filter=bool(getattr(settings, "oil_entry_chase_filter", True)),
         )
         if sig is None:
             return 0
@@ -3469,12 +3790,12 @@ class OilMonitorEngine:
         return 1
 
     async def _tick_fastlane(self, settings: Any) -> int:
-        """‼️ КРИТИЧНО: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → сразу в Новостник."""
+        """‼️ КРИТИЧНО: wire + WSJ/Reuters/Bloomberg → сразу в чат (ИИ — после пуша)."""
         if not getattr(settings, "oil_fastlane_enabled", True):
             return 0
         now = time.time()
-        interval = float(getattr(settings, "oil_fastlane_interval_seconds", 60.0))
-        interval = max(45.0, interval)
+        interval = float(getattr(settings, "oil_fastlane_interval_seconds", 45.0))
+        interval = max(30.0, interval)
         if now - self._last_fastlane_ts < interval:
             return 0
 
@@ -3484,14 +3805,19 @@ class OilMonitorEngine:
             enrich_fastlane_with_gemini,
             fastlane_title_on_topic,
             format_fastlane_flash,
+            should_ai_analyze_flash,
             _price_move_note,
         )
 
         max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 4.0))
-        min_score = int(getattr(settings, "oil_fastlane_min_score", 8))
-        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 2))
+        min_score = int(getattr(settings, "oil_fastlane_min_score", 9))
+        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 1))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
-        use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
+        # ИИ только на важных (Трамп/Бессент/Ормуз) — не на каждый flash
+        ai_enabled = bool(getattr(settings, "oil_fastlane_gemini", True))
+        ai_min = int(getattr(settings, "oil_fastlane_ai_min_score", 11))
+        include_wire = bool(getattr(settings, "oil_wire_feeds_enabled", True))
+        sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.55))
 
         try:
             items = await fetch_oil_fastlane_news(
@@ -3499,6 +3825,7 @@ class OilMonitorEngine:
                 max_age_hours=max_age_h,
                 min_flash_score=min_score,
                 include_russian=include_ru,
+                include_wire_feeds=include_wire,
             )
         except Exception:
             logger.exception("Oil fast-lane fetch failed")
@@ -3523,7 +3850,6 @@ class OilMonitorEngine:
 
         move_note = _price_move_note(bars, interval_minutes=5)
         sent = 0
-        # Протухшие сюжеты — снова можно flash (новый виток Ормуза)
         if self._seen_fastlane_stories:
             self._seen_fastlane_stories = {
                 k: ts
@@ -3548,11 +3874,59 @@ class OilMonitorEngine:
                 self._seen_fastlane.add(key)
                 logger.info("Oil fast-lane skip off-topic title: %s", it.title[:90])
                 continue
+            if not is_oil_market_moving_headline(it.title):
+                self._seen_fastlane.add(key)
+                logger.info("Oil fast-lane skip non-moving: %s", it.title[:90])
+                continue
+            # Похожая перепечатка уже уходила в чат
+            if any(
+                titles_too_similar(it.title, prev, threshold=sim_thr)
+                for prev in self._recent_sent_titles[-40:]
+            ):
+                self._seen_fastlane.add(key)
+                logger.info("Oil fast-lane skip similar: %s", it.title[:90])
+                continue
             meta = detect_fastlane_outlet(it.title, it.source, it.url or "")
             if meta is None:
                 continue
+
+            # СНАЧАЛА короткий flash — без простыни
+            msg = format_fastlane_flash(
+                it,
+                meta=meta,
+                ai_ru="",
+                move_note=move_note,
+                age_label=_age_label(it.published_ts),
+                compact=True,
+            )
+            try:
+                ok = await self._on_news(msg)
+            except Exception:
+                logger.exception("Oil fast-lane dispatch failed")
+                ok = False
+            if not ok:
+                continue
+
+            self._seen_titles.add(key)
+            self._seen_fastlane.add(key)
+            self._recent_sent_titles.append(it.title)
+            if len(self._recent_sent_titles) > 80:
+                self._recent_sent_titles = self._recent_sent_titles[-40:]
+            if story:
+                self._seen_fastlane_stories[story] = now
+            sent += 1
+            logger.info(
+                "Oil fast-lane %s score=%d: %s",
+                meta.outlet,
+                meta.flash_score,
+                it.title[:80],
+            )
+
             ai_ru = ""
-            if use_gemini:
+            want_ai = ai_enabled and should_ai_analyze_flash(
+                it.title, meta, min_score=ai_min
+            )
+            if want_ai:
                 ai_ru, bias_ov = await enrich_fastlane_with_gemini(
                     it.title,
                     source=it.source,
@@ -3563,64 +3937,35 @@ class OilMonitorEngine:
                     model=self._resolve_gemini_model(),
                 )
                 if ai_ru and ai_says_off_topic(ai_ru):
-                    self._seen_fastlane.add(key)
-                    self._seen_titles.add(key)
-                    # Не блокируем сюжет: другой outlet может быть on-topic
                     logger.info(
-                        "Oil fast-lane drop (Gemini off-topic): %s",
+                        "Oil fast-lane Gemini off-topic (уже отправлено): %s",
                         it.title[:90],
                     )
-                    continue
-                if bias_ov in {"bullish", "bearish", "neutral"} and bias_ov != it.impact:
-                    logger.info(
-                        "Oil fast-lane bias override %s→%s: %s",
-                        it.impact,
-                        bias_ov,
-                        it.title[:80],
+                    ai_ru = ""
+                elif ai_ru:
+                    from .oil_fastlane import (
+                        strip_gemini_oil_meta,
+                        strip_invented_trade_levels,
                     )
-                    it = replace(it, impact=bias_ov)
-                    for i, old in enumerate(self._recent_news):
-                        if (old.title or "").lower()[:120] == key:
-                            self._recent_news[i] = it
-                            break
-            if ai_ru:
-                from .oil_fastlane import strip_gemini_oil_meta, strip_invented_trade_levels
 
-                ai_ru = strip_invented_trade_levels(strip_gemini_oil_meta(ai_ru))
-            msg = format_fastlane_flash(
+                    ai_ru = strip_invented_trade_levels(strip_gemini_oil_meta(ai_ru))
+                    if bias_ov in {"bullish", "bearish", "neutral"} and bias_ov != it.impact:
+                        it = replace(it, impact=bias_ov)
+                    follow = f"🧠 <b>ИИ</b> · {meta.outlet}\n{ai_ru}"
+                    try:
+                        await self._on_news(follow)
+                    except Exception:
+                        logger.debug("Oil fast-lane AI follow-up failed", exc_info=True)
+
+            await self._maybe_forward_trade_brief(
                 it,
                 meta=meta,
                 ai_ru=ai_ru,
                 move_note=move_note,
-                age_label=_age_label(it.published_ts),
+                settings=settings,
             )
-            try:
-                ok = await self._on_news(msg)
-            except Exception:
-                logger.exception("Oil fast-lane dispatch failed")
-                ok = False
-            if ok:
-                self._seen_titles.add(key)
-                self._seen_fastlane.add(key)
-                if story:
-                    self._seen_fastlane_stories[story] = now
-                sent += 1
-                logger.info(
-                    "Oil fast-lane %s score=%d: %s",
-                    meta.outlet,
-                    meta.flash_score,
-                    it.title[:80],
-                )
-                # Громкая новость, влияющая на сделку → ручной анализ
-                await self._maybe_forward_trade_brief(
-                    it,
-                    meta=meta,
-                    ai_ru=ai_ru,
-                    move_note=move_note,
-                    settings=settings,
-                )
-                if sent >= max_per:
-                    break
+            if sent >= max_per:
+                break
 
         if len(self._seen_fastlane) > 300:
             self._seen_fastlane = set(list(self._seen_fastlane)[-150:])
@@ -3680,6 +4025,7 @@ class OilMonitorEngine:
             return 0
 
         sent = 0
+        sent += await self._tick_price_crash(settings)
         sent += await self._tick_level_alerts(settings)
         sent += await self._tick_micro_signals(settings)
         sent += await self._tick_fastlane(settings)
@@ -3730,9 +4076,16 @@ class OilMonitorEngine:
 
             if fresh:
                 batch = fresh[:max_per_poll]
+                sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.55))
                 use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
                 if separate:
                     for it in batch:
+                        if any(
+                            titles_too_similar(it.title, prev, threshold=sim_thr)
+                            for prev in self._recent_sent_titles[-40:]
+                        ):
+                            self._seen_titles.add(it.title.lower()[:120])
+                            continue
                         ai_ru = ""
                         sc = news_critical_score(it.title, source=it.source)
                         th = it.theme or detect_oil_news_theme(it.title, source=it.source)
@@ -3754,6 +4107,9 @@ class OilMonitorEngine:
                             ok = False
                         if ok:
                             self._seen_titles.add(it.title.lower()[:120])
+                            self._recent_sent_titles.append(it.title)
+                            if len(self._recent_sent_titles) > 80:
+                                self._recent_sent_titles = self._recent_sent_titles[-40:]
                             sent += 1
                 else:
                     msg = format_oil_news_message(batch, max_show=len(batch))
@@ -4608,6 +4964,11 @@ class OilMonitorEngine:
             ta_confidence_raw=ta_conf_raw,
             min_quality=min_q,
             near_pct=near_pct,
+            bars=bundle.brent_bars,
+            session_block_minutes=float(getattr(settings, "oil_session_block_minutes", 20.0)),
+            apply_session_filter=bool(getattr(settings, "oil_entry_session_filter", True)),
+            apply_chase_filter=bool(getattr(settings, "oil_entry_chase_filter", True)),
+            require_close_break=bool(getattr(settings, "oil_entry_require_close", True)),
         )
         if not setup_passes_gate(setup, min_quality=min_q):
             return 0
@@ -4866,9 +5227,10 @@ class OilMonitorEngine:
             )
             fastlane_on = bool(getattr(settings, "oil_fastlane_enabled", True))
             if fastlane_on:
-                fl = float(getattr(settings, "oil_fastlane_interval_seconds", 60.0))
-                sleep_s = min(sleep_s, max(45.0, fl))
-                sleep_s = max(45.0, sleep_s)
+                fl = float(getattr(settings, "oil_fastlane_interval_seconds", 45.0))
+                # Crash/wire: цикл не реже 30с
+                sleep_s = min(sleep_s, max(30.0, fl))
+                sleep_s = max(30.0, sleep_s)
             else:
                 sleep_s = max(120.0, sleep_s)
             try:

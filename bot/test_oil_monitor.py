@@ -607,7 +607,14 @@ def _micro_dump_bars(n: int = 30, *, start: float = 90.0) -> list[KlineBar]:
 
 def test_oil_micro_signal_short_on_dump():
     bars = _micro_dump_bars()
-    sig = detect_oil_micro_signal(bars, tp_pct=0.25, sl_pct=0.18, min_impulse_pct=0.12)
+    sig = detect_oil_micro_signal(
+        bars,
+        tp_pct=0.25,
+        sl_pct=0.18,
+        min_impulse_pct=0.12,
+        apply_session_filter=False,
+        apply_chase_filter=False,
+    )
     assert sig is not None
     assert sig.side == "short"
     assert sig.target < sig.entry
@@ -714,11 +721,11 @@ def test_fastlane_detects_wsj_reuters_blas():
         ai_ru="Bias вверх; ждать отскок от хая.",
         move_note="⚠️ Движение опережает новость: прокси-цена уже +1.2% / 30м",
         age_label="5 мин",
+        compact=True,
     )
-    assert "ВАЖНО" in text
     assert "Reuters" in text
-    assert "Разбор" in text or "Главное" in text or "Кратко" in text
-    assert "опережает" in text
+    assert "Bias вверх" in text
+    assert "Иран" in text or "Ормуз" in text
 
 
 def test_fastlane_accepts_bloomberg_via_google_news_url():
@@ -1021,8 +1028,8 @@ def test_fastlane_bounce_hint_after_spike():
 
     bull = _bounce_hint("bullish", "движение опережает новость")
     bear = _bounce_hint("bearish", "уже сдвинулась")
-    assert "откатывает" in bull or "Не догонять" in bull
-    assert "отскок" in bear or "нож" in bear
+    assert "Не догонять" in bull or "хай" in bull
+    assert "нож" in bear or "базу" in bear
 
     # Flat bars → no move note
     bars = [

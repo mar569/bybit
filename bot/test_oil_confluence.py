@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from bot.oil_confluence import (
     build_oil_confluence_setup,
     format_oil_confluence_setup,
@@ -11,6 +13,14 @@ from bot.oil_confluence import (
 from bot.oil_forecast import OilForecast
 from bot.oil_monitor import OilBouncePlan, OilNewsBias, OilScalpCall
 from bot.ta_analysis import TAAnalysisResult
+
+
+@pytest.fixture(autouse=True)
+def _disable_session_fragile(monkeypatch):
+    monkeypatch.setattr(
+        "bot.oil_entry_filters.is_session_open_fragile",
+        lambda **_kw: False,
+    )
 
 
 def _snap(**kwargs):

@@ -12,29 +12,49 @@ from .bybit_klines import KlineBar
 
 logger = logging.getLogger(__name__)
 
-# Узкий набор — только топ wire / эксклюзивы / official (site: — не тянем tertiary)
+# Сначала deal/Trump/Bessent/Иран·Ормуз (то, что валит цену за минуты)
 FAST_LANE_QUERIES_EN: tuple[str, ...] = (
+    # Трамп: Truth Social / X / TACO
+    "Trump Truth Social Iran OR Hormuz OR deal OR reopen OR strike when:12h",
+    "Trump posts OR tweet OR Truth Social Iran OR Hormuz OR oil when:12h",
+    "site:truthsocial.com Trump Iran OR Hormuz OR oil OR deal when:12h",
+    "Trump called off OR cancels OR delays Iran strike OR attack when:12h",
+    "Trump Iran negotiations OR last chance OR Hormuz reopen when:12h",
+    # Бессент / Treasury — сильно двигает premium
+    "Bessent Iran OR Hormuz OR oil OR energy OR deal when:12h",
+    "Scott Bessent Treasury Hormuz OR Iran OR oil OR reopen when:12h",
+    "Treasury Secretary Bessent oil OR energy OR Iran OR Hormuz when:12h",
+    # Иран ↔ Ормуз: открывает / не открывает
+    "Iran reopen OR open OR refuse OR deny OR reject Strait of Hormuz when:12h",
+    "Iran will not open OR won't reopen Hormuz OR denies talks when:12h",
+    "Tehran Hormuz reopen OR blockade OR tanker OR shipping when:12h",
+    "site:reuters.com OR site:bloomberg.com Trump cancels OR pauses OR TACO Iran strike when:12h",
+    "site:reuters.com OR site:bloomberg.com Strait of Hormuz tanker OR blockade OR reopen when:12h",
+    # Трейдерские агрегаторы (зеркало прямого RSS)
+    "site:financialjuice.com oil OR crude OR Brent OR Iran OR Hormuz OR Trump OR Bessent when:12h",
+    "site:forexlive.com OR site:investinglive.com oil OR Brent OR Iran OR Hormuz OR Trump OR Bessent when:12h",
     "site:wsj.com Iran OR Hormuz OR oil OR Trump when:12h",
     "site:reuters.com Iran OR Hormuz OR oil OR Trump when:12h",
-    "site:bloomberg.com Iran OR Hormuz OR oil OR energy OR Trump when:12h",
+    "site:bloomberg.com Iran OR Hormuz OR oil OR energy OR Trump OR Bessent when:12h",
     "site:apnews.com Iran OR Hormuz OR Trump oil OR strike OR cancel when:12h",
     "site:investing.com oil OR Brent OR WTI OR Hormuz OR Iran OR crude when:12h",
     "Javier Blas oil OR Hormuz OR Iran OR Brent when:12h",
     "site:ft.com oil OR Iran OR Hormuz OR Brent when:1d",
     "site:nytimes.com Iran OR Hormuz OR oil OR Trump when:1d",
     "site:whitehouse.gov Iran OR Hormuz OR oil when:1d",
-    "site:defense.gov Iran OR Hormuz OR oil when:1d",
     "EIA crude oil inventory OR STEO when:1d",
-    "site:reuters.com OR site:bloomberg.com OR site:wsj.com Trump cancels OR pauses OR TACO Iran strike when:12h",
-    "site:reuters.com OR site:bloomberg.com Strait of Hormuz tanker OR blockade OR reopen when:12h",
-    # Иранская линия (Fars / Tasnim) — контр-нарратив к «deal tape»
     "site:farsnews.ir Hormuz OR Strait OR Iran OR tanker OR oil when:12h",
-    "Fars News Agency Hormuz OR Iran Strait OR refuse OR reject when:12h",
+    "Fars News Agency Hormuz OR Iran Strait OR refuse OR reject OR reopen when:12h",
     "site:tasnimnews.com Hormuz OR Iran oil OR Strait when:12h",
-    "site:en.irna.ir Hormuz OR Strait OR tanker OR oil when:12h",
+    "site:en.irna.ir Hormuz OR Strait OR tanker OR oil OR reopen when:12h",
 )
 
 FAST_LANE_QUERIES_RU: tuple[str, ...] = (
+    "Трамп Truth Social OR твит Иран OR Ормуз when:12h",
+    "Трамп отменил удар Иран OR отложил атаку нефть when:12h",
+    "Трамп Ормуз сделка OR переговоры Иран нефть when:12h",
+    "Бессент OR министр финансов США Ормуз OR Иран OR нефть when:12h",
+    "Иран откроет OR не откроет Ормуз OR отрицает переговоры when:12h",
     "WSJ Трамп Иран удар OR атака нефть when:12h",
     "Reuters Ормуз нефть Иран when:12h",
     "Bloomberg Ормуз OR Иран нефть when:12h",
@@ -56,6 +76,15 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("associated press", "AP", 1),
     ("javier blas", "Javier Blas", 1),
     ("investing.com", "Investing.com", 1),
+    # Трейдерский wire — раньше массовых СМИ
+    ("financialjuice.com", "FinancialJuice", 1),
+    ("financialjuice", "FinancialJuice", 1),
+    ("forexlive.com", "ForexLive", 1),
+    ("forexlive", "ForexLive", 1),
+    ("investinglive.com", "InvestingLive", 1),
+    ("investinglive", "InvestingLive", 1),
+    ("truthsocial.com", "Truth Social", 1),
+    ("truth social", "Truth Social", 1),
     ("ft.com", "FT", 2),
     ("financial times", "FT", 2),
     ("nytimes.com", "NYT", 2),
@@ -103,6 +132,24 @@ _FLASH_TERMS: dict[str, int] = {
     "pauses": 4,
     "holds off": 4,
     "hold off": 4,
+    "called off": 5,
+    "calls off": 5,
+    "delays": 3,
+    "interview": 3,
+    "truth social": 5,
+    "tweet": 3,
+    "posts on": 3,
+    "last chance": 4,
+    "negotiations": 3,
+    "talks with iran": 4,
+    "bessent": 5,
+    "treasury secretary": 4,
+    "scott bessent": 5,
+    "open hormuz": 5,
+    "reopen hormuz": 5,
+    "open the strait": 4,
+    "denies talks": 4,
+    "denies negotiations": 4,
     "tumble": 4,
     "tumbles": 4,
     "slump": 3,
@@ -157,6 +204,7 @@ _TOPIC_GEO: tuple[str, ...] = (
     "iran", "иран", "tehran", "тегеран", "hormuz", "ормуз", "strait",
     "houthi", "хусит", "persian gulf", "middle east", "ближн",
     "israel", "израил", "hezbollah", "red sea",
+    "truth social", "taco",
 )
 
 
@@ -204,6 +252,27 @@ def fastlane_title_on_topic(title: str) -> bool:
     # Санкции/атака США — только вместе с нефтью или Ираном (не любой Trump-заголовок)
     if any(k in low for k in ("sanction", "санкц", "attack", "strike", "удар", "атак")) and any(
         k in low for k in ("oil", "crude", "нефт", "iran", "иран", "hormuz", "ормуз", "energy")
+    ):
+        return True
+    # Trump deal/TACO tape без слова oil — всё равно двигает Brent
+    if any(k in low for k in ("trump", "трамп", "truth social")) and any(
+        k in low
+        for k in (
+            "iran", "иран", "hormuz", "ормуз", "strike", "attack", "удар", "атак",
+            "taco", "deal", "сделк", "reopen", "negotiation", "переговор",
+            "called off", "cancels", "pauses",
+        )
+    ):
+        return True
+    # Бессент / Treasury про энергию/Иран/Ормуз
+    if any(
+        k in low for k in ("bessent", "treasury secretary", "scott bessent", "бессент")
+    ) and any(
+        k in low
+        for k in (
+            "iran", "иран", "hormuz", "ормуз", "oil", "crude", "energy", "энерг",
+            "deal", "сделк", "reopen", "negotiat", "переговор",
+        )
     ):
         return True
     return False
@@ -261,6 +330,13 @@ def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
     title = getattr(item, "title", "") or ""
     if not fastlane_title_on_topic(title):
         return False
+    try:
+        from .oil_monitor import is_oil_market_moving_headline
+
+        if not is_oil_market_moving_headline(title):
+            return False
+    except Exception:
+        pass
     meta = detect_fastlane_outlet(
         title,
         getattr(item, "source", "") or "",
@@ -329,32 +405,6 @@ def _price_move_note(bars: Sequence[KlineBar] | None, *, interval_minutes: int =
     )
 
 
-def _bounce_hint(impact: str, move_note: str) -> str:
-    """После сильного импульса часто бывает отскок — простыми словами."""
-    strong = "опережает" in move_note or "уже" in move_note
-    if impact == "bullish":
-        if strong:
-            return (
-                "Цена уже сильно скакнула вверх — часто потом чуть откатывает. "
-                "Не догонять хай; лонг только от уровня."
-            )
-        return (
-            "Страх поставок тянет цену вверх. Против тренда шортить опасно; "
-            "лонг — от поддержки, не в середине импульса."
-        )
-    if impact == "bearish":
-        if strong:
-            return (
-                "Цена уже сильно упала — часто бывает короткий отскок вверх. "
-                "Не ловить нож лонгом; шорт от сопротивления."
-            )
-        return (
-            "Страх войны/блока слабеет — давление вниз. "
-            "Лонг только от сильной поддержки."
-        )
-    return "Картина смешанная — ждать уровень и следующий сильный заголовок."
-
-
 async def enrich_fastlane_with_gemini(
     title: str,
     *,
@@ -365,11 +415,7 @@ async def enrich_fastlane_with_gemini(
     api_key: str | None,
     model: str = "gemini-3.6-flash",
 ) -> tuple[str, str | None]:
-    """Короткий ИИ-разбор для UKOUSD.
-
-    Returns (text, bias_override) where bias_override is bullish|bearish|neutral|None.
-    Первые строки: OIL_RELEVANT + OIL_BIAS.
-    """
+    """Короткий ИИ-разбор только для важных flash (не простыня)."""
     if not api_key:
         return "", None
     try:
@@ -378,36 +424,25 @@ async def enrich_fastlane_with_gemini(
         if gemini_in_cooldown():
             return "", None
         ctx = (
-            "Ты профессиональный трейдер нефти (Brent / UKOUSD). "
-            "Пиши ТОЛЬКО по-русски, простыми словами, без англ. жаргона "
-            "(не пиши gap, bias, deal-tape — говори «скорее подешевеет», «страх войны»).\n"
-            f"Издатель (реальный): {source}\n"
-            f"Канал (если primary wire): {outlet}\n"
+            "Трейдер Brent/UKOUSD. Ответ ТОЛЬКО по-русски, коротко.\n"
+            f"Источник: {outlet or source}\n"
             f"Заголовок: {title}\n"
-            f"Черновой тон бота (может ОШИБАТЬСЯ): {impact} — НЕ копируй слепо.\n"
-            f"Цена: {move_note or 'без сильного сдвига до новости'}\n"
-            "Правила направления:\n"
-            "- tumbles/falls/обвал → вниз.\n"
-            "- отмена/пауза ударов, TACO, сделка, открытие Ормуза → вниз.\n"
-            "- новые удары/блок пролива без отмены → вверх.\n"
-            "- attack само по себе НЕ вверх, если рядом cancel/pause/TACO.\n"
-            "- если заголовок про «weighing / considering strikes», а рынок уже "
-            "знает отмену/сделку — это СТАРЫЙ нарратив, не разгоняй LONG.\n"
-            "ЗАПРЕЩЕНО: цены входа, стоп, TP, уровни вроде $74.50, «ВЕРДИКТ: LONG», "
-            "«открываю покупку», RR. Только направление и осторожность.\n"
+            f"Черновик бота: {impact} (может ошибаться).\n"
+            f"Цена: {move_note or 'без сильного хода'}\n"
+            "Правила: отмена удара/сделка/открытие Ормуза → вниз; "
+            "отказ Ирана открыть / новые удары → вверх; "
+            "Трамп, Бессент, Ормуз — главные драйверы.\n"
+            "Запрет: вход/стоп/TP/цифры уровней/ВЕРДИКТ LONG.\n"
         )
         user = (
-            "Строка 1 СТРОГО: OIL_RELEVANT: YES или OIL_RELEVANT: NO\n"
-            "Строка 2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n\n"
-            "YES — только нефть/Ормуз/санкции/запасы/ОПЕК. NO — одной фразой почему шум.\n\n"
-            "Если YES — ровно такой каркас (простые слова, 7–10 строк):\n"
-            "📌 Что случилось — 1–2 предложения, факт\n"
-            "💡 Что это значит для Brent/UKOUSD — почему цена может дёрнуться\n"
-            "👀 Что ждать дальше — 1–2 clarifier (Reuters/AP, Ормуз, EIA)\n"
-            "⚡ Риск сюрприза — может ли дать резкие ±2–5% в ближайшие часы/сессию "
-            "(низкий/средний/высокий) и от чего\n"
-            "🧭 Как аккуратно — без цифр входа/стопа: не догонять / ждать / осторожно\n"
-            "Не выдумывай факты и уровни. Если похоже на репост вчерашнего — скажи прямо."
+            "Строка1: OIL_RELEVANT: YES|NO\n"
+            "Строка2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n"
+            "Если NO — одна фраза почему шум.\n"
+            "Если YES — РОВНО 3 коротких пункта (без воды):\n"
+            "• Суть (1 предложение)\n"
+            "• Для нефти: вверх/вниз и почему\n"
+            "• Что делать: не догонять / ждать / осторожно\n"
+            "Максимум 500 символов после мета-строк."
         )
         result = await ask_gemini(
             api_key=api_key,
@@ -420,8 +455,8 @@ async def enrich_fastlane_with_gemini(
             return "", None
         bias_override = parse_gemini_oil_bias(text)
         text = strip_invented_trade_levels(text)
-        if len(text) > 1400:
-            text = text[:1397] + "…"
+        if len(text) > 700:
+            text = text[:697] + "…"
         return text, bias_override
     except Exception:
         logger.exception("Fast-lane Gemini failed")
@@ -484,6 +519,63 @@ def strip_invented_trade_levels(ai_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def detect_oil_primary_actors(title: str) -> list[str]:
+    """Кто двигает нефть в заголовке: Трамп / Бессент / Иран·Ормуз."""
+    low = (title or "").lower()
+    actors: list[str] = []
+    if any(
+        k in low
+        for k in (
+            "trump", "трамп", "truth social", "taco",
+        )
+    ):
+        actors.append("Трамп")
+    if any(
+        k in low
+        for k in (
+            "bessent", "treasury secretary", "scott bessent",
+            "министр финансов", "бессент",
+        )
+    ):
+        actors.append("Бессент")
+    if any(
+        k in low
+        for k in (
+            "hormuz", "ормуз", "iran", "иран", "tehran", "тегеран",
+            "fars", "tasnim", "irna",
+        )
+    ):
+        actors.append("Иран·Ормуз")
+    return actors
+
+
+def _bounce_hint(impact: str, move_note: str) -> str:
+    """Одна короткая строка — без простыни."""
+    strong = "опережает" in (move_note or "")
+    if impact == "bullish":
+        return "Не шортить против импульса; лонг только от уровня." if not strong else "Уже вверх — не догонять хай."
+    if impact == "bearish":
+        return "Не ловить нож; шорт от сопротивления." if not strong else "Уже вниз — ждать базу, не лонговать в воздух."
+    return "Ждать clarifier (Reuters/AP) или уровень."
+
+
+def should_ai_analyze_flash(
+    title: str,
+    meta: FastLaneMeta,
+    *,
+    min_score: int = 11,
+) -> bool:
+    """ИИ только на громких драйверах — не на каждый заголовок."""
+    actors = detect_oil_primary_actors(title)
+    # Трамп / Бессент / Ормуз — главный контур
+    if actors and meta.flash_score >= max(9, min_score - 1):
+        return True
+    # Очень громкий wire без явного actor-тега
+    if meta.tier == 1 and meta.flash_score >= min_score + 2:
+        return True
+    return False
+
+
 def format_fastlane_flash(
     item: Any,
     *,
@@ -491,75 +583,64 @@ def format_fastlane_flash(
     ai_ru: str = "",
     move_note: str = "",
     age_label: str = "",
+    compact: bool = True,
 ) -> str:
-    """Сообщение ‼️ КРИТИЧНО в Новостник — суть сверху, детали без простыни."""
+    """Короткий ‼️ flash — без лишней простыни."""
     title = (getattr(item, "title", "") or "").replace("<", "&lt;").replace(">", "&gt;")
     url = getattr(item, "url", "") or ""
     impact = getattr(item, "impact", "neutral") or "neutral"
     impact_ru = {
-        "bullish": "🟢 нефть скорее ВВЕРХ",
-        "bearish": "🔴 нефть скорее ВНИЗ",
-        "neutral": "⚪ влияние смешанное",
-    }.get(impact, "⚪ контекст")
+        "bullish": "🟢 ↑",
+        "bearish": "🔴 ↓",
+        "neutral": "⚪ ~",
+    }.get(impact, "⚪")
     bang = "‼️‼️" if meta.tier == 1 and meta.flash_score >= 12 else "‼️"
-    # В шапке — реальный wire (Reuters), не слово из title
-    lines = [
-        f"{bang} <b>ВАЖНО ДЛЯ НЕФТИ</b> · {meta.outlet}",
-        f"{impact_ru}",
-        "",
-    ]
+    actors = detect_oil_primary_actors(getattr(item, "title", "") or "")
+    actor_line = (" · ".join(actors)) if actors else ""
+    head = f"{bang} <b>{meta.outlet}</b> {impact_ru}"
+    if actor_line:
+        head += f" · {actor_line}"
+
+    lines = [head]
     if url:
         lines.append(f"<a href=\"{url}\"><b>{title}</b></a>")
     else:
         lines.append(f"<b>{title}</b>")
-    lines.append("")
-    lines.append(_bounce_hint(impact, move_note))
-    if move_note:
-        lines.append("")
-        lines.append(_esc(move_note))
+
     if ai_ru:
+        # ИИ уже внутри — не дублируем rule-brief
         lines.append("")
-        lines.append("🤖 <b>Разбор</b>")
-        lines.append(_esc(ai_ru))
+        lines.append(ai_ru.strip())
+    elif compact:
+        lines.append(_bounce_hint(impact, move_note))
+        if move_note and "опережает" in move_note:
+            lines.append(f"<i>{_esc(move_note)}</i>")
     else:
-        # Без Gemini — минимальный проф-каркас по правилам
         lines.append("")
-        lines.append("🧭 <b>Кратко</b>")
+        lines.append(_bounce_hint(impact, move_note))
+        if move_note:
+            lines.append(_esc(move_note))
         lines.append(_rule_brief(impact, title))
-    lines.append("")
+
     src = (getattr(item, "source", "") or meta.publisher or meta.outlet).strip()
     age = age_label or ""
-    lines.append(
-        f"<i>{src}"
-        + (f" · {age}" if age else "")
-        + f" · вес {meta.flash_score}</i>"
-    )
+    foot = f"<i>{src}"
+    if age:
+        foot += f" · {age}"
+    foot += "</i>"
+    lines.append(foot)
     if url:
-        lines.append(f"🔗 <a href=\"{url}\">Источник</a>")
-    lines.append("<i>Не финансовый совет. Без выдуманных уровней входа.</i>")
+        lines.append(f'<a href="{url}">источник</a>')
     return "\n".join(lines)
 
 
 def _rule_brief(impact: str, title: str) -> str:
-    low = (title or "").lower()
-    surprise = "средний"
-    if any(k in low for k in ("strike", "attack", "blockade", "closed", "удар", "атак")):
-        surprise = "высокий"
-    if any(k in low for k in ("cancel", "taco", "pause", "holds off", "отмен")):
-        surprise = "высокий"
-    if any(k in low for k in ("eia", "inventory", "spr", "запас")):
-        surprise = "средний"
     dir_ru = {
-        "bullish": "давление вверх (страх поставок / тугой склад)",
-        "bearish": "давление вниз (деэскалация / избыток)",
-        "neutral": "смешанно — нужен clarifier",
+        "bullish": "скорее вверх (поставки/гео)",
+        "bearish": "скорее вниз (сделка/деэскалация)",
+        "neutral": "смешанно",
     }.get(impact, "смешанно")
-    return (
-        f"💡 Значит: {dir_ru}.\n"
-        f"👀 Ждать: подтверждение от Reuters/AP/Bloomberg, не tertiary-репост.\n"
-        f"⚡ Сюрприз ±2–5%: <b>{surprise}</b> на гео/официальных заявлениях.\n"
-        f"🧭 Аккуратно: не догонять импульс; торговать только на открытой сессии Bybit."
-    )
+    return f"<i>{dir_ru}. Не догонять импульс.</i>"
 
 
 def is_trade_critical_flash(
