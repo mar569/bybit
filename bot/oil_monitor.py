@@ -1071,13 +1071,27 @@ def summarize_oil_news_bias(
     *,
     ta_verdict: str | None = None,
     ta_confidence: int | None = None,
+    max_age_hours: float | None = 2.0,
 ) -> OilNewsBias:
-    """Считает давление по уникальным сюжетам (без раздувания score дублями)."""
+    """Считает давление по уникальным сюжетам (без раздувания score дублями).
+
+    max_age_hours: жёсткий фильтр для ТОРГОВОГО bias.
+    Утренняя новость вечером не должна давать bullish/bearish на вход.
+    None = без фильтра (редко, для /why контекста).
+    """
+    if max_age_hours is not None:
+        cutoff = time.time() - max(0.25, float(max_age_hours)) * 3600.0
+        items = [
+            it
+            for it in items
+            if float(getattr(it, "published_ts", 0) or 0) >= cutoff
+        ]
+
     if not items:
         return OilNewsBias(
-            summary_ru="Новостной фон: нет важных заголовков",
+            summary_ru="Новостной фон: нет свежих важных заголовков",
             how_to_use_ru="Торговать только от уровней TA, без новостного подтверждения.",
-            basis_ru="Нет приоритетных новостей (Иран/Трамп/EIA/ОПЕК/объёмы) → только график.",
+            basis_ru="Нет свежих новостей в торговом окне → только график.",
         )
 
     # Одна тема = один голос (не 16 одинаковых Hormuz)
@@ -2212,6 +2226,138 @@ def _fetch_pro_oil_rss(
     return out
 
 
+async def collect_live_why_news(
+    *,
+    include_russian: bool = False,
+    include_pro_feeds: bool = True,
+    include_wire: bool = True,
+    include_x: bool = True,
+    x_bearer: str | None = None,
+    x_handles: Sequence[str] | None = None,
+    max_age_hours: float = 6.0,
+    ultra_fresh_hours: float = 2.0,
+) -> list[OilNewsItem]:
+    """Полный живой сбор для «Почему так»: RSS + fastlane + wire + X.
+
+    Не опирается на кэш монитора — каждый раз тянет источники заново.
+    При сильном ходе цены важны сюжеты ≤ultra_fresh_hours.
+    """
+    from .oil_wire import OilWireItem, fetch_oil_wire_headlines
+
+    flash_h = min(3.0, max(1.5, float(ultra_fresh_hours) + 0.5))
+    wire_h = min(4.0, max(2.0, float(ultra_fresh_hours) + 1.0))
+    x_h = min(3.0, max(1.5, float(ultra_fresh_hours) + 0.5))
+
+    tasks: list = [
+        fetch_oil_news(
+            max_items=24,
+            include_russian=include_russian,
+            critical_only=False,
+            critical_min_score=2,
+            max_age_hours=max_age_hours,
+            include_pro_feeds=include_pro_feeds,
+        ),
+        fetch_oil_fastlane_news(
+            max_items=16,
+            include_russian=include_russian,
+            max_age_hours=flash_h,
+            min_flash_score=5,
+            include_wire_feeds=False,  # wire тянем отдельно без flash-фильтра
+        ),
+    ]
+    if include_wire:
+        tasks.append(
+            asyncio.to_thread(
+                fetch_oil_wire_headlines,
+                max_age_hours=wire_h,
+                max_items=30,
+            )
+        )
+    if include_x:
+        from .oil_x import DEFAULT_X_HANDLES, fetch_oil_x_headlines
+
+        handles = x_handles or DEFAULT_X_HANDLES
+        tasks.append(
+            fetch_oil_x_headlines(
+                bearer_token=x_bearer,
+                handles=handles,
+                max_age_hours=x_h,
+                prefer_api=True,
+            )
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    merged: list[OilNewsItem] = []
+    seen: set[str] = set()
+
+    def _add(it: OilNewsItem) -> None:
+        title = (it.title or "").strip()
+        if not title:
+            return
+        if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_hours):
+            return
+        key = title.lower()[:120]
+        if key in seen:
+            return
+        seen.add(key)
+        merged.append(it)
+
+    for res in results:
+        if isinstance(res, Exception):
+            logger.debug("Why live fetch piece failed: %s", res)
+            continue
+        if not res:
+            continue
+        first = res[0]
+        # Wire RSS
+        if isinstance(first, OilWireItem):
+            for w in res:
+                if not isinstance(w, OilWireItem):
+                    continue
+                _add(
+                    OilNewsItem(
+                        title=w.title,
+                        url=w.url,
+                        source=w.source,
+                        published_ts=w.published_ts,
+                        impact=classify_news_impact(w.title),
+                        query="why_wire",
+                        lang="en",
+                        theme=detect_oil_news_theme(w.title, source=w.source) or "",
+                    )
+                )
+            continue
+        # X items (OilXItem)
+        if hasattr(first, "handle") and hasattr(first, "title"):
+            for xi in res:
+                title = getattr(xi, "title", "") or ""
+                _add(
+                    OilNewsItem(
+                        title=title,
+                        url=getattr(xi, "url", "") or "",
+                        source=getattr(xi, "source", "") or "X",
+                        published_ts=float(getattr(xi, "published_ts", 0) or 0),
+                        impact=classify_news_impact(title),
+                        query="why_x",
+                        lang="en",
+                        theme=detect_oil_news_theme(title) or "",
+                    )
+                )
+            continue
+        for it in res:
+            if isinstance(it, OilNewsItem):
+                _add(it)
+
+    merged.sort(
+        key=lambda x: (
+            float(x.published_ts or 0),
+            news_critical_score(x.title, source=x.source),
+        ),
+        reverse=True,
+    )
+    return merged
+
+
 async def fetch_oil_fastlane_news(
     *,
     max_items: int = 8,
@@ -2820,58 +2966,27 @@ def _age_label(published_ts: float) -> str:
     return datetime.fromtimestamp(published_ts, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
 
 def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
-    """Одна новость = одно сообщение со ссылкой."""
+    """Коротко: заголовок + направление + возраст."""
     title = item.title.replace("<", "&lt;").replace(">", "&gt;")
-    impact_ru = {
-        "bullish": "🟢 давление вверх на нефть",
-        "bearish": "🔴 давление вниз на нефть",
-        "neutral": "⚪ контекст / следить",
-    }.get(item.impact, "⚪ контекст")
-    lang_mark = "🇷🇺" if item.lang == "ru" else "🇬🇧"
-    theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
-    theme_ru = theme_label_ru(theme)
+    impact_ru = {"bullish": "🟢↑", "bearish": "🔴↓", "neutral": "⚪"}.get(
+        item.impact, "⚪"
+    )
     score = news_critical_score(item.title, source=item.source)
-    pro = match_pro_oil_analyst(item.title, item.source)
-    is_analyst = theme == "analyst" or pro is not None
-    # Сильный вес по Ормузу/Ирану — шапка как «важно», с разбором если есть
-    priority = score >= 12 and theme in {"iran_geo", "trump_us"}
-    if priority:
-        header = "‼️ <b>ВАЖНО ДЛЯ НЕФТИ</b> · Bybit UKOUSD.s"
-    elif pro is not None:
-        header = f"🛢 <b>Нефть · ⭐ {pro[0]}</b>"
-    elif is_analyst:
-        header = "🛢 <b>Нефть · аналитика</b>"
-    else:
-        header = "🛢 <b>Нефть · важное</b>"
-    lines = [
-        header,
-        f"<i>{theme_ru} · вес {score}</i>",
-        "",
-    ]
+    bang = "‼️ " if score >= 12 else ""
     if item.url:
-        lines.append(f"<a href=\"{item.url}\"><b>{title}</b></a>")
+        head = f'{bang}{impact_ru} <a href="{item.url}"><b>{title}</b></a>'
     else:
-        lines.append(f"<b>{title}</b>")
-    lines.append("")
-    lines.append(f"{impact_ru}")
+        head = f"{bang}{impact_ru} <b>{title}</b>"
+    lines = [head, f"<i>{item.source} · {_age_label(item.published_ts)}</i>"]
     if ai_ru:
-        lines.append("")
-        lines.append("🤖 <b>Коротко</b>")
         safe_ai = (
             ai_ru.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         )
-        lines.append(safe_ai)
-    elif pro is not None:
-        lines.append(
-            f"<i>Топ-аналитик ({pro[0]}) — приоритет для bias; "
-            "не сигнал входа, сверяй с графиком UKOUSD.</i>"
-        )
-    elif is_analyst:
-        lines.append("<i>Прогноз/мнение — не сигнал входа; сверяй с графиком UKOUSD.</i>")
-    lines.append(f"<i>{lang_mark} {item.source} · {_age_label(item.published_ts)}</i>")
-    if item.url:
-        lines.append(f"🔗 <a href=\"{item.url}\">Открыть источник</a>")
-    lines.append("<i>Не финсовет · только Bybit UKOUSD.s</i>")
+        # максимум 2–3 коротких строки
+        short = " ".join(safe_ai.split())
+        if len(short) > 220:
+            short = short[:217] + "…"
+        lines.append(short)
     return "\n".join(lines)
 
 
@@ -3471,8 +3586,10 @@ class OilMonitorEngine:
         on_extra_chart: Callable[[str, bytes], Awaitable[bool]] | None = None,
         on_signal: Callable[[str], Awaitable[bool]] | None = None,
         on_setup: Callable[[str, bytes | None], Awaitable[bool]] | None = None,
+        on_admin_desk: Callable[[str], Awaitable[bool]] | None = None,
         gemini_api_key: Callable[[], str | None] | str | None = None,
         gemini_model: Callable[[], str] | str | None = None,
+        x_bearer_token: Callable[[], str | None] | str | None = None,
     ) -> None:
         self.settings_manager = settings_manager
         self._on_news = on_news
@@ -3481,8 +3598,10 @@ class OilMonitorEngine:
         self._on_extra_chart = on_extra_chart
         self._on_signal = on_signal or on_level_alert
         self._on_setup = on_setup
+        self._on_admin_desk = on_admin_desk
         self._gemini_api_key = gemini_api_key
         self._gemini_model = gemini_model
+        self._x_bearer_token = x_bearer_token
         self._seen_titles: set[str] = set()
         self._last_digest_ts = 0.0
         self._level_watcher = OilLevelWatcher()
@@ -3505,6 +3624,11 @@ class OilMonitorEngine:
         self._hormuz_prev: Any = None
         self._last_crash_alert_ts: float = 0.0
         self._last_crash_abs_move: float = 0.0
+        self._pending_reaction: Any = None
+        self._speech_freeze_until: float = 0.0
+        self._speech_freeze_reason: str = ""
+        self._last_calendar_brief_day: str = ""
+        self._x_bearer_token: Callable[[], str | None] | str | None = None
         from .oil_journal import OilSetupJournal
 
         self._setup_journal = OilSetupJournal()
@@ -3561,6 +3685,229 @@ class OilMonitorEngine:
     def _oil_entry_signals_allowed(self, settings: Any) -> bool:
         """Мастер-тумблер сигналов входа (панель Нефть). Не зависит от сессии."""
         return bool(getattr(settings, "oil_entry_signals_enabled", True))
+
+    def _resolve_x_bearer(self) -> str | None:
+        key = self._x_bearer_token
+        if callable(key):
+            key = key()
+        return (key or None) if key else None
+
+    def _trading_news_bias(
+        self,
+        settings: Any,
+        *,
+        ta_verdict: str | None = None,
+        ta_confidence: int | None = None,
+    ) -> OilNewsBias:
+        """Bias только из свежих новостей — утро не кормит вечерний вход."""
+        max_age = float(getattr(settings, "oil_news_bias_max_age_hours", 2.0))
+        return summarize_oil_news_bias(
+            self._recent_news,
+            ta_verdict=ta_verdict,
+            ta_confidence=ta_confidence,
+            max_age_hours=max_age,
+        )
+
+    def _fresh_news_for_entry(self, settings: Any) -> list[OilNewsItem]:
+        max_age = float(getattr(settings, "oil_news_entry_max_age_hours", 1.0))
+        cutoff = time.time() - max(0.25, max_age) * 3600.0
+        return [
+            it
+            for it in self._recent_news
+            if float(getattr(it, "published_ts", 0) or 0) >= cutoff
+        ]
+
+    def _entry_block_reason(self, settings: Any) -> str | None:
+        """Календарь / речь / реакция на flash — блок входов."""
+        if not self._oil_entry_signals_allowed(settings):
+            return "входы OFF"
+        now = time.time()
+        if now < float(self._speech_freeze_until or 0):
+            return self._speech_freeze_reason or "🔒 freeze по заявлению"
+
+        if bool(getattr(settings, "oil_calendar_lock_enabled", True)):
+            from .oil_calendar import calendar_entry_lock
+
+            lock = calendar_entry_lock()
+            if lock.active:
+                return lock.reason_ru
+
+        if bool(getattr(settings, "oil_reaction_enabled", True)):
+            from .oil_reaction import reaction_blocks_entry
+
+            reason = reaction_blocks_entry(self._pending_reaction, now_ts=now)
+            if reason:
+                return reason
+        return None
+
+    def _arm_reaction_from_flash(self, item: Any, settings: Any) -> None:
+        if not bool(getattr(settings, "oil_reaction_enabled", True)):
+            return
+        from .oil_reaction import start_reaction
+        from .oil_calendar import detect_scheduled_speech_freeze
+
+        title = getattr(item, "title", "") or ""
+        impact = getattr(item, "impact", "neutral") or "neutral"
+        speech = detect_scheduled_speech_freeze(
+            title,
+            freeze_minutes=float(getattr(settings, "oil_speech_freeze_minutes", 60.0)),
+        )
+        if speech.active:
+            self._speech_freeze_until = speech.until_ts
+            self._speech_freeze_reason = speech.reason_ru
+
+        rx = start_reaction(
+            impact=impact,
+            title=title,
+            source=getattr(item, "source", "") or "",
+            wait_minutes=float(getattr(settings, "oil_reaction_wait_minutes", 10.0)),
+            expire_minutes=float(getattr(settings, "oil_reaction_expire_minutes", 45.0)),
+        )
+        if rx is not None:
+            self._pending_reaction = rx
+
+    async def _tick_reaction_confirm(self, settings: Any) -> int:
+        if not bool(getattr(settings, "oil_reaction_enabled", True)):
+            return 0
+        rx = self._pending_reaction
+        if rx is None:
+            return 0
+        now = time.time()
+        if now > rx.expire_ts:
+            self._pending_reaction = None
+            return 0
+        if now < rx.ready_ts or rx.confirmed is not None:
+            return 0
+        try:
+            bars = await asyncio.to_thread(
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=5,
+                limit=20,
+            )
+        except Exception:
+            return 0
+        from .oil_reaction import confirm_reaction_with_bars, format_reaction_wait_note
+
+        self._pending_reaction = confirm_reaction_with_bars(rx, bars, now_ts=now)
+        # Одно короткое обновление статуса
+        if self._pending_reaction.confirmed is not None and self._on_news is not None:
+            try:
+                await self._on_news(format_reaction_wait_note(self._pending_reaction))
+            except Exception:
+                logger.debug("Oil reaction note failed", exc_info=True)
+            return 1
+        return 0
+
+    async def _tick_calendar_brief(self, settings: Any) -> int:
+        """08:00 МСК DESK → лично админу, даже если канал Нефть OFF."""
+        if not bool(getattr(settings, "oil_calendar_brief_enabled", True)):
+            return 0
+        from .oil_calendar import format_morning_desk_brief, upcoming_oil_events
+        from datetime import datetime
+
+        try:
+            from zoneinfo import ZoneInfo
+
+            msk = ZoneInfo("Europe/Moscow")
+        except Exception:
+            from datetime import timezone, timedelta
+
+            msk = timezone(timedelta(hours=3))
+        now = datetime.now(tz=msk)
+        hour = int(getattr(settings, "oil_calendar_brief_hour_msk", 8))
+        # окно 8:00–8:20 — не пропустить тик
+        if now.hour != hour or now.minute > 20:
+            return 0
+        day_key = now.strftime("%Y-%m-%d")
+        if self._last_calendar_brief_day == day_key:
+            return 0
+
+        night = [
+            it.title[:100]
+            for it in list(self._recent_news)[:8]
+            if (now.timestamp() - float(it.published_ts or 0)) <= 10 * 3600
+            and getattr(it, "impact", "") in {"bullish", "bearish"}
+        ][:2]
+        msg = format_morning_desk_brief(
+            upcoming_oil_events(now=now, horizon_hours=40.0),
+            now=now,
+            night_headlines=night,
+        )
+        ok = False
+        # Приоритет: личка админу (не зависит от oil_news_enabled)
+        if self._on_admin_desk is not None:
+            try:
+                ok = await self._on_admin_desk(msg)
+            except Exception:
+                logger.exception("Oil admin desk brief failed")
+                ok = False
+        elif self._on_news is not None:
+            try:
+                ok = await self._on_news(msg)
+            except Exception:
+                logger.debug("Oil calendar brief fallback failed", exc_info=True)
+                ok = False
+
+        # В Новостник — только если канал Нефть ON и день важный
+        if (
+            ok
+            and self._on_news is not None
+            and bool(getattr(settings, "oil_news_enabled", False))
+        ):
+            try:
+                from .oil_calendar import format_newsroom_desk_flash
+
+                flash = format_newsroom_desk_flash(
+                    upcoming_oil_events(now=now, horizon_hours=40.0),
+                    now=now,
+                )
+                if flash:
+                    await self._on_news(flash)
+            except Exception:
+                logger.debug("Oil newsroom desk flash failed", exc_info=True)
+
+        if ok:
+            self._last_calendar_brief_day = day_key
+            logger.info("Oil DESK brief sent for %s", day_key)
+            return 1
+        return 0
+
+    async def calendar_desk_now(self) -> tuple[bool, str]:
+        """Ручная кнопка «Календарь»: свежий DESK прямо сейчас."""
+        from .oil_calendar import format_morning_desk_brief, upcoming_oil_events
+        from datetime import datetime
+
+        try:
+            from zoneinfo import ZoneInfo
+
+            msk = ZoneInfo("Europe/Moscow")
+        except Exception:
+            from datetime import timezone, timedelta
+
+            msk = timezone(timedelta(hours=3))
+        now = datetime.now(tz=msk)
+        try:
+            evs = await asyncio.to_thread(
+                upcoming_oil_events, now=now, horizon_hours=48.0
+            )
+        except Exception as exc:
+            logger.exception("Oil calendar refresh failed")
+            return False, f"календарь недоступен: {exc}"
+        night = [
+            it.title[:100]
+            for it in list(self._recent_news)[:6]
+            if (now.timestamp() - float(getattr(it, "published_ts", 0) or 0)) <= 12 * 3600
+        ][:2]
+        text = format_morning_desk_brief(evs, now=now, night_headlines=night)
+        # Отдать текст в UI; опционально продублировать админу
+        if self._on_admin_desk is not None:
+            try:
+                await self._on_admin_desk(text)
+            except Exception:
+                logger.debug("Oil calendar desk admin mirror failed", exc_info=True)
+        return True, text
 
     def _resolve_gemini_key(self) -> str | None:
         key = self._gemini_api_key
@@ -3702,8 +4049,8 @@ class OilMonitorEngine:
             bars,
             interval_minutes=5,
             pct_15m=float(getattr(settings, "oil_crash_pct_15m", 1.5)),
-            pct_30m=float(getattr(settings, "oil_crash_pct_30m", 3.0)),
-            pct_60m=float(getattr(settings, "oil_crash_pct_60m", 4.0)),
+            pct_30m=float(getattr(settings, "oil_crash_pct_30m", 2.0)),
+            pct_60m=float(getattr(settings, "oil_crash_pct_60m", 2.0)),
         )
         if alert is None:
             return 0
@@ -3725,11 +4072,20 @@ class OilMonitorEngine:
             if (it.title or "").strip()
         ]
         msg = format_oil_crash_alert(alert, recent_headlines=headlines)
+        ok = False
         try:
-            ok = await self._on_news(msg)
+            if self._on_news is not None:
+                ok = await self._on_news(msg)
         except Exception:
             logger.exception("Oil crash alert dispatch failed")
-            return 0
+            ok = False
+        # Канал Нефть OFF / чат недоступен → личка админу
+        if not ok and self._on_admin_desk is not None:
+            try:
+                ok = await self._on_admin_desk(msg)
+            except Exception:
+                logger.exception("Oil crash admin fallback failed")
+                ok = False
         if not ok:
             return 0
         self._last_crash_alert_ts = now
@@ -3779,6 +4135,10 @@ class OilMonitorEngine:
             return 0
         if not self._oil_entry_signals_allowed(settings):
             return 0
+        block = self._entry_block_reason(settings)
+        if block and block != "входы OFF":
+            logger.debug("Oil micro skipped: %s", block)
+            return 0
         dispatch = self._on_signal or self._on_level_alert
         if dispatch is None:
             return 0
@@ -3802,7 +4162,7 @@ class OilMonitorEngine:
         except Exception:
             logger.debug("Oil micro bars failed", exc_info=True)
             return 0
-        news_bias = summarize_oil_news_bias(self._recent_news)
+        news_bias = self._trading_news_bias(settings)
         sig = detect_oil_micro_signal(
             bars,
             news_bias=news_bias,
@@ -3889,6 +4249,34 @@ class OilMonitorEngine:
             self._last_fastlane_ts = now
             return 0
 
+        # X / Twitter wire (Bearer или RSSHub fallback)
+        if bool(getattr(settings, "oil_x_enabled", True)):
+            try:
+                from .oil_x import DEFAULT_X_HANDLES, fetch_oil_x_headlines
+
+                handles = getattr(settings, "oil_x_handles", None) or DEFAULT_X_HANDLES
+                if isinstance(handles, str):
+                    handles = [h.strip() for h in handles.split(",") if h.strip()]
+                x_raw = await fetch_oil_x_headlines(
+                    bearer_token=self._resolve_x_bearer(),
+                    handles=handles,
+                    max_age_hours=min(2.0, max_age_h),
+                    prefer_api=True,
+                )
+                for xi in x_raw[:8]:
+                    items.append(
+                        OilNewsItem(
+                            title=xi.title,
+                            url=xi.url,
+                            source=xi.source,
+                            published_ts=xi.published_ts,
+                            impact=classify_news_impact(xi.title),
+                            lang="en",
+                        )
+                    )
+            except Exception:
+                logger.debug("Oil X fetch failed", exc_info=True)
+
         self._last_fastlane_ts = now
         cutoff = now - max_age_h * 3600.0
         self._remember_news(items, cutoff=cutoff)
@@ -3964,6 +4352,7 @@ class OilMonitorEngine:
             if not ok:
                 continue
 
+            self._arm_reaction_from_flash(it, settings)
             self._seen_titles.add(key)
             self._seen_fastlane.add(key)
             self._recent_sent_titles.append(it.title)
@@ -4075,20 +4464,35 @@ class OilMonitorEngine:
             )
 
     async def poll_once(self) -> int:
+        """Тик монитора.
+
+        Календарь DESK + crash работают даже при oil_news_enabled=OFF
+        (админ / fallback). Остальная лента — только при включённом канале.
+        """
         settings = self.settings_manager.settings
-        if not getattr(settings, "oil_news_enabled", False):
-            return 0
         if getattr(settings, "bot_paused", False):
             return 0
 
+        oil_on = bool(getattr(settings, "oil_news_enabled", False))
         sent = 0
+
+        # --- Ops: не зависят от тумблера «Нефть» ---
+        sent += await self._tick_calendar_brief(settings)
         sent += await self._tick_price_crash(settings)
+        # A+ ПРО в ручной TA — отдельно от дайджеста
+        sent += await self._tick_confluence_setup(settings)
+        sent += await self._tick_setup_outcomes(settings)
+
+        if not oil_on:
+            return sent
+
+        # --- Лента / алерты канала Нефть ---
+        sent += await self._tick_reaction_confirm(settings)
         sent += await self._tick_level_alerts(settings)
         sent += await self._tick_micro_signals(settings)
         sent += await self._tick_fastlane(settings)
         sent += await self._tick_hormuz_alert(settings)
         sent += await self._tick_preopen_alert(settings)
-        sent += await self._tick_setup_outcomes(settings)
 
         now = time.time()
         news_interval = float(getattr(settings, "oil_news_interval_seconds", 300.0))
@@ -4238,7 +4642,7 @@ class OilMonitorEngine:
         return True, f"отправлено ({n})"
 
     async def explain_why_now(self) -> tuple[bool, str]:
-        """Честный разбор: почему цена растёт/падает — свежий сбор фактов «прямо сейчас»."""
+        """Честный разбор: живой сбор X/wire/RSS под текущий ход цены."""
         settings = self.settings_manager.settings
         interval_min = int(getattr(settings, "oil_interval_minutes", 15))
         try:
@@ -4250,56 +4654,41 @@ class OilMonitorEngine:
             if not bundle:
                 return False, "не удалось собрать свечи UKOUSD"
 
-            # Жёсткий свежий сбор: fast-lane ≤4ч + обычные ≤8ч (не старый кэш)
-            fresh_h = 8.0
-            flash_h = min(
-                1.5, float(getattr(settings, "oil_fastlane_max_age_hours", 1.5))
-            )
+            # Полный живой сбор — не кэш: RSS + fastlane + FJ/ForexLive + X
+            fresh_h = 6.0
             cutoff = time.time() - fresh_h * 3600.0
             try:
-                regular, flash = await asyncio.gather(
-                    fetch_oil_news(
-                        max_items=20,
-                        include_russian=bool(getattr(settings, "oil_russian_news", True)),
-                        critical_only=False,
-                        critical_min_score=2,
-                        max_age_hours=fresh_h,
-                        include_pro_feeds=bool(
-                            getattr(settings, "oil_pro_feeds_enabled", True)
-                        ),
+                from .oil_x import DEFAULT_X_HANDLES
+
+                handles = getattr(settings, "oil_x_handles", None) or DEFAULT_X_HANDLES
+                if isinstance(handles, str):
+                    handles = [h.strip() for h in handles.split(",") if h.strip()]
+                why_items = await collect_live_why_news(
+                    include_russian=bool(getattr(settings, "oil_russian_news", False)),
+                    include_pro_feeds=bool(
+                        getattr(settings, "oil_pro_feeds_enabled", True)
                     ),
-                    fetch_oil_fastlane_news(
-                        max_items=12,
-                        include_russian=bool(getattr(settings, "oil_russian_news", True)),
-                        max_age_hours=flash_h,
-                        min_flash_score=max(
-                            6, int(getattr(settings, "oil_fastlane_min_score", 8)) - 2
-                        ),
-                    ),
+                    include_wire=bool(getattr(settings, "oil_wire_feeds_enabled", True)),
+                    include_x=bool(getattr(settings, "oil_x_enabled", True)),
+                    x_bearer=self._resolve_x_bearer(),
+                    x_handles=handles,
+                    max_age_hours=fresh_h,
+                    ultra_fresh_hours=2.0,
                 )
-                merged: list[OilNewsItem] = []
-                seen: set[str] = set()
-                for it in list(flash) + list(regular):
-                    key = (it.title or "").lower()[:120]
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    merged.append(it)
-                self._remember_news(merged, cutoff=cutoff)
-                # Для why — приоритет свежему merged, не раздутый старый кэш
+                self._remember_news(why_items, cutoff=cutoff)
+            except Exception:
+                logger.debug("Oil why live collect failed", exc_info=True)
                 why_items = [
                     it
-                    for it in merged
+                    for it in self._recent_news
                     if oil_news_is_fresh(it.published_ts, max_age_hours=fresh_h)
-                ] or merged
-            except Exception:
-                logger.debug("Oil why news refresh failed", exc_info=True)
-                why_items = list(self._recent_news)
+                ]
 
             news_bias = summarize_oil_news_bias(
                 why_items,
                 ta_verdict=bundle.brent.verdict,
                 ta_confidence=int(bundle.brent.confidence or 0),
+                max_age_hours=2.0,  # bias только из свежего — не утро на вечер
             )
             forecast = None
             if bool(getattr(settings, "oil_forecast_enabled", True)):
@@ -4324,6 +4713,8 @@ class OilMonitorEngine:
 
             from .oil_flow import compute_oil_flow_proxy
             from .oil_why import (
+                _is_strong_move,
+                _pick_news,
                 build_oil_why_report,
                 enrich_why_with_gemini,
                 format_oil_why_report,
@@ -4333,7 +4724,16 @@ class OilMonitorEngine:
                 bundle.brent_bars,
                 lookback=12 if interval_min <= 15 else 8,
             )
-            # Черновик без ИИ — чтобы знать direction/move
+
+            inventory_ru = ""
+            try:
+                from .oil_inventory import fetch_us_oil_inventory, format_inventory_short
+
+                inv = await fetch_us_oil_inventory()
+                inventory_ru = format_inventory_short(inv)
+            except Exception:
+                logger.debug("Why+inventory failed", exc_info=True)
+
             draft = build_oil_why_report(
                 bundle.brent_bars,
                 news_items=why_items,
@@ -4341,35 +4741,45 @@ class OilMonitorEngine:
                 forecast=forecast,
                 flow=flow,
                 interval_minutes=bundle.interval_minutes,
+                inventory_ru=inventory_ru,
             )
             if draft is None:
                 return False, "мало данных для объяснения"
 
-            extra_bits: list[str] = []
-            try:
-                from .oil_inventory import fetch_us_oil_inventory, format_inventory_short
-
-                inv = await fetch_us_oil_inventory()
-                short = format_inventory_short(inv)
-                if short:
-                    extra_bits.append(short)
-            except Exception:
-                logger.debug("Why+inventory failed", exc_info=True)
-
-            headlines = [
-                f"{getattr(it, 'source', '')}: {getattr(it, 'title', '')}"
-                for it in why_items[:10]
-                if getattr(it, "title", "")
-            ]
+            strong = _is_strong_move(draft.move_1h_pct, draft.move_4h_pct)
+            picked = _pick_news(
+                why_items,
+                limit=5,
+                prefer_direction=draft.direction,
+                max_age_hours=6.0,
+                prefer_fresh_hours=2.0 if strong or draft.direction != "flat" else None,
+                strong_move=strong,
+            )
+            # Возраст в заголовке для ИИ — чтобы не тащил старьё
+            now = time.time()
+            headlines: list[str] = []
+            for it in picked:
+                title = getattr(it, "title", "") or ""
+                if not title:
+                    continue
+                src = getattr(it, "source", "") or ""
+                ts = float(getattr(it, "published_ts", 0) or 0)
+                age = ""
+                if ts > 0:
+                    age_h = (now - ts) / 3600.0
+                    age = f"{int(age_h * 60)}м" if age_h < 1 else f"{age_h:.1f}ч"
+                headlines.append(f"[{age}] {src}: {title}")
             ai_now = await enrich_why_with_gemini(
                 direction=draft.direction,
                 move_1h=draft.move_1h_pct,
                 move_4h=draft.move_4h_pct,
                 price=draft.price,
                 headlines=headlines,
-                extra_context="; ".join(extra_bits),
+                extra_context=inventory_ru or "",
                 api_key=self._resolve_gemini_key(),
                 model=self._resolve_gemini_model(),
+                strong_move=strong,
+                freshest_age_h=draft.freshest_age_h,
             )
             report = build_oil_why_report(
                 bundle.brent_bars,
@@ -4379,13 +4789,11 @@ class OilMonitorEngine:
                 flow=flow,
                 interval_minutes=bundle.interval_minutes,
                 ai_now_ru=ai_now,
+                inventory_ru=inventory_ru,
             )
             if report is None:
                 return False, "мало данных для объяснения"
-            text = format_oil_why_report(report)
-            if extra_bits:
-                text += "\n\n" + "\n".join(extra_bits)
-            return True, text
+            return True, format_oil_why_report(report)
         except Exception as exc:
             logger.exception("Oil why explain failed")
             return False, f"ошибка: {exc}"
@@ -4430,7 +4838,7 @@ class OilMonitorEngine:
             except Exception:
                 logger.debug("Open-brief news refresh failed", exc_info=True)
 
-            news_bias = summarize_oil_news_bias(self._recent_news)
+            news_bias = self._trading_news_bias(settings)
             forecast = None
             if bool(getattr(settings, "oil_forecast_enabled", True)) and bundle:
                 from .oil_forecast import build_oil_forecast
@@ -4548,7 +4956,7 @@ class OilMonitorEngine:
                 include_wti=False,
             )
             price = float(bundle.brent.price) if bundle else 0.0
-            news_bias = summarize_oil_news_bias(self._recent_news)
+            news_bias = self._trading_news_bias(settings)
 
             def _fallback(*, rate_limited: bool) -> str:
                 return format_oil_ai_fallback(
@@ -4747,7 +5155,7 @@ class OilMonitorEngine:
                 from .oil_session import oil_session_status
 
                 session = oil_session_status()
-                news_bias = summarize_oil_news_bias(self._recent_news)
+                news_bias = self._trading_news_bias(settings)
                 return True, format_oil_ai_fallback(
                     q,
                     price=0.0,
@@ -4790,15 +5198,15 @@ class OilMonitorEngine:
             min_score = float(getattr(settings, "oil_bounce_min_news_score", 3.0))
             ta_verdict_raw = bundle.brent.verdict
             ta_conf_raw = int(bundle.brent.confidence or 0)
-            news_bias = summarize_oil_news_bias(
-                self._recent_news,
+            news_bias = self._trading_news_bias(
+                settings,
                 ta_verdict=ta_verdict_raw,
                 ta_confidence=ta_conf_raw,
             )
             bounce = build_oil_bounce_plan(
                 bundle.brent,
                 news_bias,
-                news_items=self._recent_news,
+                news_items=self._fresh_news_for_entry(settings),
                 min_score=min_score,
             )
             self._active_bounce = bounce
@@ -4919,14 +5327,14 @@ class OilMonitorEngine:
 
                 wti_bounce = None
                 if bounce is not None and bundle.wti:
-                    wti_bias = summarize_oil_news_bias(
-                        self._recent_news,
+                    wti_bias = self._trading_news_bias(
+                        settings,
                         ta_verdict=bundle.wti.verdict,
                     )
                     wti_bounce = build_oil_bounce_plan(
                         bundle.wti,
                         wti_bias,
-                        news_items=self._recent_news,
+                        news_items=self._fresh_news_for_entry(settings),
                         min_score=min_score,
                     )
                     if wti_bounce is not None:
@@ -4960,6 +5368,81 @@ class OilMonitorEngine:
             logger.exception("Oil digest compose failed")
             return 0
 
+    async def _tick_confluence_setup(self, settings: Any) -> int:
+        """Отдельный тик A+ ПРО → ручной TA (не зависит от oil_setup_with_digest)."""
+        if self._on_setup is None:
+            return 0
+        if not bool(getattr(settings, "oil_setup_enabled", True)):
+            return 0
+        if not self._oil_entry_signals_allowed(settings):
+            return 0
+        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 10800))
+        if time.time() - self._last_setup_ts < cooldown:
+            return 0
+        if not self._oil_ta_gap_ok(settings):
+            return 0
+
+        interval_min = int(getattr(settings, "oil_interval_minutes", 15))
+        try:
+            bundle = await build_oil_analysis_bundle(
+                interval_minutes=interval_min,
+                include_brent=True,
+                include_wti=False,
+            )
+        except Exception:
+            logger.debug("Oil confluence bars failed", exc_info=True)
+            return 0
+        if not bundle or bundle.brent is None:
+            return 0
+
+        ta_verdict_raw = bundle.brent.verdict
+        ta_conf_raw = int(bundle.brent.confidence or 0)
+        news_bias = self._trading_news_bias(
+            settings,
+            ta_verdict=ta_verdict_raw,
+            ta_confidence=ta_conf_raw,
+        )
+        scalp = build_oil_scalp_call(
+            bundle.brent,
+            bundle.brent_ta,
+            news_bias=news_bias,
+            market_mood=bundle.market_mood,
+            interval_minutes=bundle.interval_minutes,
+        )
+        forecast = None
+        if bool(getattr(settings, "oil_forecast_enabled", True)):
+            try:
+                from .oil_forecast import build_oil_forecast
+
+                forecast = build_oil_forecast(
+                    bundle.brent,
+                    bundle.brent_ta,
+                    news_bias=news_bias,
+                    news_items=self._fresh_news_for_entry(settings),
+                    scalp_call=scalp,
+                    market_mood=bundle.market_mood,
+                    interval_minutes=bundle.interval_minutes,
+                )
+            except Exception:
+                logger.debug("Oil confluence forecast failed", exc_info=True)
+        bounce = build_oil_bounce_plan(
+            bundle.brent,
+            news_bias,
+            news_items=self._fresh_news_for_entry(settings),
+            min_score=float(getattr(settings, "oil_bounce_min_news_score", 3.0)),
+        )
+        return await self._maybe_dispatch_confluence_setup(
+            settings,
+            bundle=bundle,
+            forecast=forecast,
+            news_bias=news_bias,
+            scalp=scalp,
+            bounce=bounce,
+            ta_verdict_raw=ta_verdict_raw,
+            ta_conf_raw=ta_conf_raw,
+            png=None,
+        )
+
     async def _maybe_dispatch_confluence_setup(
         self,
         settings: Any,
@@ -4980,6 +5463,10 @@ class OilMonitorEngine:
             return 0
         if not self._oil_entry_signals_allowed(settings):
             logger.debug("Oil confluence skipped: entry signals toggled OFF")
+            return 0
+        block = self._entry_block_reason(settings)
+        if block and block != "входы OFF":
+            logger.debug("Oil confluence skipped: %s", block)
             return 0
         # Антиспам: не дублировать торговые пуши в ручной TA
         if not self._oil_ta_gap_ok(settings):
@@ -5014,7 +5501,7 @@ class OilMonitorEngine:
             news_bias=news_bias,
             scalp_call=scalp,
             bounce_plan=bounce,
-            news_items=self._recent_news,
+            news_items=self._fresh_news_for_entry(settings),
             market_mood=bundle.market_mood,
             interval_minutes=bundle.interval_minutes,
             ta_verdict_raw=ta_verdict_raw,
@@ -5294,10 +5781,10 @@ class OilMonitorEngine:
             else:
                 sleep_s = max(120.0, sleep_s)
             try:
-                if getattr(settings, "oil_news_enabled", False):
-                    n = await self.poll_once()
-                    if n:
-                        logger.info("Oil monitor sent %d message(s)", n)
+                # Всегда крутим poll: DESK/crash/ПРО живут и при Нефть OFF
+                n = await self.poll_once()
+                if n:
+                    logger.info("Oil monitor sent %d message(s)", n)
             except asyncio.CancelledError:
                 raise
             except Exception:

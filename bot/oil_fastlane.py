@@ -85,6 +85,11 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("investinglive", "InvestingLive", 1),
     ("truthsocial.com", "Truth Social", 1),
     ("truth social", "Truth Social", 1),
+    ("x.com", "X", 1),
+    ("twitter.com", "X", 1),
+    ("x @", "X", 1),
+    ("deltaone", "X · DeItaone", 1),
+    ("financialjuice", "FinancialJuice", 1),
     ("ft.com", "FT", 2),
     ("financial times", "FT", 2),
     ("nytimes.com", "NYT", 2),
@@ -560,7 +565,7 @@ def _bounce_hint(impact: str, move_note: str) -> str:
         return "Не шортить против импульса; лонг только от уровня." if not strong else "Уже вверх — не догонять хай."
     if impact == "bearish":
         return "Не ловить нож; шорт от сопротивления." if not strong else "Уже вниз — ждать базу, не лонговать в воздух."
-    return "Ждать clarifier (Reuters/AP) или уровень."
+    return "Ждать подтверждения (Reuters/AP) или уровень."
 
 
 def should_ai_analyze_flash(
@@ -580,6 +585,17 @@ def should_ai_analyze_flash(
     return False
 
 
+def _headline_ru(title: str) -> tuple[str, str]:
+    """Русский пересказ заголовка + влияние на цену."""
+    try:
+        from .oil_why import _explain_headline
+
+        what, means, _ = _explain_headline(title or "")
+        return what, means
+    except Exception:
+        return "Новость по нефти", "Смотри Ормуз и уровни"
+
+
 def format_fastlane_flash(
     item: Any,
     *,
@@ -589,8 +605,8 @@ def format_fastlane_flash(
     age_label: str = "",
     compact: bool = True,
 ) -> str:
-    """Короткий ‼️ flash — без лишней простыни."""
-    title = (getattr(item, "title", "") or "").replace("<", "&lt;").replace(">", "&gt;")
+    """Короткий ‼️ flash — по-русски, без сырого EN-заголовка."""
+    raw_title = getattr(item, "title", "") or ""
     url = getattr(item, "url", "") or ""
     impact = getattr(item, "impact", "neutral") or "neutral"
     impact_ru = {
@@ -599,42 +615,34 @@ def format_fastlane_flash(
         "neutral": "⚪ ~",
     }.get(impact, "⚪")
     bang = "‼️‼️" if meta.tier == 1 and meta.flash_score >= 12 else "‼️"
-    actors = detect_oil_primary_actors(getattr(item, "title", "") or "")
+    actors = detect_oil_primary_actors(raw_title)
     actor_line = (" · ".join(actors)) if actors else ""
     head = f"{bang} <b>{meta.outlet}</b> {impact_ru}"
     if actor_line:
         head += f" · {actor_line}"
 
-    lines = [head]
+    what, means = _headline_ru(raw_title)
+    lines = [head, f"<b>{_esc(what)}</b>", f"→ {_esc(means)}"]
     if url:
-        lines.append(f"<a href=\"{url}\"><b>{title}</b></a>")
-    else:
-        lines.append(f"<b>{title}</b>")
+        lines.append(f'<a href="{url}">источник</a>')
 
     if ai_ru:
-        # ИИ уже внутри — не дублируем rule-brief
-        lines.append("")
-        lines.append(ai_ru.strip())
-    elif compact:
-        lines.append(_bounce_hint(impact, move_note))
-        if move_note and "опережает" in move_note:
-            lines.append(f"<i>{_esc(move_note)}</i>")
+        short = " ".join(ai_ru.strip().split())
+        if len(short) > 200:
+            short = short[:197] + "…"
+        lines.append(_esc(short))
     else:
-        lines.append("")
-        lines.append(_bounce_hint(impact, move_note))
-        if move_note:
-            lines.append(_esc(move_note))
-        lines.append(_rule_brief(impact, title))
+        hint = _bounce_hint(impact, move_note)
+        if hint:
+            lines.append(hint)
 
     src = (getattr(item, "source", "") or meta.publisher or meta.outlet).strip()
     age = age_label or ""
     foot = f"<i>{src}"
     if age:
         foot += f" · {age}"
-    foot += "</i>"
+    foot += " · не входить 5–15м</i>"
     lines.append(foot)
-    if url:
-        lines.append(f'<a href="{url}">источник</a>')
     return "\n".join(lines)
 
 
@@ -673,22 +681,23 @@ def format_trade_impact_for_manual_ta(
     move_note: str = "",
 ) -> str:
     """Краткий разбор для чата ручного TA — влияет на сделку."""
-    title = (getattr(item, "title", "") or "").replace("<", "&lt;").replace(">", "&gt;")
+    raw_title = getattr(item, "title", "") or ""
     url = getattr(item, "url", "") or ""
     impact = getattr(item, "impact", "neutral") or "neutral"
     dir_ru = {
         "bullish": "🟢 вверх",
         "bearish": "🔴 вниз",
     }.get(impact, "⚪ смешанно")
+    what, means = _headline_ru(raw_title)
     lines = [
         "🛢 <b>Новость влияет на сделку</b>",
         f"Направление: <b>{dir_ru}</b> · {meta.outlet}",
         "",
+        f"<b>{_esc(what)}</b>",
+        f"→ {_esc(means)}",
     ]
     if url:
-        lines.append(f"<a href=\"{url}\"><b>{title}</b></a>")
-    else:
-        lines.append(f"<b>{title}</b>")
+        lines.append(f'<a href="{url}">источник</a>')
     lines.append("")
     lines.append(_bounce_hint(impact, move_note))
     if move_note:
@@ -697,11 +706,6 @@ def format_trade_impact_for_manual_ta(
         lines.append("")
         lines.append("🤖 <b>Главное</b>")
         lines.append(_esc(ai_ru))
-    lines.append("")
-    lines.append(
-        "<i>Сверь с графиком UKOUSD. Не финсовет. "
-        "Кнопки ниже — почему / открытие / Ормуз / ИИ.</i>"
-    )
     return "\n".join(lines)
 
 

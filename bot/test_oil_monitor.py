@@ -1,6 +1,8 @@
 """Tests for oil news monitor."""
 from __future__ import annotations
 
+import time
+
 from bot.oil_monitor import (
     classify_news_impact,
     _is_relevant,
@@ -69,7 +71,7 @@ def test_pro_analyst_blas_kemp_priority():
     assert is_critical_oil_news(item, min_score=4)
     text = format_single_oil_news(item)
     assert "Javier Blas" in text
-    assert "⭐" in text
+    assert "Bloomberg" in text
 
 
 def test_detect_themes_priority():
@@ -97,9 +99,8 @@ def test_format_analyst_news_header():
         theme="analyst",
     )
     text = format_single_oil_news(item)
-    assert "аналитика" in text
-    assert "Прогноз" in text
-    assert "UKOUSD" in text
+    assert "Barclays" in text or "forecast" in text.lower()
+    assert "Reuters" in text
 
 
 def test_pro_feed_theme_oilprice_headline():
@@ -172,7 +173,6 @@ def test_format_single_oil_news_has_link():
     text = format_single_oil_news(items[0])
     assert "Hormuz" in text
     assert "example.com" in text
-    assert "Открыть источник" in text
 
 
 def test_format_oil_news_message_batch():
@@ -282,7 +282,8 @@ def test_format_russian_news_lang_mark():
         lang="ru",
     )
     text = format_single_oil_news(item)
-    assert "🇷🇺" in text
+    assert "РИА" in text
+    assert "Ормуз" in text or "Иран" in text
 
 
 def test_detect_oil_market_mood_range():
@@ -300,19 +301,20 @@ def test_detect_oil_market_mood_range():
 
 
 def test_summarize_oil_news_bias_bullish_confirms_long():
+    now = time.time()
     items = [
         OilNewsItem(
             title="Iran threatens Strait of Hormuz blockade",
             url="",
             source="Reuters",
-            published_ts=1_700_000_000.0,
+            published_ts=now - 600,
             impact="bullish",
         ),
         OilNewsItem(
             title="Oil prices surge on US sanctions",
             url="",
             source="Bloomberg",
-            published_ts=1_700_000_100.0,
+            published_ts=now - 500,
             impact="bullish",
         ),
     ]
@@ -324,12 +326,13 @@ def test_summarize_oil_news_bias_bullish_confirms_long():
 
 
 def test_summarize_oil_news_bias_conflict():
+    now = time.time()
     items = [
         OilNewsItem(
             title="Brent falls after US Iran deal reopen Hormuz",
             url="",
             source="Reuters",
-            published_ts=1_700_000_000.0,
+            published_ts=now - 600,
             impact="bearish",
         ),
     ]
@@ -360,7 +363,7 @@ def test_digest_includes_news_bias():
             title="OPEC oil production cut",
             url="",
             source="Reuters",
-            published_ts=1_700_000_000.0,
+            published_ts=time.time() - 600,
             impact="bullish",
         ),
     ]

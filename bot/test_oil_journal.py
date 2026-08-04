@@ -30,12 +30,10 @@ def test_risk_checklist_has_core_fields():
         catalyst="Trump TACOs on Iran attacks",
     )
     text = "\n".join(lines)
-    assert "Чеклист" in text
-    assert "SHORT" in text or "продажа" in text
-    assert "Стоп" in text
+    assert "SHORT" in text
+    assert "SL" in text or "86" in text
     assert "80" in text or "82" in text
-    assert "депозита" in text
-    assert "Иран" in text or "TACO" in text
+    assert "TACO" in text or "Iran" in text
 
 
 def test_resolve_short_hit_tp_and_sl():

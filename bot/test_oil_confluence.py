@@ -108,9 +108,7 @@ def test_short_setup_near_resistance_passes_gate():
     assert setup_passes_gate(setup, min_quality=7)
     text = format_oil_confluence_setup(setup)
     assert "SHORT" in text
-    assert "Стоп" in text or "стоп" in text.lower()
-    assert "Чеклист" in text
-    assert "Иран" in text or "новост" in text.lower()
+    assert "SL" in text or "стоп" in text.lower() or "вход" in text
 
 
 def test_conflict_news_ta_does_not_pass_high_gate():
@@ -292,7 +290,7 @@ def test_pro_format_card_title():
     assert setup is not None
     text = format_oil_confluence_setup(setup)
     assert "ПРО" in text
-    assert "Чтение графика" in text or "План сделки" in text
+    assert "LONG" in text or "WAIT" in text or "SHORT" in text
 
 
 def test_stale_news_no_entry_points():

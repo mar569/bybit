@@ -86,63 +86,21 @@ def risk_checklist_lines(
     catalyst: str = "",
     account_risk_pct: float = 1.0,
 ) -> list[str]:
-    """Чеклист перед входом — выжать важное."""
-    lines = ["<b>✅ Чеклист перед входом</b>"]
-    dir_ru = "покупка (LONG)" if side == "LONG" else "продажа (SHORT)"
-    lines.append(f"• Направление: <b>{dir_ru}</b>")
+    """Короткий чеклист (если нужен развёрнутый вид)."""
+    lines: list[str] = []
+    bits = [f"<b>{side}</b>"]
     if entry_lo is not None and entry_hi is not None:
-        lines.append(f"• Уровень входа: <b>{entry_lo:.2f}–{entry_hi:.2f}</b>")
-    elif price:
-        lines.append(f"• Ориентир цены сейчас: <b>{price:.2f}</b>")
+        bits.append(f"вход {entry_lo:.2f}–{entry_hi:.2f}")
     if stop is not None:
-        lines.append(f"• Стоп: <b>{stop:.2f}</b>")
-    tps = []
-    if tp1 is not None:
-        tps.append(f"{tp1:.2f}")
-    if tp2 is not None:
-        tps.append(f"{tp2:.2f}")
+        bits.append(f"SL {stop:.2f}")
+    tps = [f"{x:.2f}" for x in (tp1, tp2) if x is not None]
     if tps:
-        lines.append(f"• Цели: <b>{' / '.join(tps)}</b>")
-
-    entry_mid = None
-    if entry_lo is not None and entry_hi is not None:
-        entry_mid = (float(entry_lo) + float(entry_hi)) / 2.0
-    elif price:
-        entry_mid = float(price)
-
-    if entry_mid and stop is not None and entry_mid > 0:
-        stop_dist = abs(entry_mid - float(stop))
-        risk_pct = stop_dist / entry_mid * 100.0
-        lines.append(
-            f"• Риск по стопу: ≈<b>{risk_pct:.2f}%</b> цены "
-            f"(${stop_dist:.2f} на баррель)"
-        )
-        rr = ""
-        if tp1 is not None and stop_dist > 0:
-            reward = abs(float(tp1) - entry_mid)
-            rr = f" · R:R до TP1 ≈ <b>{reward / stop_dist:.1f}</b>"
-        risk_acc = max(0.25, min(2.0, float(account_risk_pct)))
-        lines.append(
-            f"• Размер: риск <b>{risk_acc:g}%</b> депозита на эту сделку"
-            f"{rr}"
-        )
-        lines.append(
-            f"  <i>Пример: депо $10 000 → риск ${10_000 * risk_acc / 100:.0f}; "
-            f"движение стопа ${stop_dist:.2f} → объём ≈ "
-            f"${(10_000 * risk_acc / 100) / stop_dist:.0f} нотионала</i>"
-        )
-
+        bits.append(f"TP {'/'.join(tps)}")
+    lines.append(" · ".join(bits))
     if invalidation is not None:
-        if side == "LONG":
-            lines.append(f"• Отмена, если цена уйдёт ниже <b>{invalidation:.2f}</b>")
-        else:
-            lines.append(f"• Отмена, если цена уйдёт выше <b>{invalidation:.2f}</b>")
+        lines.append(f"отмена @{invalidation:.2f}")
     if catalyst:
-        cat = catalyst[:120].replace("<", "").replace(">", "")
-        lines.append(f"• Главный почему (новость): <i>{cat}</i>")
-    lines.append(
-        "• Помни: новости США/Иран/Ормуз сейчас важнее «красивого» графика"
-    )
+        lines.append(f"<i>{catalyst[:100].replace('<', '').replace('>', '')}</i>")
     return lines
 
 

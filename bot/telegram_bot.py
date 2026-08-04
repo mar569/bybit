@@ -2030,6 +2030,20 @@ class TelegramBot:
             )
         return sent
 
+    async def dispatch_oil_admin_desk(self, message: str) -> bool:
+        """Утренний DESK/календарь → лично админу.
+
+        Не зависит от oil_news_enabled и от паузы каналов — это операционный ритуал.
+        """
+        if self.application is None:
+            return False
+        return await self._send_to_chat(
+            self.config.telegram_admin_id,
+            message,
+            None,
+            is_priority=True,
+        )
+
     async def dispatch_oil_news(self, message: str) -> bool:
         if self.application is None:
             return False
@@ -2128,7 +2142,7 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("🚢 Ормуз", callback_data="oil:hormuz"),
-                InlineKeyboardButton("🗓 На открытии", callback_data="oil:open"),
+                InlineKeyboardButton("🗓 Календарь", callback_data="oil:cal"),
             ],
             [
                 InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
@@ -2144,7 +2158,7 @@ class TelegramBot:
                 InlineKeyboardButton("📊 Сейчас", callback_data="oil:now"),
             ],
             [
-                InlineKeyboardButton("🗓 Что на открытии", callback_data="oil:open"),
+                InlineKeyboardButton("🗓 Календарь", callback_data="oil:cal"),
                 InlineKeyboardButton("🚢 Ормуз", callback_data="oil:hormuz"),
             ],
             [
@@ -2154,14 +2168,16 @@ class TelegramBot:
         ])
 
     async def dispatch_oil_setup(self, message: str, png: bytes | None = None) -> bool:
-        """Сильный confluence UKOUSD → чат ручного TA (график + план)."""
+        """Confluence / trade-brief → ручной TA.
+
+        Не зависит от oil_news_enabled (сетап в TA).
+        Зеркало в Новостник — только для карточек ПРО, не для flash-brief.
+        """
         if self.application is None:
             return False
         settings = self.settings_manager.settings
         force = bool(self._oil_force_dispatch)
         if not force and self._bot_notifications_blocked():
-            return False
-        if not force and not getattr(settings, "oil_news_enabled", False):
             return False
         if not force and not getattr(settings, "oil_setup_enabled", True):
             return False
@@ -2175,8 +2191,20 @@ class TelegramBot:
             )
         else:
             ok = await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
-        # A+ ПРО-setup → также в Новостник, если чаты разные
-        if ok and bool(getattr(settings, "oil_setup_to_news_chat", True)):
+
+        # Trade-brief с flash («Новость влияет на сделку») — только TA, без зеркала
+        is_trade_brief = "Новость влияет на сделку" in (message or "")
+        is_pro_card = (message or "").lstrip().startswith(("🟢", "🔴", "✋")) or "ПРО " in (
+            message or ""
+        )
+        mirror = (
+            ok
+            and not is_trade_brief
+            and is_pro_card
+            and bool(getattr(settings, "oil_setup_to_news_chat", True))
+            and bool(getattr(settings, "oil_news_enabled", False))
+        )
+        if mirror:
             news_id = self.config.oil_news_chat_id
             if news_id is not None and int(news_id) != int(chat_id):
                 try:
@@ -3959,7 +3987,7 @@ class TelegramBot:
             await update.message.reply_text("Нефтяной монитор ещё не подключен.")
             return
         wait = await update.message.reply_text(
-            "⏳ Собираю самые свежие новости и смотрю, что двигает цену прямо сейчас…",
+            "⏳ Живой сбор: X · FinancialJuice · ForexLive · Reuters/RSS под текущий ход…",
             parse_mode=ParseMode.HTML,
         )
         ok, text = await self.oil_monitor.explain_why_now()
@@ -4660,7 +4688,7 @@ class TelegramBot:
             f"каждые <b>{s.oil_digest_interval_hours:g}ч</b> · "
             f"график <b>{'ON' if s.oil_chart_enabled else 'OFF'}</b>\n"
             f"Новости: только важные <b>{'ON' if getattr(s, 'oil_news_critical_only', True) else 'OFF'}</b> · "
-            f"RU <b>{'ON' if getattr(s, 'oil_russian_news', True) else 'OFF'}</b> · "
+            f"RU <b>{'ON' if getattr(s, 'oil_russian_news', False) else 'OFF'}</b> · "
             f"свежесть ≤<b>{getattr(s, 'oil_news_max_age_hours', 12):g}ч</b> · "
             f"вход≤<b>{getattr(s, 'oil_news_entry_max_age_hours', 1):g}ч</b> · "
             f"poll <b>{s.oil_news_interval_seconds}с</b>\n"
@@ -4716,6 +4744,9 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("📦 Запасы США", callback_data="oil:spr"),
+                InlineKeyboardButton("🗓 Календарь", callback_data="oil:cal"),
+            ],
+            [
                 InlineKeyboardButton("🤖 Спросить ИИ", callback_data="oil:ai"),
             ],
             [
@@ -4750,7 +4781,7 @@ class TelegramBot:
                     callback_data="oil:critical",
                 ),
                 InlineKeyboardButton(
-                    self._mark("RU новости", getattr(s, "oil_russian_news", True)),
+                    self._mark("RU новости", getattr(s, "oil_russian_news", False)),
                     callback_data="oil:ru",
                 ),
                 InlineKeyboardButton(
@@ -5291,7 +5322,7 @@ class TelegramBot:
             return
 
         # Кнопки под oil-setup в ручном TA (не только админ-панель)
-        if payload in {"oil:why", "oil:now", "oil:open", "oil:hormuz", "oil:spr", "oil:ai"} or payload.startswith(
+        if payload in {"oil:why", "oil:now", "oil:open", "oil:hormuz", "oil:spr", "oil:ai", "oil:cal"} or payload.startswith(
             "oil:aiask:"
         ) or payload in {"oil:aiwait"} or payload.startswith("oil:out:"):
             if not (self._is_admin(update) or self._can_use_manual_ta(update)):
@@ -5630,12 +5661,12 @@ class TelegramBot:
             return True
 
         if action == "why":
-            await query.answer("Смотрю драйверы…", show_alert=False)
+            await query.answer("Живой сбор X/wire…", show_alert=False)
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
             wait = await query.message.reply_text(
-                "⏳ Почему цена: свежий сбор новостей прямо сейчас…",
+                "⏳ Живой сбор: X · FinancialJuice · ForexLive · Reuters/RSS под текущий ход…",
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.explain_why_now()
@@ -5665,6 +5696,32 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             ok, text = await self.oil_monitor.weekend_open_brief_now()
+            kb = self._oil_context_keyboard()
+            try:
+                await wait.edit_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=kb if ok else None,
+                )
+            except Exception:
+                await query.message.reply_text(
+                    text if ok else f"⚠️ {text}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb if ok else None,
+                )
+            return True
+
+        if action == "cal":
+            await query.answer("Календарь…", show_alert=False)
+            if self.oil_monitor is None:
+                await query.message.reply_text("Нефтяной монитор не подключен.")
+                return True
+            wait = await query.message.reply_text(
+                "⏳ Свежий DESK / календарь…",
+                parse_mode=ParseMode.HTML,
+            )
+            ok, text = await self.oil_monitor.calendar_desk_now()
             kb = self._oil_context_keyboard()
             try:
                 await wait.edit_text(
@@ -5916,7 +5973,7 @@ class TelegramBot:
             self.settings_manager.update(oil_fastlane_enabled=not cur)
             label = f"Fast-lane → {'ON' if not cur else 'OFF'}"
         elif action == "ru":
-            cur = bool(getattr(s, "oil_russian_news", True))
+            cur = bool(getattr(s, "oil_russian_news", False))
             self.settings_manager.update(oil_russian_news=not cur)
             label = f"RU → {'ON' if not cur else 'OFF'}"
         elif action == "signals":

@@ -524,66 +524,47 @@ def read_oil_chart_structure(
 
 
 def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
-    """Про-карточка: как трейдер читает график → решение → риск."""
-    from .oil_journal import risk_checklist_lines
-
+    """Короткая ПРО-карточка без простыни."""
     if setup.side == "WAIT":
-        mark = "✋"
-        title = "ПРО · WAIT — нет A+ входа"
+        mark, title = "✋", "WAIT"
     elif setup.side == "LONG":
-        mark = "🟢"
-        title = "ПРО · LONG UKOUSD.s"
+        mark, title = "🟢", "LONG"
     else:
-        mark = "🔴"
-        title = "ПРО · SHORT UKOUSD.s"
+        mark, title = "🔴", "SHORT"
 
     lines = [
-        f"{mark} <b>{title}</b> · {setup.quality}/10",
-        f"<i>≈${setup.price:.2f} · {setup.horizon_ru}</i>",
-        "",
+        f"{mark} <b>ПРО {title}</b> · {setup.quality}/10 · ${setup.price:.2f}",
     ]
-
-    # Чтение рынка сверху
     if setup.factors_ru:
-        lines.append("<b>Чтение графика / факторов</b>")
-        for f in setup.factors_ru[:6]:
-            lines.append(f"• {_esc(f)}")
-        lines.append("")
+        lines.append(" · ".join(_esc(f) for f in setup.factors_ru[:3]))
 
     if setup.side in {"LONG", "SHORT"}:
-        lines.append("<b>План сделки</b>")
-        lines.extend(
-            risk_checklist_lines(
-                side=setup.side,
-                price=setup.price,
-                entry_lo=setup.entry_lo,
-                entry_hi=setup.entry_hi,
-                stop=setup.stop,
-                tp1=setup.tp1,
-                tp2=setup.tp2,
-                invalidation=setup.invalidation,
-                catalyst=setup.catalyst,
-            )
-        )
-        lines.append("")
-        lines.append(f"<b>Триггер:</b> {_esc(setup.trigger_ru)}")
-        if setup.invalidation:
-            lines.append(
-                f"<b>Инвалидация:</b> закрытие против плана за "
-                f"<b>${float(setup.invalidation):.2f}</b> → сделка отменяется"
-            )
+        bits = []
+        if setup.entry_lo is not None and setup.entry_hi is not None:
+            bits.append(f"вход {setup.entry_lo:.2f}–{setup.entry_hi:.2f}")
+        if setup.stop is not None:
+            bits.append(f"SL {setup.stop:.2f}")
+        tps = []
+        if setup.tp1 is not None:
+            tps.append(f"{setup.tp1:.2f}")
+        if setup.tp2 is not None:
+            tps.append(f"{setup.tp2:.2f}")
+        if tps:
+            bits.append(f"TP {'/'.join(tps)}")
+        if bits:
+            lines.append(" · ".join(bits))
+        if setup.trigger_ru:
+            lines.append(f"▶ {_esc(setup.trigger_ru)[:120]}")
+        if setup.invalidation is not None:
+            lines.append(f"✖ ниже ${float(setup.invalidation):.2f}" if setup.side == "LONG" else f"✖ выше ${float(setup.invalidation):.2f}")
     else:
-        lines.append(f"<b>Почему ждать:</b> {_esc(setup.trigger_ru)}")
-        lines.append(
-            "<i>Профессиональный вход — редкий. Нет края уровня + подтверждения = WAIT.</i>"
-        )
+        lines.append(f"{_esc(setup.trigger_ru)[:140]}")
 
     if setup.gemini_ru:
-        lines.append("")
-        lines.append(f"🧠 <b>ИИ-про</b>\n{_esc(setup.gemini_ru)}")
-
-    lines.append("")
-    lines.append("<i>Только UKOUSD.s · без chase · не финсовет</i>")
+        g = " ".join(setup.gemini_ru.split())
+        if len(g) > 180:
+            g = g[:177] + "…"
+        lines.append(_esc(g))
     return "\n".join(lines)
 
 

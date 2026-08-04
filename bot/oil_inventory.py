@@ -415,18 +415,19 @@ def format_inventory_status(st: UsOilInventoryStatus) -> str:
 
 
 def format_inventory_short(st: UsOilInventoryStatus) -> str:
-    """Короткий блок для вставки в Ормуз / дайджест."""
+    """Короткий блок для вставки в «почему» / дайджест — только по-русски."""
     parts: list[str] = []
     if st.spr:
-        wow = f" ({st.spr.wow_mb:+.1f})" if st.spr.wow_mb is not None else ""
-        parts.append(f"госрезерв {st.spr.latest.mbbl:.0f} млн{wow}")
+        wow = f" ({st.spr.wow_mb:+.1f} за неделю)" if st.spr.wow_mb is not None else ""
+        parts.append(f"госрезерв США {st.spr.latest.mbbl:.0f} млн баррелей{wow}")
     if st.commercial:
         wow = (
-            f" ({st.commercial.wow_mb:+.1f})"
+            f" ({st.commercial.wow_mb:+.1f} за неделю)"
             if st.commercial.wow_mb is not None
             else ""
         )
-        parts.append(f"склады {st.commercial.latest.mbbl:.0f} млн{wow}")
+        parts.append(f"коммерческие склады {st.commercial.latest.mbbl:.0f} млн{wow}")
     if not parts:
         return ""
-    return "📦 " + " · ".join(parts) + f" — {st.verdict_ru}"
+    # Без эмодзи и без длинной простыни — одна строка-факт
+    return f"<b>Запасы США</b>: {' · '.join(parts)}. {_esc(st.verdict_ru)}"

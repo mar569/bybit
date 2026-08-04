@@ -21,6 +21,8 @@ class Config(BaseSettings):
     gemini_model: str = Field("gemini-3.6-flash", env="GEMINI_MODEL")
     groq_api_key: str | None = Field(None, env="GROQ_API_KEY")
     groq_model: str = Field("llama-3.3-70b-versatile", env="GROQ_MODEL")
+    # X API Bearer (console.x.com). Если пусто — RSSHub fallback для oil X-ленты.
+    x_bearer_token: str | None = Field(None, env="X_BEARER_TOKEN")
 
     telegram_alert_chat_id: int | None = Field(None, env="TELEGRAM_ALERT_CHAT_ID")
     telegram_analysis_chat_id: int | None = Field(None, env="TELEGRAM_ANALYSIS_CHAT_ID")
@@ -70,6 +72,12 @@ class Config(BaseSettings):
             return None
         return value
 
+    @validator("x_bearer_token", pre=True)
+    def empty_x_bearer_token(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
     @property
     def gemini_configured(self) -> bool:
         return bool(self.gemini_api_key)
@@ -77,6 +85,10 @@ class Config(BaseSettings):
     @property
     def groq_configured(self) -> bool:
         return bool(self.groq_api_key)
+
+    @property
+    def x_configured(self) -> bool:
+        return bool(self.x_bearer_token)
 
     @property
     def ai_configured(self) -> bool:

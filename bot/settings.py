@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 79
+SETTINGS_VERSION = 82
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -537,7 +537,7 @@ class ScannerSettings:
     oil_interval_minutes: int = 15
     oil_include_brent: bool = True
     oil_include_wti: bool = False
-    oil_russian_news: bool = True
+    oil_russian_news: bool = False
     oil_news_critical_only: bool = True
     oil_news_critical_min_score: int = 5
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
@@ -546,10 +546,23 @@ class ScannerSettings:
     oil_fastlane_max_age_hours: float = 1.5
     # Новости дают очки входа в confluence только пока ≤ этого возраста
     oil_news_entry_max_age_hours: float = 1.0
+    # Торговый bias: утро не кормит вечер (жёсткий возраст сюжетов)
+    oil_news_bias_max_age_hours: float = 2.0
+    # После flash — ждать реакцию рынка перед входом
+    oil_reaction_enabled: bool = True
+    oil_reaction_wait_minutes: float = 10.0
+    oil_reaction_expire_minutes: float = 45.0
+    # Календарь EIA/API + lock
+    oil_calendar_lock_enabled: bool = True
+    oil_calendar_brief_enabled: bool = True
+    oil_calendar_brief_hour_msk: int = 8
+    oil_speech_freeze_minutes: float = 60.0
+    # X (Twitter): Bearer или RSSHub fallback
+    oil_x_enabled: bool = True
     oil_fastlane_min_score: int = 9
     oil_fastlane_max_per_poll: int = 1
     # ИИ-разбор только важных (Трамп/Бессент/Ормуз), короткий текст
-    oil_fastlane_gemini: bool = True
+    oil_fastlane_gemini: bool = False
     oil_fastlane_ai_min_score: int = 11
     # Прямые RSS FinancialJuice / ForexLive (раньше Google News)
     oil_wire_feeds_enabled: bool = True
@@ -558,8 +571,8 @@ class ScannerSettings:
     # Обвал цены без новостей — must для защиты депозита
     oil_crash_alerts_enabled: bool = True
     oil_crash_pct_15m: float = 1.5
-    oil_crash_pct_30m: float = 3.0
-    oil_crash_pct_60m: float = 4.0
+    oil_crash_pct_30m: float = 2.0
+    oil_crash_pct_60m: float = 2.0
     oil_crash_cooldown_seconds: int = 600
     # Ормуз: пуш в Новостник при важном изменении AIS/статуса
     oil_hormuz_alerts_enabled: bool = True
@@ -1142,7 +1155,7 @@ class ScannerSettings:
             oil_interval_minutes=int(base.get("oil_interval_minutes", 15)),
             oil_include_brent=bool(base.get("oil_include_brent", True)),
             oil_include_wti=bool(base.get("oil_include_wti", False)),
-            oil_russian_news=bool(base.get("oil_russian_news", True)),
+            oil_russian_news=bool(base.get("oil_russian_news", False)),
             oil_news_critical_only=bool(base.get("oil_news_critical_only", True)),
             oil_news_critical_min_score=int(base.get("oil_news_critical_min_score", 5)),
             oil_fastlane_enabled=bool(base.get("oil_fastlane_enabled", True)),
@@ -1155,16 +1168,39 @@ class ScannerSettings:
             oil_news_entry_max_age_hours=float(
                 base.get("oil_news_entry_max_age_hours", 1.0)
             ),
+            oil_news_bias_max_age_hours=float(
+                base.get("oil_news_bias_max_age_hours", 2.0)
+            ),
+            oil_reaction_enabled=bool(base.get("oil_reaction_enabled", True)),
+            oil_reaction_wait_minutes=float(
+                base.get("oil_reaction_wait_minutes", 10.0)
+            ),
+            oil_reaction_expire_minutes=float(
+                base.get("oil_reaction_expire_minutes", 45.0)
+            ),
+            oil_calendar_lock_enabled=bool(
+                base.get("oil_calendar_lock_enabled", True)
+            ),
+            oil_calendar_brief_enabled=bool(
+                base.get("oil_calendar_brief_enabled", True)
+            ),
+            oil_calendar_brief_hour_msk=int(
+                base.get("oil_calendar_brief_hour_msk", 8)
+            ),
+            oil_speech_freeze_minutes=float(
+                base.get("oil_speech_freeze_minutes", 60.0)
+            ),
+            oil_x_enabled=bool(base.get("oil_x_enabled", True)),
             oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 9)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 1)),
-            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
+            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", False)),
             oil_fastlane_ai_min_score=int(base.get("oil_fastlane_ai_min_score", 11)),
             oil_wire_feeds_enabled=bool(base.get("oil_wire_feeds_enabled", True)),
             oil_dedupe_similarity=float(base.get("oil_dedupe_similarity", 0.55)),
             oil_crash_alerts_enabled=bool(base.get("oil_crash_alerts_enabled", True)),
             oil_crash_pct_15m=float(base.get("oil_crash_pct_15m", 1.5)),
-            oil_crash_pct_30m=float(base.get("oil_crash_pct_30m", 3.0)),
-            oil_crash_pct_60m=float(base.get("oil_crash_pct_60m", 4.0)),
+            oil_crash_pct_30m=float(base.get("oil_crash_pct_30m", 2.0)),
+            oil_crash_pct_60m=float(base.get("oil_crash_pct_60m", 2.0)),
             oil_crash_cooldown_seconds=int(base.get("oil_crash_cooldown_seconds", 600)),
             oil_hormuz_alerts_enabled=bool(base.get("oil_hormuz_alerts_enabled", True)),
             oil_hormuz_interval_seconds=int(
@@ -1893,6 +1929,34 @@ class SettingsManager:
                     12.0, float(merged.get("oil_news_max_age_hours", 12) or 12)
                 )
                 merged["oil_news_entry_max_age_hours"] = 1.0
+            if version < 80:
+                # Утро≠вечер + реакция 5–15м + календарь + X
+                merged["oil_news_bias_max_age_hours"] = 2.0
+                merged["oil_news_entry_max_age_hours"] = min(
+                    1.0, float(merged.get("oil_news_entry_max_age_hours", 1) or 1)
+                )
+                merged["oil_reaction_enabled"] = True
+                merged.setdefault("oil_reaction_wait_minutes", 10.0)
+                merged.setdefault("oil_reaction_expire_minutes", 45.0)
+                merged["oil_calendar_lock_enabled"] = True
+                merged["oil_calendar_brief_enabled"] = True
+                merged.setdefault("oil_calendar_brief_hour_msk", 8)
+                merged.setdefault("oil_speech_freeze_minutes", 60.0)
+                merged["oil_x_enabled"] = True
+            if version < 81:
+                # DESK 08:00 admin + TV-style ±2% crash + FF calendar
+                merged["oil_calendar_brief_enabled"] = True
+                merged["oil_calendar_brief_hour_msk"] = 8
+                merged["oil_crash_pct_30m"] = 2.0
+                merged["oil_crash_pct_60m"] = 2.0
+                merged["oil_x_enabled"] = True
+            if version < 82:
+                # Fix ops: DESK/crash/ПРО вне news gate; RU OFF; less AI flash spam
+                merged["oil_russian_news"] = False
+                merged["oil_fastlane_gemini"] = False
+                merged["oil_setup_enabled"] = True
+                merged["oil_calendar_brief_enabled"] = True
+                merged["oil_crash_alerts_enabled"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
