@@ -81,6 +81,49 @@ def test_calendar_events_and_brief():
     text = format_morning_desk_brief(upcoming_oil_events(horizon_hours=80) or None)
     assert "DESK" in text
     assert "Нефть" in text or "нефть" in text.lower()
+    assert "Завтра" in text
+    assert "WAIT" not in text
+    assert "Flash →" not in text
+
+
+def test_desk_night_headlines_russian():
+    from bot.oil_calendar import OilCalendarEvent, format_morning_desk_brief, _title_ru
+    from datetime import datetime, timedelta, timezone
+
+    assert "Пауэлл" in _title_ru("Fed Chair Powell Speaks", "fed")
+    assert "Трамп" in _title_ru("President Trump Speaks", "speech")
+    msk = timezone(timedelta(hours=3))
+    now = datetime(2026, 8, 4, 8, 0, tzinfo=msk)
+    now_ts = now.timestamp()
+    evs = [
+        OilCalendarEvent(
+            key="a",
+            title_ru="API запасы нефти",
+            when_ts=now_ts + 3600,
+            kind="api",
+            impact="Medium",
+        ),
+        OilCalendarEvent(
+            key="b",
+            title_ru="EIA запасы нефти (Crude)",
+            when_ts=now_ts + 30 * 3600,
+            kind="eia",
+            impact="High",
+        ),
+    ]
+    text = format_morning_desk_brief(
+        evs,
+        now=now,
+        night_headlines=[
+            "U.S. Treasury yields drop as oil falls on Iran deal hopes",
+            "Europe could foot bill in new plan to reopen Hormuz",
+        ],
+    )
+    assert "Ночь" in text
+    assert "Treasury yields" not in text
+    assert "Europe could" not in text
+    assert "Завтра" in text
+    assert "EIA" in text
 
 
 def test_calendar_lock_around_event():
@@ -116,31 +159,34 @@ def test_newsroom_flash_only_when_important():
         format_newsroom_desk_flash,
         important_events_today,
     )
+    from datetime import datetime, timedelta, timezone
 
-    now = time.time()
+    msk = timezone(timedelta(hours=3))
+    now = datetime(2026, 8, 4, 10, 0, tzinfo=msk)
+    now_ts = now.timestamp()
     quiet = [
         OilCalendarEvent(
             key="x",
             title_ru="Minor PMI",
-            when_ts=now + 3600,
+            when_ts=now_ts + 3600,
             kind="macro",
             impact="Low",
         )
     ]
-    assert important_events_today(quiet) == []
-    assert format_newsroom_desk_flash(quiet) == ""
+    assert important_events_today(quiet, now=now) == []
+    assert format_newsroom_desk_flash(quiet, now=now) == ""
 
     hot = [
         OilCalendarEvent(
             key="e",
             title_ru="EIA запасы",
-            when_ts=now + 7200,
+            when_ts=now_ts + 7200,
             kind="eia",
             impact="High",
         )
     ]
-    assert important_events_today(hot)
-    text = format_newsroom_desk_flash(hot)
+    assert important_events_today(hot, now=now)
+    text = format_newsroom_desk_flash(hot, now=now)
     assert "важно" in text.lower()
     assert "EIA" in text
 

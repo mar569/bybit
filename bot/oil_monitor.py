@@ -3824,14 +3824,27 @@ class OilMonitorEngine:
         if self._last_calendar_brief_day == day_key:
             return 0
 
-        night = [
-            it.title[:100]
-            for it in list(self._recent_news)[:8]
-            if (now.timestamp() - float(it.published_ts or 0)) <= 10 * 3600
-            and getattr(it, "impact", "") in {"bullish", "bearish"}
-        ][:2]
+        night = []
+        try:
+            from .oil_calendar import _headline_ru_short
+
+            for it in list(self._recent_news)[:10]:
+                if (now.timestamp() - float(it.published_ts or 0)) > 10 * 3600:
+                    continue
+                if getattr(it, "impact", "") not in {"bullish", "bearish"}:
+                    continue
+                night.append(_headline_ru_short(getattr(it, "title", "") or ""))
+                if len(night) >= 2:
+                    break
+        except Exception:
+            night = [
+                it.title[:100]
+                for it in list(self._recent_news)[:8]
+                if (now.timestamp() - float(it.published_ts or 0)) <= 10 * 3600
+                and getattr(it, "impact", "") in {"bullish", "bearish"}
+            ][:2]
         msg = format_morning_desk_brief(
-            upcoming_oil_events(now=now, horizon_hours=40.0),
+            upcoming_oil_events(now=now, horizon_hours=48.0),
             now=now,
             night_headlines=night,
         )
@@ -3895,11 +3908,21 @@ class OilMonitorEngine:
         except Exception as exc:
             logger.exception("Oil calendar refresh failed")
             return False, f"календарь недоступен: {exc}"
-        night = [
-            it.title[:100]
-            for it in list(self._recent_news)[:6]
-            if (now.timestamp() - float(getattr(it, "published_ts", 0) or 0)) <= 12 * 3600
-        ][:2]
+        night: list[str] = []
+        try:
+            from .oil_calendar import _headline_ru_short
+
+            for it in list(self._recent_news)[:10]:
+                if (now.timestamp() - float(getattr(it, "published_ts", 0) or 0)) > 12 * 3600:
+                    continue
+                title = getattr(it, "title", "") or ""
+                if not title:
+                    continue
+                night.append(_headline_ru_short(title))
+                if len(night) >= 2:
+                    break
+        except Exception:
+            night = []
         text = format_morning_desk_brief(evs, now=now, night_headlines=night)
         # Отдать текст в UI; опционально продублировать админу
         if self._on_admin_desk is not None:

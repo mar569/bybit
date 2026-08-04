@@ -437,8 +437,30 @@ class TelegramBot:
             cvd_long_min=s.signal_cvd_long_min_ratio,
         )
 
+    async def _on_application_error(
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Глушим типичный шум Telegram (просроченный callback), остальное — в лог."""
+        exc = context.error
+        if isinstance(exc, BadRequest):
+            msg = str(exc).lower()
+            if any(
+                x in msg
+                for x in (
+                    "query is too old",
+                    "query id is invalid",
+                    "response timeout expired",
+                    "message is not modified",
+                    "message to edit not found",
+                )
+            ):
+                logger.debug("Telegram benign BadRequest: %s", exc)
+                return
+        logger.exception("Unhandled telegram error: %s", exc)
+
     async def start(self) -> None:
         self.application = Application.builder().token(self.config.telegram_token).build()
+        self.application.add_error_handler(self._on_application_error)
         self.application.add_handler(CommandHandler("start", self.on_start))
         self.application.add_handler(CommandHandler("help", self.on_help))
         self.application.add_handler(CommandHandler("status", self.on_status))
@@ -5035,6 +5057,24 @@ class TelegramBot:
     def _mark(self, label: str, is_active: bool) -> str:
         return f"✅ {label}" if is_active else label
 
+    async def _safe_answer_callback(
+        self,
+        query: CallbackQuery,
+        text: str = "",
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        """answerCallbackQuery: не роняем хендлер на 'Query is too old' / already answered."""
+        try:
+            if text:
+                await query.answer(str(text)[:180], show_alert=show_alert)
+            else:
+                await query.answer()
+        except BadRequest as exc:
+            logger.debug("callback answer ignored: %s", exc)
+        except Exception:
+            logger.debug("callback answer failed", exc_info=True)
+
     async def _safe_edit_message_text(
         self,
         query: CallbackQuery,
@@ -5057,15 +5097,15 @@ class TelegramBot:
         payload = query.data or ""
         if payload.startswith("tseed:"):
             if not self._is_admin(update):
-                await query.answer("Нет доступа.", show_alert=True)
+                await self._safe_answer_callback(query, "Нет доступа.", show_alert=True)
                 return
             if payload == "tseed:refresh":
-                await query.answer("Обновляю…")
+                await self._safe_answer_callback(query, "Обновляю…")
                 await self._handle_trend_seed_scan_request(
                     update, query=query, from_callback=True,
                 )
             else:
-                await query.answer("Неизвестная команда", show_alert=True)
+                await self._safe_answer_callback(query, "Неизвестная команда", show_alert=True)
             return
         if payload.startswith("symcopy:"):
             sym = payload.split(":", 1)[1].upper()
@@ -5326,13 +5366,13 @@ class TelegramBot:
             "oil:aiask:"
         ) or payload in {"oil:aiwait"} or payload.startswith("oil:out:"):
             if not (self._is_admin(update) or self._can_use_manual_ta(update)):
-                await query.answer("Нет доступа.", show_alert=True)
+                await self._safe_answer_callback(query, "Нет доступа.", show_alert=True)
                 return
             await self._handle_oil_callback(query, payload)
             return
 
         if not self._is_admin(update):
-            await query.answer("Нет доступа.", show_alert=True)
+            await self._safe_answer_callback(query, "Нет доступа.", show_alert=True)
             return
 
         changed_label = ""
@@ -5656,12 +5696,12 @@ class TelegramBot:
         s = self.settings_manager.settings
 
         if action == "now":
-            await query.answer("Собираю нефть…", show_alert=False)
+            await self._safe_answer_callback(query, "Собираю нефть…")
             await self._send_oil_snapshot_now(query.message)
             return True
 
         if action == "why":
-            await query.answer("Живой сбор X/wire…", show_alert=False)
+            await self._safe_answer_callback(query, "Живой сбор…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5687,7 +5727,7 @@ class TelegramBot:
             return True
 
         if action == "open":
-            await query.answer("План на открытие…", show_alert=False)
+            await self._safe_answer_callback(query, "План на открытие…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5713,7 +5753,7 @@ class TelegramBot:
             return True
 
         if action == "cal":
-            await query.answer("Календарь…", show_alert=False)
+            await self._safe_answer_callback(query, "Календарь…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5739,7 +5779,7 @@ class TelegramBot:
             return True
 
         if action == "hormuz":
-            await query.answer("Ормуз…", show_alert=False)
+            await self._safe_answer_callback(query, "Ормуз…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5765,7 +5805,7 @@ class TelegramBot:
             return True
 
         if action == "spr":
-            await query.answer("Запасы США…", show_alert=False)
+            await self._safe_answer_callback(query, "Запасы США…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5791,7 +5831,7 @@ class TelegramBot:
             return True
 
         if action == "ai":
-            await query.answer("Можно писать свой вопрос", show_alert=False)
+            await self._safe_answer_callback(query, "Можно писать свой вопрос")
             uid = query.from_user.id if query.from_user else 0
             if uid:
                 self._oil_ai_pending[uid] = time.time()
@@ -5842,7 +5882,9 @@ class TelegramBot:
             return True
 
         if action == "aiwait":
-            await query.answer("Пиши вопрос следующим сообщением", show_alert=True)
+            await self._safe_answer_callback(
+                query, "Пиши вопрос следующим сообщением", show_alert=True
+            )
             uid = query.from_user.id if query.from_user else 0
             if uid:
                 self._oil_ai_pending[uid] = time.time()
@@ -5854,7 +5896,7 @@ class TelegramBot:
             return True
 
         if action.startswith("aiask:"):
-            await query.answer("Спрашиваю ИИ…", show_alert=False)
+            await self._safe_answer_callback(query, "Спрашиваю ИИ…")
             if self.oil_monitor is None:
                 await query.message.reply_text("Нефтяной монитор не подключен.")
                 return True
@@ -5921,7 +5963,7 @@ class TelegramBot:
             return True
 
         if action.startswith("out:"):
-            await query.answer("Записал в журнал", show_alert=False)
+            await self._safe_answer_callback(query, "Записал в журнал")
             if self.oil_monitor is None:
                 return True
             kind = action.split(":", 1)[1]

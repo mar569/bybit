@@ -102,26 +102,98 @@ def _kind_from_title(title: str) -> str:
     return "macro"
 
 
+_WD_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
 def _title_ru(title: str, kind: str) -> str:
-    mapping = {
+    """Любой EN-тайтл из FF → коротко по-русски."""
+    low = (title or "").lower().strip()
+    mapping_kind = {
         "api": "API запасы нефти",
         "eia": "EIA запасы нефти (Crude)",
         "inventory": "Запасы нефти США",
         "opec": "ОПЕК / JMMC",
-        "cpi": "CPI США",
+        "cpi": "CPI США (инфляция)",
         "ppi": "PPI США",
         "nfp": "NFP (занятость США)",
         "fed": "ФРС / FOMC",
-        "speech": "Выступление",
     }
-    base = mapping.get(kind)
-    if base and kind in {"api", "eia", "nfp", "cpi", "ppi", "opec"}:
-        return base
-    # Сохраняем оригинал коротко
+    if kind in mapping_kind and kind != "speech":
+        # уточнение спикера, если есть
+        if kind == "fed":
+            if "powell" in low:
+                return "Пауэлл (ФРС) — выступление / пресс-конф."
+            if "fomc" in low and "rate" in low:
+                return "FOMC — решение по ставке"
+            if "fomc" in low:
+                return "FOMC / заседание ФРС"
+        return mapping_kind[kind]
+
+    # Speeches / named people
+    if "powell" in low:
+        return "Пауэлл (ФРС) — выступление"
+    if "bessent" in low:
+        return "Бессент — выступление"
+    if "trump" in low and ("speak" in low or "press" in low or "remarks" in low):
+        return "Трамп — выступление / брифинг"
+    if "white house" in low and ("brief" in low or "press" in low):
+        return "Белый дом — брифинг"
+    if kind == "speech" or "speak" in low or "press conference" in low or "remarks" in low:
+        who = "спикер"
+        if "fed" in low or "chair" in low:
+            who = "ФРС"
+        elif "treasury" in low:
+            who = "Минфин США"
+        elif "trump" in low:
+            who = "Трамп"
+        return f"Выступление ({who})"
+
+    if "adp" in low:
+        return "ADP занятость США"
+    if "ism manufacturing" in low:
+        return "ISM производство США"
+    if "ism services" in low or "ism non-manufacturing" in low:
+        return "ISM услуги США"
+    if "claim" in low and "jobless" in low:
+        return "Заявки на пособия по безработице США"
+    if "retail sales" in low:
+        return "Розничные продажи США"
+    if "gdp" in low:
+        return "ВВП США"
+    if "crude" in low or "oil inventor" in low:
+        return "Запасы нефти США"
+    if "gasoline" in low and "inventor" in low:
+        return "Запасы бензина США"
+    if "natural gas" in low:
+        return "Запасы газа США"
+    if "opec" in low:
+        return "ОПЕК / встреча"
+
+    # fallback — без сырого EN
+    if kind == "macro":
+        return "Макро США (риск для нефти)"
     t = re.sub(r"\s+", " ", (title or "").strip())
-    if kind == "speech":
-        return f"Выступление: {t[:70]}"
-    return t[:80]
+    # если уже кириллица — оставить
+    if re.search(r"[А-Яа-яЁё]", t):
+        return t[:80]
+    return "Событие календаря (см. время)"
+
+
+def _headline_ru_short(title: str) -> str:
+    """Ночной фон: EN-заголовок → 1 фраза по-русски."""
+    try:
+        from .oil_why import _explain_headline
+
+        what, means, _ = _explain_headline(title or "")
+        # what уже по-русски; если generic — сжать means
+        if what and "без ясного" not in what.lower():
+            return what
+        return means[:100] if means else "Сюжет по нефти"
+    except Exception:
+        t = (title or "").strip()
+        if re.search(r"[А-Яа-яЁё]", t):
+            return t[:100]
+        return "Новость по нефти / геополитике"
 
 
 def _lock_windows(kind: str, impact: str) -> tuple[float, float]:
@@ -149,7 +221,7 @@ def _is_oil_relevant_ff(row: dict[str, Any]) -> bool:
     if country == "USD" and impact == "High":
         return True
     if country == "USD" and impact == "Medium" and any(
-        k in low for k in ("speak", "fomc", "adp", "ism", "claim")
+        k in low for k in ("speak", "fomc", "adp", "ism", "claim", "powell", "bessent", "trump")
     ):
         return True
     return False
@@ -311,7 +383,7 @@ def detect_scheduled_speech_freeze(
         until_ts=until,
         event=OilCalendarEvent(
             key=f"speech-{int(t0)}",
-            title_ru=t[:80],
+            title_ru=_headline_ru_short(t)[:80],
             when_ts=t0,
             kind="speech",
             impact="High",
@@ -331,14 +403,23 @@ def merge_locks(*locks: OilCalendarLock) -> OilCalendarLock:
 def _fmt_when(ts: float, now_ts: float) -> str:
     when = datetime.fromtimestamp(ts, tz=_MSK)
     delta_m = int((ts - now_ts) / 60.0)
+    wd = _WD_RU[when.weekday()]
+    day_bit = f"{wd} {when.strftime('%d.%m')} "
     if delta_m < -5:
         tag = "было"
     elif delta_m <= 0:
         tag = "сейчас"
     elif delta_m < 60:
         tag = f"через {delta_m}м"
+    elif delta_m < 24 * 60:
+        tag = f"через {delta_m // 60}ч {delta_m % 60:02d}м"
     else:
-        tag = f"через {delta_m // 60}ч{delta_m % 60:02d}" if delta_m < 24 * 60 else when.strftime("%d.%m")
+        tag = day_bit.strip()
+        return f"{when.strftime('%H:%M')} МСК · {tag}"
+    # если не сегодня — добавить день
+    now_d = datetime.fromtimestamp(now_ts, tz=_MSK).date()
+    if when.date() != now_d:
+        return f"{day_bit}{when.strftime('%H:%M')} МСК · {tag}"
     return f"{when.strftime('%H:%M')} МСК · {tag}"
 
 
@@ -393,16 +474,20 @@ def format_morning_desk_brief(
     now: datetime | None = None,
     night_headlines: Sequence[str] | None = None,
 ) -> str:
-    """Короткий профессиональный DESK на сегодня → только админу."""
+    """Короткий DESK на сегодня → админу. Весь текст по-русски."""
     now_m = _as_msk(now)
     now_ts = now_m.timestamp()
     day_end = datetime(
         now_m.year, now_m.month, now_m.day, 23, 59, 59, tzinfo=_MSK
     ).timestamp()
-    evs = list(events) if events is not None else upcoming_oil_events(now=now_m, horizon_hours=36.0)
+    tomorrow_end = day_end + 24 * 3600.0
+    # Смотрим дальше, чтобы «завтра» не пропало
+    evs = list(events) if events is not None else upcoming_oil_events(
+        now=now_m, horizon_hours=48.0
+    )
 
-    today = [e for e in evs if e.when_ts <= day_end + 3600]
-    later = [e for e in evs if e.when_ts > day_end + 3600][:3]
+    today = [e for e in evs if e.when_ts <= day_end + 1800]
+    tomorrow = [e for e in evs if day_end + 1800 < e.when_ts <= tomorrow_end]
 
     oil_kinds = {"eia", "api", "inventory", "opec"}
     oil_today = [e for e in today if e.kind in oil_kinds]
@@ -413,8 +498,17 @@ def format_morning_desk_brief(
         and (e.impact in {"High", "Medium"} or e.kind in {"nfp", "cpi", "ppi", "fed"})
     ]
 
+    # Завтра: всё важное (нефть, макро High, речи, FOMC)
+    def _is_important(e: OilCalendarEvent) -> bool:
+        if e.kind in oil_kinds | {"speech", "fed", "nfp", "cpi", "ppi", "opec"}:
+            return True
+        return e.impact == "High"
+
+    tomorrow_imp = [e for e in tomorrow if _is_important(e)][:6]
+
+    wd = _WD_RU[now_m.weekday()]
     lines = [
-        f"🗓 <b>DESK UKOUSD</b> · {now_m.strftime('%a %d.%m')} · 08:00 МСК",
+        f"🗓 <b>DESK UKOUSD</b> · {wd} {now_m.strftime('%d.%m')} · 08:00 МСК",
     ]
 
     lines.append("")
@@ -423,7 +517,7 @@ def format_morning_desk_brief(
         for e in oil_today[:4]:
             lines.append(f"• {e.title_ru} · {_fmt_when(e.when_ts, now_ts)}")
     else:
-        lines.append("• без EIA/API в календаре на сегодня")
+        lines.append("• EIA/API на сегодня в календаре нет")
 
     if speech_today:
         lines.append("")
@@ -433,28 +527,34 @@ def format_morning_desk_brief(
 
     if macro_today:
         lines.append("")
-        lines.append("<b>Макро → USD/нефть</b>")
+        lines.append("<b>Макро → доллар / нефть</b>")
         for e in macro_today[:5]:
             mark = "🔴" if e.impact == "High" else "🟡"
             lines.append(f"• {mark} {e.title_ru} · {_fmt_when(e.when_ts, now_ts)}")
 
-    if later and not oil_today:
-        lines.append("")
-        lines.append("<b>Скоро</b>")
-        for e in later[:3]:
-            lines.append(f"• {e.title_ru} · {_fmt_when(e.when_ts, now_ts)}")
+    # Всегда показываем завтра, если есть что сказать
+    lines.append("")
+    lines.append("<b>Завтра</b>")
+    if tomorrow_imp:
+        for e in tomorrow_imp:
+            mark = "🔴" if e.impact == "High" or e.kind in {"eia", "nfp", "fed", "speech"} else "🟡"
+            lines.append(f"• {mark} {e.title_ru} · {_fmt_when(e.when_ts, now_ts)}")
+    else:
+        lines.append("• важных релизов / заседаний в календаре пока нет")
 
     if night_headlines:
         lines.append("")
         lines.append("<b>Ночь (фон)</b>")
         for h in list(night_headlines)[:2]:
-            lines.append(f"• {h[:100]}")
+            # уже могли перевести снаружи; на всякий случай ещё раз
+            ru = h if re.search(r"[А-Яа-яЁё]", h or "") else _headline_ru_short(h)
+            lines.append(f"• {ru[:110]}")
 
     lines.append("")
     lines.append(
-        "<i>Режим: между релизами — график/уровни. "
-        "За 15–30м до события и сразу после — WAIT, без новых входов. "
-        "Flash → ждать 5м свечу.</i>"
+        "<i>Режим: между релизами — график и уровни. "
+        "За 15–30 мин до события и сразу после — ждать, без новых входов. "
+        "После срочной новости — подождать подтверждение на 5‑мин свече.</i>"
     )
     return "\n".join(lines)
 
