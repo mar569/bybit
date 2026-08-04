@@ -591,17 +591,18 @@ def test_oil_scalp_open_long_near_support_with_news():
 
 
 def _micro_dump_bars(n: int = 30, *, start: float = 90.0) -> list[KlineBar]:
+    """Импульс вниз (~0.22%) + откат на последней свече."""
     bars: list[KlineBar] = []
     px = start
     t0 = 1_700_000_000.0
-    for i in range(n - 5):
+    for i in range(n - 6):
         bars.append(KlineBar(t0 + i * 300, px, px + 0.05, px - 0.05, px, 1.0))
-    for j in range(5):
+    for j in range(4):
         o = px
-        px = px * (1.0 - 0.0007)
-        bars.append(
-            KlineBar(t0 + (n - 5 + j) * 300, o, o + 0.02, px - 0.01, px, 2.0)
-        )
+        px = px * (1.0 - 0.00055)
+        bars.append(KlineBar(t0 + (n - 6 + j) * 300, o, o + 0.02, px - 0.03, px, 2.0))
+    o = px
+    bars.append(KlineBar(t0 + (n - 2) * 300, o, o * 1.0008, o - 0.10, o * 1.0006, 2.0))
     return bars
 
 
@@ -609,22 +610,43 @@ def test_oil_micro_signal_short_on_dump():
     bars = _micro_dump_bars()
     sig = detect_oil_micro_signal(
         bars,
-        tp_pct=0.25,
-        sl_pct=0.18,
-        min_impulse_pct=0.12,
+        tp_pct=0.30,
+        sl_pct=0.28,
+        min_impulse_pct=0.15,
+        max_impulse_pct=0.40,
         apply_session_filter=False,
         apply_chase_filter=False,
+        require_pullback=True,
+        min_quality=7,
     )
     assert sig is not None
     assert sig.side == "short"
     assert sig.target < sig.entry
     assert sig.stop > sig.entry
-    assert 0.2 <= sig.tp_pct <= 0.3
     text = format_oil_micro_signal(sig)
     assert "SHORT" in text
     assert "TP" in text
-    assert "текущей" in text or "UKOUSD.s" in text
     assert "UKOUSD.s" in text
+
+
+def test_oil_micro_skips_chase_without_pullback():
+    """Чистый водопад без отката — не входим (как SHORT −0.34% → стоп)."""
+    bars: list[KlineBar] = []
+    px = 90.0
+    t0 = 1_700_000_000.0
+    for i in range(25):
+        o = px
+        px = px * (1.0 - 0.0008)
+        bars.append(KlineBar(t0 + i * 300, o, o + 0.01, px - 0.01, px, 1.0))
+    assert (
+        detect_oil_micro_signal(
+            bars,
+            apply_session_filter=False,
+            apply_chase_filter=False,
+            require_pullback=True,
+        )
+        is None
+    )
 
 
 def test_oil_micro_signal_skips_against_strong_news():

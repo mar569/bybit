@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 76
+SETTINGS_VERSION = 78
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -574,11 +574,13 @@ class ScannerSettings:
     oil_forecast_gemini: bool = False
     # Confluence-setup → чат ручного TA (только сильные LONG/SHORT)
     oil_setup_enabled: bool = True
-    oil_setup_min_quality: int = 7
-    oil_setup_cooldown_seconds: int = 14400  # 4ч — не спамить «Вход»
+    oil_setup_min_quality: int = 8
+    oil_setup_cooldown_seconds: int = 10800  # 3ч
     oil_setup_near_pct: float = 0.35
     # Не слать карточку «Вход» сразу после дайджеста (там уже план)
     oil_setup_with_digest: bool = False
+    # Дублировать A+ ПРО-setup в oil-чат (новостник)
+    oil_setup_to_news_chat: bool = True
     # Мин. пауза между торговыми пушами в ручной TA (дайджест/вход)
     oil_ta_signal_gap_seconds: int = 10800  # 3ч
     oil_level_alerts_enabled: bool = True
@@ -588,14 +590,15 @@ class ScannerSettings:
     oil_bounce_near_pct: float = 0.4
     oil_bounce_min_news_score: float = 3.0
     # Микро-сигналы UKOUSD: цель ~0.2–0.3%
-    oil_micro_signals_enabled: bool = True
-    oil_micro_tp_pct: float = 0.25
-    oil_micro_sl_pct: float = 0.18
-    oil_micro_min_impulse_pct: float = 0.12
-    oil_micro_max_impulse_pct: float = 0.55
+    oil_micro_signals_enabled: bool = False
+    oil_micro_tp_pct: float = 0.30
+    oil_micro_sl_pct: float = 0.28
+    oil_micro_min_impulse_pct: float = 0.15
+    oil_micro_max_impulse_pct: float = 0.32
     oil_micro_lookback_bars: int = 4
-    oil_micro_cooldown_seconds: int = 1200
-    oil_micro_max_per_hour: int = 3
+    oil_micro_cooldown_seconds: int = 1800
+    oil_micro_max_per_hour: int = 2
+    oil_micro_min_quality: int = 8
     # Качество входа: сессия / anti-chase / close за уровнем
     oil_entry_session_filter: bool = True
     oil_session_block_minutes: float = 20.0
@@ -1175,12 +1178,13 @@ class ScannerSettings:
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
             oil_forecast_gemini=bool(base.get("oil_forecast_gemini", False)),
             oil_setup_enabled=bool(base.get("oil_setup_enabled", True)),
-            oil_setup_min_quality=int(base.get("oil_setup_min_quality", 7)),
+            oil_setup_min_quality=int(base.get("oil_setup_min_quality", 8)),
             oil_setup_cooldown_seconds=int(
-                base.get("oil_setup_cooldown_seconds", 14400)
+                base.get("oil_setup_cooldown_seconds", 10800)
             ),
             oil_setup_near_pct=float(base.get("oil_setup_near_pct", 0.35)),
             oil_setup_with_digest=bool(base.get("oil_setup_with_digest", False)),
+            oil_setup_to_news_chat=bool(base.get("oil_setup_to_news_chat", True)),
             oil_ta_signal_gap_seconds=int(
                 base.get("oil_ta_signal_gap_seconds", 10800)
             ),
@@ -1194,14 +1198,15 @@ class ScannerSettings:
             ),
             oil_bounce_near_pct=float(base.get("oil_bounce_near_pct", 0.4)),
             oil_bounce_min_news_score=float(base.get("oil_bounce_min_news_score", 3.0)),
-            oil_micro_signals_enabled=bool(base.get("oil_micro_signals_enabled", True)),
-            oil_micro_tp_pct=float(base.get("oil_micro_tp_pct", 0.25)),
-            oil_micro_sl_pct=float(base.get("oil_micro_sl_pct", 0.18)),
-            oil_micro_min_impulse_pct=float(base.get("oil_micro_min_impulse_pct", 0.12)),
-            oil_micro_max_impulse_pct=float(base.get("oil_micro_max_impulse_pct", 0.55)),
+            oil_micro_signals_enabled=bool(base.get("oil_micro_signals_enabled", False)),
+            oil_micro_tp_pct=float(base.get("oil_micro_tp_pct", 0.30)),
+            oil_micro_sl_pct=float(base.get("oil_micro_sl_pct", 0.28)),
+            oil_micro_min_impulse_pct=float(base.get("oil_micro_min_impulse_pct", 0.15)),
+            oil_micro_max_impulse_pct=float(base.get("oil_micro_max_impulse_pct", 0.32)),
             oil_micro_lookback_bars=int(base.get("oil_micro_lookback_bars", 4)),
-            oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1200)),
-            oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 3)),
+            oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1800)),
+            oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 2)),
+            oil_micro_min_quality=int(base.get("oil_micro_min_quality", 8)),
             oil_entry_session_filter=bool(base.get("oil_entry_session_filter", True)),
             oil_session_block_minutes=float(base.get("oil_session_block_minutes", 20.0)),
             oil_entry_chase_filter=bool(base.get("oil_entry_chase_filter", True)),
@@ -1855,6 +1860,25 @@ class SettingsManager:
                 merged["oil_fastlane_gemini"] = True
                 merged.setdefault("oil_fastlane_ai_min_score", 11)
                 merged["oil_fastlane_max_per_poll"] = 1
+            if version < 77:
+                # Микро: не догонять импульс, шире стоп, меньше сигналов
+                merged["oil_micro_tp_pct"] = 0.30
+                merged["oil_micro_sl_pct"] = 0.28
+                merged["oil_micro_min_impulse_pct"] = 0.15
+                merged["oil_micro_max_impulse_pct"] = 0.32
+                merged["oil_micro_cooldown_seconds"] = 1800
+                merged["oil_micro_max_per_hour"] = 2
+                merged["oil_micro_min_quality"] = 8
+            if version < 78:
+                # Pro trader: rarer A+ setups, micro OFF, mirror to oil chat
+                merged["oil_setup_min_quality"] = max(
+                    8, int(merged.get("oil_setup_min_quality", 8) or 8)
+                )
+                cur_cd = int(merged.get("oil_setup_cooldown_seconds", 14400) or 14400)
+                if cur_cd > 10800:
+                    merged["oil_setup_cooldown_seconds"] = 10800
+                merged["oil_setup_to_news_chat"] = True
+                merged["oil_micro_signals_enabled"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

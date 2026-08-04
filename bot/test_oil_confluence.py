@@ -8,6 +8,7 @@ import pytest
 from bot.oil_confluence import (
     build_oil_confluence_setup,
     format_oil_confluence_setup,
+    read_oil_chart_structure,
     setup_passes_gate,
 )
 from bot.oil_forecast import OilForecast
@@ -243,3 +244,52 @@ def test_long_near_support_with_aligned_factors():
     assert setup.side == "LONG"
     assert setup_passes_gate(setup, min_quality=7)
     assert setup.entry_lo is not None and setup.stop is not None
+
+
+def test_read_oil_chart_structure_notes():
+    bars = []
+    # rising then pullback-ish series
+    px = 80.0
+    for i in range(48):
+        px = 80.0 + i * 0.05
+        bars.append(
+            SimpleNamespace(open=px - 0.02, high=px + 0.04, low=px - 0.05, close=px)
+        )
+    notes = read_oil_chart_structure(bars, price=px, support=81.0, resistance=84.0)
+    assert notes
+    joined = " ".join(notes)
+    assert "Структура" in joined or "Позиция" in joined
+
+
+def test_pro_format_card_title():
+    setup = build_oil_confluence_setup(
+        _snap(price=85.55, support=85.5, resistance=88.0, verdict="LONG", confidence=8),
+        TAAnalysisResult(verdict="LONG", verdict_confidence=8),
+        forecast=OilForecast(
+            bias="LONG",
+            scenario="disruption",
+            confidence=8,
+            horizon_ru="свинг",
+            headline_ru="LONG",
+            base_case_ru="up",
+            alt_case_ru="down",
+            invalidation_ru="bd",
+            watch_list_ru=("Hormuz",),
+            entry_hint_ru="long S",
+        ),
+        news_bias=OilNewsBias(
+            bias="bullish",
+            weighted_score=5.0,
+            summary_ru="news up",
+            how_to_use_ru="long",
+            top_catalyst="Hormuz",
+        ),
+        ta_verdict_raw="LONG",
+        ta_confidence_raw=8,
+        min_quality=7,
+        near_pct=0.35,
+    )
+    assert setup is not None
+    text = format_oil_confluence_setup(setup)
+    assert "ПРО" in text
+    assert "Чтение графика" in text or "План сделки" in text

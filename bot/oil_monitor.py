@@ -440,6 +440,14 @@ def is_critical_oil_news(item: OilNewsItem, min_score: int = 5) -> bool:
     # Старше 2 суток — не «критично» для пуша (рынок уже отыграл)
     if not oil_news_is_fresh(getattr(item, "published_ts", None), max_age_hours=48.0):
         return False
+    # Tertiary (India Today / Ynet…) — не в чат
+    try:
+        from .oil_fastlane import is_syndicate_host
+
+        if is_syndicate_host(getattr(item, "url", "") or "", getattr(item, "source", "") or ""):
+            return False
+    except Exception:
+        pass
     # Только то, что реально двигает нефть — не «ещё одна похожая статья»
     if not is_oil_market_moving_headline(item.title):
         return False
@@ -1510,43 +1518,48 @@ def detect_oil_micro_signal(
     bars: list[KlineBar],
     *,
     news_bias: OilNewsBias | None = None,
-    tp_pct: float = 0.25,
-    sl_pct: float = 0.18,
-    min_impulse_pct: float = 0.12,
-    max_impulse_pct: float = 0.55,
+    tp_pct: float = 0.30,
+    sl_pct: float = 0.28,
+    min_impulse_pct: float = 0.15,
+    max_impulse_pct: float = 0.32,
     lookback_bars: int = 4,
     session_block_minutes: float = 20.0,
     apply_session_filter: bool = True,
     apply_chase_filter: bool = True,
+    min_quality: int = 8,
+    require_pullback: bool = True,
 ) -> OilMicroSignal | None:
-    """Импульс 5m UKOUSD → SHORT/LONG на микротейк 0.2–0.3%.
+    """Микро UKOUSD: только ранний импульс + откат, не догон.
 
-    Фильтры качества:
-    - импульс уже есть, но не «догоняем» большой ход (>max)
-    - 2+ закрытия в сторону / тело не doji
-    - новости не против сильного импульса
-    - не в первые N минут сессии
-    - не chase, если цена уже сильно уехала за 30–60м
+    Типичный проигрыш: SHORT после −0.34% со стопом 0.18% → отскок выносит.
     """
-    from .oil_entry_filters import oil_entry_block_reason
+    from .oil_entry_filters import oil_entry_block_reason, measure_recent_move
 
     if len(bars) < max(12, lookback_bars + 2):
         return None
-    tp = max(0.15, min(0.45, float(tp_pct)))
-    sl = max(0.10, min(0.40, float(sl_pct)))
+    tp = max(0.20, min(0.50, float(tp_pct)))
+    sl = max(0.20, min(0.50, float(sl_pct)))
+    # RR не хуже ~1.0 после шума
+    if tp < sl * 0.95:
+        tp = sl * 1.05
     lb = max(2, min(8, int(lookback_bars)))
-    window = bars[-(lb + 1) :]
-    px0 = float(window[0].close)
-    px = float(window[-1].close)
-    if px0 <= 0 or px <= 0:
+    if len(bars) < lb + 3:
         return None
-    impulse = (px - px0) / px0 * 100.0
+    # Импульс по окну БЕЗ последней свечи; последняя = откат/пауза
+    impulse_bars = bars[-(lb + 1) : -1]
+    last = bars[-1]
+    prev = impulse_bars[-1]
+    px0 = float(impulse_bars[0].close)
+    px_imp = float(prev.close)
+    px = float(last.close)
+    if px0 <= 0 or px_imp <= 0 or px <= 0:
+        return None
+    impulse = (px_imp - px0) / px0 * 100.0
     abs_imp = abs(impulse)
     if abs_imp < min_impulse_pct or abs_imp > max_impulse_pct:
         return None
 
-    # Последовательность закрытий в сторону импульса
-    closes = [float(b.close) for b in window]
+    closes = [float(b.close) for b in impulse_bars]
     if impulse < 0:
         descending = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i - 1])
         if descending < max(1, lb // 2):
@@ -1557,6 +1570,16 @@ def detect_oil_micro_signal(
         if ascending < max(1, lb // 2):
             return None
         side = "long"
+
+    # Уже уехало за 30м сильнее — поздний вход
+    move = measure_recent_move(
+        bars, interval_minutes=5, priced_in_30m_pct=0.40, priced_in_60m_pct=0.60
+    )
+    if move is not None:
+        if side == "short" and move.move_30m_pct <= -0.40:
+            return None
+        if side == "long" and move.move_30m_pct >= 0.40:
+            return None
 
     block = oil_entry_block_reason(
         bars=bars,
@@ -1570,34 +1593,49 @@ def detect_oil_micro_signal(
     if block:
         return None
 
-    last = window[-1]
     body = abs(float(last.close) - float(last.open))
     rng = max(float(last.high) - float(last.low), 1e-9)
-    if body / rng < 0.22:
-        return None  # doji / шум
+    # На откате тело может быть меньше — смотрим фитиль
+    if require_pullback:
+        if side == "short":
+            lower_wick = min(float(last.open), float(last.close)) - float(last.low)
+            bounced = float(last.close) >= float(prev.close) or lower_wick / rng >= 0.25
+            if not bounced:
+                return None
+        else:
+            upper_wick = float(last.high) - max(float(last.open), float(last.close))
+            pulled = float(last.close) <= float(prev.close) or upper_wick / rng >= 0.25
+            if not pulled:
+                return None
+    elif body / rng < 0.28:
+        return None
 
     # Не входить против сильного новостного давления
-    if news_bias is not None and abs(news_bias.weighted_score) >= 3.0:
+    if news_bias is not None and abs(news_bias.weighted_score) >= 2.5:
         if side == "short" and news_bias.bias == "bullish":
             return None
         if side == "long" and news_bias.bias == "bearish":
             return None
 
-    # Качество: сила импульса в «сладкой» зоне + тело + новости с нами
-    quality = 5
-    if 0.15 <= abs_imp <= 0.35:
+    # Качество жёстче: без «9/10 за догон»
+    quality = 4
+    if 0.15 <= abs_imp <= 0.26:
         quality += 2
-    elif abs_imp <= 0.45:
+    elif abs_imp <= 0.30:
         quality += 1
     if body / rng >= 0.45:
         quality += 1
-    if news_bias is not None:
+    if require_pullback:
+        quality += 1
+    if news_bias is not None and abs(news_bias.weighted_score) >= 2.0:
         if side == "short" and news_bias.bias == "bearish":
-            quality += 1
+            quality += 2
         elif side == "long" and news_bias.bias == "bullish":
-            quality += 1
+            quality += 2
+        else:
+            quality -= 1  # новости не подтверждают
     quality = max(1, min(10, quality))
-    if quality < 6:
+    if quality < max(7, int(min_quality)):
         return None
 
     if side == "short":
@@ -1605,21 +1643,17 @@ def detect_oil_micro_signal(
         target = px * (1.0 - tp / 100.0)
         stop = px * (1.0 + sl / 100.0)
         reason = (
-            f"UKOUSD падает {impulse:.2f}% за ~{lb * 5}м → SHORT микротейк {tp:.2f}%"
+            f"SHORT после импульса {impulse:.2f}% + откат · TP {tp:.2f}% / SL {sl:.2f}%"
         )
     else:
         entry = px
         target = px * (1.0 + tp / 100.0)
         stop = px * (1.0 - sl / 100.0)
         reason = (
-            f"UKOUSD растёт {impulse:+.2f}% за ~{lb * 5}м → LONG микротейк {tp:.2f}%"
+            f"LONG после импульса {impulse:+.2f}% + откат · TP {tp:.2f}% / SL {sl:.2f}%"
         )
 
-    # hold: быстрее на сильном импульсе
-    if abs_imp >= 0.30:
-        hold_min, hold_max = 10, 40
-    else:
-        hold_min, hold_max = 15, 60
+    hold_min, hold_max = (15, 50) if abs_imp >= 0.25 else (20, 70)
 
     return OilMicroSignal(
         side=side,
@@ -3751,14 +3785,16 @@ class OilMonitorEngine:
         sig = detect_oil_micro_signal(
             bars,
             news_bias=news_bias,
-            tp_pct=float(getattr(settings, "oil_micro_tp_pct", 0.25)),
-            sl_pct=float(getattr(settings, "oil_micro_sl_pct", 0.18)),
-            min_impulse_pct=float(getattr(settings, "oil_micro_min_impulse_pct", 0.12)),
-            max_impulse_pct=float(getattr(settings, "oil_micro_max_impulse_pct", 0.55)),
+            tp_pct=float(getattr(settings, "oil_micro_tp_pct", 0.30)),
+            sl_pct=float(getattr(settings, "oil_micro_sl_pct", 0.28)),
+            min_impulse_pct=float(getattr(settings, "oil_micro_min_impulse_pct", 0.15)),
+            max_impulse_pct=float(getattr(settings, "oil_micro_max_impulse_pct", 0.32)),
             lookback_bars=int(getattr(settings, "oil_micro_lookback_bars", 4)),
             session_block_minutes=float(getattr(settings, "oil_session_block_minutes", 20.0)),
             apply_session_filter=bool(getattr(settings, "oil_entry_session_filter", True)),
             apply_chase_filter=bool(getattr(settings, "oil_entry_chase_filter", True)),
+            min_quality=int(getattr(settings, "oil_micro_min_quality", 8)),
+            require_pullback=True,
         )
         if sig is None:
             return 0
@@ -4928,7 +4964,7 @@ class OilMonitorEngine:
         if not self._oil_ta_gap_ok(settings):
             logger.debug("Oil confluence skipped: TA signal gap")
             return 0
-        base_q = int(getattr(settings, "oil_setup_min_quality", 7))
+        base_q = int(getattr(settings, "oil_setup_min_quality", 8))
         from .oil_journal import adaptive_min_quality, gemini_memory_block
 
         stats = self._setup_journal.stats()
@@ -4938,7 +4974,7 @@ class OilMonitorEngine:
             else base_q
         )
         near_pct = float(getattr(settings, "oil_setup_near_pct", 0.35))
-        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 14400))
+        cooldown = float(getattr(settings, "oil_setup_cooldown_seconds", 10800))
         now = time.time()
         if now - self._last_setup_ts < cooldown:
             return 0

@@ -2170,10 +2170,27 @@ class TelegramBot:
             return False
         keyboard = self._oil_signal_keyboard()
         if png:
-            return await self._send_chart(
+            ok = await self._send_chart(
                 chat_id, png, message, is_priority=True, keyboard=keyboard,
             )
-        return await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
+        else:
+            ok = await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
+        # A+ ПРО-setup → также в Новостник, если чаты разные
+        if ok and bool(getattr(settings, "oil_setup_to_news_chat", True)):
+            news_id = self.config.oil_news_chat_id
+            if news_id is not None and int(news_id) != int(chat_id):
+                try:
+                    if png:
+                        await self._send_chart(
+                            news_id, png, message, is_priority=True, keyboard=keyboard,
+                        )
+                    else:
+                        await self._send_to_chat(
+                            news_id, message, keyboard, is_priority=True,
+                        )
+                except Exception:
+                    logger.exception("Oil setup mirror to news chat failed")
+        return ok
 
     async def dispatch_oil_extra_chart(self, message: str, png: bytes) -> bool:
         if self.application is None:
@@ -4659,9 +4676,10 @@ class TelegramBot:
             f"(мастер: уровни/micro/bounce/confluence)\n"
             f"Алерты уровней: <b>{'ON' if getattr(s, 'oil_level_alerts_enabled', True) else 'OFF'}</b> · "
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
-            f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', True) else 'OFF'}</b> · "
-            f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.25):g}%</b> · "
-            f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.18):g}%</b>\n"
+            f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', False) else 'OFF'}</b> · "
+            f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.30):g}%</b> · "
+            f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.28):g}%</b> "
+            f"<i>(по умолч. OFF — режим ПРО)</i>\n"
             f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
             f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', False) else 'OFF'}</b> · "
             f"ключи: <b>{'Gemini' if self.config.gemini_configured else ''}"
@@ -4669,9 +4687,10 @@ class TelegramBot:
             f"{'Groq' if self.config.groq_configured else ''}"
             f"{'нет' if not self.config.ai_configured else ''}</b>\n"
             f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
-            f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 7)}</b> · "
-            f"CD <b>{int(getattr(s, 'oil_setup_cooldown_seconds', 14400) / 3600)}ч</b> · "
-            f"с дайджестом <b>{'ON' if getattr(s, 'oil_setup_with_digest', False) else 'OFF'}</b>\n"
+            f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 8)}</b> · "
+            f"CD <b>{int(getattr(s, 'oil_setup_cooldown_seconds', 10800) / 3600)}ч</b> · "
+            f"с дайджестом <b>{'ON' if getattr(s, 'oil_setup_with_digest', False) else 'OFF'}</b> · "
+            f"→Новостник <b>{'ON' if getattr(s, 'oil_setup_to_news_chat', True) else 'OFF'}</b>\n"
             f"Пауза торговых пушей в TA: <b>{int(getattr(s, 'oil_ta_signal_gap_seconds', 10800) / 3600)}ч</b>\n"
             f"{self._oil_journal_stats_line()}"
             f"Brent <b>{'ON' if getattr(s, 'oil_include_brent', True) else 'OFF'}</b> · "

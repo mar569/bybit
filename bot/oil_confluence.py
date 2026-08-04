@@ -213,6 +213,25 @@ def build_oil_confluence_setup(
     if market_mood:
         factors.append(f"режим: {market_mood.split('—')[0].strip()[:40]}")
 
+    for note in read_oil_chart_structure(
+        bars,
+        price=px,
+        support=float(s) if s else None,
+        resistance=float(r) if r else None,
+    ):
+        factors.append(note)
+        if "бычий каркас" in note:
+            long_pts += 1
+        elif "медвежий каркас" in note:
+            short_pts += 1
+        elif "не догонять" in note:
+            # Импульс уже ушёл — не форсируем chase
+            long_pts = max(0, long_pts - 1)
+            short_pts = max(0, short_pts - 1)
+        elif "середина" in note and not near_level:
+            long_pts = max(0, long_pts - 1)
+            short_pts = max(0, short_pts - 1)
+
     # Conflict penalty
     if long_pts > 0 and short_pts > 0 and abs(long_pts - short_pts) <= 1:
         return OilConfluenceSetup(
@@ -417,26 +436,95 @@ def build_oil_confluence_setup(
     return setup
 
 
+def read_oil_chart_structure(
+    bars: Sequence[Any] | None,
+    *,
+    price: float,
+    support: float | None = None,
+    resistance: float | None = None,
+) -> tuple[str, ...]:
+    """Короткое чтение графика как у про: структура / позиция / уровни."""
+    notes: list[str] = []
+    if not bars or len(bars) < 12 or price <= 0:
+        return tuple(notes)
+    closes = [float(getattr(b, "close", 0) or 0) for b in bars[-48:]]
+    highs = [float(getattr(b, "high", 0) or 0) for b in bars[-48:]]
+    lows = [float(getattr(b, "low", 0) or 0) for b in bars[-48:]]
+    if not closes or min(closes) <= 0:
+        return tuple(notes)
+
+    # Локальный swing: последние 20 vs предыдущие 20
+    a, b = closes[-20:], closes[-40:-20] if len(closes) >= 40 else closes[: len(closes) // 2]
+    if a and b:
+        if a[-1] > max(b) * 0.999 and min(a) > min(b):
+            notes.append("Структура: локальные HH/HL — бычий каркас")
+        elif a[-1] < min(b) * 1.001 and max(a) < max(b):
+            notes.append("Структура: локальные LH/LL — медвежий каркас")
+        else:
+            notes.append("Структура: смешанная / переходная")
+
+    hi = max(highs[-24:]) if highs else price
+    lo = min(lows[-24:]) if lows else price
+    if hi > lo:
+        pos = (price - lo) / (hi - lo)
+        if pos >= 0.75:
+            notes.append(f"Позиция в range: верх ({pos * 100:.0f}%) — осторожно с лонгом")
+        elif pos <= 0.25:
+            notes.append(f"Позиция в range: низ ({pos * 100:.0f}%) — осторожно с шортом")
+        else:
+            notes.append(f"Позиция в range: середина ({pos * 100:.0f}%) — ждать край")
+
+    if support and resistance and support < resistance:
+        mid = (float(support) + float(resistance)) / 2.0
+        if abs(price - float(support)) / price < 0.004:
+            notes.append(f"У уровня support ≈${float(support):.2f}")
+        elif abs(price - float(resistance)) / price < 0.004:
+            notes.append(f"У уровня resistance ≈${float(resistance):.2f}")
+        elif price > mid:
+            notes.append("Ближе к сопротивлению, чем к поддержке")
+        else:
+            notes.append("Ближе к поддержке, чем к сопротивлению")
+
+    # Импульс последних 3 баров
+    if len(closes) >= 4:
+        ch = (closes[-1] - closes[-4]) / closes[-4] * 100.0
+        if abs(ch) >= 0.35:
+            notes.append(
+                f"Импульс 15–20м: {ch:+.2f}% — "
+                + ("не догонять" if abs(ch) >= 0.55 else "есть движение")
+            )
+    return tuple(notes[:5])
+
+
 def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
-    """HTML для Telegram (ручной TA) — чеклист + детали без простыни."""
+    """Про-карточка: как трейдер читает график → решение → риск."""
     from .oil_journal import risk_checklist_lines
 
     if setup.side == "WAIT":
-        mark = "⚪"
-        title = "Bybit UKOUSD.s · ждать (нет сильного края)"
+        mark = "✋"
+        title = "ПРО · WAIT — нет A+ входа"
     elif setup.side == "LONG":
         mark = "🟢"
-        title = "Вход LONG · Bybit UKOUSD.s"
+        title = "ПРО · LONG UKOUSD.s"
     else:
         mark = "🔴"
-        title = "Вход SHORT · Bybit UKOUSD.s"
+        title = "ПРО · SHORT UKOUSD.s"
 
     lines = [
-        f"{mark} <b>{title}</b> · качество {setup.quality}/10",
-        f"<i>Сейчас ≈${setup.price:.2f} · {setup.horizon_ru} · только Bybit TradFi</i>",
+        f"{mark} <b>{title}</b> · {setup.quality}/10",
+        f"<i>≈${setup.price:.2f} · {setup.horizon_ru}</i>",
         "",
     ]
+
+    # Чтение рынка сверху
+    if setup.factors_ru:
+        lines.append("<b>Чтение графика / факторов</b>")
+        for f in setup.factors_ru[:6]:
+            lines.append(f"• {_esc(f)}")
+        lines.append("")
+
     if setup.side in {"LONG", "SHORT"}:
+        lines.append("<b>План сделки</b>")
         lines.extend(
             risk_checklist_lines(
                 side=setup.side,
@@ -451,24 +539,24 @@ def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
             )
         )
         lines.append("")
-        lines.append(f"• Триггер: {_esc(setup.trigger_ru)}")
+        lines.append(f"<b>Триггер:</b> {_esc(setup.trigger_ru)}")
+        if setup.invalidation:
+            lines.append(
+                f"<b>Инвалидация:</b> закрытие против плана за "
+                f"<b>${float(setup.invalidation):.2f}</b> → сделка отменяется"
+            )
     else:
-        lines.append(f"• {_esc(setup.trigger_ru)}")
+        lines.append(f"<b>Почему ждать:</b> {_esc(setup.trigger_ru)}")
+        lines.append(
+            "<i>Профессиональный вход — редкий. Нет края уровня + подтверждения = WAIT.</i>"
+        )
 
-    if setup.factors_ru:
-        lines.append("")
-        lines.append("<b>Почему сейчас</b>")
-        for f in setup.factors_ru[:5]:
-            lines.append(f"• {_esc(f)}")
     if setup.gemini_ru:
         lines.append("")
-        lines.append(f"🤖 <b>Главное от ИИ</b>\n{_esc(setup.gemini_ru)}")
+        lines.append(f"🧠 <b>ИИ-про</b>\n{_esc(setup.gemini_ru)}")
+
     lines.append("")
-    lines.append(
-        "<i>Инструмент: только Bybit TradFi <b>UKOUSD.s</b>. "
-        "Новости США/Иран/Ормуз важнее «красивого» чужого графика. "
-        "Нет касания уровня — не входить. Не финсовет.</i>"
-    )
+    lines.append("<i>Только UKOUSD.s · без chase · не финсовет</i>")
     return "\n".join(lines)
 
 
@@ -518,8 +606,9 @@ async def enrich_setup_with_gemini(
         memory = (memory_ru or "").strip()
         memory_block = f"\nОпыт прошлых сигналов бота:\n{memory}\n" if memory else ""
         ctx = (
-            "Ты трейдер нефти. Пиши по-русски простыми словами, 5–8 строк: "
-            "выжми важное, немного деталей, без простыни и без англ. жаргона.\n"
+            "Ты профессиональный трейдер Brent (UKOUSD). Читаешь график: "
+            "структура, уровни, импульс, новости Трамп/Бессент/Ормуз. "
+            "Пиши по-русски, коротко, как на desk: 4–6 строк.\n"
             f"SETUP: {setup.side} quality={setup.quality}\n"
             f"Цена ${setup.price:.2f} entry={setup.entry_lo}-{setup.entry_hi} "
             f"stop={setup.stop} tp={setup.tp1}/{setup.tp2}\n"
@@ -533,16 +622,19 @@ async def enrich_setup_with_gemini(
             model=model,
             context_text=ctx,
             user_text=(
-                "Структура: главное ПОЧЕМУ вход валиден; куда цена; "
-                "один риск; когда отменять. Не меняй сторону. Не финсовет. "
-                "Свежие критичные новости (Ормуз/Иран) важнее старой статистики."
+                "Формат:\n"
+                "1) Что вижу на графике (1 фраза)\n"
+                "2) Почему вход валиден / или слабость\n"
+                "3) Главный риск\n"
+                "4) Когда отменять\n"
+                "Не меняй сторону. Без цифр «идеального» входа сверх плана. Не финсовет."
             ),
         )
         text = sanitize_ai_reply_for_telegram(result.text or "").strip()
         if not text or result.error:
             return setup
-        if len(text) > 600:
-            text = text[:597] + "…"
+        if len(text) > 700:
+            text = text[:697] + "…"
         return replace(setup, gemini_ru=text)
     except Exception:
         return setup
