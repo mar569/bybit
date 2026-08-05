@@ -22,7 +22,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
-from .bybit_klines import BYBIT_KLINE_URL, KlineBar
+from .bybit_klines import KlineBar, fetch_bybit_klines_sync
 from .oil_level_watcher import OilLevelWatcher
 from .ta_analysis import TAAnalysisResult, TradeScenario, fmt_price, run_ta_analysis
 
@@ -2727,39 +2727,20 @@ def _fetch_bybit_oil_bars(
     interval_minutes: int = 15,
     limit: int | None = None,
 ) -> list[KlineBar]:
-    """Свечи Bybit native commodity perps (linear): BZUSDT / CLUSDT."""
+    """Свечи Bybit native commodity perps (linear): BZUSDT / CLUSDT.
+
+    Хосты: api.bybit.com → api.bytick.com (если DNS/сеть падает в Docker).
+    """
     interval = bybit_interval_for_minutes(interval_minutes)
     lim = limit if limit is not None else _bars_limit_for_interval(interval_minutes)
     lim = min(max(int(lim), 24), 1000)
-    params = urllib.parse.urlencode({
-        "category": "linear",
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "limit": lim,
-    })
-    url = f"{BYBIT_KLINE_URL}?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; BybitBot/1.0)"})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        j = json.loads(resp.read())
-    if j.get("retCode") != 0:
-        raise RuntimeError(f"Bybit oil kline {symbol}: {j.get('retMsg')}")
-    bars: list[KlineBar] = []
-    for row in j.get("result", {}).get("list", []) or []:
-        try:
-            bars.append(
-                KlineBar(
-                    open_time=float(row[0]) / 1000.0,
-                    open=float(row[1]),
-                    high=float(row[2]),
-                    low=float(row[3]),
-                    close=float(row[4]),
-                    volume=float(row[5]),
-                )
-            )
-        except (IndexError, TypeError, ValueError):
-            continue
-    bars.sort(key=lambda b: b.open_time)
-    return bars
+    return fetch_bybit_klines_sync(
+        symbol,
+        interval=interval,
+        limit=lim,
+        category="linear",
+        timeout=25.0,
+    )
 
 
 # Антиспам: fallback Bybit — один WARN на символ раз в час
@@ -2834,12 +2815,14 @@ def _fetch_oil_bars(
                 set_oil_price_source(f"Bybit {bybit_symbol} (не USOIL Cash)")
             _log_oil_bybit_fallback(bybit_symbol)
             return bybit_bars
-    except Exception:
+    except Exception as exc:
+        # DNS/сеть Bybit — без traceback-простыни в логах
         logger.warning(
-            "Bybit oil %s failed, fallback Yahoo",
+            "Bybit oil %s failed (%s), fallback Yahoo",
             bybit_symbol,
-            exc_info=True,
+            type(exc).__name__,
         )
+        logger.debug("Bybit oil %s detail", bybit_symbol, exc_info=True)
 
     try:
         yahoo_bars = _fetch_yahoo_oil_bars(

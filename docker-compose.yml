@@ -17,6 +17,9 @@ services:
       - .env
     depends_on:
       - redis
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ./:/app:rw
     command: python -m bot.main

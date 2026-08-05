@@ -190,6 +190,17 @@ def _is_model_error_payload(status: int, body: str) -> bool:
     )
 
 
+def _is_transient_gemini_payload(status: int, body: str) -> bool:
+    """503 / high demand — пробуем другую модель, не считаем фаталом."""
+    low = (body or "").lower()
+    return status in {503, 500, 502, 504} or (
+        "high demand" in low
+        or "unavailable" in low
+        or "try again later" in low
+        or "overloaded" in low
+    )
+
+
 def _image_part(png: bytes) -> dict[str, Any]:
     return {
         "inline_data": {
@@ -427,6 +438,20 @@ async def ask_gemini(
                             or "404" in err
                         ):
                             logger.warning("Gemini model %s unavailable: %s", mid, err)
+                            continue
+                        # 503 high demand → тихий переход на fallback-модель
+                        status_code = 0
+                        if err.startswith("HTTP "):
+                            try:
+                                status_code = int(err.split(":", 1)[0].split()[1])
+                            except (IndexError, ValueError):
+                                status_code = 0
+                        if _is_transient_gemini_payload(status_code, err):
+                            logger.warning(
+                                "Gemini busy on %s — next model: %s",
+                                mid,
+                                (err or "")[:160],
+                            )
                             continue
                         logger.error("Gemini error on %s: %s", mid, err)
                         continue
