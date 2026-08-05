@@ -95,8 +95,11 @@ def test_build_forecast_short_on_deal_tape():
     assert fc.confidence >= 5
     text = format_oil_forecast_block(fc)
     assert "SHORT" in text
-    assert "Прогноз UKOUSD" in text
-    assert "Отмена" in text
+    assert "✖" in text
+    assert "Следить" not in text
+    assert "База: База" not in text
+    assert "правила бота" not in text
+    assert "Прогноз UKOUSD" not in text
 
 
 def test_build_forecast_wait_on_mixed():
@@ -123,7 +126,8 @@ def test_build_forecast_wait_on_mixed():
     fc = build_oil_forecast(snap, ta, news_items=items)
     assert fc.scenario in {"mixed_geo", "deal_tape", "disruption"}
     text = format_oil_forecast_block(fc)
-    assert "Прогноз" in text
+    assert "WAIT" in text
+    assert "Следить" not in text
 
 
 def test_build_forecast_long_with_missing_breakout():
@@ -155,7 +159,7 @@ def test_build_forecast_long_with_missing_breakout():
         ta_confidence_raw=6,
     )
     assert fc.bias == "LONG"
-    assert "цели" in fc.entry_hint_ru
+    assert "TP" in fc.entry_hint_ru or "SL" in fc.entry_hint_ru
 
 
 def test_digest_includes_forecast_block():
@@ -173,5 +177,8 @@ def test_digest_includes_forecast_block():
         entry_hint_ru="Short от R",
     )
     text = format_oil_market_digest([snap], forecast=fc)
-    assert "Прогноз UKOUSD" in text
     assert "SHORT" in text
+    assert "Нефть" in text
+    assert "Источник цены" not in text
+    assert "Следить" not in text
+    assert "TV/Hyperliquid" not in text

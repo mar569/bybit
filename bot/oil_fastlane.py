@@ -123,6 +123,17 @@ _SYNDICATE_HOST_DENY: tuple[str, ...] = (
     "ynet ",
     "msn.com",
     "yahoo.com",
+    "yahoo finance",
+    "latestly.com",
+    "latestly",
+    "telanganatoday",
+    "telangana today",
+    "cryptobriefing",
+    "crypto briefing",
+    "al-monitor.com",
+    "al-monitor",
+    "abcnews.go.com",
+    "abc news",
     # news.google.com НЕ здесь: это наш RSS-агрегатор; outlet берём из <source>
     # (Bloomberg/WSJ). Иначе ВСЕ Tier‑1 с Google News молчат.
 )
@@ -252,12 +263,28 @@ def fastlane_title_on_topic(title: str) -> bool:
     low = (title or "").lower()
     if not low.strip():
         return False
+    # Оффтоп даже при слове Iran
+    from .oil_monitor import _OIL_OFFTOPIC_PHRASES
+
+    if any(p in low for p in _OIL_OFFTOPIC_PHRASES):
+        return False
     if any(k in low for k in _TOPIC_OIL):
         return True
     if any(_has_whole_word(low, w) for w in _TOPIC_OIL_WORDS):
         return True
-    if any(k in low for k in _TOPIC_GEO):
+    # Голый geo без нефти — только Ормуз / явная сделка / удар по Ирану
+    if any(k in low for k in ("hormuz", "ормуз")):
         return True
+    if any(k in low for k in _TOPIC_GEO):
+        if any(
+            k in low
+            for k in (
+                "oil", "crude", "нефт", "tanker", "танкер", "shipping", "strait",
+                "deal", "сделк", "reopen", "sanction", "санкц", "missile", "bomb",
+            )
+        ):
+            return True
+        return False
     # Санкции/атака США — только вместе с нефтью или Ираном (не любой Trump-заголовок)
     if any(k in low for k in ("sanction", "санкц", "attack", "strike", "удар", "атак")) and any(
         k in low for k in ("oil", "crude", "нефт", "iran", "иран", "hormuz", "ормуз", "energy")

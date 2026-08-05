@@ -35,6 +35,157 @@ def _dist_pct(px: float, level: float | None) -> float | None:
     return abs(px - float(level)) / px * 100.0
 
 
+
+def score_oil_tech_pack(
+    ta: TAAnalysisResult | None,
+    *,
+    px: float,
+    full_weight: bool = True,
+) -> tuple[int, int, list[str], dict[str, float | None]]:
+    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза.
+
+    full_weight=True — нет сильных новостей, техника ведёт.
+    full_weight=False — новость HOT, техника только подтверждает.
+    """
+    long_pts = 0
+    short_pts = 0
+    factors: list[str] = []
+    levels: dict[str, float | None] = {
+        "entry": None,
+        "stop": None,
+        "tp1": None,
+        "tp2": None,
+    }
+    if ta is None or px <= 0:
+        return 0, 0, factors, levels
+
+    w = 1.0 if full_weight else 0.55
+
+    ew_ready = bool(getattr(ta, "elliott_entry_ready", False))
+    ew_conf = int(getattr(ta, "elliott_confidence", 0) or 0)
+    ew_label = (getattr(ta, "elliott_label", "") or "")[:80]
+    ew_path = (getattr(ta, "elliott_path_bias", "") or "").lower()
+    wave_bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    wave_conf = int(getattr(ta, "wave_confidence", 0) or 0)
+
+    if ew_ready and ew_conf >= 5:
+        pts = int(round((3 if ew_conf >= 7 else 2) * w))
+        mode = (getattr(ta, "elliott_entry_mode", "") or "").lower()
+        if "short" in mode or ew_path == "short" or wave_bias == "short":
+            short_pts += pts
+            factors.append(
+                f"EW вход SHORT · {ew_conf}/10"
+                + (f" · {ew_label}" if ew_label else "")
+            )
+        elif "long" in mode or ew_path == "long" or wave_bias == "long":
+            long_pts += pts
+            factors.append(
+                f"EW вход LONG · {ew_conf}/10"
+                + (f" · {ew_label}" if ew_label else "")
+            )
+        if getattr(ta, "elliott_entry_price", None):
+            levels["entry"] = float(ta.elliott_entry_price)
+        if getattr(ta, "elliott_stop_price", None):
+            levels["stop"] = float(ta.elliott_stop_price)
+        tps = list(getattr(ta, "elliott_tp_prices", None) or [])
+        if tps:
+            levels["tp1"] = float(tps[0])
+        if len(tps) > 1:
+            levels["tp2"] = float(tps[1])
+    elif wave_bias in {"long", "short"} and wave_conf >= 5:
+        pts = int(round((2 if wave_conf >= 7 else 1) * w))
+        if wave_bias == "long":
+            long_pts += pts
+        else:
+            short_pts += pts
+        factors.append(f"Волна {wave_bias.upper()} · {wave_conf}/10")
+
+    tri_kind = (getattr(ta, "elliott_triangle_kind", "") or "").strip()
+    tri_bias = (getattr(ta, "elliott_triangle_bias", "") or "").lower()
+    if tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
+        pts = int(round(2 * w))
+        side = "long" if tri_bias in {"long", "bullish"} else "short"
+        if side == "long":
+            long_pts += pts
+        else:
+            short_pts += pts
+        factors.append(f"Треугольник {tri_kind} → {side.upper()}")
+
+    try:
+        from .chart_patterns import format_chart_pattern_compact, pick_primary_pattern
+
+        patterns = list(getattr(ta, "chart_patterns", None) or [])
+        primary = getattr(ta, "primary_chart_pattern", None) or pick_primary_pattern(
+            patterns
+        )
+        if primary is not None:
+            conf = float(getattr(primary, "confidence", 0) or 0)
+            direction = (getattr(primary, "direction", "") or "neutral").lower()
+            status = getattr(primary, "status", "") or ""
+            label = format_chart_pattern_compact(primary) or getattr(
+                primary, "label_ru", ""
+            )
+            if conf >= 0.55 and direction in {"long", "short", "bullish", "bearish"}:
+                pts = int(
+                    round((3 if conf >= 0.7 and status == "confirmed" else 2) * w)
+                )
+                if direction in {"long", "bullish"}:
+                    long_pts += pts
+                else:
+                    short_pts += pts
+                factors.append(f"Фигура: {label}" if label else f"Фигура {direction}")
+                if full_weight:
+                    if getattr(primary, "stop_price", None) and levels["stop"] is None:
+                        levels["stop"] = float(primary.stop_price)
+                    if getattr(primary, "target_price", None) and levels["tp1"] is None:
+                        levels["tp1"] = float(primary.target_price)
+            elif label:
+                factors.append(f"Фигура (слабо): {label}")
+    except Exception:
+        pass
+
+    phase = (getattr(ta, "phase_label", "") or "").lower()
+    plabel = str(getattr(ta, "phase_label", "") or "")
+    if "импульс вверх" in phase:
+        long_pts += int(round(1 * w))
+        factors.append(f"Фаза: {plabel[:40]}")
+    elif "импульс вниз" in phase:
+        short_pts += int(round(1 * w))
+        factors.append(f"Фаза: {plabel[:40]}")
+    elif any(k in phase for k in ("пробой", "сжатие", "breakout")):
+        factors.append(f"Фаза: {plabel[:40]} — ждать close")
+    elif plabel:
+        factors.append(f"Фаза: {plabel[:40]}")
+
+    structure = (getattr(ta, "structure_label", "") or "").lower()
+    if full_weight:
+        if "быч" in structure:
+            long_pts += 1
+        if "медвеж" in structure:
+            short_pts += 1
+
+    channel = getattr(ta, "channel", None)
+    if channel is not None and full_weight:
+        try:
+            lo = float(
+                getattr(channel, "lower", 0) or getattr(channel, "low", 0) or 0
+            )
+            hi = float(
+                getattr(channel, "upper", 0) or getattr(channel, "high", 0) or 0
+            )
+            if lo > 0 and hi > lo:
+                if abs(px - lo) / px <= 0.004:
+                    long_pts += 1
+                    factors.append("У низа канала")
+                elif abs(px - hi) / px <= 0.004:
+                    short_pts += 1
+                    factors.append("У верха канала")
+        except Exception:
+            pass
+
+    return long_pts, short_pts, factors, levels
+
+
 def _pro_analyst_boost(news_items: Sequence[Any] | None) -> tuple[int, str]:
     """+баллы и имя, если в окне есть Blas/Kemp/Croft/Sen."""
     try:
@@ -138,44 +289,62 @@ def build_oil_confluence_setup(
     elif forecast is not None:
         factors.append(f"прогноз WAIT · {fc_scen or 'range'}")
 
-    # News bias: очки только если импульс ещё «горячий» (≤~1ч)
-    news_age_h = None
-    if news_items:
-        ages = []
-        now_ts = time.time()
-        for it in news_items:
-            ts = float(getattr(it, "published_ts", 0) or 0)
-            if ts > 0:
-                ages.append(max(0.0, (now_ts - ts) / 3600.0))
-        if ages:
-            news_age_h = min(ages)
-    news_entry_max_h = float(news_entry_max_age_hours)
-    if news_items and news_age_h is not None:
-        news_for_entry = news_age_h <= news_entry_max_h
-        age_note = f"{news_age_h:.1f}ч"
-    else:
-        # Нет дат в батче — доверяем уже посчитанному bias (тесты / fallback)
-        news_for_entry = True
-        age_note = "bias"
+    # News: HOT ≤30м = очки входа; WARM/опоздание = только фон; priced-in = не догонять
+    from .oil_news_discipline import assess_news_for_trade
+
+    news_assess = assess_news_for_trade(
+        news_items,
+        news_bias=news_bias,
+        bars=bars,
+        hot_hours=float(news_entry_max_age_hours),
+        warm_hours=2.0,
+        priced_in_pct=0.35,
+    )
+    factors.append(f"📰 {news_assess.rule_ru}")
+    age_note = news_assess.age_note
 
     if news == "bullish":
-        if news_for_entry:
+        if news_assess.for_entry:
             add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
             long_pts += add
-            factors.append(f"новости↑ {news_w:+.1f}/10 · {age_note}")
-        else:
+            factors.append(f"новости↑ HOT {news_w:+.1f}/10 · {age_note}")
+        elif news_assess.mode in {"warm", "hot"}:
             factors.append(f"новости↑ фон ({age_note}) — без очков входа")
+        else:
+            factors.append(f"новости↑ устарели ({age_note})")
     elif news == "bearish":
-        if news_for_entry:
+        if news_assess.for_entry:
             add = 3 if abs(news_w) >= 3 else 2 if abs(news_w) >= 1.5 else 1
             short_pts += add
-            factors.append(f"новости↓ {news_w:+.1f}/10 · {age_note}")
-        else:
+            factors.append(f"новости↓ HOT {news_w:+.1f}/10 · {age_note}")
+        elif news_assess.mode in {"warm", "hot"}:
             factors.append(f"новости↓ фон ({age_note}) — без очков входа")
+        else:
+            factors.append(f"новости↓ устарели ({age_note})")
     elif news == "mixed":
-        factors.append("новости mixed")
+        factors.append("новости mixed — без входа по новостям")
     elif news_bias is not None:
         factors.append("новости нейтральны")
+
+    # Техпакет: волны / EW / треугольники / фигуры — ведёт, если нет HOT-новостей
+    tech_full = news_assess.mode in {"none", "cold"} or (
+        news_assess.mode == "warm" and not news_assess.for_entry
+    )
+    if tech_full:
+        factors.insert(0, "📐 режим: ТЕХНИКА (нет сильной свежей новости)")
+    else:
+        factors.append("режим: НОВОСТЬ + техника")
+    t_long, t_short, t_factors, tech_levels = score_oil_tech_pack(
+        ta, px=px, full_weight=tech_full
+    )
+    # Не толкать технику против блока новостей
+    if news_assess.block_long:
+        t_long = 0
+    if news_assess.block_short:
+        t_short = 0
+    long_pts += t_long
+    short_pts += t_short
+    factors.extend(t_factors[:6])
 
     # TA
     if ta_v == "LONG":
@@ -187,32 +356,36 @@ def build_oil_confluence_setup(
     else:
         factors.append(f"TA WAIT {ta_c}/10")
 
-    # Scalp
-    if scalp_action == "open_long":
+    # Scalp — не усиливать против news discipline
+    if scalp_action == "open_long" and not news_assess.block_long:
         long_pts += 2 if scalp_score >= 7 else 1
         factors.append(f"скальп LONG score {scalp_score}")
-    elif scalp_action == "open_short":
+    elif scalp_action == "open_short" and not news_assess.block_short:
         short_pts += 2 if scalp_score >= 7 else 1
         factors.append(f"скальп SHORT score {scalp_score}")
+    elif scalp_action in {"open_long", "open_short"}:
+        factors.append("скальп отключён: конфликт с новостным фоном")
 
     # Bounce
     if bounce_plan is not None:
         bside = getattr(bounce_plan, "side", "")
         strong = bool(getattr(bounce_plan, "strong", False))
-        if bside == "long":
+        if bside == "long" and not news_assess.block_long:
             long_pts += 3 if strong else 2
             factors.append(f"отскок LONG у {fmt_price(bounce_plan.bounce_level)}")
-        elif bside == "short":
+        elif bside == "short" and not news_assess.block_short:
             short_pts += 3 if strong else 2
             factors.append(f"отскок SHORT у {fmt_price(bounce_plan.bounce_level)}")
+        elif bside in {"long", "short"}:
+            factors.append("отскок против новостного фона — без очков")
 
     # Level proximity (только усиливает сторону, не создаёт одну)
-    if near_s or near_bo:
+    if (near_s or near_bo) and not news_assess.block_long:
         long_pts += 1
         factors.append(
             "цена у support" if near_s else "цена у breakout↑"
         )
-    if near_r or near_bd:
+    if (near_r or near_bd) and not news_assess.block_short:
         short_pts += 1
         factors.append(
             "цена у resistance" if near_r else "цена у breakdown↓"
@@ -288,10 +461,30 @@ def build_oil_confluence_setup(
         return None
 
     quality = min(10, max(1, 4 + edge + (1 if near_level else 0) + (1 if ta_c >= 6 else 0)))
-    # Сильный конфликт news vs TA режет quality
+    # Дисциплина новостей: блок стороны / опоздание / уже в цене
+    if side == "LONG" and news_assess.block_long:
+        quality = min(quality, 5)
+        factors.append("блок LONG: новости↓ или уже отыграно")
+    if side == "SHORT" and news_assess.block_short:
+        quality = min(quality, 5)
+        factors.append("блок SHORT: новости↑ или уже отыграно")
     if (news == "bullish" and ta_v == "SHORT") or (news == "bearish" and ta_v == "LONG"):
-        quality = min(quality, 6)
+        quality = min(quality, 5)
         factors.append("конфликт news↔TA")
+    if side == "LONG" and near_bo and news_assess.mode in {"warm", "hot"} and news == "bearish":
+        quality = min(quality, 5)
+        factors.append("пробой↑ при фоне сделки/Ормуз")
+    if side == "SHORT" and near_bd and news_assess.mode in {"warm", "hot"} and news == "bullish":
+        quality = min(quality, 5)
+        factors.append("пробой↓ при бычьем новостном фоне")
+    # Без HOT-новости не раздувать «новостной» пробой; техника (tech_full) — ок
+    if (not tech_full) and news_assess.mode != "hot" and near_bo and side == "LONG" and news != "bullish":
+        quality = min(quality, 6)
+    if (not tech_full) and news_assess.mode != "hot" and near_bd and side == "SHORT" and news != "bearish":
+        quality = min(quality, 6)
+    if tech_full and (t_long >= 3 or t_short >= 3):
+        quality = min(10, quality + 1)
+        factors.append("техпакет согласован")
 
     # Levels for side
     entry_lo = entry_hi = stop = tp1 = tp2 = inv = None
@@ -322,7 +515,6 @@ def build_oil_confluence_setup(
             inv = stop
             trigger = f"close/hold выше BO {fmt_price(bo)}"
         else:
-            # Нет близости — setup только как watch (ниже gate)
             entry_lo = float(s) * 0.998 if s else px * 0.997
             entry_hi = float(s) * 1.002 if s else px
             stop = float(bd or (s * 0.99 if s else px * 0.992))
@@ -356,7 +548,29 @@ def build_oil_confluence_setup(
             inv = stop
             trigger = "ждать цену у R или close ниже breakdown↓"
 
+    # Техпакет: уровни EW/фигуры приоритетнее «голого» S/R, если техника ведёт
+    if tech_full and tech_levels:
+        te = tech_levels.get("entry")
+        ts_ = tech_levels.get("stop")
+        tt1 = tech_levels.get("tp1")
+        tt2 = tech_levels.get("tp2")
+        if te and te > 0:
+            entry_lo = float(te) * 0.999
+            entry_hi = float(te) * 1.001
+            trigger = f"техвход EW/фигура ≈{fmt_price(te)}"
+        if ts_ and ts_ > 0:
+            stop = float(ts_)
+            inv = stop
+        if tt1 and tt1 > 0:
+            tp1 = float(tt1)
+        if tt2 and tt2 > 0:
+            tp2 = float(tt2)
+        if not catalyst and t_factors:
+            catalyst = t_factors[0][:120]
+
     horizon = "intraday 4–12ч"
+    if tech_full:
+        horizon = "техника · intraday / свинг по фигуре-волне"
     if fc_scen in {"deal_tape", "disruption", "mixed_geo"}:
         horizon = "свинг 1–3д · intraday по уровню"
     elif scalp_action in {"open_long", "open_short"}:
@@ -374,10 +588,10 @@ def build_oil_confluence_setup(
         tp2=tp2,
         invalidation=inv,
         horizon_ru=horizon,
-        factors_ru=tuple(factors[:8]),
+        factors_ru=tuple(factors[:10]),
         catalyst=catalyst,
         trigger_ru=trigger,
-        near_level=near_level,
+        near_level=near_level or bool(tech_full and tech_levels.get("entry")),
         price=px,
     )
 
@@ -437,12 +651,19 @@ def build_oil_confluence_setup(
                 factors_ru=tuple(list(factors[:7]) + ["фильтр: нет close-триггера"]),
             )
 
-    # High-conviction gate: quality + (near level OR bounce aligned OR scalp open)
+    # High-conviction gate: уровень ИЛИ bounce ИЛИ scalp ИЛИ техвход EW/фигура
+    tech_ready = bool(
+        tech_full
+        and tech_levels.get("entry")
+        and ((side == "LONG" and t_long >= 2) or (side == "SHORT" and t_short >= 2))
+    )
     ready = (
         quality >= int(min_quality)
         and side in {"LONG", "SHORT"}
         and (
             near_level
+            or tech_ready
+            or setup.near_level
             or (
                 bounce_plan is not None
                 and getattr(bounce_plan, "side", "") == side.lower()
@@ -532,11 +753,21 @@ def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
     else:
         mark, title = "🔴", "SHORT"
 
+    tech_mode = any("режим: ТЕХНИКА" in f for f in setup.factors_ru)
+    mode_tag = " · 📐 ТЕХНИКА" if tech_mode else ""
     lines = [
-        f"{mark} <b>ПРО {title}</b> · {setup.quality}/10 · ${setup.price:.2f}",
+        f"{mark} <b>ПРО {title}</b> · {setup.quality}/10 · ${setup.price:.2f}{mode_tag}",
     ]
-    if setup.factors_ru:
-        lines.append(" · ".join(_esc(f) for f in setup.factors_ru[:3]))
+    news_line = next((f for f in setup.factors_ru if f.startswith("📰")), "")
+    if news_line:
+        lines.append(_esc(news_line[:220]))
+    other = [
+        f
+        for f in setup.factors_ru
+        if not f.startswith("📰") and "режим: ТЕХНИКА" not in f
+    ]
+    if other:
+        lines.append(" · ".join(_esc(f) for f in other[:3]))
 
     if setup.side in {"LONG", "SHORT"}:
         bits = []

@@ -55,4 +55,7 @@ def test_digest_includes_flow_block():
         reason="",
     )
     text = format_oil_market_digest([snap], bars=bars, interval_minutes=15)
-    assert "Поток (прокси)" in text
+    assert "📡" in text
+    assert "BUY" in text or "SELL" in text or "NEUTRAL" in text
+    assert "Поток (прокси)" not in text
+    assert "Источник цены" not in text

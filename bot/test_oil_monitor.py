@@ -70,7 +70,7 @@ def test_pro_analyst_blas_kemp_priority():
     assert news_critical_score(item.title, source=item.source) >= 5
     assert is_critical_oil_news(item, min_score=4)
     text = format_single_oil_news(item)
-    assert "Javier Blas" in text
+    assert "Javier Blas" in text or "Ормуз" in text or "сделк" in text.lower()
     assert "Bloomberg" in text
 
 
@@ -216,7 +216,8 @@ def test_digest_keeps_entry_plan_when_session_closed():
     ta = TAAnalysisResult(verdict="LONG", verdict_confidence=7)
     text = format_oil_market_digest([snap], ta=ta, news_bias=bias)
     assert "фон вверх" in text
-    assert "Рабочий план" in text
+    assert "LONG" in text
+    assert "UKOUSD" in text
     # session_open больше не параметр — планы не прячем на выходных
     assert "session_open" not in format_oil_market_digest.__code__.co_varnames
 

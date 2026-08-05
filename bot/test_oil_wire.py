@@ -179,3 +179,28 @@ def test_financialjuice_is_fastlane_outlet():
         theme="trump_us",
     )
     assert is_fastlane_item(item, min_flash_score=7)
+
+def test_reject_cyber_water_and_weak_mirrors():
+    from bot.oil_fastlane import fastlane_title_on_topic, is_syndicate_host
+    from bot.oil_monitor import (
+        _news_story_key,
+        is_oil_market_moving_headline,
+        is_weak_oil_news_source,
+    )
+
+    assert not is_oil_market_moving_headline(
+        "Iran-Linked Cyberattacks on US Water Utilities Continue"
+    )
+    assert not fastlane_title_on_topic(
+        "Iran-Linked Cyberattacks on US Water Utilities Continue"
+    )
+    assert is_oil_market_moving_headline(
+        "Negotiators Close In on Deal With Iran to Open Hormuz"
+    )
+    assert is_weak_oil_news_source("LatestLY", "https://www.latestly.com/x")
+    assert is_weak_oil_news_source("Telangana Today", "")
+    assert is_syndicate_host("Telangana Today", "https://telanganatoday.com/x")
+    k1 = _news_story_key("Iran Oman Agree on Proposed Shipping Route in Hormuz Strait")
+    k2 = _news_story_key("Watch Iran Says Agreement Reached With Oman on Hormuz Shipping")
+    assert "hormuz" in k1 and "iran" in k1
+    assert ("deesc" in k1 and "deesc" in k2) or k1 == k2

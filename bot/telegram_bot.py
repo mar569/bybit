@@ -2146,7 +2146,7 @@ class TelegramBot:
             return False
         if not getattr(settings, "oil_news_enabled", False):
             return False
-        if not getattr(settings, "oil_micro_signals_enabled", True):
+        if not getattr(settings, "oil_micro_signals_enabled", False):
             return False
         chat_id = self.config.oil_news_chat_id
         if chat_id is None:

@@ -21,15 +21,57 @@ def _lvls(*prices: float | None, sep: str = " / ") -> str:
     parts = [_lvl(p) for p in prices if p is not None]
     return sep.join(parts) if parts else "—"
 
-# Сценарии рынка нефти (фундамент → bias)
+# Сценарии рынка нефти (фундамент → bias) — коротко для чата
 _SCENARIO_LABEL = {
-    "deal_tape": "Deal-tape (Ормуз/перемирие → снятие premium)",
-    "disruption": "Disruption (блок/атаки → geo-premium)",
-    "inventory": "Запасы США (госрезерв / склады компаний → спрос и предложение)",
-    "opec_supply": "OPEC/supply (квоты/добыча)",
-    "range": "Range (нет сильного катализатора)",
-    "mixed_geo": "Mixed geo (сигналы в обе стороны)",
+    "deal_tape": "сделка Ормуз → снятие premium",
+    "disruption": "блок/атаки → geo-premium",
+    "inventory": "запасы США",
+    "opec_supply": "ОПЕК / добыча",
+    "range": "range · без сильного катализатора",
+    "mixed_geo": "geo mixed",
 }
+
+
+def _strip_case_prefix(text: str) -> str:
+    """Убрать «База:/Альт:/Отмена:/План:» из текста — метка уже в форматтере."""
+    t = (text or "").strip()
+    for pref in (
+        "База: ",
+        "База:",
+        "Альт: ",
+        "Альт:",
+        "Отмена LONG: ",
+        "Отмена SHORT: ",
+        "Отмена: ",
+        "Отмена ",
+        "План: ",
+        "План:",
+    ):
+        if t.startswith(pref):
+            return t[len(pref) :].strip()
+    return t
+
+
+def _short_catalyst(raw: str, *, max_len: int = 72) -> str:
+    """Не тащить длинный EN-заголовок в карточку."""
+    t = " ".join((raw or "").split())
+    if not t:
+        return ""
+    # Если почти весь текст латиницей — только короткий хвост
+    letters = [c for c in t if c.isalpha()]
+    latin = sum(1 for c in letters if "A" <= c.upper() <= "Z")
+    if letters and latin / len(letters) >= 0.7:
+        low = t.lower()
+        if "hormuz" in low or "ормуз" in low:
+            return "Ормуз / сделка"
+        if "opec" in low or "опек" in low:
+            return "ОПЕК"
+        if "inventor" in low or "eia" in low or "запас" in low:
+            return "запасы США"
+        return t[:40].rstrip(" .,:;") + ("…" if len(t) > 40 else "")
+    if len(t) > max_len:
+        return t[: max_len - 1].rstrip() + "…"
+    return t
 
 
 @dataclass(frozen=True)
@@ -197,122 +239,90 @@ def build_oil_forecast(
     if bias == "WAIT":
         conf = min(conf, 6)
 
-    horizon = "intraday 4–12ч"
+    horizon = "4–12ч"
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
-        horizon = "свинг 1–3д · intraday по уровням"
+        horizon = "1–3д / intraday"
     elif scenario == "inventory":
-        horizon = "до следующего отчёта по запасам / 1–2 сессии"
+        horizon = "до отчёта запасов"
 
     scen_ru = _SCENARIO_LABEL.get(scenario, scenario)
     catalyst = ""
     if news_bias and getattr(news_bias, "top_catalyst", ""):
-        catalyst = str(news_bias.top_catalyst)[:120]
+        catalyst = _short_catalyst(str(news_bias.top_catalyst))
 
     if bias == "SHORT":
-        headline = f"Bias SHORT · {scen_ru}"
+        headline = f"SHORT · {scen_ru}"
         base = (
-            f"База: давление вниз с ${px:.2f}. "
-            f"Искать продажи от сопротивления"
-            + (f" {_lvl(r)}" if r else "")
-            + (f" / отката к R" if r else "")
-            + ". Geo-premium сжимается — не ловить каждое дно."
+            f"давление вниз с ${px:.2f}"
+            + (f" · продажи от R {_lvl(r)}" if r else "")
         )
         alt = (
-            "Альт: срыв deal / блок Ормуза → разворот в LONG "
-            + (f"выше {_lvl(bo)}" if bo else "на срыве переговоров")
-            + "."
+            "срыв deal / блок Ормуза → LONG"
+            + (f" выше {_lvl(bo)}" if bo else "")
         )
         inv = (
-            "Отмена SHORT: "
-            + (
-                f"закрытие {interval_minutes}m выше {_lvl(bo or r)}"
-                if (bo or r)
-                else "сильный geo-spike без отката"
-            )
-            + "."
+            f"close {interval_minutes}m выше {_lvl(bo or r)}"
+            if (bo or r)
+            else "сильный geo-spike без отката"
         )
         entry = (
-            "План: short от R / после failed breakout; "
+            "short от R / failed BO"
             + (
-                f"стоп над {_lvl(bo or (r * 1.004 if r else px * 1.005))}; "
+                f" · SL {_lvl(bo or (r * 1.004 if r else px * 1.005))}"
                 if (bo or r)
                 else ""
             )
-            + (
-                f"цели {_lvls(s, bd)}"
-                if (s or bd)
-                else "цели — ближайшие S / breakdown"
-            )
-            + "."
+            + (f" · TP {_lvls(s, bd)}" if (s or bd) else "")
         )
     elif bias == "LONG":
-        headline = f"Bias LONG · {scen_ru}"
+        headline = f"LONG · {scen_ru}"
         base = (
-            f"База: давление вверх с ${px:.2f}. "
-            f"Покупки от поддержки"
-            + (f" {_lvl(s)}" if s else "")
-            + " или после подтверждённого пробоя↑."
+            f"давление вверх с ${px:.2f}"
+            + (f" · покупки от S {_lvl(s)}" if s else "")
+            + " / пробой↑"
         )
         alt = (
-            "Альт: новости про сделку / запасы сильно выросли → откат "
-            + (f"к {_lvl(s or bd)}" if (s or bd) else "к поддержке")
-            + " или WAIT."
+            "сделка / рост запасов → откат"
+            + (f" к {_lvl(s or bd)}" if (s or bd) else "")
+            + " / WAIT"
         )
         inv = (
-            "Отмена LONG: "
-            + (
-                f"закрытие {interval_minutes}m ниже {_lvl(bd or s)}"
-                if (bd or s)
-                else "слом структуры вниз"
-            )
-            + "."
+            f"close {interval_minutes}m ниже {_lvl(bd or s)}"
+            if (bd or s)
+            else "слом структуры вниз"
         )
         entry = (
-            "План: long от S / close выше breakout; "
+            "long от S / close выше BO"
             + (
-                f"стоп под {_lvl(bd or (s * 0.996 if s else px * 0.995))}; "
+                f" · SL {_lvl(bd or (s * 0.996 if s else px * 0.995))}"
                 if (bd or s)
                 else ""
             )
-            + (
-                f"цели {_lvls(r, bo)}"
-                if (r or bo)
-                else "цели — R / breakout"
-            )
-            + "."
+            + (f" · TP {_lvls(r, bo)}" if (r or bo) else "")
         )
     else:
-        headline = f"Bias WAIT · {scen_ru}"
+        headline = f"WAIT · {scen_ru}"
         base = (
-            f"База: нет чистого края с ${px:.2f}. "
-            f"Торговать только от уровня или после close {interval_minutes}m за границей range."
+            f"нет края с ${px:.2f} · только от уровня / close {interval_minutes}m за range"
         )
-        alt = (
-            "Альт вверх: срыв поставок / пробой вверх. "
-            "Альт вниз: новости про сделку / пробой вниз."
-        )
-        inv = (
-            "Ждать ясности: танкеры в проливе, отчёт по запасам, тон переговоров."
-        )
+        alt = "вверх: срыв поставок · вниз: сделка / пробой↓"
+        inv = "ждать: танкеры / запасы / тон переговоров"
         entry = (
-            "План: без касания S/R или пробоя — снаружи. "
-            + (f"Range {_lvl(s)}–{_lvl(r)}." if s and r else "")
+            "снаружи без S/R или пробоя"
+            + (f" · range {_lvl(s)}–{_lvl(r)}" if s and r else "")
         )
 
     if catalyst:
-        base = f"{base} Катализатор: «{catalyst}»."
+        base = f"{base} · {catalyst}"
 
-    watch: list[str] = [
-        "Танкеры / статус пролива (сделка vs блок)",
-        "еженедельный отчёт по запасам США (среда/четверг) и склад Кашинг",
-        "ОПЕК+: квоты / комментарии Саудовской Аравии",
-    ]
-    if scenario == "inventory":
-        watch.insert(0, "Сюрприз в отчёте по запасам vs то, что ждал рынок")
+    # watch_list оставляем в данных, в чат не спамим
+    watch: list[str] = []
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
-        watch.insert(0, "Дипломатия / договорённости / удары по инфраструктуре")
+        watch.append("Ормуз / дипломатия")
+    if scenario == "inventory":
+        watch.append("отчёт запасов")
     if market_mood:
-        watch.append(f"Режим графика: {market_mood.split('—')[0].strip()[:48]}")
+        watch.append(market_mood.split("—")[0].strip()[:40])
 
     return OilForecast(
         bias=bias,
@@ -323,41 +333,32 @@ def build_oil_forecast(
         base_case_ru=base,
         alt_case_ru=alt,
         invalidation_ru=inv,
-        watch_list_ru=tuple(watch[:5]),
+        watch_list_ru=tuple(watch[:3]),
         entry_hint_ru=entry,
         source="rules",
     )
 
 
 def format_oil_forecast_block(fc: OilForecast) -> str:
-    """HTML-блок для Telegram дайджеста."""
+    """Короткий HTML-блок для Telegram — без простыни «Следить»."""
     bias_mark = {
         "LONG": "🟢",
         "SHORT": "🔴",
         "WAIT": "⚪",
     }.get(fc.bias, "⚪")
-    src = "правила+AI" if fc.source == "rules+gemini" else "правила бота"
     lines = [
-        f"🎯 <b>Прогноз UKOUSD</b> · {bias_mark} <b>{fc.bias}</b> · {fc.confidence}/10",
-        f"<i>{fc.headline_ru}</i>",
-        f"<i>Горизонт: {fc.horizon_ru} · {src}</i>",
-        "",
-        f"• <b>База:</b> {_esc(fc.base_case_ru)}",
-        f"• <b>Альт:</b> {_esc(fc.alt_case_ru)}",
-        f"• <b>Отмена:</b> {_esc(fc.invalidation_ru)}",
-        f"• <b>Как торговать:</b> {_esc(fc.entry_hint_ru)}",
+        f"🎯 {bias_mark} <b>{fc.bias}</b> · {fc.confidence}/10 · {_esc(fc.headline_ru)}",
+        f"<i>{_esc(fc.horizon_ru)}</i>",
+        f"• {_esc(_strip_case_prefix(fc.base_case_ru))}",
+        f"• альт: {_esc(_strip_case_prefix(fc.alt_case_ru))}",
+        f"• ✖ {_esc(_strip_case_prefix(fc.invalidation_ru))}",
+        f"• ▶ {_esc(_strip_case_prefix(fc.entry_hint_ru))}",
     ]
-    if fc.watch_list_ru:
-        lines.append("• <b>Следить:</b>")
-        for w in fc.watch_list_ru:
-            lines.append(f"  – {_esc(w)}")
     if fc.gemini_ru:
-        lines.append("")
-        lines.append(f"🤖 <b>AI:</b> {_esc(fc.gemini_ru)}")
-    lines.append("")
-    lines.append(
-        "<i>Сценарий, не гарантия. Сверяй с графиком UKOUSD и свежими заголовками.</i>"
-    )
+        g = " ".join(fc.gemini_ru.split())
+        if len(g) > 160:
+            g = g[:157] + "…"
+        lines.append(f"🤖 {_esc(g)}")
     return "\n".join(lines)
 
 

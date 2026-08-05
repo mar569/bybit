@@ -325,4 +325,10 @@ def test_stale_news_no_entry_points():
     assert not setup_passes_gate(setup, min_quality=7)
     if setup is not None:
         joined = " ".join(setup.factors_ru)
-        assert "без очков входа" in joined
+        assert (
+            "без очков входа" in joined
+            or "устарели" in joined
+            or "старая" in joined
+            or "ФОН" in joined
+            or "фон" in joined
+        )

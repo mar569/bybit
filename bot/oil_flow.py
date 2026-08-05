@@ -132,27 +132,26 @@ def _fmt_vol(v: float) -> str:
     return f"{v:.2f}"
 
 
-def format_oil_flow_block(flow: OilFlowProxy) -> str:
+def format_oil_flow_block(flow: OilFlowProxy, *, compact: bool = False) -> str:
     """HTML-блок для дайджеста /oil."""
     mark = {"buy": "🟢", "sell": "🔴", "neutral": "⚪"}.get(flow.bias, "⚪")
-    bias_ru = {"buy": "BUY (покупки)", "sell": "SELL (продажи)", "neutral": "NEUTRAL"}.get(
+    bias_ru = {"buy": "BUY", "sell": "SELL", "neutral": "NEUTRAL"}.get(
         flow.bias, flow.bias
     )
+    if compact:
+        note = (flow.note_ru or "").split(".")[0][:70]
+        return (
+            f"📡 {mark} {bias_ru} · Δ{_fmt_vol(flow.delta_recent)} · "
+            f"vol x{flow.volume_ratio:g}"
+            + (f" · {note}" if note else "")
+        )
     delta_sign = "+" if flow.delta_recent >= 0 else ""
     sess_sign = "+" if flow.delta_session >= 0 else ""
     lines = [
-        f"📡 <b>Поток (прокси)</b> · {mark} <b>{bias_ru}</b>",
-        f"<i>не DOM ICE — delta по OHLC×volume последних {flow.lookback} свечей</i>",
-        "",
-        f"• Объём сессии (~{flow.bars_used} бар): <b>{_fmt_vol(flow.session_volume)}</b>",
-        f"• Объём recent/prev: <b>{_fmt_vol(flow.recent_volume)}</b> / "
-        f"{_fmt_vol(flow.prev_volume)} · x{flow.volume_ratio:g}",
-        f"• Delta recent: <b>{delta_sign}{_fmt_vol(flow.delta_recent)}</b> · "
-        f"buy share <b>{flow.buy_share_pct:g}%</b>",
-        f"• Delta сессии: <b>{sess_sign}{_fmt_vol(flow.delta_session)}</b>",
+        f"📡 <b>Поток</b> · {mark} <b>{bias_ru}</b>",
+        f"• Δ recent <b>{delta_sign}{_fmt_vol(flow.delta_recent)}</b> · "
+        f"buy {flow.buy_share_pct:g}% · vol x{flow.volume_ratio:g}",
         f"• {_esc(flow.note_ru)}",
-        "",
-        "<i>Согласуй с ценой: цена↑+BUY → сильнее long; цена↑+SELL → осторожно.</i>",
     ]
     return "\n".join(lines)
 

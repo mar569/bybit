@@ -476,6 +476,23 @@ _OIL_NOISE_PHRASES: tuple[str, ...] = (
     "crack spread",
 )
 
+# Иран в заголовке ≠ нефть (cyber/water и пр.)
+_OIL_OFFTOPIC_PHRASES: tuple[str, ...] = (
+    "cyber",
+    "cyberattack",
+    "cyber attack",
+    "ransomware",
+    "water utilit",
+    "water plant",
+    "power grid",
+    "electric grid",
+    "hospital hack",
+    "football",
+    "soccer",
+    "celebrity",
+    "fashion",
+)
+
 
 def is_oil_market_moving_headline(title: str) -> bool:
     """Жёсткий фильтр: пушим только катализаторы, не «ещё раз про нефть»."""
@@ -483,6 +500,8 @@ def is_oil_market_moving_headline(title: str) -> bool:
     if not low:
         return False
     if any(p in low for p in _OIL_NOISE_PHRASES):
+        return False
+    if any(p in low for p in _OIL_OFFTOPIC_PHRASES):
         return False
 
     # Именованный топ-аналитик Blas/Kemp про нефть/гео — раньше geo-веток
@@ -504,6 +523,7 @@ def is_oil_market_moving_headline(title: str) -> bool:
                 "iran", "иран", "hormuz", "ормуз", "strike", "attack", "удар", "атак",
                 "taco", "deal", "сделк", "reopen", "negotiat", "переговор",
                 "called off", "cancel", "pause", "sanction", "санкц", "oil", "crude",
+                "exxon", "chevron",
             )
         )
 
@@ -517,19 +537,28 @@ def is_oil_market_moving_headline(title: str) -> bool:
             )
         )
 
-    # 3) Ормуз / Иран — открытие, отказ, удар, танкеры, блок
-    if any(k in low for k in ("hormuz", "ормуз", "iran", "иран", "tehran", "тегеран")):
-        return any(
+    # 3) Ормуз = драйвер; Иран — только нефть/суда/сделка/удар (не cyber)
+    if any(k in low for k in ("hormuz", "ормуз")):
+        return True
+    if any(k in low for k in ("iran", "иран", "tehran", "тегеран")):
+        oil_ctx = any(
             k in low
             for k in (
-                "reopen", "open", "откры", "deny", "denied", "refuse", "reject",
-                "отриц", "не откро", "block", "блок", "close", "закры",
-                "tanker", "танкер", "strike", "attack", "удар", "атак",
-                "deal", "сделк", "negotiat", "переговор", "talks", "sanction", "санкц",
-                "trump", "трамп", "bessent", "shipping", "transit", "strait",
-                "oil", "crude", "нефт", "brent", "energy",
+                "oil", "crude", "brent", "нефт", "energy", "энерг",
+                "tanker", "танкер", "shipping", "transit", "strait", "пролив",
+                "deal", "сделк", "negotiat", "переговор", "talks", "reopen",
+                "sanction", "санкц", "block", "блок", "close", "закры",
+                "trump", "трамп", "bessent", "opec", "опек",
             )
         )
+        kinetic = any(
+            k in low
+            for k in (
+                "missile", "bomb", "nuclear site", "airstrike", "air strike",
+                "ракет", "бомб", "авиаудар",
+            )
+        )
+        return oil_ctx or kinetic
 
     # 4) Явный обвал/скачок цены нефти в заголовке
     if any(k in low for k in ("oil", "crude", "brent", "wti", "нефт")):
@@ -553,6 +582,32 @@ def is_oil_market_moving_headline(title: str) -> bool:
 
     # 5) запасной — уже покрыто выше
     return False
+
+
+_WEAK_NEWS_SOURCES = (
+    "latestly",
+    "telangana",
+    "crypto briefing",
+    "cryptobriefing",
+    "abc news",
+    "al-monitor",
+    "al monitor",
+    "ottumwa",
+    "kurdistan24",
+    "india today",
+    "indiatoday",
+    "edexlive",
+    "ynet",
+    "msn.com",
+    "yahoo.com",
+    "yahoo finance",
+)
+
+
+def is_weak_oil_news_source(source: str = "", url: str = "") -> bool:
+    """Зеркала / второсорт — не в чат (Tier‑1 уже ушёл или будет дубль)."""
+    blob = f"{source or ''} {url or ''}".lower()
+    return any(w in blob for w in _WEAK_NEWS_SOURCES)
 
 
 _TITLE_STOPWORDS = frozenset({
@@ -1055,8 +1110,8 @@ def _news_story_key(title: str) -> str:
     return low[:48]
 
 
-# Один сюжет fast-lane: 3ч — не спамить перепечатками Trump/Bessent/Hormuz
-_FASTLANE_STORY_TTL_SEC = 180 * 60.0
+# Один сюжет fast-lane/news: 6ч — не спамить перепечатками Trump/Bessent/Hormuz
+_FASTLANE_STORY_TTL_SEC = 360 * 60.0
 
 
 def news_impact_weight(item: OilNewsItem) -> float:
@@ -1500,8 +1555,24 @@ def build_oil_scalp_call(
     )
 
 
-def format_oil_scalp_block(call: OilScalpCall) -> str:
+def format_oil_scalp_block(call: OilScalpCall, *, compact: bool = False) -> str:
     """Блок в шапке дайджеста: что делать на 10–100 мин."""
+    if compact:
+        bits = [f"⚡ <b>{call.headline_ru}</b> · {call.score}/10"]
+        if call.action in {"open_long", "open_short"}:
+            if call.entry_lo and call.entry_hi:
+                bits.append(
+                    f"вход {fmt_price(call.entry_lo)}"
+                    if abs(call.entry_lo - call.entry_hi) / max(call.entry_lo, 1e-9) < 0.0003
+                    else f"вход {fmt_price(call.entry_lo)}–{fmt_price(call.entry_hi)}"
+                )
+            if call.stop:
+                bits.append(f"SL {fmt_price(call.stop)}")
+            if call.target:
+                bits.append(f"TP {fmt_price(call.target)}")
+            bits.append(f"{call.hold_min}–{call.hold_max}м")
+        return " · ".join(bits)
+
     lines = [
         "⚡ <b>СЕЙЧАС · 10–100 мин</b>",
         f"<b>{call.headline_ru}</b> · сходимость <b>{call.score}/10</b>",
@@ -1526,9 +1597,6 @@ def format_oil_scalp_block(call: OilScalpCall) -> str:
         lines.append(f"Триггер: <i>{call.trigger_ru}</i>")
     if call.factors_ru:
         lines.append("Факторы: " + " · ".join(call.factors_ru))
-    lines.append(
-        "<i>Не финсовет. Размер маленький; без подтверждения уровня — не входить.</i>"
-    )
     return "\n".join(lines)
 
 
@@ -1645,12 +1713,14 @@ def detect_oil_micro_signal(
     elif body / rng < 0.28:
         return None
 
-    # Не входить против сильного новостного давления
-    if news_bias is not None and abs(news_bias.weighted_score) >= 2.5:
+    # Не входить против новостного давления (даже среднего)
+    if news_bias is not None and abs(float(news_bias.weighted_score or 0)) >= 1.5:
         if side == "short" and news_bias.bias == "bullish":
             return None
         if side == "long" and news_bias.bias == "bearish":
             return None
+        if news_bias.bias == "mixed":
+            return None  # micro при mixed — мусор
 
     # Качество жёстче: без «9/10 за догон»
     quality = 4
@@ -2966,23 +3036,35 @@ def _age_label(published_ts: float) -> str:
     return datetime.fromtimestamp(published_ts, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
 
 def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
-    """Коротко: заголовок + направление + возраст."""
-    title = item.title.replace("<", "&lt;").replace(">", "&gt;")
+    """Коротко по-русски: суть + направление + возраст (EN только ссылкой)."""
+    try:
+        from .oil_why import _explain_headline
+
+        what, means, _ = _explain_headline(item.title)
+    except Exception:
+        what, means = "", ""
+    raw = (item.title or "").strip()
+    # Если пересказ слишком общий — оставить оригинал (аналитики Blas/Barclays)
+    generic = (not what) or ("без ясного" in what.lower()) or ("сюжет по нефти" in what.lower())
+    display = raw if generic else what
     impact_ru = {"bullish": "🟢↑", "bearish": "🔴↓", "neutral": "⚪"}.get(
         item.impact, "⚪"
     )
     score = news_critical_score(item.title, source=item.source)
     bang = "‼️ " if score >= 12 else ""
+    safe = display.replace("<", "&lt;").replace(">", "&gt;")
     if item.url:
-        head = f'{bang}{impact_ru} <a href="{item.url}"><b>{title}</b></a>'
+        head = f'{bang}{impact_ru} <a href="{item.url}"><b>{safe}</b></a>'
     else:
-        head = f"{bang}{impact_ru} <b>{title}</b>"
-    lines = [head, f"<i>{item.source} · {_age_label(item.published_ts)}</i>"]
+        head = f"{bang}{impact_ru} <b>{safe}</b>"
+    lines = [head]
+    if means and not generic:
+        lines.append(f"→ {means.replace('<', '&lt;').replace('>', '&gt;')}")
+    lines.append(f"<i>{item.source} · {_age_label(item.published_ts)}</i>")
     if ai_ru:
         safe_ai = (
             ai_ru.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         )
-        # максимум 2–3 коротких строки
         short = " ".join(safe_ai.split())
         if len(short) > 220:
             short = short[:217] + "…"
@@ -3327,6 +3409,20 @@ def format_oil_news_message(items: list[OilNewsItem], *, max_show: int = 5) -> s
         lines.append("")
     return "\n".join(lines).strip()
 
+def _oil_levels_line(snap: OilMarketSnapshot, *, interval_minutes: int = 15) -> str:
+    """Одна строка уровней без простыни."""
+    bits = [f"<b>{snap.label}</b> · <b>${snap.price:.2f}</b> · {interval_minutes}m"]
+    if snap.support:
+        bits.append(f"S {fmt_price(snap.support)}")
+    if snap.resistance:
+        bits.append(f"R {fmt_price(snap.resistance)}")
+    if snap.breakdown:
+        bits.append(f"↓{fmt_price(snap.breakdown)}")
+    if snap.breakout:
+        bits.append(f"↑{fmt_price(snap.breakout)}")
+    return " · ".join(bits)
+
+
 def _oil_trading_plan(
     snap: OilMarketSnapshot,
     ta: TAAnalysisResult,
@@ -3338,8 +3434,8 @@ def _oil_trading_plan(
     ta_confidence_raw: int | None = None,
     ta_verdict_raw: str | None = None,
 ) -> list[str]:
-    """Сценарии LONG / SHORT / база — intraday 5m–1h."""
-    lines: list[str] = []
+    """Короткий план — только если нет отдельного прогноза."""
+    lines: list[str] = [_oil_levels_line(snap, interval_minutes=interval_minutes)]
     px = snap.price
     s = snap.support
     r = snap.resistance
@@ -3353,105 +3449,38 @@ def _oil_trading_plan(
     )
     ta_v_raw = (ta_verdict_raw or snap.verdict or "WAIT").upper()
 
-    lines.append("<b>Почему такое суждение</b>")
-    if news_bias is not None:
+    if news_bias is not None and news_bias.summary_ru:
         lines.append(f"• {news_bias.summary_ru}")
-        if news_bias.basis_ru:
-            lines.append(f"• <i>{news_bias.basis_ru}</i>")
-    else:
-        lines.append("• Новостной фон не учтён")
+    lines.append(f"• TA: <b>{ta_v_raw}</b> {ta_raw}/10 · график <b>{snap.verdict}</b>")
 
-    lines.append(
-        f"• Уровни TA ({tf}): цена <b>${px:.2f}</b>"
-        + (f" · S {fmt_price(s)}" if s else "")
-        + (f" · R {fmt_price(r)}" if r else "")
-        + (f" ·↓{fmt_price(bd)}" if bd else "")
-        + (f" ·↑{fmt_price(bo)}" if bo else "")
-    )
-    lines.append(
-        f"• Чистый TA (до новостей): <b>{ta_v_raw}</b> {ta_raw}/10"
-        + (f" · {snap.reason}" if snap.reason and bounce_plan is None else "")
-    )
-
-    lines.append("")
-    lines.append("<b>Рабочий план</b>")
     if bounce_plan is not None:
         side = "LONG" if bounce_plan.side == "long" else "SHORT"
-        tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:3])
+        tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:2])
         lines.append(
-            f"• <b>Отскок {side}</b> от <b>{fmt_price(bounce_plan.bounce_level)}</b>"
+            f"• отскок {side} {fmt_price(bounce_plan.bounce_level)} · "
+            f"вход {fmt_price(bounce_plan.entry_lo)}–{fmt_price(bounce_plan.entry_hi)} · "
+            f"SL {fmt_price(bounce_plan.stop)} · TP {tps}"
         )
-        lines.append(
-            f"  вход {fmt_price(bounce_plan.entry_lo)}–{fmt_price(bounce_plan.entry_hi)} · "
-            f"стоп {fmt_price(bounce_plan.stop)} · TP {tps}"
-        )
-        if bounce_plan.side == "long":
-            lines.append(
-                "  <i>Почему уровни: вход у support (покупатели), стоп под breakdown "
-                "(отмена структуры), TP1=R, TP2=breakout, TP3=7д high.</i>"
-            )
-        else:
-            lines.append(
-                "  <i>Почему уровни: вход у resistance (продавцы), стоп выше breakout, "
-                "TP1=S, TP2=breakdown, TP3=7д low.</i>"
-            )
-        if bounce_plan.catalyst:
-            cat = bounce_plan.catalyst.replace("<", "&lt;").replace(">", "&gt;")
-            lines.append(f"  катализатор: <i>{cat}</i>")
-        if news_bias and news_bias.how_to_use_ru:
-            lines.append(f"• {news_bias.how_to_use_ru}")
     else:
-        if news_bias is not None:
-            lines.append(f"• <i>{news_bias.how_to_use_ru}</i>")
-        lines.append(f"• Итог на графике: <b>{snap.verdict}</b> · {snap.confidence}/10")
-
-    if market_mood:
-        lines.append(f"• Режим рынка: {market_mood}")
-
-    # Если есть bounce-план — не дублируем оба сценария, только подтверждающий
-    if bounce_plan is None:
-        if s and r and px > 0:
-            mid = (s + r) / 2.0
-            if abs(px - mid) / px < 0.015:
-                lines.append(
-                    f"• <b>База:</b> range {fmt_price(s)} – {fmt_price(r)} · "
-                    f"ждать пробой с закрытием {tf}"
-                )
-
         if bo and bo > 0:
             lines.append(
-                f"• <b>LONG:</b> закрытие {tf} выше {fmt_price(bo)} → "
-                f"цели {fmt_price(bo + (bo - (bd or s or px) * 0.5))} / {fmt_price(snap.high_7d)}"
+                f"• LONG: close {tf} > {fmt_price(bo)} · SL под {fmt_price(s or bd or px * 0.992)}"
             )
-            inv = (s or bd or px * 0.97)
-            lines.append(f"  стоп под {fmt_price(inv)} · отмена если ниже")
-
         if bd and bd > 0:
             lines.append(
-                f"• <b>SHORT:</b> закрытие {tf} ниже {fmt_price(bd)} → "
-                f"цели {fmt_price(bd - (bo or r or px - bd) * 0.5)} / {fmt_price(snap.low_7d)}"
+                f"• SHORT: close {tf} < {fmt_price(bd)} · SL над {fmt_price(r or bo or px * 1.008)}"
             )
-            inv = (r or bo or px * 1.03)
-            lines.append(f"  стоп выше {fmt_price(inv)} · отмена если выше")
-    else:
-        if bounce_plan.side == "long" and bo and bo > 0:
+        if s and r and px > 0 and abs(px - (s + r) / 2.0) / px < 0.015:
             lines.append(
-                f"• Альтернатива: пробой↑ {fmt_price(bo)} (если отскок не дали)"
-            )
-        if bounce_plan.side == "short" and bd and bd > 0:
-            lines.append(
-                f"• Альтернатива: пробой↓ {fmt_price(bd)} (если отскок не дали)"
+                f"• range {fmt_price(s)}–{fmt_price(r)} · ждать close за границей"
             )
 
+    if market_mood:
+        lines.append(f"• {market_mood.split('—')[0].strip()[:60]}")
     if snap.elliott:
         lines.append(f"• EW: {snap.elliott}")
-
-    lines.append("")
-    lines.append(
-        "<i>Читай так: новости = направление bias; уровни TA = где входить/стоп; "
-        "без пробоя/касания уровня — не входить.</i>"
-    )
     return lines
+
 
 def format_oil_market_digest(
     snaps: list[OilMarketSnapshot],
@@ -3469,65 +3498,17 @@ def format_oil_market_digest(
     bars: list[KlineBar] | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
-    from .oil_mt5 import get_oil_price_source
-
-    src = get_oil_price_source()
-    src_line = f"<i>Источник цены: <b>{src}</b></i>" if src else (
-        "<i>Источник: MT5 UKOUSD.s (если терминал запущен) или fallback</i>"
-    )
+    px = f"${primary.price:.2f}" if primary else ""
     lines = [
-        "📊 <b>Нефть · разбор</b>",
-        f"<i>Bybit TradFi · <b>UKOUSD.s</b> Brent Crude Oil Cash · TF {interval_minutes}m</i>",
-        src_line,
-        "<i>Вход только по UKOUSD.s на Bybit. TV/Hyperliquid/Yahoo — не для входа.</i>",
-        "",
+        f"📊 <b>Нефть</b> · UKOUSD.s · {interval_minutes}m"
+        + (f" · {px}" if px else ""),
     ]
+
     if forecast is not None:
         from .oil_forecast import format_oil_forecast_block
 
         lines.append(format_oil_forecast_block(forecast))
-        lines.append("")
-
-    if flow is None and bars:
-        from .oil_flow import compute_oil_flow_proxy
-
-        # ~2–3ч окна: 5m→24, 15m→12, 60m→6
-        lb = 24 if interval_minutes <= 5 else 12 if interval_minutes <= 15 else 8
-        flow = compute_oil_flow_proxy(bars, lookback=lb)
-
-    if flow is not None:
-        from .oil_flow import format_oil_flow_block
-
-        lines.append(format_oil_flow_block(flow))
-        lines.append("")
-
-    if scalp_call is None and primary is not None and ta is not None:
-        scalp_call = build_oil_scalp_call(
-            primary,
-            ta,
-            news_bias=news_bias,
-            bounce_plan=bounce_plan,
-            market_mood=market_mood,
-            interval_minutes=interval_minutes,
-            ta_confidence_raw=ta_confidence_raw,
-            ta_verdict_raw=ta_verdict_raw,
-        )
-    if scalp_call is not None:
-        lines.append(format_oil_scalp_block(scalp_call))
-        lines.append("")
-
-    for s in snaps:
-        lines.append(f"<b>{s.label}</b> · <b>${s.price:.2f}</b>")
-        lines.append(f"  7д: {fmt_price(s.low_7d)} – {fmt_price(s.high_7d)}")
-        if s.support and s.resistance:
-            lines.append(f"  S {fmt_price(s.support)} · R {fmt_price(s.resistance)}")
-        if s.breakdown or s.breakout:
-            lines.append(
-                f"  пробой↓ {fmt_price(s.breakdown or 0)} · пробой↑ {fmt_price(s.breakout or 0)}"
-            )
-        lines.append("")
-
-    if primary and ta is not None:
+    elif primary and ta is not None:
         lines.extend(
             _oil_trading_plan(
                 primary,
@@ -3541,18 +3522,51 @@ def format_oil_market_digest(
             )
         )
     elif primary:
-        if news_bias is not None:
+        lines.append(_oil_levels_line(primary, interval_minutes=interval_minutes))
+        if news_bias is not None and news_bias.summary_ru:
             lines.append(news_bias.summary_ru)
-            lines.append(f"<i>{news_bias.how_to_use_ru}</i>")
+
+    if forecast is not None and primary is not None:
+        lines.append(_oil_levels_line(primary, interval_minutes=interval_minutes))
         if bounce_plan is not None:
-            lines.append(format_oil_bounce_alert(bounce_plan, label=primary.label))
-        lines.append(f"Фаза: {primary.phase}")
-        if primary.elliott:
-            lines.append(f"EW: {primary.elliott}")
+            side = "LONG" if bounce_plan.side == "long" else "SHORT"
+            tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:2])
+            lines.append(
+                f"отскок {side} {fmt_price(bounce_plan.bounce_level)} · "
+                f"SL {fmt_price(bounce_plan.stop)} · TP {tps}"
+            )
+
+    if flow is None and bars:
+        from .oil_flow import compute_oil_flow_proxy
+
+        lb = 24 if interval_minutes <= 5 else 12 if interval_minutes <= 15 else 8
+        flow = compute_oil_flow_proxy(bars, lookback=lb)
+
+    if flow is not None:
+        from .oil_flow import format_oil_flow_block
+
+        lines.append(format_oil_flow_block(flow, compact=True))
+
+    if scalp_call is None and primary is not None and ta is not None and forecast is None:
+        scalp_call = build_oil_scalp_call(
+            primary,
+            ta,
+            news_bias=news_bias,
+            bounce_plan=bounce_plan,
+            market_mood=market_mood,
+            interval_minutes=interval_minutes,
+            ta_confidence_raw=ta_confidence_raw,
+            ta_verdict_raw=ta_verdict_raw,
+        )
+    if scalp_call is not None and getattr(scalp_call, "action", "") in {
+        "open_long",
+        "open_short",
+    }:
+        lines.append(format_oil_scalp_block(scalp_call, compact=True))
 
     if len(snaps) >= 2:
         spread = snaps[0].price - snaps[1].price
-        lines.append(f"Спред Brent−WTI: <b>${spread:.2f}</b> (геополитика → Brent чувствительнее)")
+        lines.append(f"спред Brent−WTI ${spread:.2f}")
 
     try:
         from .urals_price import fetch_urals_snapshot
@@ -3561,18 +3575,13 @@ def format_oil_market_digest(
         urals = fetch_urals_snapshot(brent_ref=brent_px)
         if urals is not None:
             disc = urals.discount_vs_brent
-            disc_txt = f" · скидка к Brent <b>{disc:+.2f}</b>$" if disc is not None else ""
-            chg = ""
-            if urals.change_pct is not None:
-                sign = "+" if urals.change_pct >= 0 else ""
-                chg = f" ({sign}{urals.change_pct:.1f}% дн.)"
-            lines.append(
-                f"🇷🇺 <b>Urals</b> · <b>${urals.price:.2f}</b>{chg}{disc_txt}"
-            )
+            disc_txt = f" · ΔBrent {disc:+.2f}$" if disc is not None else ""
+            lines.append(f"Urals ${urals.price:.2f}{disc_txt}")
     except Exception:
         pass
 
     return "\n".join(lines)
+
 
 class OilMonitorEngine:
     """Отдельный oil-чат: важные новости + разбор + алерты уровней Brent/WTI."""
@@ -3743,11 +3752,23 @@ class OilMonitorEngine:
     def _arm_reaction_from_flash(self, item: Any, settings: Any) -> None:
         if not bool(getattr(settings, "oil_reaction_enabled", True)):
             return
+        from .oil_news_discipline import news_is_hot_for_reaction
         from .oil_reaction import start_reaction
         from .oil_calendar import detect_scheduled_speech_freeze
 
         title = getattr(item, "title", "") or ""
         impact = getattr(item, "impact", "neutral") or "neutral"
+        pub = float(getattr(item, "published_ts", 0) or 0)
+        hot_h = float(getattr(settings, "oil_news_entry_max_age_hours", 0.5))
+        # Опоздавшая новость (вышла час назад, бот увидел сейчас) — не ставим «реакцию входа»
+        if not news_is_hot_for_reaction(pub, hot_hours=hot_h):
+            logger.info(
+                "Oil reaction skip stale flash (age>%.0fm): %s",
+                hot_h * 60,
+                title[:80],
+            )
+            return
+
         speech = detect_scheduled_speech_freeze(
             title,
             freeze_minutes=float(getattr(settings, "oil_speech_freeze_minutes", 60.0)),
@@ -4154,7 +4175,7 @@ class OilMonitorEngine:
 
     async def _tick_micro_signals(self, settings: Any) -> int:
         """Микро-сигналы UKOUSD: TP ~0.2–0.3%, hold десятки минут."""
-        if not getattr(settings, "oil_micro_signals_enabled", True):
+        if not getattr(settings, "oil_micro_signals_enabled", False):
             return 0
         if not self._oil_entry_signals_allowed(settings):
             return 0
@@ -4547,11 +4568,47 @@ class OilMonitorEngine:
             self._last_regular_news_ts = now
 
             fresh: list[OilNewsItem] = []
+            # В чат — только свежие (≤1ч), не фон 4–12ч
+            post_max_h = min(
+                1.0,
+                float(getattr(settings, "oil_fastlane_max_age_hours", 1.0) or 1.0),
+            )
+            sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.42))
+            if self._seen_fastlane_stories:
+                self._seen_fastlane_stories = {
+                    k: ts
+                    for k, ts in self._seen_fastlane_stories.items()
+                    if now - ts < _FASTLANE_STORY_TTL_SEC
+                }
             for it in items:
-                if not oil_news_is_fresh(it.published_ts, max_age_hours=max_age_h):
+                if not oil_news_is_fresh(it.published_ts, max_age_hours=post_max_h):
                     continue
+                if not is_oil_market_moving_headline(it.title):
+                    continue
+                if is_weak_oil_news_source(it.source, it.url):
+                    self._seen_titles.add(it.title.lower()[:120])
+                    continue
+                try:
+                    from .oil_fastlane import is_syndicate_host
+
+                    if is_syndicate_host(it.source, it.url):
+                        self._seen_titles.add(it.title.lower()[:120])
+                        continue
+                except Exception:
+                    pass
                 key = it.title.lower()[:120]
                 if key in self._seen_titles:
+                    continue
+                story = _news_story_key(it.title)
+                story_ts = self._seen_fastlane_stories.get(story) if story else None
+                if story and story_ts is not None and now - story_ts < _FASTLANE_STORY_TTL_SEC:
+                    self._seen_titles.add(key)
+                    continue
+                if any(
+                    titles_too_similar(it.title, prev, threshold=sim_thr)
+                    for prev in self._recent_sent_titles[-40:]
+                ):
+                    self._seen_titles.add(key)
                     continue
                 fresh.append(it)
 
@@ -4560,16 +4617,9 @@ class OilMonitorEngine:
 
             if fresh:
                 batch = fresh[:max_per_poll]
-                sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.55))
-                use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
+                use_gemini = bool(getattr(settings, "oil_fastlane_gemini", False))
                 if separate:
                     for it in batch:
-                        if any(
-                            titles_too_similar(it.title, prev, threshold=sim_thr)
-                            for prev in self._recent_sent_titles[-40:]
-                        ):
-                            self._seen_titles.add(it.title.lower()[:120])
-                            continue
                         ai_ru = ""
                         sc = news_critical_score(it.title, source=it.source)
                         th = it.theme or detect_oil_news_theme(it.title, source=it.source)
@@ -4592,6 +4642,9 @@ class OilMonitorEngine:
                         if ok:
                             self._seen_titles.add(it.title.lower()[:120])
                             self._recent_sent_titles.append(it.title)
+                            story = _news_story_key(it.title)
+                            if story:
+                                self._seen_fastlane_stories[story] = now
                             if len(self._recent_sent_titles) > 80:
                                 self._recent_sent_titles = self._recent_sent_titles[-40:]
                             sent += 1
@@ -4605,6 +4658,9 @@ class OilMonitorEngine:
                     if ok:
                         for it in batch:
                             self._seen_titles.add(it.title.lower()[:120])
+                            story = _news_story_key(it.title)
+                            if story:
+                                self._seen_fastlane_stories[story] = now
                         sent += len(batch)
 
                 if len(self._seen_titles) > 500:
@@ -5537,7 +5593,7 @@ class OilMonitorEngine:
             apply_chase_filter=bool(getattr(settings, "oil_entry_chase_filter", True)),
             require_close_break=bool(getattr(settings, "oil_entry_require_close", True)),
             news_entry_max_age_hours=float(
-                getattr(settings, "oil_news_entry_max_age_hours", 1.0)
+                getattr(settings, "oil_news_entry_max_age_hours", 0.5)
             ),
         )
         if not setup_passes_gate(setup, min_quality=min_q):

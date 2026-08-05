@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 82
+SETTINGS_VERSION = 84
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -543,9 +543,9 @@ class ScannerSettings:
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
     oil_fastlane_enabled: bool = True
     oil_fastlane_interval_seconds: int = 45
-    oil_fastlane_max_age_hours: float = 1.5
+    oil_fastlane_max_age_hours: float = 1.0
     # Новости дают очки входа в confluence только пока ≤ этого возраста
-    oil_news_entry_max_age_hours: float = 1.0
+    oil_news_entry_max_age_hours: float = 0.5
     # Торговый bias: утро не кормит вечер (жёсткий возраст сюжетов)
     oil_news_bias_max_age_hours: float = 2.0
     # После flash — ждать реакцию рынка перед входом
@@ -567,7 +567,7 @@ class ScannerSettings:
     # Прямые RSS FinancialJuice / ForexLive (раньше Google News)
     oil_wire_feeds_enabled: bool = True
     # Анти-спам: Jaccard похожести заголовков (0.5–0.65)
-    oil_dedupe_similarity: float = 0.55
+    oil_dedupe_similarity: float = 0.42
     # Обвал цены без новостей — must для защиты депозита
     oil_crash_alerts_enabled: bool = True
     oil_crash_pct_15m: float = 1.5
@@ -1163,10 +1163,10 @@ class ScannerSettings:
                 base.get("oil_fastlane_interval_seconds", 45)
             ),
             oil_fastlane_max_age_hours=float(
-                base.get("oil_fastlane_max_age_hours", 1.5)
+                base.get("oil_fastlane_max_age_hours", 1.0)
             ),
             oil_news_entry_max_age_hours=float(
-                base.get("oil_news_entry_max_age_hours", 1.0)
+                base.get("oil_news_entry_max_age_hours", 0.5)
             ),
             oil_news_bias_max_age_hours=float(
                 base.get("oil_news_bias_max_age_hours", 2.0)
@@ -1196,7 +1196,7 @@ class ScannerSettings:
             oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", False)),
             oil_fastlane_ai_min_score=int(base.get("oil_fastlane_ai_min_score", 11)),
             oil_wire_feeds_enabled=bool(base.get("oil_wire_feeds_enabled", True)),
-            oil_dedupe_similarity=float(base.get("oil_dedupe_similarity", 0.55)),
+            oil_dedupe_similarity=float(base.get("oil_dedupe_similarity", 0.42)),
             oil_crash_alerts_enabled=bool(base.get("oil_crash_alerts_enabled", True)),
             oil_crash_pct_15m=float(base.get("oil_crash_pct_15m", 1.5)),
             oil_crash_pct_30m=float(base.get("oil_crash_pct_30m", 2.0)),
@@ -1957,6 +1957,32 @@ class SettingsManager:
                 merged["oil_setup_enabled"] = True
                 merged["oil_calendar_brief_enabled"] = True
                 merged["oil_crash_alerts_enabled"] = True
+            if version < 83:
+                # Антиспам: ≤1ч в чат, micro OFF, жёсткий дедуп, quality≥8
+                merged["oil_fastlane_max_age_hours"] = min(
+                    1.0, float(merged.get("oil_fastlane_max_age_hours", 1.0) or 1.0)
+                )
+                merged["oil_news_max_age_hours"] = min(
+                    8.0, float(merged.get("oil_news_max_age_hours", 8) or 8)
+                )
+                merged["oil_dedupe_similarity"] = min(
+                    0.42, float(merged.get("oil_dedupe_similarity", 0.42) or 0.42)
+                )
+                merged["oil_micro_signals_enabled"] = False
+                merged["oil_setup_min_quality"] = max(
+                    8, int(merged.get("oil_setup_min_quality", 8) or 8)
+                )
+                merged["oil_russian_news"] = False
+                merged["oil_fastlane_gemini"] = False
+                merged["oil_x_enabled"] = True
+                merged["oil_wire_feeds_enabled"] = True
+            if version < 84:
+                # Новость час спустя ≠ сигнал входа: HOT только ≤30м
+                merged["oil_news_entry_max_age_hours"] = 0.5
+                merged["oil_news_bias_max_age_hours"] = min(
+                    2.0, float(merged.get("oil_news_bias_max_age_hours", 2) or 2)
+                )
+                merged["oil_reaction_enabled"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
