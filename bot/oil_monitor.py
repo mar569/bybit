@@ -182,6 +182,115 @@ def _is_deny_hormuz_reopen(title_low: str) -> bool:
     if not any(k in title_low for k in _DENY_REOPEN_PHRASES):
         return False
     return any(k in title_low for k in _REOPEN_CONTEXT)
+
+
+# Условие сделки: «подпишем, НО без судов США / без участия США» — не чистый reopen.
+_HORMUZ_CONDITION_PHRASES: tuple[str, ...] = (
+    "on condition",
+    "conditioned on",
+    "condition that",
+    "provided that",
+    "as long as",
+    "only if",
+    "unless us",
+    "bans us",
+    "ban us",
+    "bans american",
+    "ban american",
+    "bans israel",
+    "us, israel ships",
+    "us israel ships",
+    "israel ships",
+    "no us vessel",
+    "no us ships",
+    "no american vessel",
+    "no american ship",
+    "american vessels not",
+    "us vessels not",
+    "us ships not",
+    "us warship",
+    "us warships",
+    "no us involvement",
+    "without us involvement",
+    "without us ships",
+    "excluding us",
+    "exclude us",
+    "no us transit",
+    "us navy not",
+    "при условии",
+    "под услов",
+    "без судов сша",
+    "без американских суд",
+    "американские суда не",
+    "суда сша не",
+    "без участия сша",
+    "без сша",
+)
+
+
+def _is_hormuz_deal_condition(title_low: str) -> bool:
+    """Иран «согласен подписать» только с оговоркой (часто: без судов США)."""
+    if not any(k in title_low for k in ("hormuz", "ормуз", "strait", "пролив", "iran", "иран")):
+        return False
+    if any(k in title_low for k in _HORMUZ_CONDITION_PHRASES):
+        return True
+    # «agree/sign … but/except US ships»
+    has_agree = any(
+        k in title_low
+        for k in (
+            "agree",
+            "agrees",
+            "sign",
+            "signed",
+            "deal",
+            "сделк",
+            "подпис",
+            "соглас",
+            "готов",
+        )
+    )
+    # «Hormuz Deal Bans US/Israel Ships» — достаточно bans + hormuz
+    if any(
+        k in title_low
+        for k in ("bans us", "ban us", "bans israel", "us, israel ships", "us israel ships")
+    ) and any(k in title_low for k in ("hormuz", "ормуз", "iran", "иран", "deal", "сделк")):
+        return True
+    has_us_ban = (
+        any(
+            k in title_low
+            for k in (
+                "us vessel",
+                "us ship",
+                "american vessel",
+                "american ship",
+                "us navy",
+                "warship",
+                "israel ship",
+                "американск",
+                "судн",
+            )
+        )
+        and any(
+            k in title_low
+            for k in (
+                "not",
+                "no ",
+                "without",
+                "except",
+                "ban",
+                "bans",
+                "не ",
+                "без ",
+                "запрет",
+            )
+        )
+    ) or any(
+        k in title_low
+        for k in ("bans us", "ban us", "bans israel", "us, israel ships", "us israel ships")
+    )
+    return has_agree and has_us_ban
+
+
 # Веса: чем выше — тем важнее для отправки в чат
 _CRITICAL_TERMS: dict[str, int] = {
     "hormuz": 5,
@@ -240,6 +349,14 @@ _CRITICAL_TERMS: dict[str, int] = {
     "helima croft": 3,
     "amrita sen": 3,
     "war premium": 3,
+    "condition": 4,
+    "on condition": 5,
+    "us vessel": 4,
+    "us ships": 4,
+    "american vessel": 4,
+    "no us involvement": 5,
+    "при условии": 4,
+    "без судов": 4,
 }
 
 # Только эти темы имеют право уйти в чат (не «любая нефть»)
@@ -258,6 +375,11 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "Trump Truth Social OR tweet Iran OR Hormuz when:12h",
     "Bessent Treasury Iran OR Hormuz OR oil OR energy deal when:12h",
     "Iran reopen OR refuse OR deny Hormuz strait when:12h",
+    # Условие сделки: без судов США / без участия США — критичный апдейт
+    "Iran Hormuz deal condition OR proviso OR US vessels OR American ships when:12h",
+    "Iran agrees OR signs Hormuz on condition OR no US ships OR no US vessels when:12h",
+    "Hormuz no US involvement OR excluding US warships OR American vessels when:12h",
+    "site:thenationalnews.com Hormuz OR Iran OR toll OR transit when:12h",
     "US Iran crude oil sanctions when:12h",
     "EIA crude oil inventory stocks when:12h",
     "OPEC oil production quota when:1d",
@@ -426,6 +548,8 @@ def news_critical_score(title: str, *, source: str = "") -> int:
         score += 2
     elif theme in {"trump_us", "inventory", "opec", "analyst"}:
         score += 1
+    if _is_hormuz_deal_condition((title or "").lower()):
+        score += 4  # условие сделки — критичный апдейт, не дубль «deal ok»
     pro = match_pro_oil_analyst(title, source)
     if pro is not None:
         # Именованный топ-аналитик — почти всегда пушим в чат
@@ -1010,7 +1134,6 @@ def classify_news_impact(title: str) -> str:
         bull += 4
         bear = max(0, bear - 3)
 
-    # Иран/Fars: отказ переговоров / не открываем пролив → bullish для нефти
     if any(
         k in low
         for k in (
@@ -1021,6 +1144,14 @@ def classify_news_impact(title: str) -> str:
     ) and any(k in low for k in ("hormuz", "ормуз", "strait", "deal", "сделк", "iran", "иран")):
         bull += 3
         bear = max(0, bear - 1)
+
+    # «Готов подписать, НО без судов США / Israel ships ban» — не снятие premium
+    if _is_hormuz_deal_condition(low):
+        bull += 3
+        bear = max(0, bear - 2)
+        if bull >= bear:
+            return "mixed" if bull == bear else "bullish"
+        return "mixed"
 
     # Бессент: сделка / reopen / energy settle → bearish (снятие premium)
     if any(k in low for k in ("bessent", "treasury secretary", "scott bessent", "бессент")):
@@ -1095,6 +1226,12 @@ def _news_story_key(title: str) -> str:
         # Отказ открыть пролив = риск поставок вверх (эскалация), не «reopen deal»
         tags.append("esc")
         tags.append("deny_reopen")
+    elif _is_hormuz_deal_condition(low):
+        # Условие (без судов США) ≠ тот же сюжет, что «deal reopen»
+        tags.append("caveat")
+        tags.append("us_ships")
+        if any(k in low for k in ("deal", "сделк", "sign", "agree", "подпис", "соглас")):
+            tags.append("deesc_soft")
     elif any(k in low for k in deesc_kw):
         tags.append("deesc")
     elif any(k in low for k in esc_kw):
@@ -1170,6 +1307,11 @@ def summarize_oil_news_bias(
         elif it.impact == "bearish":
             bear += 1
             weighted -= w
+        elif it.impact == "mixed":
+            # Условие сделки / спор fee — не раздувать SHORT
+            neut += 1
+            bull += 1
+            bear += 1
         else:
             neut += 1
 
@@ -3105,7 +3247,7 @@ def _age_label(published_ts: float) -> str:
     return datetime.fromtimestamp(published_ts, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
 
 def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
-    """Коротко по-русски: суть + направление + возраст (EN только ссылкой)."""
+    """Коротко по-русски: суть + направление + возраст (+ живой ИИ если есть)."""
     try:
         from .oil_why import _explain_headline
 
@@ -3113,21 +3255,28 @@ def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
     except Exception:
         what, means = "", ""
     raw = (item.title or "").strip()
-    # Если пересказ слишком общий — оставить оригинал (аналитики Blas/Barclays)
     generic = (not what) or ("без ясного" in what.lower()) or ("сюжет по нефти" in what.lower())
-    display = raw if generic else what
-    impact_ru = {"bullish": "🟢↑", "bearish": "🔴↓", "neutral": "⚪"}.get(
-        item.impact, "⚪"
-    )
+    # При живом ИИ — оригинал заголовка + ИИ, без шаблонного «танкеры свободно»
+    if ai_ru:
+        display = raw
+        means = ""
+    else:
+        display = raw if generic else what
+    impact_ru = {
+        "bullish": "🟢↑",
+        "bearish": "🔴↓",
+        "neutral": "⚪",
+        "mixed": "🟡⇄",
+    }.get(item.impact, "⚪")
     score = news_critical_score(item.title, source=item.source)
-    bang = "‼️ " if score >= 12 else ""
+    bang = "‼️ " if score >= 10 else ""
     safe = display.replace("<", "&lt;").replace(">", "&gt;")
     if item.url:
         head = f'{bang}{impact_ru} <a href="{item.url}"><b>{safe}</b></a>'
     else:
         head = f"{bang}{impact_ru} <b>{safe}</b>"
     lines = [head]
-    if means and not generic:
+    if means and not generic and not ai_ru:
         lines.append(f"→ {means.replace('<', '&lt;').replace('>', '&gt;')}")
     lines.append(f"<i>{item.source} · {_age_label(item.published_ts)}</i>")
     if ai_ru:
@@ -3135,8 +3284,8 @@ def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
             ai_ru.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         )
         short = " ".join(safe_ai.split())
-        if len(short) > 220:
-            short = short[:217] + "…"
+        if len(short) > 320:
+            short = short[:317] + "…"
         lines.append(short)
     return "\n".join(lines)
 
@@ -3147,47 +3296,61 @@ async def enrich_oil_news_blurb(
     api_key: str | None,
     model: str = "gemini-3.6-flash",
 ) -> str:
-    """Короткий разбор для сильных новостей (без выдуманных entry/TP)."""
-    if not api_key:
-        return ""
+    """Живой разбор Gemini/Groq для новостей (не шаблон)."""
     try:
-        from .ai_analyst import gemini_in_cooldown
+        from .ai_analyst import gemini_in_cooldown, groq_configured
 
-        if gemini_in_cooldown():
+        if not api_key and not groq_configured():
+            return ""
+        # Gemini на паузе — всё равно пробуем Groq
+        if not api_key and gemini_in_cooldown() and not groq_configured():
             return ""
     except Exception:
-        pass
+        if not api_key:
+            return ""
     score = news_critical_score(item.title, source=item.source)
     theme = item.theme or detect_oil_news_theme(item.title, source=item.source)
-    if score < 12 and theme not in {"iran_geo", "trump_us"}:
-        return ""
-    if score < 10:
+    # Ормуз/Трамп — почти всегда ИИ; остальное только громкое
+    if theme in {"iran_geo", "trump_us", "flow_deal"}:
+        if score < 6:
+            return ""
+    elif score < 10:
         return ""
     try:
         from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
         from .oil_fastlane import strip_invented_trade_levels
 
+        cond = _is_hormuz_deal_condition((item.title or "").lower())
         result = await ask_gemini(
             api_key=api_key,
             model=model,
             context_text=(
-                "Ты объясняешь новость про нефть обычному человеку по-русски. "
-                "Без англ. жаргона. Без цен входа/стопа/TP и без «вердикт LONG/SHORT».\n"
+                "Ты нефтяной desk-аналитик. Ответ ТОЛЬКО по-русски, 2–3 коротких пункта.\n"
+                "Не шаблон. Объясни ЭТУ новость: что изменилось и почему цена может "
+                "расти или падать.\n"
+                "Если условие «без судов США/Израиля» — явно скажи: это НЕ чистый reopen, "
+                "premium может остаться.\n"
+                "Без entry/stop/TP и без «ВЕРДИКТ LONG/SHORT».\n"
                 f"Заголовок: {item.title}\n"
                 f"Источник: {item.source}\n"
-                f"Тон бота: {item.impact}\n"
+                f"Черновик бота: {item.impact}"
+                + (" · условие сделки" if cond else "")
+                + "\n"
             ),
             user_text=(
-                "3–5 коротких строк: что случилось; почему важно для нефти; "
-                "скорее вверх или вниз и почему; на что смотреть. Не финсовет."
+                "• Суть\n• Влияние на Brent\n• Что ждать дальше (1 фраза)"
+            ),
+            system_prompt=(
+                "Пиши живо, конкретно по заголовку. Запрещены фразы: "
+                "«сюжет без ясного знака», «танкеры свободно → цена падает» "
+                "без разбора условий."
             ),
         )
-        text = sanitize_ai_reply_for_telegram(result.text or "").strip()
-        if result.error or not text:
-            return ""
-        return strip_invented_trade_levels(text)[:700]
+        text = sanitize_ai_reply_for_telegram(result.text or "")
+        text = strip_invented_trade_levels(text)
+        return (text or "").strip()[:400]
     except Exception:
-        logger.debug("Oil news blurb Gemini failed", exc_info=True)
+        logger.debug("Oil news AI blurb failed", exc_info=True)
         return ""
 
 
@@ -4774,17 +4937,18 @@ class OilMonitorEngine:
 
             if fresh:
                 batch = fresh[:max_per_poll]
-                use_gemini = bool(getattr(settings, "oil_fastlane_gemini", False))
+                use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
                 if separate:
                     for it in batch:
                         ai_ru = ""
                         sc = news_critical_score(it.title, source=it.source)
                         th = it.theme or detect_oil_news_theme(it.title, source=it.source)
-                        if (
-                            use_gemini
-                            and sc >= 12
-                            and th in {"iran_geo", "trump_us", "flow_deal"}
-                        ):
+                        want_ai = use_gemini and (
+                            th in {"iran_geo", "trump_us", "flow_deal"}
+                            or sc >= 10
+                            or _is_hormuz_deal_condition((it.title or "").lower())
+                        )
+                        if want_ai:
                             ai_ru = await enrich_oil_news_blurb(
                                 it,
                                 api_key=self._resolve_gemini_key(),

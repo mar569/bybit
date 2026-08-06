@@ -110,8 +110,21 @@ def confirm_reaction_with_bars(
 
 
 def format_reaction_wait_note(reaction: OilNewsReaction) -> str:
+    title = reaction.title[:120]
+    nuance = ""
+    try:
+        from .oil_monitor import _is_hormuz_deal_condition
+
+        if _is_hormuz_deal_condition((reaction.title or "").lower()):
+            nuance = (
+                "\n⚠️ Условие сделки (суда США/Израиля) — "
+                "не читай как «сделку подписали → шорт»"
+            )
+    except Exception:
+        pass
     return (
         f"⏳ <b>Не входить сразу</b>\n"
         f"<i>{reaction.note_ru}</i>\n"
-        f"{reaction.title[:100]}"
+        f"{title}"
+        f"{nuance}"
     )

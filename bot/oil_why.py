@@ -107,6 +107,20 @@ def _explain_headline(title: str) -> tuple[str, str, str]:
             "Страх войны слабеет → нефть обычно вниз",
             "down",
         )
+    # Условие сделки РАНЬШЕ общего «deal/reopen» — иначе шаблон «танкеры свободно»
+    try:
+        from .oil_monitor import _is_hormuz_deal_condition
+
+        if _is_hormuz_deal_condition(low):
+            return (
+                "Иран готов к сделке по Ормузу только с условием "
+                "(часто: без судов США/Израиля)",
+                "Это НЕ чистый reopen — premium может остаться, "
+                "цена часто НЕ падает как на «сделку подписали»",
+                "mix",
+            )
+    except Exception:
+        pass
     if any(
         k in low
         for k in (

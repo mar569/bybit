@@ -26,7 +26,13 @@ FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "Treasury Secretary Bessent oil OR energy OR Iran OR Hormuz when:12h",
     # Иран ↔ Ормуз: открывает / не открывает
     "Iran reopen OR open OR refuse OR deny OR reject Strait of Hormuz when:12h",
+    "Iran Hormuz deal bans OR condition US OR Israel ships OR vessels when:12h",
+    "Hormuz no US vessels OR no American ships OR no US involvement when:12h",
+    "site:thenationalnews.com Hormuz OR Iran OR deal OR vessels when:12h",
     "Iran will not open OR won't reopen Hormuz OR denies talks when:12h",
+    "Iran Hormuz condition OR proviso US vessels OR American ships OR no US involvement when:12h",
+    "Iran agrees Hormuz deal only if OR on condition no US ships when:12h",
+    "site:thenationalnews.com Hormuz OR Iran transit OR toll when:12h",
     "Tehran Hormuz reopen OR blockade OR tanker OR shipping when:12h",
     "site:reuters.com OR site:bloomberg.com Trump cancels OR pauses OR TACO Iran strike when:12h",
     "site:reuters.com OR site:bloomberg.com Strait of Hormuz tanker OR blockade OR reopen when:12h",
@@ -55,6 +61,7 @@ FAST_LANE_QUERIES_RU: tuple[str, ...] = (
     "Трамп Ормуз сделка OR переговоры Иран нефть when:12h",
     "Бессент OR министр финансов США Ормуз OR Иран OR нефть when:12h",
     "Иран откроет OR не откроет Ормуз OR отрицает переговоры when:12h",
+    "Иран Ормуз условие OR без судов США OR американские суда when:12h",
     "WSJ Трамп Иран удар OR атака нефть when:12h",
     "Reuters Ормуз нефть Иран when:12h",
     "Bloomberg Ормуз OR Иран нефть when:12h",
@@ -179,6 +186,13 @@ _FLASH_TERMS: dict[str, int] = {
     "blockade": 4,
     "close strait": 5,
     "reopen": 3,
+    "condition": 4,
+    "on condition": 5,
+    "us vessel": 4,
+    "us ships": 4,
+    "american vessel": 4,
+    "no us involvement": 5,
+    "при условии": 4,
     "ceasefire": 3,
     "sanction": 3,
     "trump": 3,
@@ -451,51 +465,56 @@ async def enrich_fastlane_with_gemini(
     api_key: str | None,
     model: str = "gemini-3.6-flash",
 ) -> tuple[str, str | None]:
-    """Короткий ИИ-разбор только для важных flash (не простыня)."""
-    if not api_key:
-        return "", None
+    """Живой ИИ-разбор flash: Gemini → Groq. Без шаблонов."""
     try:
-        from .ai_analyst import ask_gemini, gemini_in_cooldown, sanitize_ai_reply_for_telegram
+        from .ai_analyst import ask_gemini, gemini_in_cooldown, groq_configured, sanitize_ai_reply_for_telegram
 
-        if gemini_in_cooldown():
+        if not api_key and not groq_configured():
             return "", None
+        if gemini_in_cooldown() and not groq_configured() and not api_key:
+            return "", None
+        from .oil_monitor import _is_hormuz_deal_condition
+
+        cond = _is_hormuz_deal_condition((title or "").lower())
         ctx = (
-            "Трейдер Brent/UKOUSD. Ответ ТОЛЬКО по-русски, коротко.\n"
+            "Трейдер Brent/UKOUSD. Ответ ТОЛЬКО по-русски, коротко, ЖИВО по ЭТОМУ заголовку.\n"
             f"Источник: {outlet or source}\n"
             f"Заголовок: {title}\n"
             f"Черновик бота: {impact} (может ошибаться).\n"
             f"Цена: {move_note or 'без сильного хода'}\n"
-            "Правила: отмена удара/сделка/открытие Ормуза → вниз; "
+            "Правила: отмена удара/чистая сделка/открытие Ормуза → вниз; "
             "отказ Ирана открыть / новые удары → вверх; "
-            "Трамп, Бессент, Ормуз — главные драйверы.\n"
-            "Запрет: вход/стоп/TP/цифры уровней/ВЕРДИКТ LONG.\n"
+            "сделка С УСЛОВИЕМ «без судов США/Израиля» → MIXED (premium может остаться).\n"
+            "Запрет: вход/стоп/TP/цифры уровней/ВЕРДИКТ LONG; "
+            "запрещены шаблоны «сюжет без знака», «танкеры свободно→дешевеет» без условий.\n"
         )
         user = (
             "Строка1: OIL_RELEVANT: YES|NO\n"
             "Строка2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n"
             "Если NO — одна фраза почему шум.\n"
-            "Если YES — РОВНО 3 коротких пункта (без воды):\n"
-            "• Суть (1 предложение)\n"
-            "• Для нефти: вверх/вниз и почему\n"
-            "• Что делать: не догонять / ждать / осторожно\n"
-            "Максимум 500 символов после мета-строк."
+            "Если YES — РОВНО 3 коротких пункта:\n"
+            "• Суть (что именно в новости)\n"
+            "• Почему Brent вверх/вниз/mixed\n"
+            "• Что ждать 1–3ч\n"
+            + ("Важно: в заголовке условие по судам США — отрази это.\n" if cond else "")
         )
         result = await ask_gemini(
             api_key=api_key,
             model=model,
             context_text=ctx,
             user_text=user,
+            system_prompt=(
+                "Desk-аналитик нефти. Конкретно по заголовку, без воды."
+            ),
         )
-        text = sanitize_ai_reply_for_telegram(result.text or "").strip()
+        text = sanitize_ai_reply_for_telegram(result.text or "")
         if result.error or not text:
             return "", None
         bias_override = parse_gemini_oil_bias(text)
-        text = strip_invented_trade_levels(text)
-        if len(text) > 700:
-            text = text[:697] + "…"
-        return text, bias_override
+        text = strip_invented_trade_levels(strip_gemini_oil_meta(text))
+        return (text or "").strip()[:400], bias_override
     except Exception:
-        logger.exception("Fast-lane Gemini failed")
+        logger.debug("Fastlane AI enrich failed", exc_info=True)
         return "", None
 
 
@@ -599,15 +618,20 @@ def should_ai_analyze_flash(
     title: str,
     meta: FastLaneMeta,
     *,
-    min_score: int = 11,
+    min_score: int = 9,
 ) -> bool:
-    """ИИ только на громких драйверах — не на каждый заголовок."""
+    """ИИ на Ормуз/Трамп/Бессент и громких wire — не только «супер-громкие»."""
     actors = detect_oil_primary_actors(title)
-    # Трамп / Бессент / Ормуз — главный контур
-    if actors and meta.flash_score >= max(9, min_score - 1):
+    try:
+        from .oil_monitor import _is_hormuz_deal_condition
+
+        if _is_hormuz_deal_condition((title or "").lower()):
+            return True
+    except Exception:
+        pass
+    if actors and meta.flash_score >= max(7, min_score - 2):
         return True
-    # Очень громкий wire без явного actor-тега
-    if meta.tier == 1 and meta.flash_score >= min_score + 2:
+    if meta.tier == 1 and meta.flash_score >= min_score:
         return True
     return False
 
@@ -649,14 +673,20 @@ def format_fastlane_flash(
         head += f" · {actor_line}"
 
     what, means = _headline_ru(raw_title)
-    lines = [head, f"<b>{_esc(what)}</b>", f"→ {_esc(means)}"]
+    # При живом ИИ — оригинал + ИИ, без шаблонного «танкеры свободно»
+    if ai_ru:
+        what = raw_title
+        means = ""
+    lines = [head, f"<b>{_esc(what)}</b>"]
+    if means:
+        lines.append(f"→ {_esc(means)}")
     if url:
         lines.append(f'<a href="{url}">источник</a>')
 
     if ai_ru:
         short = " ".join(ai_ru.strip().split())
-        if len(short) > 200:
-            short = short[:197] + "…"
+        if len(short) > 280:
+            short = short[:277] + "…"
         lines.append(_esc(short))
     else:
         hint = _bounce_hint(impact, move_note)

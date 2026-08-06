@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 86
+SETTINGS_VERSION = 87
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -562,7 +562,7 @@ class ScannerSettings:
     oil_fastlane_min_score: int = 9
     oil_fastlane_max_per_poll: int = 1
     # ИИ-разбор только важных (Трамп/Бессент/Ормуз), короткий текст
-    oil_fastlane_gemini: bool = False
+    oil_fastlane_gemini: bool = True
     oil_fastlane_ai_min_score: int = 11
     # Прямые RSS FinancialJuice / ForexLive (раньше Google News)
     oil_wire_feeds_enabled: bool = True
@@ -586,7 +586,7 @@ class ScannerSettings:
     oil_pro_feeds_enabled: bool = True
     # Автопрогноз UKOUSD в дайджесте (правила + опционально Gemini)
     oil_forecast_enabled: bool = True
-    oil_forecast_gemini: bool = False
+    oil_forecast_gemini: bool = True
     # Confluence-setup → чат ручного TA (только сильные LONG/SHORT)
     oil_setup_enabled: bool = True
     oil_setup_min_quality: int = 9
@@ -1193,7 +1193,7 @@ class ScannerSettings:
             oil_x_enabled=bool(base.get("oil_x_enabled", True)),
             oil_fastlane_min_score=int(base.get("oil_fastlane_min_score", 9)),
             oil_fastlane_max_per_poll=int(base.get("oil_fastlane_max_per_poll", 1)),
-            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", False)),
+            oil_fastlane_gemini=bool(base.get("oil_fastlane_gemini", True)),
             oil_fastlane_ai_min_score=int(base.get("oil_fastlane_ai_min_score", 11)),
             oil_wire_feeds_enabled=bool(base.get("oil_wire_feeds_enabled", True)),
             oil_dedupe_similarity=float(base.get("oil_dedupe_similarity", 0.42)),
@@ -1217,7 +1217,7 @@ class ScannerSettings:
             ),
             oil_pro_feeds_enabled=bool(base.get("oil_pro_feeds_enabled", True)),
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
-            oil_forecast_gemini=bool(base.get("oil_forecast_gemini", False)),
+            oil_forecast_gemini=bool(base.get("oil_forecast_gemini", True)),
             oil_setup_enabled=bool(base.get("oil_setup_enabled", True)),
             oil_setup_min_quality=int(base.get("oil_setup_min_quality", 9)),
             oil_setup_cooldown_seconds=int(
@@ -2000,6 +2000,13 @@ class SettingsManager:
                 merged["oil_setup_with_digest"] = False
                 merged["oil_bounce_min_news_score"] = max(
                     4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
+                )
+            if version < 87:
+                # Живой ИИ на новости (Gemini/Groq), не статичные шаблоны
+                merged["oil_fastlane_gemini"] = True
+                merged["oil_forecast_gemini"] = True
+                merged["oil_fastlane_ai_min_score"] = min(
+                    8, int(merged.get("oil_fastlane_ai_min_score", 8) or 8)
                 )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)

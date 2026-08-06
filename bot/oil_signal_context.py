@@ -143,6 +143,28 @@ def analyze_hormuz_context(
         )
     ) or ("bessent" in text and "freedom" in text)
 
+    # Условие: без судов США / Израиля — сделка не «полный reopen»
+    us_ships_ban = any(
+        k in text
+        for k in (
+            "bans us",
+            "ban us",
+            "bans israel",
+            "no us vessel",
+            "no us ships",
+            "no american",
+            "us israel ships",
+            "no us involvement",
+            "without us involvement",
+            "без судов сша",
+            "без американск",
+            "суда сша не",
+        )
+    ) or (
+        ("us ship" in text or "us vessel" in text or "american ship" in text)
+        and any(k in text for k in ("ban", "bans", "not", "no ", "without", "except"))
+    )
+
     fee_bits: list[str] = []
     if iran_high:
         fee_bits.append("Иран хочет 5–7%")
@@ -150,6 +172,8 @@ def analyze_hormuz_context(
         fee_bits.append("Оман предлагает ~3% (service fee)")
     if us_zero:
         fee_bits.append("США: 0% / свобода прохода")
+    if us_ships_ban:
+        fee_bits.append("условие: без судов США/Израиля")
     if not fee_bits and has_deal:
         fee_bits.append("сборы обсуждают, цифры в ленте неясны")
 
@@ -159,11 +183,19 @@ def analyze_hormuz_context(
     if "oman" in text or "оман" in text:
         control = (control + " · " if control else "") + "переговоры Иран–Оман"
 
-    if signed_claim and not not_final:
+    if signed_claim and not not_final and not us_ships_ban:
         status = "signed_claim"
         oil_bias = "bearish_soft"
         for_entry = True
         line = "Ормуз: в ленте пишут «сделка есть» — сверяй, не слух ли"
+    elif us_ships_ban:
+        status = "not_final"
+        oil_bias = "mixed"
+        for_entry = False
+        line = (
+            "Ормуз: Иран готов подписать ЛИШЬ с условием "
+            "(без судов США/Израиля) — НЕ чистый reopen, premium может остаться"
+        )
     elif has_deal or not_final or oman_3 or iran_high:
         status = "not_final" if (not_final or oman_3 or iran_high or us_zero) else "progress"
         # Разные позиции по fee = нельзя SHORT как «premium снят навсегда»
