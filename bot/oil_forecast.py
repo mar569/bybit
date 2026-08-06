@@ -167,8 +167,12 @@ def build_oil_forecast(
     interval_minutes: int = 15,
     ta_verdict_raw: str | None = None,
     ta_confidence_raw: int | None = None,
+    bars: Sequence[Any] | None = None,
+    flow: Any | None = None,
 ) -> OilForecast:
-    """Склеивает новости + уровни + scalp → один торговый прогноз."""
+    """Склеивает новости + уровни + поток + ход цены → прогноз (без слепого 10/10)."""
+    from .oil_news_discipline import assess_news_for_trade
+
     px = float(getattr(snap, "price", 0) or 0)
     s = getattr(snap, "support", None)
     r = getattr(snap, "resistance", None)
@@ -183,31 +187,86 @@ def build_oil_forecast(
     news = getattr(news_bias, "bias", "neutral") if news_bias else "neutral"
     news_w = float(getattr(news_bias, "weighted_score", 0) or 0) if news_bias else 0.0
     scenario = detect_oil_scenario(news_items)
+    news_assess = assess_news_for_trade(
+        news_items,
+        news_bias=news_bias,
+        bars=bars,
+        hot_hours=0.5,
+        warm_hours=2.0,
+        priced_in_pct=0.35,
+    )
+    from .oil_signal_context import analyze_hormuz_context, analyze_inventory_from_news
 
-    # ---- bias scoring ----
+    hormuz = analyze_hormuz_context(news_items)
+    inv_ctx = analyze_inventory_from_news(news_items)
+
     long_pts = short_pts = 0
+    notes: list[str] = []
+
     if scenario == "deal_tape":
-        short_pts += 3
-    elif scenario == "disruption":
-        long_pts += 3
-    elif scenario == "inventory":
-        # Зависит от тона новостей; без тона — нейтрально
-        if news == "bullish":
-            long_pts += 2
-        elif news == "bearish":
+        # Сделка не финал / спор 3% vs 5–7% vs 0% → без сильного SHORT
+        if hormuz.status in {"not_final", "progress", "talks"} or hormuz.oil_bias == "mixed":
+            notes.append(hormuz.line_ru or "Ормуз не финал")
+            if news_assess.for_entry and news == "bearish" and hormuz.for_entry:
+                short_pts += 1
+            # иначе 0 — только фон в тексте
+        elif news_assess.for_entry and news == "bearish":
             short_pts += 2
+            notes.append("deal HOT↓")
+        elif news_assess.mode in {"hot", "warm"} and news in {
+            "bearish",
+            "neutral",
+            "mixed",
+        }:
+            short_pts += 1
+            notes.append("deal фон↓")
+        else:
+            notes.append("deal устарел — без очков")
+    elif scenario == "disruption":
+        if news_assess.for_entry and news == "bullish":
+            long_pts += 2
+        elif news_assess.mode in {"hot", "warm"}:
+            long_pts += 1
+    elif scenario == "inventory":
+        if inv_ctx.tone == "bearish":
+            short_pts += 2 if news_assess.for_entry else 1
+            notes.append(inv_ctx.line_ru or "запасы build")
+        elif inv_ctx.tone == "bullish":
+            long_pts += 2 if news_assess.for_entry else 1
+            notes.append(inv_ctx.line_ru or "запасы draw")
+        elif inv_ctx.tone == "mixed":
+            notes.append(inv_ctx.line_ru or "запасы mixed")
+        elif news == "bullish" and news_assess.for_entry:
+            long_pts += 2
+        elif news == "bearish" and news_assess.for_entry:
+            short_pts += 2
+        elif news == "bullish":
+            long_pts += 1
+        elif news == "bearish":
+            short_pts += 1
     elif scenario == "opec_supply":
         if news == "bullish":
-            long_pts += 2
+            long_pts += 1 + (1 if news_assess.for_entry else 0)
         elif news == "bearish":
-            short_pts += 2
+            short_pts += 1 + (1 if news_assess.for_entry else 0)
     elif scenario == "mixed_geo":
-        pass  # ждём clarifier
+        notes.append("geo mixed")
 
-    if news == "bullish":
+    if news == "bullish" and news_assess.for_entry:
         long_pts += 2 if abs(news_w) >= 3 else 1
-    elif news == "bearish":
+    elif news == "bearish" and news_assess.for_entry:
         short_pts += 2 if abs(news_w) >= 3 else 1
+    elif news == "bullish" and news_assess.mode == "warm":
+        long_pts += 1
+    elif news == "bearish" and news_assess.mode == "warm":
+        short_pts += 1
+
+    if news_assess.block_long:
+        long_pts = 0
+        notes.append("блок LONG")
+    if news_assess.block_short:
+        short_pts = 0
+        notes.append("блок SHORT")
 
     if ta_v == "LONG":
         long_pts += 2 if ta_c >= 6 else 1
@@ -215,18 +274,38 @@ def build_oil_forecast(
         short_pts += 2 if ta_c >= 6 else 1
 
     if bounce_plan is not None:
-        if getattr(bounce_plan, "side", "") == "long":
+        if getattr(bounce_plan, "side", "") == "long" and not news_assess.block_long:
             long_pts += 2
-        elif getattr(bounce_plan, "side", "") == "short":
+        elif getattr(bounce_plan, "side", "") == "short" and not news_assess.block_short:
             short_pts += 2
 
     scalp_action = getattr(scalp_call, "action", "") if scalp_call else ""
-    if scalp_action == "open_long":
+    if scalp_action == "open_long" and not news_assess.block_long:
         long_pts += 1
-    elif scalp_action == "open_short":
+    elif scalp_action == "open_short" and not news_assess.block_short:
         short_pts += 1
 
-    if scenario == "mixed_geo" or (abs(long_pts - short_pts) <= 1 and max(long_pts, short_pts) < 4):
+    flow_bias = (getattr(flow, "bias", "") or "").lower() if flow is not None else ""
+    if flow_bias == "buy":
+        long_pts += 1
+        notes.append("поток BUY")
+    elif flow_bias == "sell":
+        short_pts += 1
+        notes.append("поток SELL")
+
+    conflict_flow = False
+    if flow_bias == "buy" and short_pts > long_pts:
+        conflict_flow = True
+        short_pts = max(0, short_pts - 3)
+        notes.append("конфликт: поток↑ vs SHORT")
+    elif flow_bias == "sell" and long_pts > short_pts:
+        conflict_flow = True
+        long_pts = max(0, long_pts - 3)
+        notes.append("конфликт: поток↓ vs LONG")
+
+    if scenario == "mixed_geo" or (
+        abs(long_pts - short_pts) <= 1 and max(long_pts, short_pts) < 4
+    ):
         bias = "WAIT"
     elif long_pts > short_pts:
         bias = "LONG"
@@ -235,9 +314,70 @@ def build_oil_forecast(
     else:
         bias = "WAIT"
 
-    conf = min(10, max(3, 4 + abs(long_pts - short_pts) + (1 if ta_c >= 6 else 0)))
+    adverse = False
+    try:
+        from .oil_entry_filters import measure_recent_move
+
+        move = measure_recent_move(
+            bars,
+            interval_minutes=interval_minutes,
+            priced_in_30m_pct=0.40,
+            priced_in_60m_pct=0.65,
+        )
+        if move is not None:
+            if bias == "SHORT" and (
+                move.move_30m_pct >= 0.40 or move.move_60m_pct >= 0.65
+            ):
+                adverse = True
+                notes.append(
+                    f"уже ↑{move.move_30m_pct:+.2f}%/30м — не догонять SHORT"
+                )
+            elif bias == "LONG" and (
+                move.move_30m_pct <= -0.40 or move.move_60m_pct <= -0.65
+            ):
+                adverse = True
+                notes.append(
+                    f"уже ↓{move.move_30m_pct:+.2f}%/30м — не догонять LONG"
+                )
+    except Exception:
+        pass
+
+    if adverse or conflict_flow:
+        bias = "WAIT"
+    if hormuz.oil_bias == "mixed" and bias == "SHORT":
+        bias = "WAIT"
+        notes.append("Ормуз: спор 3%/5–7%/0% — WAIT")
+        conf_cap_mixed = True
+    else:
+        conf_cap_mixed = False
+
+    edge = abs(long_pts - short_pts)
+    # Потолок: без полного схождения ≤7; 9 редко; 10 из правил — никогда
+    conf = min(7, max(3, 3 + edge + (1 if ta_c >= 6 else 0)))
+    same_side_flow = (bias == "LONG" and flow_bias == "buy") or (
+        bias == "SHORT" and flow_bias == "sell"
+    )
+    hot_aligned = news_assess.for_entry and (
+        (bias == "LONG" and news == "bullish")
+        or (bias == "SHORT" and news == "bearish")
+    )
+    if (
+        bias in {"LONG", "SHORT"}
+        and hot_aligned
+        and same_side_flow
+        and edge >= 3
+        and ta_c >= 6
+        and hormuz.for_entry
+    ):
+        conf = min(9, conf + 2)
+    elif bias in {"LONG", "SHORT"} and hot_aligned and edge >= 2:
+        conf = min(8, conf + 1)
+
     if bias == "WAIT":
-        conf = min(conf, 6)
+        conf = min(
+            conf,
+            5 if (adverse or conflict_flow or conf_cap_mixed) else 6,
+        )
 
     horizon = "4–12ч"
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
@@ -302,20 +442,29 @@ def build_oil_forecast(
         )
     else:
         headline = f"WAIT · {scen_ru}"
-        base = (
-            f"нет края с ${px:.2f} · только от уровня / close {interval_minutes}m за range"
-        )
+        if adverse:
+            base = f"WAIT с ${px:.2f}: цена уже ушла против идеи — не догонять"
+            entry = "снаружи · ждать откат к уровню или новый HOT-драйвер"
+        elif conflict_flow:
+            base = f"WAIT с ${px:.2f}: поток против новостного bias — без входа"
+            entry = "ждать согласования цены и потока"
+        else:
+            base = (
+                f"нет края с ${px:.2f} · только от уровня / "
+                f"close {interval_minutes}m за range"
+            )
+            entry = (
+                "снаружи без S/R или пробоя"
+                + (f" · range {_lvl(s)}–{_lvl(r)}" if s and r else "")
+            )
         alt = "вверх: срыв поставок · вниз: сделка / пробой↓"
-        inv = "ждать: танкеры / запасы / тон переговоров"
-        entry = (
-            "снаружи без S/R или пробоя"
-            + (f" · range {_lvl(s)}–{_lvl(r)}" if s and r else "")
-        )
+        inv = "ждать: танкеры / запасы / тон переговоров / согласование потока"
 
-    if catalyst:
+    if catalyst and news_assess.mode in {"hot", "warm"}:
         base = f"{base} · {catalyst}"
+    if notes and bias == "WAIT":
+        base = f"{base} · {notes[0]}"
 
-    # watch_list оставляем в данных, в чат не спамим
     watch: list[str] = []
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
         watch.append("Ормуз / дипломатия")
@@ -339,27 +488,67 @@ def build_oil_forecast(
     )
 
 
-def format_oil_forecast_block(fc: OilForecast) -> str:
-    """Короткий HTML-блок для Telegram — без простыни «Следить»."""
-    bias_mark = {
-        "LONG": "🟢",
-        "SHORT": "🔴",
-        "WAIT": "⚪",
-    }.get(fc.bias, "⚪")
-    lines = [
-        f"🎯 {bias_mark} <b>{fc.bias}</b> · {fc.confidence}/10 · {_esc(fc.headline_ru)}",
-        f"<i>{_esc(fc.horizon_ru)}</i>",
-        f"• {_esc(_strip_case_prefix(fc.base_case_ru))}",
-        f"• альт: {_esc(_strip_case_prefix(fc.alt_case_ru))}",
-        f"• ✖ {_esc(_strip_case_prefix(fc.invalidation_ru))}",
-        f"• ▶ {_esc(_strip_case_prefix(fc.entry_hint_ru))}",
-    ]
-    if fc.gemini_ru:
-        g = " ".join(fc.gemini_ru.split())
-        if len(g) > 160:
-            g = g[:157] + "…"
-        lines.append(f"🤖 {_esc(g)}")
-    return "\n".join(lines)
+
+def format_oil_forecast_block(
+    fc: OilForecast,
+    *,
+    news_items: Sequence[Any] | None = None,
+    flow: Any | None = None,
+    price: float | None = None,
+) -> str:
+    """Понятный блок прогноза: почему / фон / план / отмена."""
+    import re as _re
+
+    from .oil_signal_context import build_signal_drivers, format_clear_signal_card
+
+    drivers = build_signal_drivers(
+        news_items=news_items,
+        news_mode=fc.scenario if fc.scenario != "range" else "none",
+        flow=flow,
+        side=fc.bias,
+    )
+    if fc.bias in {"LONG", "SHORT"} and drivers.why_ru == "схождение факторов слабое":
+        why = _strip_case_prefix(fc.base_case_ru)[:120]
+        drivers = type(drivers)(
+            hormuz=drivers.hormuz,
+            inventory=drivers.inventory,
+            news_mode=drivers.news_mode,
+            flow_ru=drivers.flow_ru,
+            why_ru=why,
+            caution_ru=drivers.caution_ru,
+            lines_ru=drivers.lines_ru
+            or ((_strip_case_prefix(fc.headline_ru),) if fc.headline_ru else ()),
+        )
+    if fc.bias == "WAIT" and not drivers.caution_ru:
+        drivers = type(drivers)(
+            hormuz=drivers.hormuz,
+            inventory=drivers.inventory,
+            news_mode=drivers.news_mode,
+            flow_ru=drivers.flow_ru,
+            why_ru=drivers.why_ru,
+            caution_ru=_strip_case_prefix(fc.base_case_ru)[:140],
+            lines_ru=drivers.lines_ru,
+        )
+
+    px = float(price) if price and price > 0 else 0.0
+    if px <= 0:
+        m = _re.search(r"\$([0-9]+(?:\.[0-9]+)?)", fc.base_case_ru or "")
+        if m:
+            px = float(m.group(1))
+
+    card = format_clear_signal_card(
+        side=fc.bias,
+        quality=fc.confidence,
+        price=px,
+        drivers=drivers,
+        trigger_ru=_strip_case_prefix(fc.entry_hint_ru),
+        horizon_ru=fc.horizon_ru,
+        extra_ru=fc.gemini_ru,
+    )
+    inv = _strip_case_prefix(fc.invalidation_ru)
+    if inv and "<b>Отмена:</b>" not in card:
+        card = card + f"\n<b>Отмена:</b> {_esc(inv)[:140]}"
+    return card
 
 
 def _esc(text: str) -> str:
@@ -413,13 +602,12 @@ async def enrich_oil_forecast_with_gemini(
             return fc
         ctx = _forecast_context_for_gemini(fc, snap, news_items)
         user = (
-            "Сформулируй 6–10 строк по-русски простыми словами (не страница):\n"
-            "1) что сейчас главное для нефти,\n"
-            "2) самое громкое ПОЧЕМУ,\n"
-            "3) куда скорее цена (вверх/вниз/ждать),\n"
-            "4) что делать трейдеру UKOUSD сейчас,\n"
-            "5) что сломает сценарий.\n"
-            "Без англ. жаргона, без воды. Не финсовет."
+            "Сформулируй 4–7 строк по-русски:\n"
+            "1) что главное сейчас,\n"
+            "2) согласованы ли цена/поток с bias бота,\n"
+            "3) открывать или WAIT (если бот WAIT — не уговаривай входить),\n"
+            "4) что сломает сценарий.\n"
+            "Не ставь 10/10. Не догоняй ход. Без англ. жаргона. Не финсовет."
         )
         result = await ask_gemini(
             api_key=api_key,

@@ -326,6 +326,31 @@ def build_oil_confluence_setup(
     elif news_bias is not None:
         factors.append("новости нейтральны")
 
+    # Ормуз / запасы — явный разбор в factors (не слепой deal SHORT)
+    try:
+        from .oil_signal_context import analyze_hormuz_context, analyze_inventory_from_news
+
+        hz = analyze_hormuz_context(news_items)
+        if hz.line_ru:
+            factors.insert(1 if factors and factors[0].startswith("📐") else 0, hz.line_ru[:160])
+        if hz.oil_bias == "mixed" or (
+            hz.status in {"not_final", "progress"} and not hz.for_entry
+        ):
+            # Не раздувать SHORT по слуху о сделке
+            short_pts = max(0, short_pts - 2)
+        inv = analyze_inventory_from_news(news_items)
+        if inv.line_ru:
+            factors.append(inv.line_ru[:120])
+            if inv.tone == "bearish" and news_assess.for_entry:
+                short_pts += 1
+            elif inv.tone == "bullish" and news_assess.for_entry:
+                long_pts += 1
+            elif inv.tone == "mixed":
+                long_pts = max(0, long_pts - 1)
+                short_pts = max(0, short_pts - 1)
+    except Exception:
+        pass
+
     # Техпакет: волны / EW / треугольники / фигуры — ведёт, если нет HOT-новостей
     tech_full = news_assess.mode in {"none", "cold"} or (
         news_assess.mode == "warm" and not news_assess.for_entry
@@ -744,59 +769,64 @@ def read_oil_chart_structure(
     return tuple(notes[:5])
 
 
-def format_oil_confluence_setup(setup: OilConfluenceSetup) -> str:
-    """Короткая ПРО-карточка без простыни."""
-    if setup.side == "WAIT":
-        mark, title = "✋", "WAIT"
-    elif setup.side == "LONG":
-        mark, title = "🟢", "LONG"
-    else:
-        mark, title = "🔴", "SHORT"
+def format_oil_confluence_setup(
+    setup: OilConfluenceSetup,
+    *,
+    news_items: Sequence[Any] | None = None,
+    flow: Any | None = None,
+    news_mode: str = "",
+) -> str:
+    """Понятная ПРО-карточка: почему / фон / план / отмена."""
+    from .oil_signal_context import build_signal_drivers, format_clear_signal_card
 
+    mode = news_mode
+    if not mode:
+        news_line = next((f for f in setup.factors_ru if f.startswith("📰")), "")
+        if "HOT" in news_line:
+            mode = "hot"
+        elif "фон" in news_line or "WARM" in news_line:
+            mode = "warm"
+        elif "нет" in news_line.lower() or "none" in news_line.lower():
+            mode = "none"
+        else:
+            mode = "cold"
+
+    drivers = build_signal_drivers(
+        news_items=news_items,
+        news_mode=mode,
+        flow=flow,
+        side=setup.side,
+    )
+    # Если в factors уже есть Ормуз/техника — дополним why из factors
     tech_mode = any("режим: ТЕХНИКА" in f for f in setup.factors_ru)
     mode_tag = " · 📐 ТЕХНИКА" if tech_mode else ""
-    lines = [
-        f"{mark} <b>ПРО {title}</b> · {setup.quality}/10 · ${setup.price:.2f}{mode_tag}",
-    ]
-    news_line = next((f for f in setup.factors_ru if f.startswith("📰")), "")
-    if news_line:
-        lines.append(_esc(news_line[:220]))
-    other = [
-        f
-        for f in setup.factors_ru
-        if not f.startswith("📰") and "режим: ТЕХНИКА" not in f
-    ]
-    if other:
-        lines.append(" · ".join(_esc(f) for f in other[:3]))
+    if setup.catalyst and setup.side in {"LONG", "SHORT"} and drivers.why_ru == "схождение факторов слабое":
+        drivers = type(drivers)(
+            hormuz=drivers.hormuz,
+            inventory=drivers.inventory,
+            news_mode=drivers.news_mode,
+            flow_ru=drivers.flow_ru,
+            why_ru=str(setup.catalyst)[:100],
+            caution_ru=drivers.caution_ru,
+            lines_ru=drivers.lines_ru,
+        )
 
-    if setup.side in {"LONG", "SHORT"}:
-        bits = []
-        if setup.entry_lo is not None and setup.entry_hi is not None:
-            bits.append(f"вход {setup.entry_lo:.2f}–{setup.entry_hi:.2f}")
-        if setup.stop is not None:
-            bits.append(f"SL {setup.stop:.2f}")
-        tps = []
-        if setup.tp1 is not None:
-            tps.append(f"{setup.tp1:.2f}")
-        if setup.tp2 is not None:
-            tps.append(f"{setup.tp2:.2f}")
-        if tps:
-            bits.append(f"TP {'/'.join(tps)}")
-        if bits:
-            lines.append(" · ".join(bits))
-        if setup.trigger_ru:
-            lines.append(f"▶ {_esc(setup.trigger_ru)[:120]}")
-        if setup.invalidation is not None:
-            lines.append(f"✖ ниже ${float(setup.invalidation):.2f}" if setup.side == "LONG" else f"✖ выше ${float(setup.invalidation):.2f}")
-    else:
-        lines.append(f"{_esc(setup.trigger_ru)[:140]}")
-
-    if setup.gemini_ru:
-        g = " ".join(setup.gemini_ru.split())
-        if len(g) > 180:
-            g = g[:177] + "…"
-        lines.append(_esc(g))
-    return "\n".join(lines)
+    return format_clear_signal_card(
+        side=setup.side,
+        quality=setup.quality,
+        price=setup.price,
+        drivers=drivers,
+        entry_lo=setup.entry_lo,
+        entry_hi=setup.entry_hi,
+        stop=setup.stop,
+        tp1=setup.tp1,
+        tp2=setup.tp2,
+        trigger_ru=setup.trigger_ru,
+        invalidation=setup.invalidation,
+        horizon_ru=setup.horizon_ru,
+        mode_tag=mode_tag,
+        extra_ru=setup.gemini_ru,
+    )
 
 
 def _esc(text: str) -> str:

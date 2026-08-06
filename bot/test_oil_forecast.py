@@ -63,6 +63,8 @@ def test_detect_disruption_scenario():
 
 
 def test_build_forecast_short_on_deal_tape():
+    import time
+
     snap = _snap(verdict="SHORT", confidence=6)
     ta = TAAnalysisResult(verdict="SHORT", verdict_confidence=6)
     bias = OilNewsBias(
@@ -77,7 +79,7 @@ def test_build_forecast_short_on_deal_tape():
             title="Brent drops on Hormuz reopen deal",
             url="https://x",
             source="Reuters",
-            published_ts=1.0,
+            published_ts=time.time() - 600,
             impact="bearish",
             theme="iran_geo",
         ),
@@ -92,14 +94,16 @@ def test_build_forecast_short_on_deal_tape():
     )
     assert fc.bias == "SHORT"
     assert fc.scenario == "deal_tape"
-    assert fc.confidence >= 5
+    assert 5 <= fc.confidence <= 9
+    assert fc.confidence != 10
     text = format_oil_forecast_block(fc)
     assert "SHORT" in text
-    assert "✖" in text
+    assert "Отмена" in text or "✖" in text
     assert "Следить" not in text
     assert "База: База" not in text
     assert "правила бота" not in text
     assert "Прогноз UKOUSD" not in text
+    assert "СИГНАЛ" in text or "SHORT" in text
 
 
 def test_build_forecast_wait_on_mixed():

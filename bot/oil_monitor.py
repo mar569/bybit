@@ -3479,6 +3479,7 @@ def format_oil_market_digest(
     forecast: Any | None = None,
     flow: Any | None = None,
     bars: list[KlineBar] | None = None,
+    news_items: list[Any] | None = None,
 ) -> str:
     primary = snaps[0] if snaps else None
     px = f"${primary.price:.2f}" if primary else ""
@@ -3490,7 +3491,14 @@ def format_oil_market_digest(
     if forecast is not None:
         from .oil_forecast import format_oil_forecast_block
 
-        lines.append(format_oil_forecast_block(forecast))
+        lines.append(
+            format_oil_forecast_block(
+                forecast,
+                news_items=news_items,
+                flow=flow,
+                price=float(primary.price) if primary else None,
+            )
+        )
     elif primary and ta is not None:
         lines.extend(
             _oil_trading_plan(
@@ -3545,7 +3553,28 @@ def format_oil_market_digest(
         "open_long",
         "open_short",
     }:
-        lines.append(format_oil_scalp_block(scalp_call, compact=True))
+        # Не показывать «ОТКРЫВАТЬ», если прогноз WAIT / конфликт / низкая уверенность
+        allow_open = True
+        if forecast is not None:
+            fb = getattr(forecast, "bias", "WAIT")
+            fq = int(getattr(forecast, "confidence", 0) or 0)
+            act = getattr(scalp_call, "action", "")
+            if fb == "WAIT" or fq < 7:
+                allow_open = False
+            elif fb == "LONG" and act == "open_short":
+                allow_open = False
+            elif fb == "SHORT" and act == "open_long":
+                allow_open = False
+            elif flow is not None:
+                fl = (getattr(flow, "bias", "") or "").lower()
+                if act == "open_short" and fl == "buy":
+                    allow_open = False
+                if act == "open_long" and fl == "sell":
+                    allow_open = False
+        if allow_open:
+            lines.append(format_oil_scalp_block(scalp_call, compact=True))
+        else:
+            lines.append("⚡ <b>НЕ ОТКРЫВАТЬ</b> · жди согласования / уровень")
 
     if len(snaps) >= 2:
         spread = snaps[0].price - snaps[1].price
@@ -4755,6 +4784,7 @@ class OilMonitorEngine:
             forecast = None
             if bool(getattr(settings, "oil_forecast_enabled", True)):
                 from .oil_forecast import build_oil_forecast
+                from .oil_flow import compute_oil_flow_proxy
 
                 scalp = build_oil_scalp_call(
                     bundle.brent,
@@ -4762,6 +4792,10 @@ class OilMonitorEngine:
                     news_bias=news_bias,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
+                )
+                flow_why = compute_oil_flow_proxy(
+                    bundle.brent_bars,
+                    lookback=12 if interval_min <= 15 else 8,
                 )
                 forecast = build_oil_forecast(
                     bundle.brent,
@@ -4771,6 +4805,8 @@ class OilMonitorEngine:
                     scalp_call=scalp,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
+                    bars=bundle.brent_bars,
+                    flow=flow_why,
                 )
 
             from .oil_flow import compute_oil_flow_proxy
@@ -4912,6 +4948,7 @@ class OilMonitorEngine:
                     news_items=self._recent_news,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
+                    bars=bundle.brent_bars,
                 )
 
             brief = build_weekend_open_brief(
@@ -5299,6 +5336,21 @@ class OilMonitorEngine:
                 ta_confidence_raw=ta_conf_raw,
                 ta_verdict_raw=ta_verdict_raw,
             )
+            flow = None
+            try:
+                from .oil_flow import compute_oil_flow_proxy
+
+                lb = (
+                    24
+                    if bundle.interval_minutes <= 5
+                    else 12
+                    if bundle.interval_minutes <= 15
+                    else 8
+                )
+                flow = compute_oil_flow_proxy(bundle.brent_bars, lookback=lb)
+            except Exception:
+                logger.debug("Oil digest flow failed", exc_info=True)
+
             forecast = None
             if bool(getattr(settings, "oil_forecast_enabled", True)):
                 from .oil_forecast import (
@@ -5317,6 +5369,8 @@ class OilMonitorEngine:
                     interval_minutes=bundle.interval_minutes,
                     ta_verdict_raw=ta_verdict_raw,
                     ta_confidence_raw=ta_conf_raw,
+                    bars=bundle.brent_bars,
+                    flow=flow,
                 )
                 if bool(getattr(settings, "oil_forecast_gemini", True)):
                     forecast = await enrich_oil_forecast_with_gemini(
@@ -5339,6 +5393,8 @@ class OilMonitorEngine:
                 scalp_call=scalp,
                 forecast=forecast,
                 bars=bundle.brent_bars,
+                flow=flow,
+                news_items=self._recent_news,
             )
             # пометка ручного/планового вызова в шапке уже есть в digest
             png: bytes | None = None
@@ -5475,7 +5531,12 @@ class OilMonitorEngine:
         if bool(getattr(settings, "oil_forecast_enabled", True)):
             try:
                 from .oil_forecast import build_oil_forecast
+                from .oil_flow import compute_oil_flow_proxy
 
+                flow_c = compute_oil_flow_proxy(
+                    bundle.brent_bars or [],
+                    lookback=12 if bundle.interval_minutes <= 15 else 8,
+                )
                 forecast = build_oil_forecast(
                     bundle.brent,
                     bundle.brent_ta,
@@ -5484,6 +5545,8 @@ class OilMonitorEngine:
                     scalp_call=scalp,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
+                    bars=bundle.brent_bars,
+                    flow=flow_c,
                 )
             except Exception:
                 logger.debug("Oil confluence forecast failed", exc_info=True)
@@ -5600,7 +5663,10 @@ class OilMonitorEngine:
                 memory_ru=memory,
             )
 
-        msg = format_oil_confluence_setup(setup)
+        msg = format_oil_confluence_setup(
+            setup,
+            news_items=self._recent_news,
+        )
         chart_png = png
         if chart_png is None and bool(getattr(settings, "oil_chart_enabled", True)):
             try:
