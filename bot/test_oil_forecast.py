@@ -93,6 +93,7 @@ def test_build_forecast_short_on_deal_tape():
         ta_verdict_raw="SHORT",
         ta_confidence_raw=6,
     )
+    # Deal-tape без финала и без тренда↓ → WAIT; с трендом↓ SHORT возможен
     assert fc.scenario == "deal_tape"
     assert fc.bias == "WAIT"
     assert fc.confidence != 10

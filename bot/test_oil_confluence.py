@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot.oil_confluence import (
+    OilConfluenceSetup,
     build_oil_confluence_setup,
     format_oil_confluence_setup,
     read_oil_chart_structure,
@@ -293,7 +294,75 @@ def test_pro_format_card_title():
     assert "LONG" in text or "WAIT" in text or "SHORT" in text
 
 
-def test_stale_news_no_entry_points():
+def test_setup_passes_gate_requires_near_level():
+    weak = OilConfluenceSetup(
+        side="SHORT",
+        quality=9,
+        entry_lo=87.0,
+        entry_hi=87.5,
+        stop=88.5,
+        tp1=85.0,
+        tp2=84.5,
+        invalidation=88.5,
+        horizon_ru="x",
+        factors_ru=("t",),
+        catalyst="",
+        trigger_ru="x",
+        near_level=False,
+        price=87.2,
+    )
+    assert not setup_passes_gate(weak, min_quality=9)
+
+    strong = OilConfluenceSetup(
+        side="SHORT",
+        quality=9,
+        entry_lo=87.0,
+        entry_hi=87.5,
+        stop=88.5,
+        tp1=85.0,
+        tp2=84.5,
+        invalidation=88.5,
+        horizon_ru="x",
+        factors_ru=("t",),
+        catalyst="",
+        trigger_ru="x",
+        near_level=True,
+        price=87.2,
+    )
+    assert setup_passes_gate(strong, min_quality=9)
+
+
+def test_setup_passes_gate_rejects_forecast_wait():
+    setup = OilConfluenceSetup(
+        side="LONG",
+        quality=9,
+        entry_lo=85.0,
+        entry_hi=85.5,
+        stop=84.5,
+        tp1=87.0,
+        tp2=88.0,
+        invalidation=84.5,
+        horizon_ru="x",
+        factors_ru=("t",),
+        catalyst="",
+        trigger_ru="x",
+        near_level=True,
+        price=85.3,
+    )
+    fc = OilForecast(
+        bias="WAIT",
+        scenario="range",
+        confidence=5,
+        horizon_ru="x",
+        headline_ru="WAIT",
+        base_case_ru="x",
+        alt_case_ru="x",
+        invalidation_ru="x",
+        watch_list_ru=(),
+        entry_hint_ru="x",
+    )
+    assert not setup_passes_gate(setup, min_quality=9, forecast=fc)
+
     import time
 
     stale = [

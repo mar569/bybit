@@ -1,4 +1,4 @@
-"""Единый гейт: рост + MACD → SHORT закрыт; прогноз/confluence/scalp → WAIT."""
+"""Единый гейт: симметрия LONG/SHORT — против импульса закрыто, по импульсу открыто."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -37,6 +37,26 @@ def _up_bars(n: int = 40, start: float = 80.0, step: float = 0.08) -> list[Kline
     return bars
 
 
+def _down_bars(n: int = 40, start: float = 85.0, step: float = 0.08) -> list[KlineBar]:
+    bars: list[KlineBar] = []
+    t0 = 1_700_000_000.0
+    px = start
+    for i in range(n):
+        nxt = px - step
+        bars.append(
+            KlineBar(
+                open_time=t0 + i * 300,
+                open=px,
+                high=px + 0.01,
+                low=nxt - 0.02,
+                close=nxt,
+                volume=1000.0,
+            )
+        )
+        px = nxt
+    return bars
+
+
 def _snap(px: float) -> OilMarketSnapshot:
     return OilMarketSnapshot(
         label="Brent",
@@ -62,6 +82,88 @@ def test_gate_blocks_short_on_uptrend():
     assert gate.allow_short is False
     assert gate.trend == "up" or gate.move_30m_pct > 0
     assert gate_apply_to_side(gate, "SHORT") == "WAIT"
+
+
+def test_gate_blocks_long_on_downtrend():
+    bars = _down_bars()
+    gate = evaluate_oil_signal_gate(bars, interval_minutes=5)
+    assert gate.allow_long is False
+    assert gate.allow_short is True
+    assert gate_apply_to_side(gate, "LONG") == "WAIT"
+    assert gate_apply_to_side(gate, "SHORT") == "SHORT"
+
+
+def test_forecast_short_on_downtrend_inventory():
+    """Падение + EIA build → SHORT (не заточен только на LONG)."""
+    import time
+
+    bars = _down_bars()
+    px = float(bars[-1].close)
+    snap = _snap(px)
+    now = time.time()
+    items = [
+        OilNewsItem(
+            title="EIA crude inventories build larger than expected stocks",
+            url="https://example.com/eia",
+            source="Reuters",
+            published_ts=now - 600,
+            impact="bearish",
+            theme="inventory",
+        )
+    ]
+    fc = build_oil_forecast(
+        snap,
+        TAAnalysisResult(verdict="SHORT", verdict_confidence=8),
+        news_bias=OilNewsBias(
+            bias="bearish",
+            weighted_score=-5.0,
+            summary_ru="запасы",
+            top_catalyst="EIA build",
+        ),
+        news_items=items,
+        bars=bars,
+        interval_minutes=5,
+        ta_verdict_raw="SHORT",
+        ta_confidence_raw=8,
+    )
+    assert fc.bias == "SHORT"
+
+
+def test_forecast_short_on_downtrend_with_deal_tape():
+    """Deal в ленте + цена уже падает → SHORT ок."""
+    import time
+
+    bars = _down_bars()
+    px = float(bars[-1].close)
+    snap = _snap(px)
+    now = time.time()
+    items = [
+        OilNewsItem(
+            title="Hormuz deal progress oil premium unwind tumble",
+            url="https://example.com/deal",
+            source="Reuters",
+            published_ts=now - 600,
+            impact="bearish",
+            theme="iran_geo",
+        )
+    ]
+    fc = build_oil_forecast(
+        snap,
+        TAAnalysisResult(verdict="SHORT", verdict_confidence=8),
+        news_bias=OilNewsBias(
+            bias="bearish",
+            weighted_score=-5.0,
+            summary_ru="deal",
+            top_catalyst="Hormuz deal",
+        ),
+        news_items=items,
+        bars=bars,
+        interval_minutes=5,
+        ta_verdict_raw="SHORT",
+        ta_confidence_raw=8,
+    )
+    assert fc.bias == "SHORT"
+    assert fc.scenario == "deal_tape"
 
 
 def test_forecast_wait_not_short_on_rally_deal_tape():

@@ -1335,6 +1335,7 @@ def build_oil_scalp_call(
     ta_confidence_raw: int | None = None,
     ta_verdict_raw: str | None = None,
     bars: list | None = None,
+    news_items: list | None = None,
 ) -> OilScalpCall:
     """Сводка всех факторов → одна команда на 10–100 мин.
 
@@ -1385,10 +1386,31 @@ def build_oil_scalp_call(
         long_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
     elif ta_v == "SHORT":
         short_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
-    if news == "bullish":
-        long_pts += 2 if abs(news_w) >= 3 else 1
-    elif news == "bearish":
-        short_pts += 2 if abs(news_w) >= 3 else 1
+    # Новости: только HOT for_entry (не warm/priced-in chase)
+    try:
+        from .oil_news_discipline import assess_news_for_trade
+
+        news_assess = assess_news_for_trade(
+            news_items,
+            news_bias=news_bias,
+            bars=bars,
+            hot_hours=0.5,
+            warm_hours=2.0,
+            priced_in_pct=0.35,
+        )
+        if news == "bullish" and news_assess.for_entry and not news_assess.block_long:
+            long_pts += 2 if abs(news_w) >= 3 else 1
+            factors.append(f"новости↑ HOT {news_assess.age_note}")
+        elif news == "bearish" and news_assess.for_entry and not news_assess.block_short:
+            short_pts += 2 if abs(news_w) >= 3 else 1
+            factors.append(f"новости↓ HOT {news_assess.age_note}")
+        elif news in {"bullish", "bearish"}:
+            factors.append(f"новости {news} фон — без очков скальпа")
+    except Exception:
+        if news == "bullish":
+            long_pts += 1
+        elif news == "bearish":
+            short_pts += 1
     if bounce_plan is not None:
         if bounce_plan.side == "long":
             long_pts += 3 if bounce_plan.strong else 2
@@ -3584,13 +3606,16 @@ def format_oil_market_digest(
 
     if forecast is not None and primary is not None:
         lines.append(_oil_levels_line(primary, interval_minutes=interval_minutes))
+        # Bounce-план только если прогноз той же стороны (не реклама SHORT при WAIT)
         if bounce_plan is not None:
-            side = "LONG" if bounce_plan.side == "long" else "SHORT"
-            tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:2])
-            lines.append(
-                f"отскок {side} {fmt_price(bounce_plan.bounce_level)} · "
-                f"SL {fmt_price(bounce_plan.stop)} · TP {tps}"
-            )
+            fb = (getattr(forecast, "bias", "") or "").upper()
+            want = "LONG" if bounce_plan.side == "long" else "SHORT"
+            if fb == want:
+                tps = " / ".join(fmt_price(t) for t in bounce_plan.targets[:2])
+                lines.append(
+                    f"отскок {want} {fmt_price(bounce_plan.bounce_level)} · "
+                    f"SL {fmt_price(bounce_plan.stop)} · TP {tps}"
+                )
 
     if flow is None and bars:
         from .oil_flow import compute_oil_flow_proxy
@@ -3625,7 +3650,7 @@ def format_oil_market_digest(
         if forecast is not None:
             fb = getattr(forecast, "bias", "WAIT")
             fq = int(getattr(forecast, "confidence", 0) or 0)
-            if fb == "WAIT" or fq < 7:
+            if fb == "WAIT" or fq < 8:
                 allow_open = False
             elif fb == "LONG" and act == "open_short":
                 allow_open = False
@@ -3637,6 +3662,30 @@ def format_oil_market_digest(
                     allow_open = False
                 if act == "open_long" and fl == "sell":
                     allow_open = False
+            # OPEN только у уровня / bounce той же стороны
+            if allow_open and bounce_plan is not None:
+                want = "long" if act == "open_long" else "short"
+                if bounce_plan.side != want:
+                    allow_open = False
+            elif allow_open and primary is not None:
+                px = float(getattr(primary, "price", 0) or 0)
+                s = getattr(primary, "support", None)
+                r = getattr(primary, "resistance", None)
+                bd = getattr(primary, "breakdown", None)
+                bo = getattr(primary, "breakout", None)
+
+                def _near(lvl: float | None) -> bool:
+                    if not lvl or px <= 0:
+                        return False
+                    return abs(px - float(lvl)) / px * 100.0 <= 0.35
+
+                if act == "open_long" and not (_near(s) or _near(bo)):
+                    allow_open = False
+                if act == "open_short" and not (_near(r) or _near(bd)):
+                    allow_open = False
+        else:
+            # Без прогноза — никогда не «ОТКРЫВАТЬ» (антиспам)
+            allow_open = False
         if allow_open and bars:
             try:
                 from .oil_signal_gate import evaluate_oil_signal_gate
@@ -3706,6 +3755,7 @@ class OilMonitorEngine:
         self._recent_news: list[OilNewsItem] = []
         self._last_bounce_alert_ts: dict[str, float] = {}
         self._active_bounce: OilBouncePlan | None = None
+        self._last_brent_bars: list | None = None
         self._last_micro_signal_ts: float = 0.0
         self._micro_signal_hour: list[float] = []
         self._last_setup_ts: float = 0.0
@@ -4077,6 +4127,7 @@ class OilMonitorEngine:
         label: str,
         settings: Any,
         png: bytes | None = None,
+        bars: list | None = None,
     ) -> int:
         """Редкий алерт: сильный bias + цена у уровня. Без спама."""
         if not getattr(settings, "oil_bounce_alerts_enabled", True):
@@ -4087,6 +4138,23 @@ class OilMonitorEngine:
             return 0
         if not plan.strong:
             return 0
+        # Гейт: не алертить SHORT в рост / LONG в падение
+        try:
+            from .oil_signal_gate import evaluate_oil_signal_gate
+
+            gate_bars = bars if bars is not None else self._last_brent_bars
+            gate = evaluate_oil_signal_gate(
+                gate_bars,
+                interval_minutes=int(getattr(settings, "oil_interval_minutes", 15)),
+            )
+            if plan.side == "short" and not gate.allow_short:
+                logger.debug("Oil bounce skipped: gate blocks SHORT")
+                return 0
+            if plan.side == "long" and not gate.allow_long:
+                logger.debug("Oil bounce skipped: gate blocks LONG")
+                return 0
+        except Exception:
+            pass
         from .oil_entry_filters import is_session_open_fragile
 
         session_block = float(getattr(settings, "oil_session_block_minutes", 20.0))
@@ -4125,7 +4193,7 @@ class OilMonitorEngine:
                 tp2=tp2,
                 price=float(plan.entry_mid),
                 catalyst=plan.catalyst or plan.reason_ru or "",
-                quality=8 if plan.strong else 6,
+                quality=9 if plan.strong else 7,
                 source="bounce",
             )
         sent = 1
@@ -5369,6 +5437,7 @@ class OilMonitorEngine:
             if not bundle:
                 return 0
             self._sync_levels_from_bundle(bundle)
+            self._last_brent_bars = list(bundle.brent_bars or [])
             snaps = [bundle.brent]
             if bundle.wti:
                 snaps.append(bundle.wti)
@@ -5389,22 +5458,8 @@ class OilMonitorEngine:
                 interval_minutes=bundle.interval_minutes,
             )
             self._active_bounce = bounce
-            if bounce is not None:
-                apply_oil_bounce_to_ta(
-                    bundle.brent_ta,
-                    bounce,
-                    ta_confidence_raw=ta_conf_raw,
-                )
-                bundle.brent.verdict = (
-                    "LONG" if bounce.side == "long" else "SHORT"
-                )
-                bundle.brent.confidence = int(
-                    bundle.brent_ta.verdict_confidence or ta_conf_raw
-                )
-                bundle.brent.entry_zone = (bounce.entry_lo, bounce.entry_hi)
-                bundle.brent.stop = bounce.stop
-                bundle.brent.targets = bounce.targets
-                bundle.brent.reason = bounce.reason_ru[:200]
+            # Bounce НЕ переписывает TA/вердикт графика — иначе PNG врёт «структура SHORT»
+            # при новостном плане. Уровни bounce только в тексте, если прогноз согласен.
 
             scalp = build_oil_scalp_call(
                 bundle.brent,
@@ -5416,6 +5471,7 @@ class OilMonitorEngine:
                 ta_confidence_raw=ta_conf_raw,
                 ta_verdict_raw=ta_verdict_raw,
                 bars=bundle.brent_bars,
+                news_items=self._fresh_news_for_entry(settings),
             )
             flow = None
             try:
@@ -5538,12 +5594,7 @@ class OilMonitorEngine:
                         bars=bundle.wti_bars,
                         interval_minutes=bundle.interval_minutes,
                     )
-                    if wti_bounce is not None:
-                        apply_oil_bounce_to_ta(
-                            bundle.wti_ta,
-                            wti_bounce,
-                            ta_confidence_raw=int(bundle.wti.confidence or 0),
-                        )
+                    # Не мутируем WTI TA bounce-планом — честный график
                 wti_png = render_oil_chart(
                     bundle.wti_bars,
                     bundle.wti_ta,
@@ -5598,18 +5649,32 @@ class OilMonitorEngine:
 
         ta_verdict_raw = bundle.brent.verdict
         ta_conf_raw = int(bundle.brent.confidence or 0)
+        self._last_brent_bars = list(bundle.brent_bars or [])
         news_bias = self._trading_news_bias(
             settings,
             ta_verdict=ta_verdict_raw,
             ta_confidence=ta_conf_raw,
         )
+        # Порядок как в digest: bounce → scalp (без мутации TA)
+        bounce = build_oil_bounce_plan(
+            bundle.brent,
+            news_bias,
+            news_items=self._fresh_news_for_entry(settings),
+            min_score=float(getattr(settings, "oil_bounce_min_news_score", 4.0)),
+            bars=bundle.brent_bars,
+            interval_minutes=bundle.interval_minutes,
+        )
         scalp = build_oil_scalp_call(
             bundle.brent,
             bundle.brent_ta,
             news_bias=news_bias,
+            bounce_plan=bounce,
             market_mood=bundle.market_mood,
             interval_minutes=bundle.interval_minutes,
             bars=bundle.brent_bars,
+            news_items=self._fresh_news_for_entry(settings),
+            ta_verdict_raw=ta_verdict_raw,
+            ta_confidence_raw=ta_conf_raw,
         )
         forecast = None
         if bool(getattr(settings, "oil_forecast_enabled", True)):
@@ -5626,22 +5691,17 @@ class OilMonitorEngine:
                     bundle.brent_ta,
                     news_bias=news_bias,
                     news_items=self._fresh_news_for_entry(settings),
+                    bounce_plan=bounce,
                     scalp_call=scalp,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
                     bars=bundle.brent_bars,
                     flow=flow_c,
+                    ta_verdict_raw=ta_verdict_raw,
+                    ta_confidence_raw=ta_conf_raw,
                 )
             except Exception:
                 logger.debug("Oil confluence forecast failed", exc_info=True)
-        bounce = build_oil_bounce_plan(
-            bundle.brent,
-            news_bias,
-            news_items=self._fresh_news_for_entry(settings),
-            min_score=float(getattr(settings, "oil_bounce_min_news_score", 3.0)),
-            bars=bundle.brent_bars,
-            interval_minutes=bundle.interval_minutes,
-        )
         return await self._maybe_dispatch_confluence_setup(
             settings,
             bundle=bundle,
@@ -5728,7 +5788,13 @@ class OilMonitorEngine:
                 getattr(settings, "oil_news_entry_max_age_hours", 0.5)
             ),
         )
-        if not setup_passes_gate(setup, min_quality=min_q):
+        if not setup_passes_gate(
+            setup,
+            min_quality=min_q,
+            bars=bundle.brent_bars,
+            interval_minutes=bundle.interval_minutes,
+            forecast=forecast,
+        ):
             return 0
         assert setup is not None
         # Не спамить ту же сторону подряд в пределах cooldown (уже проверен) —

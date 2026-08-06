@@ -312,16 +312,18 @@ def _build_lesson(
 
 
 def adaptive_min_quality(base: int, stats: OilOutcomeStats) -> int:
-    """Мягкая подстройка порога setup (±1). Не трогает новости/Ормуз."""
-    b = max(5, min(9, int(base)))
+    """Подстройка порога setup. Для A+ (base≥9) пол никогда не ниже 9."""
+    floor = 9 if int(base) >= 9 else 5
+    b = max(floor, min(10, int(base)))
     decided = stats.wins + stats.losses
     if decided < MIN_SAMPLES_ADAPT or stats.winrate_pct is None:
         return b
     wr = float(stats.winrate_pct)
     if wr < 35.0:
-        return min(9, b + 1)
-    if wr > 55.0:
-        return max(5, b - 1)
+        return min(10, b + 1)
+    if wr > 55.0 and floor < 9:
+        # Снижать порог только если base был <9 (legacy); A+ не размываем
+        return max(floor, b - 1)
     return b
 
 

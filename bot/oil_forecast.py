@@ -209,7 +209,8 @@ def build_oil_forecast(
 
     long_pts = short_pts = 0
 
-    # Deal-tape: НИКОГДА не открывает SHORT сам — только фон, пока нет финала + гейт
+    # Deal-tape: слух ≠ SHORT. SHORT только если гейт уже разрешил (тренд↓/MACD↓)
+    # или есть signed HOT + bearish. Симметрия: не лонговая дыра — падение + deal = SHORT ок.
     if scenario == "deal_tape":
         notes.append(hormuz.line_ru or "Ормуз deal — только фон")
         if (
@@ -219,15 +220,28 @@ def build_oil_forecast(
             and news_assess.for_entry
             and news == "bearish"
         ):
-            short_pts += 1
+            short_pts += 2
             notes.append("deal подписан HOT↓")
+        elif gate.allow_short and (
+            gate.trend == "down" or gate.macd_bias == "bear"
+        ):
+            short_pts += 1
+            notes.append("deal-фон + тренд/MACD↓ — SHORT возможен")
         else:
-            notes.append("deal не даёт вход SHORT")
+            notes.append("deal не даёт вход SHORT без тренда↓")
     elif scenario == "disruption":
+        # Симметрия с deal: warm ≠ вход; LONG только HOT или тренд/MACD↑
         if gate.allow_long and news_assess.for_entry and news == "bullish":
             long_pts += 2
-        elif gate.allow_long and news_assess.mode in {"hot", "warm"}:
+        elif gate.allow_long and (
+            gate.trend == "up" or gate.macd_bias == "bull"
+        ):
             long_pts += 1
+            notes.append("disrupt-фон + тренд/MACD↑ — LONG возможен")
+        elif gate.allow_long and news_assess.mode == "hot":
+            long_pts += 1
+        else:
+            notes.append("disrupt без HOT/тренда↑ — без LONG")
     elif scenario == "inventory":
         if inv_ctx.tone == "bearish" and gate.allow_short:
             short_pts += 2 if news_assess.for_entry else 1
@@ -319,10 +333,18 @@ def build_oil_forecast(
     if bias == "WAIT" and gate.force_wait:
         notes.append(gate.reason_ru)
 
-    conf_cap_mixed = hormuz.oil_bias == "mixed" or scenario == "deal_tape"
-    if conf_cap_mixed and bias == "SHORT":
-        bias = "WAIT"
-        notes.append("deal/Ормуз — без SHORT")
+    # Ормуз mixed / слух: SHORT только если цена уже падает (гейт открыл SHORT).
+    # НЕ режем SHORT глобально на любом deal_tape — иначе бот «только LONG».
+    if bias == "SHORT" and hormuz.oil_bias == "mixed":
+        if not gate.allow_short or (
+            gate.trend != "down" and gate.macd_bias != "bear"
+        ):
+            bias = "WAIT"
+            notes.append("Ормуз mixed — SHORT без тренда↓ отклонён")
+    elif bias == "SHORT" and scenario == "deal_tape" and not hormuz.for_entry:
+        if gate.trend != "down" and gate.macd_bias != "bear":
+            bias = "WAIT"
+            notes.append("deal не финал — SHORT только с трендом↓/MACD↓")
 
     edge = abs(long_pts - short_pts)
     # Потолок: без полного схождения ≤7; 9 редко; 10 из правил — никогда
@@ -347,7 +369,14 @@ def build_oil_forecast(
         conf = min(8, conf + 1)
 
     if bias == "WAIT":
+        conf_cap_mixed = hormuz.oil_bias == "mixed" or (
+            scenario == "deal_tape" and not hormuz.for_entry
+        )
         conf = min(conf, 5 if (gate.force_wait or conf_cap_mixed) else 6)
+
+    conf_cap_mixed = hormuz.oil_bias == "mixed" or (
+        scenario == "deal_tape" and not hormuz.for_entry
+    )
 
     horizon = "4–12ч"
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:

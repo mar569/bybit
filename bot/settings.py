@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 85
+SETTINGS_VERSION = 86
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -1988,6 +1988,16 @@ class SettingsManager:
                 merged["oil_setup_min_quality"] = max(
                     9, int(merged.get("oil_setup_min_quality", 9) or 9)
                 )
+                merged["oil_bounce_min_news_score"] = max(
+                    4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
+                )
+            if version < 86:
+                # Ideal A+: редкие сигналы, без размытия порога, micro OFF
+                merged["oil_setup_min_quality"] = max(
+                    9, int(merged.get("oil_setup_min_quality", 9) or 9)
+                )
+                merged["oil_micro_signals_enabled"] = False
+                merged["oil_setup_with_digest"] = False
                 merged["oil_bounce_min_news_score"] = max(
                     4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
                 )

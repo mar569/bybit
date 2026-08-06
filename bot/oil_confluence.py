@@ -338,6 +338,14 @@ def build_oil_confluence_setup(
         ):
             # Не раздувать SHORT по слуху о сделке
             short_pts = max(0, short_pts - 2)
+        # Симметрия: «reopen deny / fake deal» не раздувает LONG
+        if hz.status in {"talks", "not_final", "progress"} and hz.oil_bias in {
+            "bullish_soft",
+            "mixed",
+            "neutral",
+        }:
+            if not (hz.for_entry and hz.oil_bias == "bullish_soft"):
+                long_pts = max(0, long_pts - 1)
         inv = analyze_inventory_from_news(news_items)
         if inv.line_ru:
             factors.append(inv.line_ru[:120])
@@ -403,23 +411,25 @@ def build_oil_confluence_setup(
     else:
         factors.append(f"TA WAIT {ta_c}/10" if ta_v == "WAIT" else f"TA {ta_v} блокирован гейтом")
 
-    # Scalp — не усиливать против news discipline / гейта
+    # Scalp — максимум +1, только если HOT + гейт (не shortcut A+)
     if (
         scalp_action == "open_long"
         and not news_assess.block_long
+        and news_assess.for_entry
         and (gate is None or gate.allow_long)
     ):
-        long_pts += 2 if scalp_score >= 7 else 1
+        long_pts += 1
         factors.append(f"скальп LONG score {scalp_score}")
     elif (
         scalp_action == "open_short"
         and not news_assess.block_short
+        and news_assess.for_entry
         and (gate is None or gate.allow_short)
     ):
-        short_pts += 2 if scalp_score >= 7 else 1
+        short_pts += 1
         factors.append(f"скальп SHORT score {scalp_score}")
     elif scalp_action in {"open_long", "open_short"}:
-        factors.append("скальп отключён: конфликт с новостным фоном / гейтом")
+        factors.append("скальп без HOT/гейта — без очков")
 
     # Bounce
     if bounce_plan is not None:
@@ -550,7 +560,19 @@ def build_oil_confluence_setup(
                 price=px,
             )
 
-    quality = min(10, max(1, 4 + edge + (1 if near_level else 0) + (1 if ta_c >= 6 else 0)))
+    quality = min(
+        10,
+        max(
+            1,
+            2
+            + edge
+            + (1 if near_level else 0)
+            + (1 if ta_c >= 7 else 0),
+        ),
+    )
+    # Редкость A+: без края факторов не выше 6
+    if edge < 2:
+        quality = min(quality, 6)
     # Дисциплина новостей: блок стороны / опоздание / уже в цене
     if side == "LONG" and news_assess.block_long:
         quality = min(quality, 5)
@@ -572,9 +594,34 @@ def build_oil_confluence_setup(
         quality = min(quality, 6)
     if (not tech_full) and news_assess.mode != "hot" and near_bd and side == "SHORT" and news != "bearish":
         quality = min(quality, 6)
-    if tech_full and (t_long >= 3 or t_short >= 3):
+    # Техпакет +1 только если реально у техвходa (не раздувать 8→9 в воздухе)
+    tech_near = False
+    if tech_full and tech_levels.get("entry"):
+        try:
+            te = float(tech_levels["entry"] or 0)
+            if te > 0 and px > 0 and abs(px - te) / px * 100.0 <= near_pct:
+                tech_near = True
+        except (TypeError, ValueError):
+            tech_near = False
+    if tech_full and tech_near and (
+        (side == "LONG" and t_long >= 3) or (side == "SHORT" and t_short >= 3)
+    ):
         quality = min(10, quality + 1)
-        factors.append("техпакет согласован")
+        factors.append("техпакет согласован у входа")
+    # 9–10 только у уровня + (HOT или сильная техника)
+    if quality >= 9 and not near_level and not tech_near:
+        quality = 8
+        factors.append("потолок 8: нет касания уровня")
+    if quality >= 9 and not (
+        news_assess.for_entry
+        or (tech_full and tech_near and (t_long >= 3 or t_short >= 3))
+        or (
+            bounce_plan is not None
+            and getattr(bounce_plan, "side", "") == side.lower()
+        )
+    ):
+        quality = min(quality, 8)
+        factors.append("потолок 8: нет HOT/тех/отскока")
 
     # Levels for side
     entry_lo = entry_hi = stop = tp1 = tp2 = inv = None
@@ -681,7 +728,7 @@ def build_oil_confluence_setup(
         factors_ru=tuple(factors[:10]),
         catalyst=catalyst,
         trigger_ru=trigger,
-        near_level=near_level or bool(tech_full and tech_levels.get("entry")),
+        near_level=bool(near_level or tech_near),
         price=px,
     )
 
@@ -741,25 +788,22 @@ def build_oil_confluence_setup(
                 factors_ru=tuple(list(factors[:7]) + ["фильтр: нет close-триггера"]),
             )
 
-    # High-conviction gate: уровень ИЛИ bounce ИЛИ scalp ИЛИ техвход EW/фигура
+    # High-conviction: реальный уровень / техвход рядом / bounce той же стороны
+    # Скальп НЕ shortcut — иначе chase A+
     tech_ready = bool(
         tech_full
-        and tech_levels.get("entry")
+        and tech_near
         and ((side == "LONG" and t_long >= 2) or (side == "SHORT" and t_short >= 2))
+    )
+    bounce_ready = bool(
+        bounce_plan is not None
+        and getattr(bounce_plan, "side", "") == side.lower()
+        and float(getattr(bounce_plan, "dist_pct", 99) or 99) <= max(0.5, near_pct * 1.5)
     )
     ready = (
         quality >= int(min_quality)
         and side in {"LONG", "SHORT"}
-        and (
-            near_level
-            or tech_ready
-            or setup.near_level
-            or (
-                bounce_plan is not None
-                and getattr(bounce_plan, "side", "") == side.lower()
-            )
-            or scalp_action == ("open_long" if side == "LONG" else "open_short")
-        )
+        and (near_level or tech_ready or bounce_ready or setup.near_level)
     )
     if not ready:
         # Возвращаем WAIT-обёртку только если качество почти прошло — иначе None
@@ -908,14 +952,42 @@ def _esc(text: str) -> str:
 def setup_passes_gate(
     setup: OilConfluenceSetup | None,
     *,
-    min_quality: int = 7,
+    min_quality: int = 9,
+    bars: Sequence[Any] | None = None,
+    interval_minutes: int = 15,
+    forecast: Any | None = None,
 ) -> bool:
-    """True только для отправки в ручной TA."""
+    """True только для отправки A+ в ручной TA.
+
+    Редкость: сторона + quality + касание уровня + гейт тренд/MACD
+    + прогноз не противоречит (если есть).
+    """
     if setup is None:
         return False
     if setup.side not in {"LONG", "SHORT"}:
         return False
-    return int(setup.quality) >= int(min_quality)
+    if int(setup.quality) < int(min_quality):
+        return False
+    if not setup.near_level:
+        return False
+    if bars is not None:
+        try:
+            from .oil_signal_gate import evaluate_oil_signal_gate
+
+            gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+            if setup.side == "LONG" and not gate.allow_long:
+                return False
+            if setup.side == "SHORT" and not gate.allow_short:
+                return False
+        except Exception:
+            pass
+    if forecast is not None:
+        fb = (getattr(forecast, "bias", "") or "WAIT").upper()
+        if fb == "WAIT":
+            return False
+        if fb in {"LONG", "SHORT"} and fb != setup.side:
+            return False
+    return True
 
 
 async def enrich_setup_with_gemini(
