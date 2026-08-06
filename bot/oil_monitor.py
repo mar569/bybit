@@ -4571,7 +4571,7 @@ class OilMonitorEngine:
         return 1
 
     async def _tick_fastlane(self, settings: Any) -> int:
-        """‼️ КРИТИЧНО: wire + WSJ/Reuters/Bloomberg → сразу в чат (ИИ — после пуша)."""
+        """‼️ КРИТИЧНО: wire + WSJ/Reuters/Bloomberg → сразу в чат (ИИ в том же flash)."""
         if not getattr(settings, "oil_fastlane_enabled", True):
             return 0
         now = time.time()
@@ -4583,6 +4583,7 @@ class OilMonitorEngine:
         from .oil_fastlane import (
             ai_says_off_topic,
             detect_fastlane_outlet,
+            detect_oil_primary_actors,
             enrich_fastlane_with_gemini,
             fastlane_title_on_topic,
             format_fastlane_flash,
@@ -4592,11 +4593,11 @@ class OilMonitorEngine:
 
         max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 1.5))
         min_score = int(getattr(settings, "oil_fastlane_min_score", 9))
-        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 1))
+        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 2))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
-        # ИИ только на важных (Трамп/Бессент/Ормуз) — не на каждый flash
+        # ИИ на Ормуз/Трамп/условиях — живой текст в том же flash
         ai_enabled = bool(getattr(settings, "oil_fastlane_gemini", True))
-        ai_min = int(getattr(settings, "oil_fastlane_ai_min_score", 11))
+        ai_min = int(getattr(settings, "oil_fastlane_ai_min_score", 8))
         include_wire = bool(getattr(settings, "oil_wire_feeds_enabled", True))
         sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.55))
 
@@ -4665,6 +4666,15 @@ class OilMonitorEngine:
                 for k, ts in self._seen_fastlane_stories.items()
                 if now - ts < _FASTLANE_STORY_TTL_SEC
             }
+        # Условие Ормуз / громкие — раньше, чтобы не срезать max_per
+        items = sorted(
+            items,
+            key=lambda it: (
+                0 if _is_hormuz_deal_condition((it.title or "").lower()) else 1,
+                0 if detect_oil_primary_actors(it.title) else 1,
+                -news_critical_score(it.title, source=it.source),
+            ),
+        )
         for it in items:
             key = it.title.lower()[:120]
             story = _news_story_key(it.title)
@@ -4687,9 +4697,14 @@ class OilMonitorEngine:
                 self._seen_fastlane.add(key)
                 logger.info("Oil fast-lane skip non-moving: %s", it.title[:90])
                 continue
-            # Похожая перепечатка уже уходила в чат
+            # Похожая перепечатка; caveat (без судов США) ≠ прошлый «deal reopen»
+            is_cond = _is_hormuz_deal_condition((it.title or "").lower())
             if any(
                 titles_too_similar(it.title, prev, threshold=sim_thr)
+                and not (
+                    is_cond
+                    and not _is_hormuz_deal_condition((prev or "").lower())
+                )
                 for prev in self._recent_sent_titles[-40:]
             ):
                 self._seen_fastlane.add(key)
@@ -4699,11 +4714,44 @@ class OilMonitorEngine:
             if meta is None:
                 continue
 
-            # СНАЧАЛА короткий flash — без простыни
+            # Живой ИИ ДО отправки — один flash, не шаблон + догонялка
+            ai_ru = ""
+            want_ai = ai_enabled and should_ai_analyze_flash(
+                it.title, meta, min_score=ai_min
+            )
+            if want_ai:
+                ai_ru, bias_ov = await enrich_fastlane_with_gemini(
+                    it.title,
+                    source=it.source,
+                    outlet=meta.outlet,
+                    impact=it.impact,
+                    move_note=move_note,
+                    api_key=self._resolve_gemini_key(),
+                    model=self._resolve_gemini_model(),
+                )
+                if ai_ru and ai_says_off_topic(ai_ru):
+                    logger.info(
+                        "Oil fast-lane Gemini off-topic: %s",
+                        it.title[:90],
+                    )
+                    ai_ru = ""
+                elif ai_ru:
+                    from .oil_fastlane import (
+                        strip_gemini_oil_meta,
+                        strip_invented_trade_levels,
+                    )
+
+                    ai_ru = strip_invented_trade_levels(strip_gemini_oil_meta(ai_ru))
+                    if bias_ov in {"bullish", "bearish", "neutral", "mixed"} and bias_ov != it.impact:
+                        # mixed → neutral для dataclass, если нужно
+                        mapped = "neutral" if bias_ov == "mixed" else bias_ov
+                        if mapped != it.impact:
+                            it = replace(it, impact=mapped)
+
             msg = format_fastlane_flash(
                 it,
                 meta=meta,
-                ai_ru="",
+                ai_ru=ai_ru,
                 move_note=move_note,
                 age_label=_age_label(it.published_ts),
                 compact=True,
@@ -4726,46 +4774,12 @@ class OilMonitorEngine:
                 self._seen_fastlane_stories[story] = now
             sent += 1
             logger.info(
-                "Oil fast-lane %s score=%d: %s",
+                "Oil fast-lane %s score=%d ai=%s: %s",
                 meta.outlet,
                 meta.flash_score,
+                "yes" if ai_ru else "no",
                 it.title[:80],
             )
-
-            ai_ru = ""
-            want_ai = ai_enabled and should_ai_analyze_flash(
-                it.title, meta, min_score=ai_min
-            )
-            if want_ai:
-                ai_ru, bias_ov = await enrich_fastlane_with_gemini(
-                    it.title,
-                    source=it.source,
-                    outlet=meta.outlet,
-                    impact=it.impact,
-                    move_note=move_note,
-                    api_key=self._resolve_gemini_key(),
-                    model=self._resolve_gemini_model(),
-                )
-                if ai_ru and ai_says_off_topic(ai_ru):
-                    logger.info(
-                        "Oil fast-lane Gemini off-topic (уже отправлено): %s",
-                        it.title[:90],
-                    )
-                    ai_ru = ""
-                elif ai_ru:
-                    from .oil_fastlane import (
-                        strip_gemini_oil_meta,
-                        strip_invented_trade_levels,
-                    )
-
-                    ai_ru = strip_invented_trade_levels(strip_gemini_oil_meta(ai_ru))
-                    if bias_ov in {"bullish", "bearish", "neutral"} and bias_ov != it.impact:
-                        it = replace(it, impact=bias_ov)
-                    follow = f"🧠 <b>ИИ</b> · {meta.outlet}\n{ai_ru}"
-                    try:
-                        await self._on_news(follow)
-                    except Exception:
-                        logger.debug("Oil fast-lane AI follow-up failed", exc_info=True)
 
             await self._maybe_forward_trade_brief(
                 it,
@@ -4924,8 +4938,13 @@ class OilMonitorEngine:
                 if story and story_ts is not None and now - story_ts < _FASTLANE_STORY_TTL_SEC:
                     self._seen_titles.add(key)
                     continue
+                is_cond = _is_hormuz_deal_condition((it.title or "").lower())
                 if any(
                     titles_too_similar(it.title, prev, threshold=sim_thr)
+                    and not (
+                        is_cond
+                        and not _is_hormuz_deal_condition((prev or "").lower())
+                    )
                     for prev in self._recent_sent_titles[-40:]
                 ):
                     self._seen_titles.add(key)
@@ -4936,6 +4955,15 @@ class OilMonitorEngine:
             self._remember_news(items, cutoff=cutoff)
 
             if fresh:
+                # Условие сделки / Ормуз caveat — первыми, не терять из‑за max_per_poll=1..2
+                fresh.sort(
+                    key=lambda it: (
+                        0
+                        if _is_hormuz_deal_condition((it.title or "").lower())
+                        else 1,
+                        -news_critical_score(it.title, source=it.source),
+                    )
+                )
                 batch = fresh[:max_per_poll]
                 use_gemini = bool(getattr(settings, "oil_fastlane_gemini", True))
                 if separate:

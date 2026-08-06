@@ -105,6 +105,13 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("defense.gov", "DoD", 1),
     ("eia.gov", "EIA", 1),
     ("energy information administration", "EIA", 1),
+    # Gulf / MENA wire — часто первыми по Ормузу
+    ("thenationalnews.com", "The National", 1),
+    ("the national", "The National", 1),
+    ("gulfnews.com", "Gulf News", 2),
+    ("gulf news", "Gulf News", 2),
+    ("aljazeera.com", "Al Jazeera", 2),
+    ("al jazeera", "Al Jazeera", 2),
     # Иранская гос. линия — важна для Ормуза (не WSJ, но primary для Тегерана)
     ("farsnews.ir", "Fars", 2),
     ("fars news", "Fars", 2),

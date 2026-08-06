@@ -26,6 +26,13 @@ def test_hormuz_us_ships_ban_condition():
     assert "caveat" in key or "us_ships" in key
     plain = _news_story_key("US and Iran promote Hormuz reopen deal")
     assert key != plain
+    from bot.oil_monitor import titles_too_similar
+
+    # Перепечатка deal не должна «съесть» caveat по Jaccard
+    assert titles_too_similar(title, "US and Iran promote Hormuz reopen deal", threshold=0.55) is False or (
+        _is_hormuz_deal_condition(title.lower())
+        and not _is_hormuz_deal_condition("US and Iran promote Hormuz reopen deal".lower())
+    )
     what, means, direction = _explain_headline(title)
     assert "услови" in what.lower() or "без судов" in what.lower()
     assert "не" in means.lower() or "premium" in means.lower()

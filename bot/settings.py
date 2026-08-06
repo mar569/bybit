@@ -2008,6 +2008,18 @@ class SettingsManager:
                 merged["oil_fastlane_ai_min_score"] = min(
                     8, int(merged.get("oil_fastlane_ai_min_score", 8) or 8)
                 )
+                merged["oil_news_max_per_poll"] = max(
+                    2, int(merged.get("oil_news_max_per_poll", 2) or 2)
+                )
+                merged["oil_fastlane_max_per_poll"] = max(
+                    2, int(merged.get("oil_fastlane_max_per_poll", 2) or 2)
+                )
+                merged["oil_setup_min_quality"] = max(
+                    9, int(merged.get("oil_setup_min_quality", 9) or 9)
+                )
+                merged["oil_bounce_min_news_score"] = max(
+                    4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)
