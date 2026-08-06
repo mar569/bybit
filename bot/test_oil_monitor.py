@@ -695,6 +695,8 @@ def test_oil_news_hard_cap_two_days():
 
     now = time.time()
     assert oil_news_is_fresh(now - 3 * 3600, max_age_hours=24)
+    assert oil_news_is_fresh(now - 10 * 60, max_age_hours=0.33)
+    assert not oil_news_is_fresh(now - 40 * 60, max_age_hours=0.5)
     assert not oil_news_is_fresh(now - 50 * 3600, max_age_hours=100)
     assert not oil_news_is_fresh(now - 49 * 3600, max_age_hours=48)
     # Свежий импульс весит больше старого фона
@@ -708,6 +710,127 @@ def test_oil_news_hard_cap_two_days():
     # После ~1.5ч вес уже слабый (фон, не вход)
     assert oil_news_freshness_weight(now - 2 * 3600) <= 0.35
     assert oil_news_freshness_weight(now - 50 * 3600) == 0.0
+
+
+def test_oil_news_detail_only_fresh_critical():
+    import time
+    from bot.oil_monitor import oil_news_detail_worth_it, oil_news_chat_max_age_hours
+
+    now = time.time()
+    caveat = "Hormuz Deal Bans US, Israel Ships — Iran ready to sign"
+    assert oil_news_detail_worth_it(
+        caveat, source="Bloomberg", published_ts=now - 8 * 60, max_age_hours=0.25
+    )
+    assert not oil_news_detail_worth_it(
+        caveat, source="Bloomberg", published_ts=now - 25 * 60, max_age_hours=0.25
+    )
+    weak = "Oil story without a clear sign"
+    assert not oil_news_detail_worth_it(
+        weak, source="InvestingLive", published_ts=now - 2 * 60, max_age_hours=0.25
+    )
+    from bot.oil_monitor import is_oil_market_moving_headline
+
+    assert not is_oil_market_moving_headline(weak)
+    # Громкое / desk — дольше в чате (заголовок), чем слабый wire
+    assert oil_news_chat_max_age_hours(caveat, source="Bloomberg") >= 1.5
+    assert oil_news_chat_max_age_hours(weak, source="InvestingLive") <= 0.6
+
+
+def test_priority_outlets_detected_from_google_news_source():
+    from bot.oil_fastlane import detect_fastlane_outlet, is_fastlane_item
+    from bot.oil_monitor import OilNewsItem, oil_news_chat_max_age_hours
+
+    gurl = "https://news.google.com/rss/articles/CBMiabc"
+
+    wsj = detect_fastlane_outlet(
+        "Trump Holds Off Iran Strikes as Hormuz Deal Nears",
+        source="WSJ",
+        url=gurl,
+    )
+    assert wsj is not None and wsj.outlet == "WSJ" and wsj.tier == 1
+
+    inv = detect_fastlane_outlet(
+        "Oil jumps as Iran threatens Hormuz shipping",
+        source="Investing",
+        url=gurl,
+    )
+    assert inv is not None and inv.outlet == "Investing.com"
+
+    fars = detect_fastlane_outlet(
+        "Iran will not reopen Strait of Hormuz — Fars",
+        source="Fars News",
+        url=gurl,
+    )
+    assert fars is not None and fars.outlet == "Fars" and fars.tier == 1
+
+    # InvestingLive не путать с Investing.com
+    il = detect_fastlane_outlet(
+        "Hormuz tanker traffic update",
+        source="InvestingLive",
+        url="https://www.investinglive.com/news/x",
+    )
+    assert il is not None and il.outlet == "InvestingLive"
+
+    item = OilNewsItem(
+        title="Iran will not reopen Strait of Hormuz",
+        url=gurl,
+        source="Fars News",
+        published_ts=time.time() - 3600,
+        impact="bullish",
+        theme="iran_geo",
+    )
+    assert is_fastlane_item(item, min_flash_score=7)
+    assert oil_news_chat_max_age_hours(
+        item.title, source=item.source, url=item.url, outlet="Fars"
+    ) >= 2.0
+
+
+def test_weak_and_noise_sources_blocked():
+    from bot.oil_monitor import is_oil_market_moving_headline, is_weak_oil_news_source
+
+    assert is_weak_oil_news_source("News On AIR", "https://newsonair.gov.in/x")
+    assert is_weak_oil_news_source("tradingnews.com", "https://tradingnews.com/oil")
+    assert not is_oil_market_moving_headline("Oil story without a clear sign")
+    assert not is_oil_market_moving_headline("Markets open with mixed signals on oil")
+
+
+def test_format_fastlane_headline_only_without_ai():
+    from bot.oil_fastlane import detect_fastlane_outlet, format_fastlane_flash
+
+    item = OilNewsItem(
+        title="Oil story without a clear sign",
+        url="https://investinglive.com/x",
+        source="InvestingLive",
+        published_ts=time.time() - 120,
+        impact="bearish",
+        theme="iran_geo",
+    )
+    meta = detect_fastlane_outlet(item.title, item.source, item.url)
+    if meta is None:
+        from bot.oil_fastlane import FastLaneMeta
+
+        meta = FastLaneMeta(
+            outlet="InvestingLive",
+            publisher="InvestingLive",
+            tier=2,
+            flash_score=9,
+            is_flash=True,
+        )
+    text = format_fastlane_flash(item, meta=meta, ai_ru="", age_label="2 мин")
+    assert "→" not in text
+    assert "Не ловить" not in text
+    assert "не входить" not in text
+    assert "InvestingLive" in text
+
+
+def test_strip_gemini_oil_meta_inline():
+    from bot.oil_fastlane import strip_gemini_oil_meta
+
+    raw = "OIL_RELEVANT: YES\nOIL_BIAS: UP\n• Суть: Иран ужесточает доступ.\nПочему вверх."
+    cleaned = strip_gemini_oil_meta(raw)
+    assert "OIL_RELEVANT" not in cleaned.upper()
+    assert "OIL_BIAS" not in cleaned.upper()
+    assert "Иран" in cleaned
 
 
 def test_parse_rss_pub_empty_is_none():

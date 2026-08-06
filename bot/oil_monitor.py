@@ -598,6 +598,16 @@ _OIL_NOISE_PHRASES: tuple[str, ...] = (
     "markets open with",
     "gasoline inventory",  # слабый routine без EIA surprise
     "crack spread",
+    # Пустые wire-заголовки — не катализатор
+    "without a clear",
+    "oil story without",
+    "no clear direction",
+    "mixed signals",
+    "what it means for",
+    "things to know",
+    "week ahead",
+    "in pictures",
+    "opinion:",
 )
 
 # Иран в заголовке ≠ нефть (cyber/water и пр.)
@@ -725,6 +735,12 @@ _WEAK_NEWS_SOURCES = (
     "msn.com",
     "yahoo.com",
     "yahoo finance",
+    "newsonair",
+    "news on air",
+    "tradingnews",
+    "trading news",
+    "livemint",
+    "ndtv",
 )
 
 
@@ -1031,13 +1047,97 @@ def resolve_oil_news_published_ts(
 
 
 def oil_news_is_fresh(published_ts: float | None, *, max_age_hours: float) -> bool:
-    """Свежесть для чата. Жёсткий потолок — 48ч (2 суток)."""
+    """Свежесть для чата. Жёсткий потолок — 48ч; низ — ~6 мин (импульс)."""
     if published_ts is None or published_ts <= 0:
         return False
     hard_cap_h = 48.0
-    max_age_h = max(1.0, min(hard_cap_h, float(max_age_hours)))
+    # Раньше max(1.0,…) не давал резать ленту до 10–30 мин
+    max_age_h = max(0.1, min(hard_cap_h, float(max_age_hours)))
     age_h = (time.time() - published_ts) / 3600.0
     return 0.0 <= age_h <= max_age_h
+
+
+def oil_news_detail_worth_it(
+    title: str,
+    *,
+    source: str = "",
+    published_ts: float | None = None,
+    max_age_hours: float = 0.25,
+    min_score: int = 12,
+) -> bool:
+    """Описание/ИИ — только пока импульс жив (~15м) и сюжет реально двигает Brent."""
+    if not oil_news_is_fresh(published_ts, max_age_hours=max_age_hours):
+        return False
+    low = (title or "").lower()
+    if _is_hormuz_deal_condition(low):
+        return True
+    score = news_critical_score(title, source=source)
+    if score >= min_score:
+        return True
+    try:
+        from .oil_fastlane import detect_oil_primary_actors
+
+        # Трамп/Бессент/Ормуз — можно чуть раньше по score
+        if detect_oil_primary_actors(title) and score >= max(10, min_score - 2):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def oil_news_chat_max_age_hours(
+    title: str,
+    *,
+    source: str = "",
+    url: str = "",
+    tier: int = 2,
+    flash_score: int = 0,
+    outlet: str = "",
+) -> float:
+    """Сколько держать заголовок в чате.
+
+    WSJ/Reuters/Bloomberg/Fars/Investing часто приходят из Google News с лагом
+    30–90м — резать на 20–45м = «список есть, а новостей нет».
+    Описание/ИИ режется отдельно (~15м).
+    """
+    low = (title or "").lower()
+    if _is_hormuz_deal_condition(low):
+        return 2.0
+    out = (outlet or "").strip()
+    if not out:
+        try:
+            from .oil_fastlane import _PRIORITY_FLASH_OUTLETS, detect_fastlane_outlet
+
+            meta = detect_fastlane_outlet(title, source, url)
+            if meta is not None:
+                out = meta.outlet
+                tier = meta.tier
+                flash_score = meta.flash_score
+            if out in _PRIORITY_FLASH_OUTLETS:
+                return 2.0
+        except Exception:
+            pass
+    else:
+        try:
+            from .oil_fastlane import _PRIORITY_FLASH_OUTLETS
+
+            if out in _PRIORITY_FLASH_OUTLETS:
+                return 2.0
+        except Exception:
+            pass
+    score = news_critical_score(title, source=source)
+    if score >= 11 or (tier <= 1 and flash_score >= 11):
+        return 1.5
+    try:
+        from .oil_fastlane import detect_oil_primary_actors
+
+        if detect_oil_primary_actors(title):
+            return 1.25
+    except Exception:
+        pass
+    if any(k in low for k in ("hormuz", "ормуз")) and score >= 8:
+        return 1.25
+    return 0.5
 
 
 def _google_news_undated(url: str) -> bool:
@@ -3247,21 +3347,23 @@ def _age_label(published_ts: float) -> str:
     return datetime.fromtimestamp(published_ts, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
 
 def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
-    """Коротко по-русски: суть + направление + возраст (+ живой ИИ если есть)."""
-    try:
-        from .oil_why import _explain_headline
-
-        what, means, _ = _explain_headline(item.title)
-    except Exception:
-        what, means = "", ""
+    """Заголовок + источник. Описание/ИИ — только если передали ai_ru (критичное+свежее)."""
     raw = (item.title or "").strip()
-    generic = (not what) or ("без ясного" in what.lower()) or ("сюжет по нефти" in what.lower())
-    # При живом ИИ — оригинал заголовка + ИИ, без шаблонного «танкеры свободно»
-    if ai_ru:
-        display = raw
-        means = ""
-    else:
-        display = raw if generic else what
+    display = raw
+    if not ai_ru:
+        try:
+            from .oil_why import _explain_headline
+
+            what, _means, _ = _explain_headline(item.title)
+            generic = (
+                (not what)
+                or ("без ясного" in what.lower())
+                or ("сюжет по нефти" in what.lower())
+            )
+            if what and not generic:
+                display = what
+        except Exception:
+            pass
     impact_ru = {
         "bullish": "🟢↑",
         "bearish": "🔴↓",
@@ -3276,16 +3378,14 @@ def format_single_oil_news(item: OilNewsItem, *, ai_ru: str = "") -> str:
     else:
         head = f"{bang}{impact_ru} <b>{safe}</b>"
     lines = [head]
-    if means and not generic and not ai_ru:
-        lines.append(f"→ {means.replace('<', '&lt;').replace('>', '&gt;')}")
     lines.append(f"<i>{item.source} · {_age_label(item.published_ts)}</i>")
     if ai_ru:
         safe_ai = (
             ai_ru.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         )
         short = " ".join(safe_ai.split())
-        if len(short) > 320:
-            short = short[:317] + "…"
+        if len(short) > 220:
+            short = short[:217] + "…"
         lines.append(short)
     return "\n".join(lines)
 
@@ -3325,11 +3425,9 @@ async def enrich_oil_news_blurb(
             api_key=api_key,
             model=model,
             context_text=(
-                "Ты нефтяной desk-аналитик. Ответ ТОЛЬКО по-русски, 2–3 коротких пункта.\n"
-                "Не шаблон. Объясни ЭТУ новость: что изменилось и почему цена может "
-                "расти или падать.\n"
-                "Если условие «без судов США/Израиля» — явно скажи: это НЕ чистый reopen, "
-                "premium может остаться.\n"
+                "Ты нефтяной desk-аналитик. Ответ ТОЛЬКО по-русски, 1–2 коротких предложения.\n"
+                "Без пунктов и без шаблонов. Суть новости + почему Brent ↑/↓/mixed.\n"
+                "Если условие «без судов США/Израиля» — это НЕ чистый reopen.\n"
                 "Без entry/stop/TP и без «ВЕРДИКТ LONG/SHORT».\n"
                 f"Заголовок: {item.title}\n"
                 f"Источник: {item.source}\n"
@@ -4591,19 +4689,20 @@ class OilMonitorEngine:
             _price_move_note,
         )
 
-        max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 1.5))
+        max_age_h = float(getattr(settings, "oil_fastlane_max_age_hours", 2.0))
         min_score = int(getattr(settings, "oil_fastlane_min_score", 9))
-        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 2))
+        max_per = int(getattr(settings, "oil_fastlane_max_per_poll", 3))
         include_ru = bool(getattr(settings, "oil_russian_news", True))
-        # ИИ на Ормуз/Трамп/условиях — живой текст в том же flash
+        # ИИ только на свежем критичном (~15м)
         ai_enabled = bool(getattr(settings, "oil_fastlane_gemini", True))
-        ai_min = int(getattr(settings, "oil_fastlane_ai_min_score", 8))
+        ai_min = int(getattr(settings, "oil_fastlane_ai_min_score", 12))
+        blurb_age_h = float(getattr(settings, "oil_news_blurb_max_age_hours", 0.25))
         include_wire = bool(getattr(settings, "oil_wire_feeds_enabled", True))
         sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.55))
 
         try:
             items = await fetch_oil_fastlane_news(
-                max_items=12,
+                max_items=24,
                 max_age_hours=max_age_h,
                 min_flash_score=min_score,
                 include_russian=include_ru,
@@ -4666,15 +4765,22 @@ class OilMonitorEngine:
                 for k, ts in self._seen_fastlane_stories.items()
                 if now - ts < _FASTLANE_STORY_TTL_SEC
             }
-        # Условие Ормуз / громкие — раньше, чтобы не срезать max_per
-        items = sorted(
-            items,
-            key=lambda it: (
+        # Priority desk (WSJ/Fars/Investing…) раньше InvestingLive-шума
+        from .oil_fastlane import _PRIORITY_FLASH_OUTLETS
+
+        def _flash_sort_key(it: OilNewsItem) -> tuple:
+            meta = detect_fastlane_outlet(it.title, it.source, it.url or "")
+            outlet = meta.outlet if meta else ""
+            tier = meta.tier if meta else 9
+            return (
                 0 if _is_hormuz_deal_condition((it.title or "").lower()) else 1,
+                0 if outlet in _PRIORITY_FLASH_OUTLETS else 1,
                 0 if detect_oil_primary_actors(it.title) else 1,
+                tier,
                 -news_critical_score(it.title, source=it.source),
-            ),
-        )
+            )
+
+        items = sorted(items, key=_flash_sort_key)
         for it in items:
             key = it.title.lower()[:120]
             story = _news_story_key(it.title)
@@ -4713,11 +4819,43 @@ class OilMonitorEngine:
             meta = detect_fastlane_outlet(it.title, it.source, it.url or "")
             if meta is None:
                 continue
+            if meta.flash_score < min_score and meta.tier > 1:
+                self._seen_fastlane.add(key)
+                continue
+            # Адаптивный возраст: WSJ/Fars/Investing до ~2ч (заголовок), шум ~30м
+            post_h = min(
+                max_age_h,
+                oil_news_chat_max_age_hours(
+                    it.title,
+                    source=it.source,
+                    url=it.url or "",
+                    tier=meta.tier,
+                    flash_score=meta.flash_score,
+                    outlet=meta.outlet,
+                ),
+            )
+            if not oil_news_is_fresh(it.published_ts, max_age_hours=post_h):
+                self._seen_fastlane.add(key)
+                logger.info(
+                    "Oil fast-lane skip stale (>%sg): %s",
+                    f"{post_h * 60:.0f}m",
+                    it.title[:80],
+                )
+                continue
 
-            # Живой ИИ ДО отправки — один flash, не шаблон + догонялка
+            # Текст снизу только ≤~15м и только сильный катализатор
             ai_ru = ""
-            want_ai = ai_enabled and should_ai_analyze_flash(
-                it.title, meta, min_score=ai_min
+            show_body = oil_news_detail_worth_it(
+                it.title,
+                source=it.source,
+                published_ts=it.published_ts,
+                max_age_hours=blurb_age_h,
+                min_score=max(12, ai_min),
+            )
+            want_ai = (
+                ai_enabled
+                and show_body
+                and should_ai_analyze_flash(it.title, meta, min_score=ai_min)
             )
             if want_ai:
                 ai_ru, bias_ov = await enrich_fastlane_with_gemini(
@@ -4747,6 +4885,20 @@ class OilMonitorEngine:
                         mapped = "neutral" if bias_ov == "mixed" else bias_ov
                         if mapped != it.impact:
                             it = replace(it, impact=mapped)
+
+            # Критичное+свежее, но ИИ молчит — одна короткая строка, не простыня
+            if show_body and not ai_ru:
+                try:
+                    from .oil_why import _explain_headline
+
+                    _w, means, _d = _explain_headline(it.title or "")
+                    means = (means or "").strip()
+                    if means and "танкер" not in means.lower()[:20]:
+                        if len(means) > 140:
+                            means = means[:137] + "…"
+                        ai_ru = means
+                except Exception:
+                    pass
 
             msg = format_fastlane_flash(
                 it,
@@ -4902,12 +5054,13 @@ class OilMonitorEngine:
             self._last_regular_news_ts = now
 
             fresh: list[OilNewsItem] = []
-            # В чат — только свежие (≤1ч), не фон 4–12ч
+            # В чат: потолок ~2ч для desk; слабые режутся адаптивно
             post_max_h = min(
-                1.0,
-                float(getattr(settings, "oil_fastlane_max_age_hours", 1.0) or 1.0),
+                2.0,
+                float(getattr(settings, "oil_fastlane_max_age_hours", 2.0) or 2.0),
             )
             sim_thr = float(getattr(settings, "oil_dedupe_similarity", 0.42))
+            blurb_age_h = float(getattr(settings, "oil_news_blurb_max_age_hours", 0.25))
             if self._seen_fastlane_stories:
                 self._seen_fastlane_stories = {
                     k: ts
@@ -4917,15 +5070,20 @@ class OilMonitorEngine:
             for it in items:
                 if not oil_news_is_fresh(it.published_ts, max_age_hours=post_max_h):
                     continue
-                if not is_oil_market_moving_headline(it.title):
-                    continue
                 if is_weak_oil_news_source(it.source, it.url):
                     self._seen_titles.add(it.title.lower()[:120])
+                    continue
+                chat_h = oil_news_chat_max_age_hours(
+                    it.title, source=it.source, url=it.url or ""
+                )
+                if not oil_news_is_fresh(it.published_ts, max_age_hours=chat_h):
+                    continue
+                if not is_oil_market_moving_headline(it.title):
                     continue
                 try:
                     from .oil_fastlane import is_syndicate_host
 
-                    if is_syndicate_host(it.source, it.url):
+                    if is_syndicate_host(it.url or "", it.source):
                         self._seen_titles.add(it.title.lower()[:120])
                         continue
                 except Exception:
@@ -4969,12 +5127,12 @@ class OilMonitorEngine:
                 if separate:
                     for it in batch:
                         ai_ru = ""
-                        sc = news_critical_score(it.title, source=it.source)
-                        th = it.theme or detect_oil_news_theme(it.title, source=it.source)
-                        want_ai = use_gemini and (
-                            th in {"iran_geo", "trump_us", "flow_deal"}
-                            or sc >= 10
-                            or _is_hormuz_deal_condition((it.title or "").lower())
+                        want_ai = use_gemini and oil_news_detail_worth_it(
+                            it.title,
+                            source=it.source,
+                            published_ts=it.published_ts,
+                            max_age_hours=blurb_age_h,
+                            min_score=12,
                         )
                         if want_ai:
                             ai_ru = await enrich_oil_news_blurb(

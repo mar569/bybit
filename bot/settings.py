@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 87
+SETTINGS_VERSION = 90
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -543,7 +543,9 @@ class ScannerSettings:
     # Fast-lane: WSJ/Reuters/Bloomberg/Blas/FT/NYT/official → ‼️ КРИТИЧНО
     oil_fastlane_enabled: bool = True
     oil_fastlane_interval_seconds: int = 45
-    oil_fastlane_max_age_hours: float = 1.0
+    oil_fastlane_max_age_hours: float = 2.0
+    # Описание/ИИ к новости — только пока импульс жив (~15 мин)
+    oil_news_blurb_max_age_hours: float = 0.25
     # Новости дают очки входа в confluence только пока ≤ этого возраста
     oil_news_entry_max_age_hours: float = 0.5
     # Торговый bias: утро не кормит вечер (жёсткий возраст сюжетов)
@@ -563,7 +565,7 @@ class ScannerSettings:
     oil_fastlane_max_per_poll: int = 1
     # ИИ-разбор только важных (Трамп/Бессент/Ормуз), короткий текст
     oil_fastlane_gemini: bool = True
-    oil_fastlane_ai_min_score: int = 11
+    oil_fastlane_ai_min_score: int = 12
     # Прямые RSS FinancialJuice / ForexLive (раньше Google News)
     oil_wire_feeds_enabled: bool = True
     # Анти-спам: Jaccard похожести заголовков (0.5–0.65)
@@ -1163,7 +1165,10 @@ class ScannerSettings:
                 base.get("oil_fastlane_interval_seconds", 45)
             ),
             oil_fastlane_max_age_hours=float(
-                base.get("oil_fastlane_max_age_hours", 1.0)
+                base.get("oil_fastlane_max_age_hours", 2.0)
+            ),
+            oil_news_blurb_max_age_hours=float(
+                base.get("oil_news_blurb_max_age_hours", 0.25)
             ),
             oil_news_entry_max_age_hours=float(
                 base.get("oil_news_entry_max_age_hours", 0.5)
@@ -2019,6 +2024,42 @@ class SettingsManager:
                 )
                 merged["oil_bounce_min_news_score"] = max(
                     4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
+                )
+            if version < 88:
+                # В чат ≤45м потолок; описание/ИИ только ≤~15–20м и только критичное
+                merged["oil_fastlane_max_age_hours"] = min(
+                    0.75, float(merged.get("oil_fastlane_max_age_hours", 0.75) or 0.75)
+                )
+                merged["oil_news_blurb_max_age_hours"] = min(
+                    0.33,
+                    float(merged.get("oil_news_blurb_max_age_hours", 0.33) or 0.33),
+                )
+                merged["oil_fastlane_ai_min_score"] = max(
+                    11, int(merged.get("oil_fastlane_ai_min_score", 11) or 11)
+                )
+            if version < 89:
+                # Desk: заголовок дольше, текст короче; wire FL/IL не Tier‑1
+                merged["oil_fastlane_max_age_hours"] = min(
+                    0.75, float(merged.get("oil_fastlane_max_age_hours", 0.75) or 0.75)
+                )
+                merged["oil_news_blurb_max_age_hours"] = min(
+                    0.25,
+                    float(merged.get("oil_news_blurb_max_age_hours", 0.25) or 0.25),
+                )
+                merged["oil_fastlane_ai_min_score"] = max(
+                    12, int(merged.get("oil_fastlane_ai_min_score", 12) or 12)
+                )
+            if version < 90:
+                # WSJ/Fars/Investing снова в чат: fetch ≤2ч, описание всё ещё ≤15м
+                merged["oil_fastlane_max_age_hours"] = max(
+                    2.0, float(merged.get("oil_fastlane_max_age_hours", 2.0) or 2.0)
+                )
+                merged["oil_news_blurb_max_age_hours"] = min(
+                    0.25,
+                    float(merged.get("oil_news_blurb_max_age_hours", 0.25) or 0.25),
+                )
+                merged["oil_fastlane_max_per_poll"] = max(
+                    3, int(merged.get("oil_fastlane_max_per_poll", 3) or 3)
                 )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)

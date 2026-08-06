@@ -72,6 +72,7 @@ FAST_LANE_QUERIES_RU: tuple[str, ...] = (
 )
 
 # Needle только в source/url (НЕ в title) — иначе EdexLive «White House signals…» = fake Tier-1
+# Более длинный needle выигрывает при конфликте (investinglive > investing).
 _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("wall street journal", "WSJ", 1),
     ("wsj.com", "WSJ", 1),
@@ -82,21 +83,18 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("apnews.com", "AP", 1),
     ("associated press", "AP", 1),
     ("javier blas", "Javier Blas", 1),
+    ("investinglive.com", "InvestingLive", 2),
+    ("investinglive", "InvestingLive", 2),
     ("investing.com", "Investing.com", 1),
-    # Трейдерский wire — раньше массовых СМИ
     ("financialjuice.com", "FinancialJuice", 1),
     ("financialjuice", "FinancialJuice", 1),
-    ("forexlive.com", "ForexLive", 1),
-    ("forexlive", "ForexLive", 1),
-    ("investinglive.com", "InvestingLive", 1),
-    ("investinglive", "InvestingLive", 1),
+    ("forexlive.com", "ForexLive", 2),
+    ("forexlive", "ForexLive", 2),
     ("truthsocial.com", "Truth Social", 1),
     ("truth social", "Truth Social", 1),
     ("x.com", "X", 1),
     ("twitter.com", "X", 1),
-    ("x @", "X", 1),
     ("deltaone", "X · DeItaone", 1),
-    ("financialjuice", "FinancialJuice", 1),
     ("ft.com", "FT", 2),
     ("financial times", "FT", 2),
     ("nytimes.com", "NYT", 2),
@@ -105,20 +103,41 @@ _TIER1_SOURCES: tuple[tuple[str, str, int], ...] = (
     ("defense.gov", "DoD", 1),
     ("eia.gov", "EIA", 1),
     ("energy information administration", "EIA", 1),
-    # Gulf / MENA wire — часто первыми по Ормузу
     ("thenationalnews.com", "The National", 1),
+    ("the national news", "The National", 1),
     ("the national", "The National", 1),
     ("gulfnews.com", "Gulf News", 2),
     ("gulf news", "Gulf News", 2),
     ("aljazeera.com", "Al Jazeera", 2),
     ("al jazeera", "Al Jazeera", 2),
-    # Иранская гос. линия — важна для Ормуза (не WSJ, но primary для Тегерана)
-    ("farsnews.ir", "Fars", 2),
-    ("fars news", "Fars", 2),
-    ("farsnews", "Fars", 2),
-    ("tasnimnews.com", "Tasnim", 2),
-    ("tasnim", "Tasnim", 2),
-    ("irna.ir", "IRNA", 2),
+    # Иранская гос. линия = primary по Ормузу
+    ("farsnews.ir", "Fars", 1),
+    ("fars news", "Fars", 1),
+    ("farsnews", "Fars", 1),
+    ("tasnimnews.com", "Tasnim", 1),
+    ("tasnim", "Tasnim", 1),
+    ("irna.ir", "IRNA", 1),
+)
+
+# Заголовок в чат держим дольше (Google News / paywall WSJ часто +30–90м)
+_PRIORITY_FLASH_OUTLETS: frozenset[str] = frozenset(
+    {
+        "WSJ",
+        "Reuters",
+        "Bloomberg",
+        "AP",
+        "Investing.com",
+        "FinancialJuice",
+        "Fars",
+        "Tasnim",
+        "IRNA",
+        "The National",
+        "Javier Blas",
+        "Truth Social",
+        "EIA",
+        "White House",
+        "DoD",
+    }
 )
 
 # Домены-синдикаты / образовательные зеркала — не пускать в ‼️
@@ -343,26 +362,43 @@ def detect_fastlane_outlet(title: str, source: str = "", url: str = "") -> FastL
     if is_syndicate_host(url, source):
         return None
 
-    # Только source + host — title не участвует в определении outlet
-    # (исключение: именные аналитики Javier Blas — часто в title, не в domain)
     host = _url_host(url)
     provenance = f"{source or ''} {host} {url or ''}".lower()
+    # Нормализация коротких имён из Google News <source>
+    src_l = (source or "").strip().lower()
+    if src_l in {"wsj", "the wsj"} or src_l.startswith("wsj "):
+        provenance = f"wall street journal {provenance}"
+    if src_l in {"investing", "investing.com"} or (
+        "investing" in src_l and "investinglive" not in src_l and "live" not in src_l
+    ):
+        provenance = f"investing.com {provenance}"
+    if src_l in {"fars", "fars news", "farsnews"} or src_l.startswith("fars "):
+        provenance = f"fars news {provenance}"
+    if src_l in {"irna", "irna news"}:
+        provenance = f"irna.ir {provenance}"
+
     title_l = (title or "").lower()
     analyst_blob = f"{provenance} {title_l}"
 
-    best: tuple[str, int] | None = None
+    best: tuple[str, int, int] | None = None  # display, tier, needle_len
     for needle, display, tier in _TIER1_SOURCES:
         blob = analyst_blob if display == "Javier Blas" else provenance
         if needle not in blob:
             continue
-        if best is None or tier < best[1]:
-            best = (display, tier)
-        elif tier == best[1] and display in {"WSJ", "Javier Blas", "Bloomberg", "Reuters", "AP"}:
-            # Именной аналитик важнее общего Bloomberg Opinion
-            if display == "Javier Blas":
-                best = (display, tier)
-            elif best[0] != "Javier Blas" and display in {"WSJ", "Bloomberg", "Reuters", "AP"}:
-                best = (display, tier)
+        # investing.com не должен перехватывать InvestingLive
+        if display == "Investing.com" and "investinglive" in provenance:
+            continue
+        nlen = len(needle)
+        if best is None:
+            best = (display, tier, nlen)
+            continue
+        # Лучший tier (1 < 2); при равенстве — более длинный needle / desk-имя
+        if tier < best[1] or (tier == best[1] and nlen > best[2]):
+            best = (display, tier, nlen)
+        elif tier == best[1] and nlen == best[2]:
+            if display in {"WSJ", "Javier Blas", "Bloomberg", "Reuters", "AP", "Fars"}:
+                if best[0] != "Javier Blas" or display == "Javier Blas":
+                    best = (display, tier, nlen)
 
     if best is None:
         return None
@@ -401,11 +437,10 @@ def is_fastlane_item(item: Any, *, min_flash_score: int = 7) -> bool:
     )
     if meta is None:
         return False
-    # Tier-1 geo/oil always; tier-2 needs higher score
-    if meta.tier == 1 and meta.flash_score >= min_flash_score:
+    # Priority desk (WSJ/Reuters/Bloomberg/Fars/Investing…) — тот же порог
+    if meta.outlet in _PRIORITY_FLASH_OUTLETS and meta.flash_score >= min_flash_score:
         return True
-    # Иранские агентства (Fars/Tasnim/IRNA) — тот же порог, что Tier-1 по Ормузу
-    if meta.outlet in {"Fars", "Tasnim", "IRNA"} and meta.flash_score >= min_flash_score:
+    if meta.tier == 1 and meta.flash_score >= min_flash_score:
         return True
     if meta.tier == 2 and meta.flash_score >= min_flash_score + 2:
         return True
@@ -498,12 +533,10 @@ async def enrich_fastlane_with_gemini(
         user = (
             "Строка1: OIL_RELEVANT: YES|NO\n"
             "Строка2 (если YES): OIL_BIAS: UP|DOWN|MIXED\n"
-            "Если NO — одна фраза почему шум.\n"
-            "Если YES — РОВНО 3 коротких пункта:\n"
-            "• Суть (что именно в новости)\n"
-            "• Почему Brent вверх/вниз/mixed\n"
-            "• Что ждать 1–3ч\n"
-            + ("Важно: в заголовке условие по судам США — отрази это.\n" if cond else "")
+            "Если NO — одна короткая фраза.\n"
+            "Если YES — ОДНО-ДВА предложения по-русски: суть + влияние на Brent. "
+            "Без пунктов, без «Суть/Почему/Что ждать».\n"
+            + ("Условие по судам США — отрази: не чистый reopen.\n" if cond else "")
         )
         result = await ask_gemini(
             api_key=api_key,
@@ -540,16 +573,21 @@ def parse_gemini_oil_bias(ai_text: str) -> str | None:
 
 def strip_gemini_oil_meta(ai_text: str) -> str:
     """Убирает служебные OIL_RELEVANT / OIL_BIAS из текста для чата."""
-    lines = (ai_text or "").splitlines()
-    kept: list[str] = []
-    for line in lines:
-        u = line.upper().replace(" ", "")
-        if u.startswith("OIL_RELEVANT:") or u.startswith("OIL_BIAS:"):
-            continue
-        if "OIL_RELEVANT" in u and len(u) < 24:
-            continue
-        kept.append(line)
-    return "\n".join(kept).strip()
+    text = ai_text or ""
+    text = re.sub(
+        r"(?im)^\s*OIL_RELEVANT\s*[:：]\s*\S+\s*$",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?im)^\s*OIL_BIAS\s*[:：]\s*\S+\s*$",
+        "",
+        text,
+    )
+    text = re.sub(r"(?i)\bOIL_RELEVANT\s*[:：]\s*\S+", "", text)
+    text = re.sub(r"(?i)\bOIL_BIAS\s*[:：]\s*\S+", "", text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines).strip()
 
 
 def strip_invented_trade_levels(ai_text: str) -> str:
@@ -663,7 +701,8 @@ def format_fastlane_flash(
     age_label: str = "",
     compact: bool = True,
 ) -> str:
-    """Короткий ‼️ flash — по-русски, без сырого EN-заголовка."""
+    """Короткий ‼️ flash: заголовок. Текст снизу — только если передали ai_ru."""
+    del move_note, compact
     raw_title = getattr(item, "title", "") or ""
     url = getattr(item, "url", "") or ""
     impact = getattr(item, "impact", "neutral") or "neutral"
@@ -679,33 +718,34 @@ def format_fastlane_flash(
     if actor_line:
         head += f" · {actor_line}"
 
-    what, means = _headline_ru(raw_title)
-    # При живом ИИ — оригинал + ИИ, без шаблонного «танкеры свободно»
-    if ai_ru:
+    # Всегда оригинал/короткий what — без стрелки «влияние» (это и есть описание)
+    what, _means = _headline_ru(raw_title)
+    if (
+        ai_ru
+        or (not what)
+        or ("без ясного" in what.lower())
+        or ("сюжет по нефти" in what.lower())
+        or ("oil story" in what.lower())
+    ):
         what = raw_title
-        means = ""
     lines = [head, f"<b>{_esc(what)}</b>"]
-    if means:
-        lines.append(f"→ {_esc(means)}")
     if url:
         lines.append(f'<a href="{url}">источник</a>')
 
     if ai_ru:
         short = " ".join(ai_ru.strip().split())
-        if len(short) > 280:
-            short = short[:277] + "…"
+        if len(short) > 180:
+            short = short[:177] + "…"
         lines.append(_esc(short))
-    else:
-        hint = _bounce_hint(impact, move_note)
-        if hint:
-            lines.append(hint)
 
     src = (getattr(item, "source", "") or meta.publisher or meta.outlet).strip()
     age = age_label or ""
     foot = f"<i>{src}"
     if age:
         foot += f" · {age}"
-    foot += " · не входить 5–15м</i>"
+    if ai_ru:
+        foot += " · импульс"
+    foot += "</i>"
     lines.append(foot)
     return "\n".join(lines)
 
