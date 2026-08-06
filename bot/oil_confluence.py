@@ -371,6 +371,40 @@ def build_oil_confluence_setup(
     short_pts += t_short
     factors.extend(t_factors[:6])
 
+    # MACD + импульс: не SHORT в рост / не LONG в падение
+    try:
+        from .oil_macd import compute_oil_macd, trend_blocks_counter_trade
+
+        macd = compute_oil_macd(bars)
+        if macd is not None:
+            factors.append(macd.line_ru)
+            if macd.bias == "bull":
+                long_pts += 2
+                short_pts = max(0, short_pts - 2)
+            elif macd.bias == "bear":
+                short_pts += 2
+                long_pts = max(0, long_pts - 2)
+        # Предварительно смотрим сторону по очкам
+        provisional = (
+            "SHORT"
+            if short_pts > long_pts
+            else "LONG"
+            if long_pts > short_pts
+            else "WAIT"
+        )
+        if provisional in {"LONG", "SHORT"}:
+            blocked, why_b = trend_blocks_counter_trade(
+                bars, side=provisional, interval_minutes=interval_minutes
+            )
+            if blocked:
+                factors.append(why_b)
+                if provisional == "SHORT":
+                    short_pts = 0
+                else:
+                    long_pts = 0
+    except Exception:
+        pass
+
     # TA
     if ta_v == "LONG":
         long_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
@@ -775,6 +809,7 @@ def format_oil_confluence_setup(
     news_items: Sequence[Any] | None = None,
     flow: Any | None = None,
     news_mode: str = "",
+    bars: Sequence[Any] | None = None,
 ) -> str:
     """Понятная ПРО-карточка: почему / фон / план / отмена."""
     from .oil_signal_context import build_signal_drivers, format_clear_signal_card
@@ -796,6 +831,7 @@ def format_oil_confluence_setup(
         news_mode=mode,
         flow=flow,
         side=setup.side,
+        bars=bars,
     )
     # Если в factors уже есть Ормуз/техника — дополним why из factors
     tech_mode = any("режим: ТЕХНИКА" in f for f in setup.factors_ru)

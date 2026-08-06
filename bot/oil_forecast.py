@@ -316,29 +316,22 @@ def build_oil_forecast(
 
     adverse = False
     try:
-        from .oil_entry_filters import measure_recent_move
+        from .oil_macd import compute_oil_macd, trend_blocks_counter_trade
 
-        move = measure_recent_move(
-            bars,
-            interval_minutes=interval_minutes,
-            priced_in_30m_pct=0.40,
-            priced_in_60m_pct=0.65,
+        blocked, why_block = trend_blocks_counter_trade(
+            bars, side=bias, interval_minutes=interval_minutes
         )
-        if move is not None:
-            if bias == "SHORT" and (
-                move.move_30m_pct >= 0.40 or move.move_60m_pct >= 0.65
-            ):
-                adverse = True
-                notes.append(
-                    f"уже ↑{move.move_30m_pct:+.2f}%/30м — не догонять SHORT"
-                )
-            elif bias == "LONG" and (
-                move.move_30m_pct <= -0.40 or move.move_60m_pct <= -0.65
-            ):
-                adverse = True
-                notes.append(
-                    f"уже ↓{move.move_30m_pct:+.2f}%/30м — не догонять LONG"
-                )
+        if blocked:
+            adverse = True
+            notes.append(why_block)
+        else:
+            macd = compute_oil_macd(bars)
+            if macd is not None:
+                notes.append(macd.line_ru)
+                if macd.bias == "bull":
+                    long_pts += 1
+                elif macd.bias == "bear":
+                    short_pts += 1
     except Exception:
         pass
 
@@ -495,6 +488,7 @@ def format_oil_forecast_block(
     news_items: Sequence[Any] | None = None,
     flow: Any | None = None,
     price: float | None = None,
+    bars: Sequence[Any] | None = None,
 ) -> str:
     """Понятный блок прогноза: почему / фон / план / отмена."""
     import re as _re
@@ -506,6 +500,7 @@ def format_oil_forecast_block(
         news_mode=fc.scenario if fc.scenario != "range" else "none",
         flow=flow,
         side=fc.bias,
+        bars=bars,
     )
     if fc.bias in {"LONG", "SHORT"} and drivers.why_ru == "схождение факторов слабое":
         why = _strip_case_prefix(fc.base_case_ru)[:120]

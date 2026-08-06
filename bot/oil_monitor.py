@@ -1836,12 +1836,43 @@ def build_oil_bounce_plan(
     *,
     news_items: list[OilNewsItem] | None = None,
     min_score: float = 3.0,
+    bars: list | None = None,
+    interval_minutes: int = 5,
 ) -> OilBouncePlan | None:
-    """Сильный news-bias → конкретный отскок: уровень, entry, stop, TP."""
+    """Сильный news-bias → конкретный отскок: уровень, entry, stop, TP.
+
+    Не шортит в бычий импульс / бычий MACD — даже если Ормуз в ленте.
+    """
     if news_bias.bias not in {"bullish", "bearish"}:
         return None
     if abs(news_bias.weighted_score) < min_score:
         return None
+
+    # Ормуз не финал → не делать bounce SHORT по слуху
+    try:
+        from .oil_signal_context import analyze_hormuz_context
+
+        hz = analyze_hormuz_context(news_items)
+        if news_bias.bias == "bearish" and (
+            hz.oil_bias == "mixed"
+            or (hz.status in {"not_final", "progress", "talks"} and not hz.for_entry)
+        ):
+            return None
+    except Exception:
+        pass
+
+    # Импульс + MACD
+    try:
+        from .oil_macd import trend_blocks_counter_trade
+
+        want = "short" if news_bias.bias == "bearish" else "long"
+        blocked, _ = trend_blocks_counter_trade(
+            bars, side=want, interval_minutes=interval_minutes
+        )
+        if blocked:
+            return None
+    except Exception:
+        pass
 
     px = float(snap.price or 0.0)
     if px <= 0:
@@ -3497,6 +3528,7 @@ def format_oil_market_digest(
                 news_items=news_items,
                 flow=flow,
                 price=float(primary.price) if primary else None,
+                bars=bars,
             )
         )
     elif primary and ta is not None:
@@ -5307,6 +5339,8 @@ class OilMonitorEngine:
                 news_bias,
                 news_items=self._fresh_news_for_entry(settings),
                 min_score=min_score,
+                bars=bundle.brent_bars,
+                interval_minutes=bundle.interval_minutes,
             )
             self._active_bounce = bounce
             if bounce is not None:
@@ -5454,6 +5488,8 @@ class OilMonitorEngine:
                         wti_bias,
                         news_items=self._fresh_news_for_entry(settings),
                         min_score=min_score,
+                        bars=bundle.wti_bars,
+                        interval_minutes=bundle.interval_minutes,
                     )
                     if wti_bounce is not None:
                         apply_oil_bounce_to_ta(
@@ -5555,6 +5591,8 @@ class OilMonitorEngine:
             news_bias,
             news_items=self._fresh_news_for_entry(settings),
             min_score=float(getattr(settings, "oil_bounce_min_news_score", 3.0)),
+            bars=bundle.brent_bars,
+            interval_minutes=bundle.interval_minutes,
         )
         return await self._maybe_dispatch_confluence_setup(
             settings,
@@ -5666,6 +5704,7 @@ class OilMonitorEngine:
         msg = format_oil_confluence_setup(
             setup,
             news_items=self._recent_news,
+            bars=bundle.brent_bars,
         )
         chart_png = png
         if chart_png is None and bool(getattr(settings, "oil_chart_enabled", True)):

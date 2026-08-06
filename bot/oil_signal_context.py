@@ -303,6 +303,7 @@ def build_signal_drivers(
     flow: Any | None = None,
     inventory_status: Any | None = None,
     side: str = "WAIT",
+    bars: Sequence[Any] | None = None,
 ) -> SignalDrivers:
     """Сводка драйверов для понятного сигнала."""
     hormuz = analyze_hormuz_context(news_items)
@@ -312,7 +313,6 @@ def build_signal_drivers(
             from .oil_inventory import format_inventory_short
 
             raw = format_inventory_short(inventory_status)
-            # strip html tags for factor line
             plain = re.sub(r"<[^>]+>", "", raw)
             if plain:
                 inv = InventoryContext(
@@ -332,6 +332,16 @@ def build_signal_drivers(
     elif fl == "neutral":
         flow_ru = "поток нейтрален"
 
+    macd_ru = ""
+    try:
+        from .oil_macd import compute_oil_macd
+
+        macd = compute_oil_macd(bars)
+        if macd is not None:
+            macd_ru = macd.line_ru
+    except Exception:
+        pass
+
     lines: list[str] = []
     if hormuz.line_ru:
         lines.append(hormuz.line_ru)
@@ -339,6 +349,8 @@ def build_signal_drivers(
         lines.append(inv.line_ru)
     if flow_ru:
         lines.append(flow_ru)
+    if macd_ru:
+        lines.append(macd_ru)
     if news_mode and news_mode != "none":
         lines.append(f"новости: {news_mode.upper()}")
 
@@ -350,6 +362,8 @@ def build_signal_drivers(
             why_parts.append("build запасов")
         if fl == "sell":
             why_parts.append("поток SELL")
+        if "MACD↓" in macd_ru:
+            why_parts.append("MACD↓")
     elif side == "LONG":
         if hormuz.oil_bias == "bullish_soft":
             why_parts.append("риск срыва / блок пролива")
@@ -357,6 +371,8 @@ def build_signal_drivers(
             why_parts.append("draw запасов")
         if fl == "buy":
             why_parts.append("поток BUY")
+        if "MACD↑" in macd_ru:
+            why_parts.append("MACD↑")
     why_ru = " · ".join(why_parts) if why_parts else "схождение факторов слабое"
 
     caution = ""
@@ -370,6 +386,10 @@ def build_signal_drivers(
         caution = "поток против SHORT"
     elif fl == "sell" and side == "LONG":
         caution = "поток против LONG"
+    elif "MACD↑" in macd_ru and side == "SHORT":
+        caution = "MACD бычий — SHORT против индикатора"
+    elif "MACD↓" in macd_ru and side == "LONG":
+        caution = "MACD медвежий — LONG против индикатора"
 
     return SignalDrivers(
         hormuz=hormuz,
