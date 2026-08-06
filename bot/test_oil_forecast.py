@@ -63,6 +63,7 @@ def test_detect_disruption_scenario():
 
 
 def test_build_forecast_short_on_deal_tape():
+    """Deal-tape без финала сделки → WAIT (не chase SHORT)."""
     import time
 
     snap = _snap(verdict="SHORT", confidence=6)
@@ -92,18 +93,15 @@ def test_build_forecast_short_on_deal_tape():
         ta_verdict_raw="SHORT",
         ta_confidence_raw=6,
     )
-    assert fc.bias == "SHORT"
     assert fc.scenario == "deal_tape"
-    assert 5 <= fc.confidence <= 9
+    assert fc.bias == "WAIT"
     assert fc.confidence != 10
     text = format_oil_forecast_block(fc)
-    assert "SHORT" in text
-    assert "Отмена" in text or "✖" in text
+    assert "WAIT" in text
     assert "Следить" not in text
     assert "База: База" not in text
     assert "правила бота" not in text
     assert "Прогноз UKOUSD" not in text
-    assert "СИГНАЛ" in text or "SHORT" in text
 
 
 def test_build_forecast_wait_on_mixed():

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 84
+SETTINGS_VERSION = 85
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -589,7 +589,7 @@ class ScannerSettings:
     oil_forecast_gemini: bool = False
     # Confluence-setup → чат ручного TA (только сильные LONG/SHORT)
     oil_setup_enabled: bool = True
-    oil_setup_min_quality: int = 8
+    oil_setup_min_quality: int = 9
     oil_setup_cooldown_seconds: int = 10800  # 3ч
     oil_setup_near_pct: float = 0.35
     # Не слать карточку «Вход» сразу после дайджеста (там уже план)
@@ -603,7 +603,7 @@ class ScannerSettings:
     oil_bounce_alerts_enabled: bool = True
     oil_bounce_alert_cooldown_seconds: int = 7200
     oil_bounce_near_pct: float = 0.4
-    oil_bounce_min_news_score: float = 3.0
+    oil_bounce_min_news_score: float = 4.0
     # Микро-сигналы UKOUSD: цель ~0.2–0.3%
     oil_micro_signals_enabled: bool = False
     oil_micro_tp_pct: float = 0.30
@@ -1219,7 +1219,7 @@ class ScannerSettings:
             oil_forecast_enabled=bool(base.get("oil_forecast_enabled", True)),
             oil_forecast_gemini=bool(base.get("oil_forecast_gemini", False)),
             oil_setup_enabled=bool(base.get("oil_setup_enabled", True)),
-            oil_setup_min_quality=int(base.get("oil_setup_min_quality", 8)),
+            oil_setup_min_quality=int(base.get("oil_setup_min_quality", 9)),
             oil_setup_cooldown_seconds=int(
                 base.get("oil_setup_cooldown_seconds", 10800)
             ),
@@ -1238,7 +1238,7 @@ class ScannerSettings:
                 base.get("oil_bounce_alert_cooldown_seconds", 7200)
             ),
             oil_bounce_near_pct=float(base.get("oil_bounce_near_pct", 0.4)),
-            oil_bounce_min_news_score=float(base.get("oil_bounce_min_news_score", 3.0)),
+            oil_bounce_min_news_score=float(base.get("oil_bounce_min_news_score", 4.0)),
             oil_micro_signals_enabled=bool(base.get("oil_micro_signals_enabled", False)),
             oil_micro_tp_pct=float(base.get("oil_micro_tp_pct", 0.30)),
             oil_micro_sl_pct=float(base.get("oil_micro_sl_pct", 0.28)),
@@ -1983,6 +1983,14 @@ class SettingsManager:
                     2.0, float(merged.get("oil_news_bias_max_age_hours", 2) or 2)
                 )
                 merged["oil_reaction_enabled"] = True
+            if version < 85:
+                # Полный гейт тренд+MACD: реже A+, без SHORT в рост
+                merged["oil_setup_min_quality"] = max(
+                    9, int(merged.get("oil_setup_min_quality", 9) or 9)
+                )
+                merged["oil_bounce_min_news_score"] = max(
+                    4.0, float(merged.get("oil_bounce_min_news_score", 4) or 4)
+                )
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

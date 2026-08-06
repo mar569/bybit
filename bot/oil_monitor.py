@@ -1334,8 +1334,12 @@ def build_oil_scalp_call(
     interval_minutes: int = 15,
     ta_confidence_raw: int | None = None,
     ta_verdict_raw: str | None = None,
+    bars: list | None = None,
 ) -> OilScalpCall:
-    """Сводка всех факторов → одна команда на 10–100 мин."""
+    """Сводка всех факторов → одна команда на 10–100 мин.
+
+    Гейт тренд+MACD: open_short запрещён в рост, open_long — в падение.
+    """
     px = float(snap.price or 0.0)
     hold_lo, hold_hi = _scalp_hold_window(market_mood, interval_minutes=interval_minutes)
     ta_v = (ta_verdict_raw or snap.verdict or getattr(ta, "verdict", None) or "WAIT").upper()
@@ -1415,6 +1419,22 @@ def build_oil_scalp_call(
 
     long_pts = max(0, long_pts)
     short_pts = max(0, short_pts)
+
+    # Единый гейт: тренд + MACD первыми
+    try:
+        from .oil_signal_gate import evaluate_oil_signal_gate
+
+        gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+        factors.extend(list(gate.factors_ru[:2]))
+        if not gate.allow_long:
+            long_pts = 0
+            factors.append(f"гейт: {gate.reason_ru}")
+        if not gate.allow_short:
+            short_pts = 0
+            factors.append(f"гейт: {gate.reason_ru}")
+    except Exception:
+        gate = None
+
     score = max(long_pts, short_pts)
     score = max(1, min(10, score + (1 if abs(long_pts - short_pts) >= 2 else 0)))
 
@@ -1508,6 +1528,12 @@ def build_oil_scalp_call(
         near_r or near_bd or (bounce_plan is not None and bounce_plan.side == "short")
     ):
         ready_short = False
+
+    if gate is not None:
+        if ready_long and not gate.allow_long:
+            ready_long = False
+        if ready_short and not gate.allow_short:
+            ready_short = False
 
     if ready_long:
         action = "open_long"
@@ -1848,28 +1874,35 @@ def build_oil_bounce_plan(
     if abs(news_bias.weighted_score) < min_score:
         return None
 
-    # Ормуз не финал → не делать bounce SHORT по слуху
+    # Импульс + MACD гейт — раньше Ормуза
     try:
-        from .oil_signal_context import analyze_hormuz_context
+        from .oil_signal_gate import evaluate_oil_signal_gate
 
-        hz = analyze_hormuz_context(news_items)
-        if news_bias.bias == "bearish" and (
-            hz.oil_bias == "mixed"
-            or (hz.status in {"not_final", "progress", "talks"} and not hz.for_entry)
-        ):
+        gate = evaluate_oil_signal_gate(
+            bars, interval_minutes=interval_minutes
+        )
+        want = "short" if news_bias.bias == "bearish" else "long"
+        if want == "short" and not gate.allow_short:
+            return None
+        if want == "long" and not gate.allow_long:
             return None
     except Exception:
         pass
 
-    # Импульс + MACD
+    # Ормуз в ленте и не финал → не делать bounce SHORT по слуху
     try:
-        from .oil_macd import trend_blocks_counter_trade
+        from .oil_signal_context import analyze_hormuz_context
 
-        want = "short" if news_bias.bias == "bearish" else "long"
-        blocked, _ = trend_blocks_counter_trade(
-            bars, side=want, interval_minutes=interval_minutes
-        )
-        if blocked:
+        hz = analyze_hormuz_context(news_items)
+        if (
+            news_bias.bias == "bearish"
+            and hz.status != "none"
+            and (
+                hz.oil_bias == "mixed"
+                or hz.status in {"not_final", "progress", "talks"}
+                or not hz.for_entry
+            )
+        ):
             return None
     except Exception:
         pass
@@ -3580,17 +3613,18 @@ def format_oil_market_digest(
             interval_minutes=interval_minutes,
             ta_confidence_raw=ta_confidence_raw,
             ta_verdict_raw=ta_verdict_raw,
+            bars=bars,
         )
     if scalp_call is not None and getattr(scalp_call, "action", "") in {
         "open_long",
         "open_short",
     }:
-        # Не показывать «ОТКРЫВАТЬ», если прогноз WAIT / конфликт / низкая уверенность
+        # Не показывать «ОТКРЫВАТЬ», если прогноз WAIT / конфликт / низкая уверенность / гейт
         allow_open = True
+        act = getattr(scalp_call, "action", "")
         if forecast is not None:
             fb = getattr(forecast, "bias", "WAIT")
             fq = int(getattr(forecast, "confidence", 0) or 0)
-            act = getattr(scalp_call, "action", "")
             if fb == "WAIT" or fq < 7:
                 allow_open = False
             elif fb == "LONG" and act == "open_short":
@@ -3603,6 +3637,17 @@ def format_oil_market_digest(
                     allow_open = False
                 if act == "open_long" and fl == "sell":
                     allow_open = False
+        if allow_open and bars:
+            try:
+                from .oil_signal_gate import evaluate_oil_signal_gate
+
+                g = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+                if act == "open_short" and not g.allow_short:
+                    allow_open = False
+                if act == "open_long" and not g.allow_long:
+                    allow_open = False
+            except Exception:
+                pass
         if allow_open:
             lines.append(format_oil_scalp_block(scalp_call, compact=True))
         else:
@@ -4824,6 +4869,7 @@ class OilMonitorEngine:
                     news_bias=news_bias,
                     market_mood=bundle.market_mood,
                     interval_minutes=bundle.interval_minutes,
+                    bars=bundle.brent_bars,
                 )
                 flow_why = compute_oil_flow_proxy(
                     bundle.brent_bars,
@@ -5369,6 +5415,7 @@ class OilMonitorEngine:
                 interval_minutes=bundle.interval_minutes,
                 ta_confidence_raw=ta_conf_raw,
                 ta_verdict_raw=ta_verdict_raw,
+                bars=bundle.brent_bars,
             )
             flow = None
             try:
@@ -5562,6 +5609,7 @@ class OilMonitorEngine:
             news_bias=news_bias,
             market_mood=bundle.market_mood,
             interval_minutes=bundle.interval_minutes,
+            bars=bundle.brent_bars,
         )
         forecast = None
         if bool(getattr(settings, "oil_forecast_enabled", True)):

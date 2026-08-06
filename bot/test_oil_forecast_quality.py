@@ -148,6 +148,9 @@ def test_rules_never_emit_confidence_10():
         ta_verdict_raw="SHORT",
         ta_confidence_raw=8,
     )
-    assert fc.bias == "SHORT"
+    # Deal-tape без финала → WAIT; потолок conf всё равно <10
+    assert fc.bias in {"WAIT", "SHORT"}
     assert fc.confidence <= 9
     assert fc.confidence != 10
+    if fc.scenario == "deal_tape":
+        assert fc.bias == "WAIT"

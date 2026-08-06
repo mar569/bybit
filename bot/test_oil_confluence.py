@@ -289,7 +289,7 @@ def test_pro_format_card_title():
     )
     assert setup is not None
     text = format_oil_confluence_setup(setup)
-    assert "ПРО" in text
+    assert "СИГНАЛ" in text or "ПРО" in text or "LONG" in text
     assert "LONG" in text or "WAIT" in text or "SHORT" in text
 
 

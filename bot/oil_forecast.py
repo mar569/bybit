@@ -200,108 +200,109 @@ def build_oil_forecast(
     hormuz = analyze_hormuz_context(news_items)
     inv_ctx = analyze_inventory_from_news(news_items)
 
-    long_pts = short_pts = 0
-    notes: list[str] = []
+    from .oil_signal_gate import evaluate_oil_signal_gate, gate_apply_to_side
 
+    gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+    notes: list[str] = list(gate.factors_ru[:3])
+    if hormuz.line_ru:
+        notes.append(hormuz.line_ru[:100])
+
+    long_pts = short_pts = 0
+
+    # Deal-tape: НИКОГДА не открывает SHORT сам — только фон, пока нет финала + гейт
     if scenario == "deal_tape":
-        # Сделка не финал / спор 3% vs 5–7% vs 0% → без сильного SHORT
-        if hormuz.status in {"not_final", "progress", "talks"} or hormuz.oil_bias == "mixed":
-            notes.append(hormuz.line_ru or "Ормуз не финал")
-            if news_assess.for_entry and news == "bearish" and hormuz.for_entry:
-                short_pts += 1
-            # иначе 0 — только фон в тексте
-        elif news_assess.for_entry and news == "bearish":
-            short_pts += 2
-            notes.append("deal HOT↓")
-        elif news_assess.mode in {"hot", "warm"} and news in {
-            "bearish",
-            "neutral",
-            "mixed",
-        }:
+        notes.append(hormuz.line_ru or "Ормуз deal — только фон")
+        if (
+            gate.allow_short
+            and hormuz.for_entry
+            and hormuz.status == "signed_claim"
+            and news_assess.for_entry
+            and news == "bearish"
+        ):
             short_pts += 1
-            notes.append("deal фон↓")
+            notes.append("deal подписан HOT↓")
         else:
-            notes.append("deal устарел — без очков")
+            notes.append("deal не даёт вход SHORT")
     elif scenario == "disruption":
-        if news_assess.for_entry and news == "bullish":
+        if gate.allow_long and news_assess.for_entry and news == "bullish":
             long_pts += 2
-        elif news_assess.mode in {"hot", "warm"}:
+        elif gate.allow_long and news_assess.mode in {"hot", "warm"}:
             long_pts += 1
     elif scenario == "inventory":
-        if inv_ctx.tone == "bearish":
+        if inv_ctx.tone == "bearish" and gate.allow_short:
             short_pts += 2 if news_assess.for_entry else 1
             notes.append(inv_ctx.line_ru or "запасы build")
-        elif inv_ctx.tone == "bullish":
+        elif inv_ctx.tone == "bullish" and gate.allow_long:
             long_pts += 2 if news_assess.for_entry else 1
             notes.append(inv_ctx.line_ru or "запасы draw")
         elif inv_ctx.tone == "mixed":
             notes.append(inv_ctx.line_ru or "запасы mixed")
-        elif news == "bullish" and news_assess.for_entry:
+        elif news == "bullish" and news_assess.for_entry and gate.allow_long:
             long_pts += 2
-        elif news == "bearish" and news_assess.for_entry:
+        elif news == "bearish" and news_assess.for_entry and gate.allow_short:
             short_pts += 2
-        elif news == "bullish":
-            long_pts += 1
-        elif news == "bearish":
-            short_pts += 1
     elif scenario == "opec_supply":
-        if news == "bullish":
+        if news == "bullish" and gate.allow_long:
             long_pts += 1 + (1 if news_assess.for_entry else 0)
-        elif news == "bearish":
+        elif news == "bearish" and gate.allow_short:
             short_pts += 1 + (1 if news_assess.for_entry else 0)
     elif scenario == "mixed_geo":
         notes.append("geo mixed")
 
-    if news == "bullish" and news_assess.for_entry:
+    if news == "bullish" and news_assess.for_entry and gate.allow_long:
         long_pts += 2 if abs(news_w) >= 3 else 1
-    elif news == "bearish" and news_assess.for_entry:
+    elif news == "bearish" and news_assess.for_entry and gate.allow_short:
         short_pts += 2 if abs(news_w) >= 3 else 1
-    elif news == "bullish" and news_assess.mode == "warm":
+    elif news == "bullish" and news_assess.mode == "warm" and gate.allow_long:
         long_pts += 1
-    elif news == "bearish" and news_assess.mode == "warm":
+    elif news == "bearish" and news_assess.mode == "warm" and gate.allow_short:
         short_pts += 1
 
-    if news_assess.block_long:
+    if news_assess.block_long or not gate.allow_long:
         long_pts = 0
-        notes.append("блок LONG")
-    if news_assess.block_short:
+        if not gate.allow_long:
+            notes.append(gate.reason_ru)
+    if news_assess.block_short or not gate.allow_short:
         short_pts = 0
-        notes.append("блок SHORT")
+        if not gate.allow_short:
+            notes.append(gate.reason_ru)
 
-    if ta_v == "LONG":
+    if ta_v == "LONG" and gate.allow_long:
         long_pts += 2 if ta_c >= 6 else 1
-    elif ta_v == "SHORT":
+    elif ta_v == "SHORT" and gate.allow_short:
         short_pts += 2 if ta_c >= 6 else 1
 
     if bounce_plan is not None:
-        if getattr(bounce_plan, "side", "") == "long" and not news_assess.block_long:
+        if getattr(bounce_plan, "side", "") == "long" and gate.allow_long:
             long_pts += 2
-        elif getattr(bounce_plan, "side", "") == "short" and not news_assess.block_short:
+        elif getattr(bounce_plan, "side", "") == "short" and gate.allow_short:
             short_pts += 2
 
     scalp_action = getattr(scalp_call, "action", "") if scalp_call else ""
-    if scalp_action == "open_long" and not news_assess.block_long:
+    if scalp_action == "open_long" and gate.allow_long:
         long_pts += 1
-    elif scalp_action == "open_short" and not news_assess.block_short:
+    elif scalp_action == "open_short" and gate.allow_short:
         short_pts += 1
 
     flow_bias = (getattr(flow, "bias", "") or "").lower() if flow is not None else ""
-    if flow_bias == "buy":
+    if flow_bias == "buy" and gate.allow_long:
         long_pts += 1
         notes.append("поток BUY")
-    elif flow_bias == "sell":
+    elif flow_bias == "sell" and gate.allow_short:
         short_pts += 1
         notes.append("поток SELL")
 
-    conflict_flow = False
     if flow_bias == "buy" and short_pts > long_pts:
-        conflict_flow = True
-        short_pts = max(0, short_pts - 3)
-        notes.append("конфликт: поток↑ vs SHORT")
+        short_pts = 0
+        notes.append("конфликт: поток↑ — SHORT сброшен")
     elif flow_bias == "sell" and long_pts > short_pts:
-        conflict_flow = True
-        long_pts = max(0, long_pts - 3)
-        notes.append("конфликт: поток↓ vs LONG")
+        long_pts = 0
+        notes.append("конфликт: поток↓ — LONG сброшен")
+
+    if gate.macd_bias == "bull" and gate.allow_long:
+        long_pts += 1
+    elif gate.macd_bias == "bear" and gate.allow_short:
+        short_pts += 1
 
     if scenario == "mixed_geo" or (
         abs(long_pts - short_pts) <= 1 and max(long_pts, short_pts) < 4
@@ -314,35 +315,14 @@ def build_oil_forecast(
     else:
         bias = "WAIT"
 
-    adverse = False
-    try:
-        from .oil_macd import compute_oil_macd, trend_blocks_counter_trade
+    bias = gate_apply_to_side(gate, bias)
+    if bias == "WAIT" and gate.force_wait:
+        notes.append(gate.reason_ru)
 
-        blocked, why_block = trend_blocks_counter_trade(
-            bars, side=bias, interval_minutes=interval_minutes
-        )
-        if blocked:
-            adverse = True
-            notes.append(why_block)
-        else:
-            macd = compute_oil_macd(bars)
-            if macd is not None:
-                notes.append(macd.line_ru)
-                if macd.bias == "bull":
-                    long_pts += 1
-                elif macd.bias == "bear":
-                    short_pts += 1
-    except Exception:
-        pass
-
-    if adverse or conflict_flow:
+    conf_cap_mixed = hormuz.oil_bias == "mixed" or scenario == "deal_tape"
+    if conf_cap_mixed and bias == "SHORT":
         bias = "WAIT"
-    if hormuz.oil_bias == "mixed" and bias == "SHORT":
-        bias = "WAIT"
-        notes.append("Ормуз: спор 3%/5–7%/0% — WAIT")
-        conf_cap_mixed = True
-    else:
-        conf_cap_mixed = False
+        notes.append("deal/Ормуз — без SHORT")
 
     edge = abs(long_pts - short_pts)
     # Потолок: без полного схождения ≤7; 9 редко; 10 из правил — никогда
@@ -367,10 +347,7 @@ def build_oil_forecast(
         conf = min(8, conf + 1)
 
     if bias == "WAIT":
-        conf = min(
-            conf,
-            5 if (adverse or conflict_flow or conf_cap_mixed) else 6,
-        )
+        conf = min(conf, 5 if (gate.force_wait or conf_cap_mixed) else 6)
 
     horizon = "4–12ч"
     if scenario in {"deal_tape", "disruption", "mixed_geo"}:
@@ -435,12 +412,12 @@ def build_oil_forecast(
         )
     else:
         headline = f"WAIT · {scen_ru}"
-        if adverse:
-            base = f"WAIT с ${px:.2f}: цена уже ушла против идеи — не догонять"
-            entry = "снаружи · ждать откат к уровню или новый HOT-драйвер"
-        elif conflict_flow:
-            base = f"WAIT с ${px:.2f}: поток против новостного bias — без входа"
-            entry = "ждать согласования цены и потока"
+        if gate.force_wait:
+            base = f"WAIT с ${px:.2f}: {gate.reason_ru}"
+            entry = "снаружи · тренд/MACD против входа — не шортить рост"
+        elif conf_cap_mixed:
+            base = f"WAIT с ${px:.2f}: Ормуз/deal не финал — без chase"
+            entry = "ждать финал сделки или уровень с MACD"
         else:
             base = (
                 f"нет края с ${px:.2f} · только от уровня / "
@@ -451,7 +428,7 @@ def build_oil_forecast(
                 + (f" · range {_lvl(s)}–{_lvl(r)}" if s and r else "")
             )
         alt = "вверх: срыв поставок · вниз: сделка / пробой↓"
-        inv = "ждать: танкеры / запасы / тон переговоров / согласование потока"
+        inv = "ждать: танкеры / запасы / MACD / согласование потока"
 
     if catalyst and news_assess.mode in {"hot", "warm"}:
         base = f"{base} · {catalyst}"

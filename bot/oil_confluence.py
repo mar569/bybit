@@ -371,80 +371,84 @@ def build_oil_confluence_setup(
     short_pts += t_short
     factors.extend(t_factors[:6])
 
-    # MACD + импульс: не SHORT в рост / не LONG в падение
+    # Единый гейт: тренд + MACD первыми (новости только подтверждают)
     try:
-        from .oil_macd import compute_oil_macd, trend_blocks_counter_trade
+        from .oil_signal_gate import evaluate_oil_signal_gate, gate_apply_to_side
 
-        macd = compute_oil_macd(bars)
-        if macd is not None:
-            factors.append(macd.line_ru)
-            if macd.bias == "bull":
-                long_pts += 2
-                short_pts = max(0, short_pts - 2)
-            elif macd.bias == "bear":
-                short_pts += 2
-                long_pts = max(0, long_pts - 2)
-        # Предварительно смотрим сторону по очкам
-        provisional = (
-            "SHORT"
-            if short_pts > long_pts
-            else "LONG"
-            if long_pts > short_pts
-            else "WAIT"
-        )
-        if provisional in {"LONG", "SHORT"}:
-            blocked, why_b = trend_blocks_counter_trade(
-                bars, side=provisional, interval_minutes=interval_minutes
-            )
-            if blocked:
-                factors.append(why_b)
-                if provisional == "SHORT":
-                    short_pts = 0
-                else:
-                    long_pts = 0
+        gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+        factors.extend(list(gate.factors_ru[:3]))
+        if gate.macd_bias == "bull":
+            long_pts += 2
+            short_pts = max(0, short_pts - 2)
+        elif gate.macd_bias == "bear":
+            short_pts += 2
+            long_pts = max(0, long_pts - 2)
+        if not gate.allow_long:
+            long_pts = 0
+            factors.append(f"гейт LONG закрыт: {gate.reason_ru}")
+        if not gate.allow_short:
+            short_pts = 0
+            factors.append(f"гейт SHORT закрыт: {gate.reason_ru}")
     except Exception:
-        pass
+        gate = None
+        gate_apply_to_side = None  # type: ignore
 
     # TA
-    if ta_v == "LONG":
+    if ta_v == "LONG" and (gate is None or gate.allow_long):
         long_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
         factors.append(f"TA LONG {ta_c}/10")
-    elif ta_v == "SHORT":
+    elif ta_v == "SHORT" and (gate is None or gate.allow_short):
         short_pts += 3 if ta_c >= 6 else 2 if ta_c >= 4 else 1
         factors.append(f"TA SHORT {ta_c}/10")
     else:
-        factors.append(f"TA WAIT {ta_c}/10")
+        factors.append(f"TA WAIT {ta_c}/10" if ta_v == "WAIT" else f"TA {ta_v} блокирован гейтом")
 
-    # Scalp — не усиливать против news discipline
-    if scalp_action == "open_long" and not news_assess.block_long:
+    # Scalp — не усиливать против news discipline / гейта
+    if (
+        scalp_action == "open_long"
+        and not news_assess.block_long
+        and (gate is None or gate.allow_long)
+    ):
         long_pts += 2 if scalp_score >= 7 else 1
         factors.append(f"скальп LONG score {scalp_score}")
-    elif scalp_action == "open_short" and not news_assess.block_short:
+    elif (
+        scalp_action == "open_short"
+        and not news_assess.block_short
+        and (gate is None or gate.allow_short)
+    ):
         short_pts += 2 if scalp_score >= 7 else 1
         factors.append(f"скальп SHORT score {scalp_score}")
     elif scalp_action in {"open_long", "open_short"}:
-        factors.append("скальп отключён: конфликт с новостным фоном")
+        factors.append("скальп отключён: конфликт с новостным фоном / гейтом")
 
     # Bounce
     if bounce_plan is not None:
         bside = getattr(bounce_plan, "side", "")
         strong = bool(getattr(bounce_plan, "strong", False))
-        if bside == "long" and not news_assess.block_long:
+        if (
+            bside == "long"
+            and not news_assess.block_long
+            and (gate is None or gate.allow_long)
+        ):
             long_pts += 3 if strong else 2
             factors.append(f"отскок LONG у {fmt_price(bounce_plan.bounce_level)}")
-        elif bside == "short" and not news_assess.block_short:
+        elif (
+            bside == "short"
+            and not news_assess.block_short
+            and (gate is None or gate.allow_short)
+        ):
             short_pts += 3 if strong else 2
             factors.append(f"отскок SHORT у {fmt_price(bounce_plan.bounce_level)}")
         elif bside in {"long", "short"}:
-            factors.append("отскок против новостного фона — без очков")
+            factors.append("отскок против новостного фона / гейта — без очков")
 
     # Level proximity (только усиливает сторону, не создаёт одну)
-    if (near_s or near_bo) and not news_assess.block_long:
+    if (near_s or near_bo) and not news_assess.block_long and (gate is None or gate.allow_long):
         long_pts += 1
         factors.append(
             "цена у support" if near_s else "цена у breakout↑"
         )
-    if (near_r or near_bd) and not news_assess.block_short:
+    if (near_r or near_bd) and not news_assess.block_short and (gate is None or gate.allow_short):
         short_pts += 1
         factors.append(
             "цена у resistance" if near_r else "цена у breakdown↓"
@@ -491,6 +495,13 @@ def build_oil_confluence_setup(
             long_pts = max(0, long_pts - 1)
             short_pts = max(0, short_pts - 1)
 
+    # Финальный сброс против гейта (структура/pro могли добавить очки позже)
+    if gate is not None:
+        if not gate.allow_long:
+            long_pts = 0
+        if not gate.allow_short:
+            short_pts = 0
+
     # Conflict penalty
     if long_pts > 0 and short_pts > 0 and abs(long_pts - short_pts) <= 1:
         return OilConfluenceSetup(
@@ -518,6 +529,26 @@ def build_oil_confluence_setup(
         edge = short_pts - long_pts
     else:
         return None
+
+    if gate is not None and gate_apply_to_side is not None:
+        side = gate_apply_to_side(gate, side)
+        if side == "WAIT":
+            return OilConfluenceSetup(
+                side="WAIT",
+                quality=min(5, max(3, max(long_pts, short_pts))),
+                entry_lo=None,
+                entry_hi=None,
+                stop=None,
+                tp1=None,
+                tp2=None,
+                invalidation=None,
+                horizon_ru=f"гейт · TF {interval_minutes}m",
+                factors_ru=tuple(factors[:8]),
+                catalyst=catalyst,
+                trigger_ru=gate.reason_ru or "тренд/MACD против входа",
+                near_level=near_level,
+                price=px,
+            )
 
     quality = min(10, max(1, 4 + edge + (1 if near_level else 0) + (1 if ta_c >= 6 else 0)))
     # Дисциплина новостей: блок стороны / опоздание / уже в цене
