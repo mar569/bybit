@@ -1781,6 +1781,90 @@ def _draw_urals_inset(
     )
 
 
+def _draw_ut_bot_overlay(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ut: Any,
+    *,
+    interval_minutes: int = 5,
+) -> None:
+    """Метки Buy/Sell + trail UT прямо на свечах (как TradingView UT Bot Alerts)."""
+    del interval_minutes
+    if ut is None or not bars:
+        return
+    trails = getattr(ut, "trails", None) or ()
+    buy_flags = getattr(ut, "buy_flags", None) or ()
+    sell_flags = getattr(ut, "sell_flags", None) or ()
+    bar_bull = getattr(ut, "bar_bull", None) or ()
+    n_ut = len(trails)
+    if n_ut < 2:
+        return
+    work = list(bars)
+    if len(work) > n_ut:
+        work = work[-n_ut:]
+    o0 = n_ut - len(work)
+    green = CHART_STYLE["accent_long"]
+    red = CHART_STYLE["accent_short"]
+    xs: list[float] = []
+    ys: list[float] = []
+    for i, b in enumerate(work):
+        ui = o0 + i
+        ts = datetime.fromtimestamp(float(b.open_time), tz=timezone.utc)
+        x = mdates.date2num(ts)
+        xs.append(x)
+        ys.append(float(trails[ui]) if ui < n_ut else float(b.close))
+        if ui < len(buy_flags) and buy_flags[ui]:
+            ax.annotate(
+                "Buy",
+                xy=(x, float(b.low)),
+                xytext=(0, -12),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                bbox=dict(
+                    boxstyle="round,pad=0.18",
+                    facecolor=green,
+                    edgecolor=green,
+                    alpha=0.95,
+                ),
+                zorder=8,
+            )
+        if ui < len(sell_flags) and sell_flags[ui]:
+            ax.annotate(
+                "Sell",
+                xy=(x, float(b.high)),
+                xytext=(0, 12),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                bbox=dict(
+                    boxstyle="round,pad=0.18",
+                    facecolor=red,
+                    edgecolor=red,
+                    alpha=0.95,
+                ),
+                zorder=8,
+            )
+    for i in range(1, len(xs)):
+        ui = o0 + i
+        bull = bool(bar_bull[ui]) if ui < len(bar_bull) else ys[i] <= float(work[i].close)
+        ax.plot(
+            xs[i - 1 : i + 1],
+            ys[i - 1 : i + 1],
+            color=green if bull else red,
+            linewidth=1.15,
+            solid_capstyle="round",
+            zorder=7,
+            alpha=0.95,
+        )
+
+
 def _render_chart_figure(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
@@ -1796,6 +1880,8 @@ def _render_chart_figure(
     wave_focus: bool = False,
     urals_price: float | None = None,
     urals_change_pct: float | None = None,
+    show_info_panels: bool = True,
+    ut_overlay: Any | None = None,
 ) -> bytes:
     use_enhanced = enhanced
     fig_size, height_ratios = _chart_figure_layout(
@@ -1804,14 +1890,17 @@ def _render_chart_figure(
         height_scale=height_scale,
     )
     if use_enhanced:
-        # Шире область свечей (~+13%): боковые панели остаются, но уже
         fig = plt.figure(figsize=fig_size, dpi=120)
         gs = fig.add_gridspec(3, 1, height_ratios=height_ratios, hspace=0.04)
         ax = fig.add_subplot(gs[0])
         ax_vol = fig.add_subplot(gs[1], sharex=ax)
         ax_rsi = fig.add_subplot(gs[2], sharex=ax)
         fig.patch.set_facecolor(CHART_STYLE["bg"])
-        fig.subplots_adjust(left=0.130, right=0.805, top=0.92, bottom=0.08)
+        if show_info_panels:
+            fig.subplots_adjust(left=0.130, right=0.805, top=0.92, bottom=0.08)
+        else:
+            # Без боковых «ИТОГ/ПЛАН/СЦЕНАРИЙ» — свечи на всю ширину
+            fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.08)
     else:
         fig, ax = plt.subplots(figsize=fig_size, dpi=120)
         ax_vol = None
@@ -1821,11 +1910,18 @@ def _render_chart_figure(
         if pro_mode and not wave_focus:
             fig.subplots_adjust(left=0.11, right=0.89, top=0.93, bottom=0.09)
         else:
-            fig.subplots_adjust(left=0.12, right=0.88, top=0.92, bottom=0.10)
+            fig.subplots_adjust(left=0.08, right=0.96, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
+    if ut_overlay is not None:
+        try:
+            _draw_ut_bot_overlay(
+                ax, bars, ut_overlay, interval_minutes=interval_minutes
+            )
+        except Exception:
+            logger.debug("UT overlay draw failed", exc_info=True)
     if use_enhanced and ax_vol is not None and ax_rsi is not None:
         draw_volume_panel(ax_vol, bars)
         draw_rsi_panel(
@@ -1856,17 +1952,20 @@ def _render_chart_figure(
             f"{title_core}  ·  {title_suffix}",
             color=CHART_STYLE["text"], fontsize=12, pad=14,
         )
-        _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
+        if show_info_panels:
+            _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
     else:
         mode_suffix = " · PRO" if pro_mode else ""
+        ut_sfx = " · UT" if ut_overlay is not None else ""
         ax.set_title(
-            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}",
+            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
         )
-        if pro_mode:
-            _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
-        else:
-            _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
+        if show_info_panels:
+            if pro_mode:
+                _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
+            else:
+                _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
     # Зум: анализ может быть на 18ч, экран — последние N часов (читаемые свечи)
     from .manual_ta import chart_display_hours
@@ -2841,6 +2940,19 @@ def render_oil_chart(
     except Exception:
         logger.debug("Urals snapshot skipped", exc_info=True)
 
+    ut_overlay = None
+    try:
+        from .oil_ut_bot import compute_oil_ut_bot
+
+        ut_overlay = compute_oil_ut_bot(
+            bars,
+            key_value=1.0,
+            atr_period=10,
+            exclude_forming=True,
+        )
+    except Exception:
+        logger.debug("Oil UT overlay compute failed", exc_info=True)
+
     return _render_chart_figure(
         bars,
         ta,
@@ -2855,6 +2967,8 @@ def render_oil_chart(
         wave_focus=False,
         urals_price=urals_px,
         urals_change_pct=urals_chg,
+        show_info_panels=False,
+        ut_overlay=ut_overlay,
     )
 
 
@@ -2953,20 +3067,24 @@ def render_oil_ut_chart(
                 zorder=5,
             )
 
-    ax.plot(
-        [mdates.date2num(t) for t in times],
-        trail_y,
-        color="#58a6ff",
-        linewidth=1.2,
-        alpha=0.9,
-        label="UT trail",
-        zorder=4,
-    )
+    # Trail как на TV: зелёный под ценой (long), красный над ценой (short)
+    xs = [mdates.date2num(t) for t in times]
+    for i in range(1, len(trail_y)):
+        ui = o0 + i
+        bull = bool(ut.bar_bull[ui]) if ui < len(ut.bar_bull) else trail_y[i] < float(work[i].close)
+        ax.plot(
+            xs[i - 1 : i + 1],
+            trail_y[i - 1 : i + 1],
+            color=green if bull else red,
+            linewidth=1.4,
+            solid_capstyle="round",
+            zorder=4,
+        )
 
     key = float(getattr(ut, "key_value", 1) or 1)
     atr_p = int(getattr(ut, "atr_period", 10) or 10)
     ax.set_title(
-        f"OIL · {symbol_label} · UT Bot · {interval_minutes}m · Key {key:g} ATR {atr_p}",
+        f"OIL · {symbol_label} · UT Bot Alerts · {interval_minutes}m · Key {key:g} ATR {atr_p}",
         color=text_c,
         fontsize=11,
         fontweight="bold",
@@ -2977,6 +3095,9 @@ def render_oil_ut_chart(
     for spine in ax.spines.values():
         spine.set_color(grid)
     ax.grid(True, color=grid, alpha=0.45, linewidth=0.5)
+    # Легенда как на TV
+    ax.plot([], [], color=green, linewidth=1.4, label="UT trail (long)")
+    ax.plot([], [], color=red, linewidth=1.4, label="UT trail (short)")
     ax.legend(loc="upper left", fontsize=8, facecolor=bg, edgecolor=grid, labelcolor=text_c)
 
     buf = io.BytesIO()
