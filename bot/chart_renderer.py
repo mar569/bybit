@@ -1882,8 +1882,13 @@ def _render_chart_figure(
     urals_change_pct: float | None = None,
     show_info_panels: bool = True,
     ut_overlay: Any | None = None,
+    clean_chart: bool = False,
 ) -> bytes:
+    """clean_chart: только свечи + UT Buy/Sell/trail (+ vol/RSI) — без Fib/Elliott/зон/текста."""
     use_enhanced = enhanced
+    # Чистый UT-вид: без боковых панелей и без TA-аннотаций
+    if clean_chart:
+        show_info_panels = False
     fig_size, height_ratios = _chart_figure_layout(
         enhanced=use_enhanced,
         pro_mode=pro_mode and not wave_focus,
@@ -1914,7 +1919,8 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
-    _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
+    if not clean_chart:
+        _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
     if ut_overlay is not None:
         try:
             _draw_ut_bot_overlay(
@@ -1927,7 +1933,8 @@ def _render_chart_figure(
         draw_rsi_panel(
             ax_rsi,
             bars,
-            divergences=getattr(ta, "rsi_divergences", None) or [],
+            # На чистом UT-графике не путаем с RSI Bull/Bear
+            divergences=[] if clean_chart else (getattr(ta, "rsi_divergences", None) or []),
             rsi_values=getattr(ta, "rsi_values", None) or None,
             rsi_sma=getattr(ta, "rsi_sma", None) or None,
         )
@@ -1936,11 +1943,12 @@ def _render_chart_figure(
 
     current = bars[-1].close
     ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
-    ax.text(
-        _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
-        color=accent_color, fontsize=7, va="center", ha="left",
-    )
-    if wave_focus:
+    if not clean_chart:
+        ax.text(
+            _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
+            color=accent_color, fontsize=7, va="center", ha="left",
+        )
+    if wave_focus and not clean_chart:
         phase = str(getattr(ta, "elliott_phase", "") or "")
         conf = int(getattr(ta, "elliott_confidence", 0) or 0)
         title_core = f"{symbol}  ·  WAVE {ta.verdict}"
@@ -1954,6 +1962,12 @@ def _render_chart_figure(
         )
         if show_info_panels:
             _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
+    elif clean_chart:
+        ut_sfx = " · UT Bot" if ut_overlay is not None else ""
+        ax.set_title(
+            f"{symbol}  ·  {title_suffix}{ut_sfx}",
+            color=CHART_STYLE["text"], fontsize=11, pad=14,
+        )
     else:
         mode_suffix = " · PRO" if pro_mode else ""
         ut_sfx = " · UT" if ut_overlay is not None else ""
@@ -1980,7 +1994,7 @@ def _render_chart_figure(
         _apply_display_zoom(
             ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
         )
-    if urals_price and urals_price > 0 and not wave_focus:
+    if urals_price and urals_price > 0 and not wave_focus and not clean_chart:
         try:
             _draw_urals_inset(
                 ax,
@@ -2927,19 +2941,6 @@ def render_oil_chart(
     zoom = max(8, min(int(zoom), max_zoom))
     title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
 
-    urals_px: float | None = None
-    urals_chg: float | None = None
-    try:
-        from .urals_price import fetch_urals_snapshot
-
-        brent_last = float(bars[-1].close)
-        snap = fetch_urals_snapshot(brent_ref=brent_last)
-        if snap is not None:
-            urals_px = float(snap.price)
-            urals_chg = snap.change_pct
-    except Exception:
-        logger.debug("Urals snapshot skipped", exc_info=True)
-
     ut_overlay = None
     try:
         from .oil_ut_bot import compute_oil_ut_bot
@@ -2965,10 +2966,11 @@ def render_oil_chart(
         enhanced=True,
         height_scale=max(1.35, float(height_scale or 1.45)),
         wave_focus=False,
-        urals_price=urals_px,
-        urals_change_pct=urals_chg,
+        urals_price=None,
+        urals_change_pct=None,
         show_info_panels=False,
         ut_overlay=ut_overlay,
+        clean_chart=True,  # только свечи + UT Buy/Sell, без Fib/зон/текста
     )
 
 
