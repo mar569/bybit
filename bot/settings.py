@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 91
+SETTINGS_VERSION = 92
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -602,7 +602,7 @@ class ScannerSettings:
     oil_ta_signal_gap_seconds: int = 10800  # 3ч
     oil_level_alerts_enabled: bool = True
     oil_level_alert_cooldown_seconds: int = 1800
-    oil_bounce_alerts_enabled: bool = True
+    oil_bounce_alerts_enabled: bool = False  # OFF: news-bounce часто ловит нож; вкл. вручную
     oil_bounce_alert_cooldown_seconds: int = 7200
     oil_bounce_near_pct: float = 0.4
     oil_bounce_min_news_score: float = 4.0
@@ -1248,7 +1248,7 @@ class ScannerSettings:
             oil_level_alert_cooldown_seconds=int(
                 base.get("oil_level_alert_cooldown_seconds", 1800)
             ),
-            oil_bounce_alerts_enabled=bool(base.get("oil_bounce_alerts_enabled", True)),
+            oil_bounce_alerts_enabled=bool(base.get("oil_bounce_alerts_enabled", False)),
             oil_bounce_alert_cooldown_seconds=int(
                 base.get("oil_bounce_alert_cooldown_seconds", 7200)
             ),
@@ -1714,7 +1714,7 @@ class SettingsManager:
                 if float(merged.get("oil_news_max_age_hours", 24) or 24) > 36:
                     merged["oil_news_max_age_hours"] = 24.0
             if version < 57:
-                merged.setdefault("oil_bounce_alerts_enabled", True)
+                merged.setdefault("oil_bounce_alerts_enabled", False)
                 merged.setdefault("oil_bounce_alert_cooldown_seconds", 7200)
                 merged.setdefault("oil_bounce_near_pct", 0.4)
                 merged.setdefault("oil_bounce_min_news_score", 3.0)
@@ -2096,6 +2096,9 @@ class SettingsManager:
                 merged.setdefault("oil_ut_bot_cooldown_seconds", 900)
                 merged.setdefault("oil_ut_bot_max_per_hour", 4)
                 merged.setdefault("oil_ut_bot_chase_block_pct", 0.45)
+            if version < 92:
+                # News-bounce ловил нож на Ормуз-заголовках — по умолчанию OFF
+                merged["oil_bounce_alerts_enabled"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

@@ -2153,6 +2153,39 @@ def build_oil_bounce_plan(
     except Exception:
         pass
 
+    # Не догонять: новость↑ после дампа / новость↓ после пампа → bounce отключён
+    try:
+        from .oil_entry_filters import measure_recent_move
+
+        move = measure_recent_move(
+            bars,
+            interval_minutes=interval_minutes,
+            priced_in_30m_pct=0.35,
+            priced_in_60m_pct=0.55,
+        )
+        if move is not None:
+            if news_bias.bias == "bullish" and (
+                move.move_30m_pct <= -0.35 or move.move_60m_pct <= -0.55
+            ):
+                return None
+            if news_bias.bias == "bearish" and (
+                move.move_30m_pct >= 0.35 or move.move_60m_pct >= 0.55
+            ):
+                return None
+    except Exception:
+        pass
+
+    # UT Bot: bounce не против ATR-trail
+    try:
+        from .oil_ut_bot import compute_oil_ut_bot, ut_blocks_side
+
+        ut = compute_oil_ut_bot(bars, exclude_forming=True) if bars else None
+        want = "long" if news_bias.bias == "bullish" else "short"
+        if ut_blocks_side(ut, want):
+            return None
+    except Exception:
+        pass
+
     # Ормуз в ленте и не финал → не делать bounce SHORT по слуху
     try:
         from .oil_signal_context import analyze_hormuz_context
@@ -4032,6 +4065,7 @@ class OilMonitorEngine:
         self._last_bounce_alert_ts: dict[str, float] = {}
         self._active_bounce: OilBouncePlan | None = None
         self._last_brent_bars: list | None = None
+        self._last_brent_ta: Any | None = None
         self._last_micro_signal_ts: float = 0.0
         self._micro_signal_hour: list[float] = []
         self._last_ut_alert_ts: float = 0.0
@@ -4407,9 +4441,10 @@ class OilMonitorEngine:
         settings: Any,
         png: bytes | None = None,
         bars: list | None = None,
+        ta: Any | None = None,
     ) -> int:
         """Редкий алерт: сильный bias + цена у уровня. Без спама."""
-        if not getattr(settings, "oil_bounce_alerts_enabled", True):
+        if not getattr(settings, "oil_bounce_alerts_enabled", False):
             return 0
         if self._on_level_alert is None:
             return 0
@@ -4427,11 +4462,75 @@ class OilMonitorEngine:
                 interval_minutes=int(getattr(settings, "oil_interval_minutes", 15)),
             )
             if plan.side == "short" and not gate.allow_short:
-                logger.debug("Oil bounce skipped: gate blocks SHORT")
+                logger.info("Oil bounce skipped: gate blocks SHORT")
                 return 0
             if plan.side == "long" and not gate.allow_long:
-                logger.debug("Oil bounce skipped: gate blocks LONG")
+                logger.info("Oil bounce skipped: gate blocks LONG")
                 return 0
+        except Exception:
+            pass
+        # UT + треугольник: bounce не «отдельной жизнью»
+        try:
+            from .oil_ut_bot import compute_oil_ut_bot, ut_blocks_side
+
+            gate_bars = bars if bars is not None else self._last_brent_bars
+            ut = compute_oil_ut_bot(gate_bars, exclude_forming=True) if gate_bars else None
+            if ut_blocks_side(ut, plan.side):
+                logger.info("Oil bounce skipped: UT blocks %s", plan.side)
+                return 0
+        except Exception:
+            pass
+        try:
+            from .oil_triangle import interpret_oil_triangle, triangle_blocks_side
+
+            gate_bars = bars if bars is not None else self._last_brent_bars
+            tri = interpret_oil_triangle(ta, bars=gate_bars, proposed_side=plan.side)
+            if triangle_blocks_side(tri, plan.side):
+                logger.info("Oil bounce skipped: triangle blocks %s", plan.side)
+                return 0
+            if tri is not None and tri.status == "confirmed" and tri.action not in {
+                plan.side,
+                "wait",
+                "cancel",
+            }:
+                # confirmed пробой против bounce
+                if tri.action in {"long", "short"} and tri.action != plan.side:
+                    logger.info(
+                        "Oil bounce skipped: triangle breakout %s vs bounce %s",
+                        tri.action,
+                        plan.side,
+                    )
+                    return 0
+        except Exception:
+            pass
+        # Не ловить нож после импульса против bounce
+        try:
+            from .oil_entry_filters import measure_recent_move
+
+            gate_bars = bars if bars is not None else self._last_brent_bars
+            move = measure_recent_move(
+                gate_bars,
+                interval_minutes=int(getattr(settings, "oil_interval_minutes", 15)),
+                priced_in_30m_pct=0.35,
+                priced_in_60m_pct=0.55,
+            )
+            if move is not None:
+                if plan.side == "long" and (
+                    move.move_30m_pct <= -0.35 or move.move_60m_pct <= -0.55
+                ):
+                    logger.info(
+                        "Oil bounce LONG skipped: dump %.2f%%/30м",
+                        move.move_30m_pct,
+                    )
+                    return 0
+                if plan.side == "short" and (
+                    move.move_30m_pct >= 0.35 or move.move_60m_pct >= 0.55
+                ):
+                    logger.info(
+                        "Oil bounce SHORT skipped: rally %.2f%%/30м",
+                        move.move_30m_pct,
+                    )
+                    return 0
         except Exception:
             pass
         from .oil_entry_filters import is_session_open_fragile
@@ -5355,6 +5454,8 @@ class OilMonitorEngine:
                         label=OIL_BRENT_LABEL,
                         settings=settings,
                         png=None,
+                        bars=self._last_brent_bars,
+                        ta=getattr(self, "_last_brent_ta", None),
                     )
             except Exception:
                 logger.debug("Oil bounce tick failed", exc_info=True)
@@ -5936,6 +6037,7 @@ class OilMonitorEngine:
                 return 0
             self._sync_levels_from_bundle(bundle)
             self._last_brent_bars = list(bundle.brent_bars or [])
+            self._last_brent_ta = bundle.brent_ta
             snaps = [bundle.brent]
             if bundle.wti:
                 snaps.append(bundle.wti)
@@ -6148,6 +6250,7 @@ class OilMonitorEngine:
         ta_verdict_raw = bundle.brent.verdict
         ta_conf_raw = int(bundle.brent.confidence or 0)
         self._last_brent_bars = list(bundle.brent_bars or [])
+        self._last_brent_ta = bundle.brent_ta
         news_bias = self._trading_news_bias(
             settings,
             ta_verdict=ta_verdict_raw,
