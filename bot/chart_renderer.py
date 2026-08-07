@@ -1174,6 +1174,70 @@ def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnaly
         )
 
 
+def _draw_essential_oil_overlays(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+) -> None:
+    """Минимум для нефти: S/R, ключевой Fib, вход/SL/TP — без треугольников/Elliott/ликв."""
+    if not bars:
+        return
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+
+    if ta.breakout_level:
+        ax.axhline(
+            ta.breakout_level, color=CHART_STYLE["entry"],
+            linestyle="-", linewidth=1.0, alpha=0.85,
+        )
+    if ta.breakdown_level and (
+        ta.breakout_level is None
+        or abs(ta.breakdown_level - ta.breakout_level) > max(ta.current_price, 1e-9) * 0.0005
+    ):
+        ax.axhline(
+            ta.breakdown_level, color=CHART_STYLE["accent_short"],
+            linestyle="-", linewidth=0.9, alpha=0.8,
+        )
+
+    for lv in (ta.levels or [])[:2]:
+        color = (
+            CHART_STYLE["level_support"]
+            if getattr(lv, "kind", "") == "support"
+            else CHART_STYLE["level_resistance"]
+        )
+        ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.8, alpha=0.55)
+
+    # Только ключевые Fib 50% / 61.8% — без полной сетки
+    for fl in getattr(ta, "fib_levels", None) or []:
+        ratio = float(getattr(fl, "ratio", 0) or 0)
+        if ratio not in {0.5, 0.618}:
+            continue
+        ax.axhline(
+            float(fl.price),
+            color=CHART_STYLE["fib_key"],
+            linestyle="--",
+            linewidth=0.75,
+            alpha=0.55,
+        )
+
+    if not is_wait and ta.invalidation_price:
+        ax.axhline(
+            ta.invalidation_price, color=CHART_STYLE["inv"],
+            linestyle="--", linewidth=1.05, alpha=0.9,
+        )
+    if not is_wait:
+        for tp in (ta.target_prices or [])[:2]:
+            if ta.verdict == "SHORT" and tp >= ta.current_price:
+                continue
+            if ta.verdict == "LONG" and tp <= ta.current_price:
+                continue
+            ax.axhline(tp, color=CHART_STYLE["target"], linestyle=":", linewidth=0.85, alpha=0.7)
+
+    if ta.entry_zone and not is_wait:
+        lo, hi = ta.entry_zone
+        ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.10)
+    # Без боковых текстовых блоков и без правых «описаний» — только линии уровней
+
+
 def _draw_ta_annotations(
     ax: plt.Axes,
     bars: list[KlineBar],
@@ -1884,9 +1948,9 @@ def _render_chart_figure(
     ut_overlay: Any | None = None,
     clean_chart: bool = False,
 ) -> bytes:
-    """clean_chart: только свечи + UT Buy/Sell/trail (+ vol/RSI) — без Fib/Elliott/зон/текста."""
+    """clean_chart: UT + важное (S/R, Fib 50/61.8, SL/TP) — без треугольников/Elliott/панелей."""
     use_enhanced = enhanced
-    # Чистый UT-вид: без боковых панелей и без TA-аннотаций
+    # Чистый UT-вид: без боковых панелей; essential overlays — да
     if clean_chart:
         show_info_panels = False
     fig_size, height_ratios = _chart_figure_layout(
@@ -1919,7 +1983,12 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
-    if not clean_chart:
+    if clean_chart:
+        try:
+            _draw_essential_oil_overlays(ax, bars, ta)
+        except Exception:
+            logger.debug("Essential oil overlays failed", exc_info=True)
+    else:
         _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
     if ut_overlay is not None:
         try:
@@ -1933,7 +2002,7 @@ def _render_chart_figure(
         draw_rsi_panel(
             ax_rsi,
             bars,
-            # На чистом UT-графике не путаем с RSI Bull/Bear
+            # На clean-графике не путаем UT Buy/Sell с RSI Bull/Bear
             divergences=[] if clean_chart else (getattr(ta, "rsi_divergences", None) or []),
             rsi_values=getattr(ta, "rsi_values", None) or None,
             rsi_sma=getattr(ta, "rsi_sma", None) or None,
@@ -1943,11 +2012,10 @@ def _render_chart_figure(
 
     current = bars[-1].close
     ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
-    if not clean_chart:
-        ax.text(
-            _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
-            color=accent_color, fontsize=7, va="center", ha="left",
-        )
+    ax.text(
+        _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
+        color=accent_color, fontsize=7, va="center", ha="left",
+    )
     if wave_focus and not clean_chart:
         phase = str(getattr(ta, "elliott_phase", "") or "")
         conf = int(getattr(ta, "elliott_confidence", 0) or 0)
@@ -1963,9 +2031,9 @@ def _render_chart_figure(
         if show_info_panels:
             _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
     elif clean_chart:
-        ut_sfx = " · UT Bot" if ut_overlay is not None else ""
+        ut_sfx = " · UT" if ut_overlay is not None else ""
         ax.set_title(
-            f"{symbol}  ·  {title_suffix}{ut_sfx}",
+            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=11, pad=14,
         )
     else:
@@ -2970,7 +3038,7 @@ def render_oil_chart(
         urals_change_pct=None,
         show_info_panels=False,
         ut_overlay=ut_overlay,
-        clean_chart=True,  # только свечи + UT Buy/Sell, без Fib/зон/текста
+        clean_chart=True,  # UT + S/R/Fib50·618/SL·TP; без треугольников/Elliott/панелей
     )
 
 

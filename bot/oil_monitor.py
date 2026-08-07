@@ -4723,24 +4723,10 @@ class OilMonitorEngine:
         if flip_key == self._last_ut_flip_key:
             return 0
 
-        # Не против жёсткого гейта тренд+MACD
+        # UT flip = сам сигнал переворота. Жёсткий тренд+MACD гейт сюда НЕ ставим:
+        # иначе Buy на развороте режется «падение/тренд↓» (лаг гейта). Гейт остаётся
+        # для confluence/scalp (oil_ut_bot_gate_enabled). Здесь — только anti-chase.
         proposed = "LONG" if ut.buy else "SHORT"
-        try:
-            from .oil_signal_gate import evaluate_oil_signal_gate
-
-            gate = evaluate_oil_signal_gate(
-                bars[:-1] if len(bars) > 1 else bars,
-                interval_minutes=im,
-                proposed_side=proposed,
-            )
-            if proposed == "LONG" and not gate.allow_long:
-                logger.info("Oil UT Buy skipped by gate: %s", gate.reason_ru)
-                return 0
-            if proposed == "SHORT" and not gate.allow_short:
-                logger.info("Oil UT Sell skipped by gate: %s", gate.reason_ru)
-                return 0
-        except Exception:
-            logger.debug("Oil UT gate check failed", exc_info=True)
 
         # Не догонять после гео-спайка
         chase_pct = float(getattr(settings, "oil_ut_bot_chase_block_pct", 0.45) or 0.45)
