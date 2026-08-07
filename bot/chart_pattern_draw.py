@@ -51,7 +51,9 @@ def _x_at(bars: list[KlineBar], idx: int) -> float:
     return mdates.date2num(_idx_to_date(bars, idx))
 
 
-def _line_end_idx(bars: list[KlineBar], line: PatternLine) -> int:
+def _line_end_idx(bars: list[KlineBar], line: PatternLine, *, to_last: bool = False) -> int:
+    if to_last:
+        return max(0, len(bars) - 1)
     return min(len(bars) - 1, max(line.end_idx, line.start_idx) + 8)
 
 
@@ -65,8 +67,13 @@ def _draw_line(
     linestyle: str = "-",
     alpha: float = 0.9,
     extend: bool = True,
+    to_last: bool = False,
 ) -> None:
-    end_idx = _line_end_idx(bars, line) if extend else line.end_idx
+    end_idx = (
+        _line_end_idx(bars, line, to_last=True)
+        if to_last
+        else (_line_end_idx(bars, line) if extend else line.end_idx)
+    )
     x0 = _x_at(bars, line.start_idx)
     x1 = _x_at(bars, end_idx)
     if end_idx == line.start_idx:
@@ -231,6 +238,7 @@ def _draw_flag_pennant(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPat
 
 
 def _draw_triangle_wedge(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:
+    """Границы до текущей свечи + заливка — как на TV/Bybit."""
     roles = {p.role: p for p in pattern.points}
     if all(k in roles for k in ("A", "B", "C", "D")):
         a, b, c, d = roles["A"], roles["B"], roles["C"], roles["D"]
@@ -246,8 +254,33 @@ def _draw_triangle_wedge(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartP
             linewidth=0,
         ))
     for line in pattern.lines:
-        _draw_line(ax, bars, line, color=color, linestyle="--", alpha=0.88)
+        _draw_line(
+            ax, bars, line, color=color, linestyle="-", alpha=0.92, to_last=True,
+        )
     _draw_points(ax, bars, pattern.points, color=color)
+    # Стрелка пробоя при confirmed
+    if (getattr(pattern, "status", "") or "") == "confirmed" and pattern.lines:
+        last_i = len(bars) - 1
+        direction = (getattr(pattern, "direction", "") or "").lower()
+        upper = next((ln for ln in pattern.lines if ln.role == "upper_bound"), pattern.lines[0])
+        lower = next((ln for ln in pattern.lines if ln.role == "lower_bound"), pattern.lines[-1])
+        y_u = _line_value_draw(upper, last_i)
+        y_l = _line_value_draw(lower, last_i)
+        x = _x_at(bars, last_i)
+        if direction in {"bullish", "long"}:
+            ax.annotate(
+                "",
+                xy=(x, y_u + abs(y_u) * 0.0015),
+                xytext=(x, y_u),
+                arrowprops=dict(arrowstyle="->", color=color, lw=1.4),
+            )
+        elif direction in {"bearish", "short"}:
+            ax.annotate(
+                "",
+                xy=(x, y_l - abs(y_l) * 0.0015),
+                xytext=(x, y_l),
+                arrowprops=dict(arrowstyle="->", color=color, lw=1.4),
+            )
 
 
 def _draw_rectangle(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:

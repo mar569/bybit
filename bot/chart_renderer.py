@@ -1256,6 +1256,33 @@ def _draw_essential_oil_overlays(
     except Exception:
         logger.debug("signal markers skipped", exc_info=True)
 
+    # Треугольник Vataga / BuyHold — профессионально на свечах
+    try:
+        from .chart_pattern_draw import draw_chart_patterns
+        from .oil_triangle import TRIANGLE_KINDS, pick_oil_triangle_pattern
+        from .pattern_specs import MIN_DRAW_CONFIDENCE
+
+        primary = pick_oil_triangle_pattern(ta) or getattr(ta, "primary_chart_pattern", None)
+        patterns = list(getattr(ta, "chart_patterns", None) or [])
+        # Предпочитаем треугольник; иначе любая primary фигура
+        force = primary
+        if force is not None:
+            pkind = (getattr(force, "kind", "") or "").lower()
+            if pkind not in TRIANGLE_KINDS and pkind != "false_breakout":
+                # всё равно рисуем primary, если это сильная фигура
+                pass
+        draw_chart_patterns(
+            ax,
+            bars,
+            patterns,
+            max_patterns=1,
+            min_confidence=min(0.55, float(MIN_DRAW_CONFIDENCE)),
+            force_primary=force,
+            draw_target_labels=False,
+        )
+    except Exception:
+        logger.debug("oil triangle draw skipped", exc_info=True)
+
     # Короткие ценники справа (не боковые «ИТОГ/ПЛАН»)
     try:
         _draw_right_price_labels(ax, bars, ta)
@@ -3062,7 +3089,7 @@ def render_oil_chart(
         urals_change_pct=None,
         show_info_panels=False,
         ut_overlay=ut_overlay,
-        clean_chart=True,  # лёгкий анализ + UT; без боковых панелей / Elliott
+        clean_chart=True,  # лёгкий анализ + UT + треугольник Vataga; без боковых панелей
     )
 
 

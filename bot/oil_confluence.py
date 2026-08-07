@@ -102,30 +102,60 @@ def score_oil_tech_pack(
 
     tri_kind = (getattr(ta, "elliott_triangle_kind", "") or "").strip()
     tri_bias = (getattr(ta, "elliott_triangle_bias", "") or "").lower()
-    if tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
-        pts = int(round(2 * w))
-        side = "long" if tri_bias in {"long", "bullish"} else "short"
-        if side == "long":
-            long_pts += pts
-        else:
-            short_pts += pts
-        factors.append(f"Треугольник {tri_kind} → {side.upper()}")
+    # Vataga / BuyHold треугольник — основной голос (классика + EW fallback)
+    try:
+        from .oil_triangle import interpret_oil_triangle, score_triangle_votes
+
+        tri_plan = interpret_oil_triangle(ta)
+        if tri_plan is not None:
+            tl, ts, tf = score_triangle_votes(tri_plan, weight=w)
+            long_pts += tl
+            short_pts += ts
+            factors.extend(tf[:3])
+            if full_weight:
+                if tri_plan.stop is not None and levels["stop"] is None:
+                    levels["stop"] = float(tri_plan.stop)
+                if tri_plan.tp1 is not None and levels["tp1"] is None:
+                    levels["tp1"] = float(tri_plan.tp1)
+        elif tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
+            pts = int(round(2 * w))
+            side = "long" if tri_bias in {"long", "bullish"} else "short"
+            if side == "long":
+                long_pts += pts
+            else:
+                short_pts += pts
+            factors.append(f"Треугольник {tri_kind} → {side.upper()}")
+    except Exception:
+        if tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
+            pts = int(round(2 * w))
+            side = "long" if tri_bias in {"long", "bullish"} else "short"
+            if side == "long":
+                long_pts += pts
+            else:
+                short_pts += pts
+            factors.append(f"Треугольник {tri_kind} → {side.upper()}")
 
     try:
         from .chart_patterns import format_chart_pattern_compact, pick_primary_pattern
+        from .oil_triangle import TRIANGLE_KINDS
 
         patterns = list(getattr(ta, "chart_patterns", None) or [])
         primary = getattr(ta, "primary_chart_pattern", None) or pick_primary_pattern(
             patterns
         )
+        # Не дублируем очки, если primary уже учтён как треугольник
         if primary is not None:
+            pkind = (getattr(primary, "kind", "") or "").lower()
+            already_tri = pkind in TRIANGLE_KINDS or pkind == "false_breakout"
             conf = float(getattr(primary, "confidence", 0) or 0)
             direction = (getattr(primary, "direction", "") or "neutral").lower()
             status = getattr(primary, "status", "") or ""
             label = format_chart_pattern_compact(primary) or getattr(
                 primary, "label_ru", ""
             )
-            if conf >= 0.55 and direction in {"long", "short", "bullish", "bearish"}:
+            if already_tri:
+                pass  # голоса уже в score_triangle_votes
+            elif conf >= 0.55 and direction in {"long", "short", "bullish", "bearish"}:
                 pts = int(
                     round((3 if conf >= 0.7 and status == "confirmed" else 2) * w)
                 )
@@ -381,6 +411,30 @@ def build_oil_confluence_setup(
     long_pts += t_long
     short_pts += t_short
     factors.extend(t_factors[:6])
+
+    # Vataga: внутри треугольника не входим против приоритета; confirmed даёт SL/TP
+    tri_plan = None
+    try:
+        from .oil_triangle import interpret_oil_triangle, triangle_blocks_side
+
+        tri_plan = interpret_oil_triangle(ta, bars=bars)
+        if tri_plan is not None:
+            factors.append(tri_plan.line_ru[:140])
+            if tri_plan.status == "forming" and tri_plan.priority in {"long", "short", "caution"}:
+                if triangle_blocks_side(tri_plan, "short"):
+                    short_pts = 0
+                    factors.append("Vataga △: SHORT закрыт до пробоя")
+                if triangle_blocks_side(tri_plan, "long"):
+                    long_pts = 0
+                    factors.append("Vataga △: LONG закрыт до пробоя")
+            if tri_plan.priority == "caution":
+                long_pts = max(0, long_pts - 2)
+                short_pts = max(0, short_pts - 2)
+            if tri_plan.action == "cancel":
+                # ложный пробой — не догонять исходный пробой
+                factors.append(tri_plan.why_ru[:120])
+    except Exception:
+        tri_plan = None
 
     # Единый гейт: тренд + MACD первыми (новости только подтверждают)
     try:
@@ -713,6 +767,27 @@ def build_oil_confluence_setup(
             tp2 = float(tt2)
         if not catalyst and t_factors:
             catalyst = t_factors[0][:120]
+
+    # Vataga △: подпись триггера / уровни из пробоя
+    if tri_plan is not None:
+        if tri_plan.status == "forming":
+            trigger = (
+                f"Vataga △ {tri_plan.label_ru}: WAIT внутри — "
+                f"вход после close-пробоя ({tri_plan.priority})"
+            )[:160]
+            if not catalyst:
+                catalyst = tri_plan.line_ru[:120]
+        elif tri_plan.action in {"long", "short"}:
+            trigger = (
+                f"Vataga △ пробой → {tri_plan.action.upper()} · {tri_plan.label_ru}"
+            )[:160]
+            if tri_plan.stop and (stop is None or stop <= 0):
+                stop = float(tri_plan.stop)
+                inv = stop
+            if tri_plan.tp1 and (tp1 is None or tp1 <= 0):
+                tp1 = float(tri_plan.tp1)
+            if not catalyst:
+                catalyst = tri_plan.line_ru[:120]
 
     horizon = "intraday 4–12ч"
     if tech_full:

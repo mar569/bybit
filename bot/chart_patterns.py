@@ -937,7 +937,10 @@ def _detect_triangles_wedges(
     elif kind == "wedge_falling":
         psycho = "нисх. клин: обе линии вниз → чаще бычий разворот/сброс слабых шортов"
     else:
-        psycho = "треугольник: накопление → пробой по направлению"
+        psycho = (
+            "Vataga △: компрессия сил → вход после close-пробоя границы; "
+            "внутри фигуры WAIT; ложный = возврат внутрь"
+        )
     if subtype == "continuation":
         psycho += " · в контексте тренда = продолжение"
     if vol_note:

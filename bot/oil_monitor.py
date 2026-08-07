@@ -3220,6 +3220,19 @@ def _snapshot_from_ta(
     if ta.entry_zone and len(ta.entry_zone) >= 2:
         entry_zone = (float(ta.entry_zone[0]), float(ta.entry_zone[1]))
     stop = ta.elliott_stop_price or ta.invalidation_price
+    tri_note = ""
+    try:
+        from .oil_triangle import interpret_oil_triangle
+
+        plan = interpret_oil_triangle(ta)
+        if plan is not None:
+            tri_note = plan.line_ru[:100]
+    except Exception:
+        tri_note = ""
+    elliott_line = (ta.elliott_label or "")[:120]
+    if tri_note:
+        elliott_line = f"{tri_note}" + (f" · {elliott_line}" if elliott_line else "")
+        elliott_line = elliott_line[:160]
     return OilMarketSnapshot(
         label=label,
         symbol=sym,
@@ -3233,7 +3246,7 @@ def _snapshot_from_ta(
         breakdown=ta.breakdown_level,
         breakout=ta.breakout_level,
         phase=(ta.phase_label or ""),
-        elliott=(ta.elliott_label or "")[:120],
+        elliott=elliott_line,
         reason=(ta.verdict_reason or ta.professional_summary or "")[:200],
         entry_zone=entry_zone,
         stop=float(stop) if stop else None,
