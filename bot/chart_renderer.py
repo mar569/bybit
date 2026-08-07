@@ -2858,6 +2858,133 @@ def render_oil_chart(
     )
 
 
+def render_oil_ut_chart(
+    bars: list[KlineBar],
+    ut: Any,
+    *,
+    symbol_label: str = "UKOUSD",
+    interval_minutes: int = 5,
+    max_bars: int = 80,
+) -> bytes | None:
+    """PNG как на TradingView UT Bot: зелёные/красные свечи + Buy/Sell labels + trail."""
+    if not bars or ut is None:
+        return None
+    from datetime import datetime, timezone
+
+    n_ut = len(getattr(ut, "trails", ()) or ())
+    if n_ut < 12:
+        return None
+
+    work = list(bars)
+    # ut посчитан без forming — если bars длиннее на 1, отрежем хвост
+    if len(work) > n_ut:
+        work = work[-n_ut:]
+    show = max(20, min(int(max_bars), len(work)))
+    work = work[-show:]
+    o0 = n_ut - len(work)
+
+    times: list[datetime] = []
+    for b in work:
+        ts = float(getattr(b, "open_time", 0) or 0)
+        times.append(
+            datetime.fromtimestamp(ts, tz=timezone.utc)
+            if ts > 0
+            else datetime.now(tz=timezone.utc)
+        )
+
+    green = CHART_STYLE.get("accent_long", "#3fb950")
+    red = CHART_STYLE.get("accent_short", "#f85149")
+    bg = CHART_STYLE.get("bg", "#0d1117")
+    grid = CHART_STYLE.get("grid", "#21262d")
+    text_c = CHART_STYLE.get("text", "#c9d1d9")
+
+    fig, ax = plt.subplots(figsize=(11.5, 5.8), dpi=120)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+
+    trail_y: list[float] = []
+    for i, b in enumerate(work):
+        ui = o0 + i
+        bull = bool(ut.bar_bull[ui]) if ui < len(ut.bar_bull) else (b.close >= b.open)
+        color = green if bull else red
+        t = mdates.date2num(times[i])
+        width = (interval_minutes / 1440.0) * 0.7
+        ax.plot([t, t], [b.low, b.high], color=color, linewidth=1.0, solid_capstyle="round")
+        body_lo, body_hi = min(b.open, b.close), max(b.open, b.close)
+        ax.add_patch(
+            Rectangle(
+                (t - width / 2, body_lo),
+                width,
+                max(body_hi - body_lo, 1e-6),
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0.5,
+                zorder=3,
+            )
+        )
+        trail_y.append(float(ut.trails[ui]) if ui < len(ut.trails) else float(b.close))
+
+        if ui < len(ut.buy_flags) and ut.buy_flags[ui]:
+            ax.annotate(
+                "Buy",
+                xy=(t, b.low),
+                xytext=(0, -14),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor=green, edgecolor=green, alpha=0.95),
+                zorder=5,
+            )
+        if ui < len(ut.sell_flags) and ut.sell_flags[ui]:
+            ax.annotate(
+                "Sell",
+                xy=(t, b.high),
+                xytext=(0, 14),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor=red, edgecolor=red, alpha=0.95),
+                zorder=5,
+            )
+
+    ax.plot(
+        [mdates.date2num(t) for t in times],
+        trail_y,
+        color="#58a6ff",
+        linewidth=1.2,
+        alpha=0.9,
+        label="UT trail",
+        zorder=4,
+    )
+
+    key = float(getattr(ut, "key_value", 1) or 1)
+    atr_p = int(getattr(ut, "atr_period", 10) or 10)
+    ax.set_title(
+        f"OIL · {symbol_label} · UT Bot · {interval_minutes}m · Key {key:g} ATR {atr_p}",
+        color=text_c,
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax.tick_params(colors=text_c, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color(grid)
+    ax.grid(True, color=grid, alpha=0.45, linewidth=0.5)
+    ax.legend(loc="upper left", fontsize=8, facecolor=bg, edgecolor=grid, labelcolor=text_c)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buf.getvalue()
+
+
 async def render_signal_chart(
     symbol: str,
     *,

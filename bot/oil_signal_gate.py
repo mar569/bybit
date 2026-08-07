@@ -72,8 +72,11 @@ def evaluate_oil_signal_gate(
     *,
     interval_minutes: int = 5,
     proposed_side: str | None = None,
+    use_ut_bot: bool = False,
+    ut_key_value: float = 1.0,
+    ut_atr_period: int = 10,
 ) -> OilSignalGate:
-    """Разрешить LONG/SHORT только с трендом и MACD.
+    """Разрешить LONG/SHORT только с трендом и MACD (+ опционально UT Bot).
 
     proposed_side — если задан, reason заточен под него.
     """
@@ -124,6 +127,27 @@ def evaluate_oil_signal_gate(
         allow_long = False
         if "MACD" not in " ".join(blocks):
             blocks.append("MACD↓ — LONG закрыт")
+
+    if use_ut_bot:
+        try:
+            from .oil_ut_bot import compute_oil_ut_bot, ut_blocks_side
+
+            ut = compute_oil_ut_bot(
+                bars,
+                key_value=float(ut_key_value),
+                atr_period=int(ut_atr_period),
+                exclude_forming=True,
+            )
+            if ut is not None:
+                factors.append(ut.line_ru)
+                if ut_blocks_side(ut, "long"):
+                    allow_long = False
+                    blocks.append("UT short — LONG закрыт")
+                if ut_blocks_side(ut, "short"):
+                    allow_short = False
+                    blocks.append("UT long — SHORT закрыт")
+        except Exception:
+            pass
 
     # Согласование: LONG только если не против MACD/тренда
     if trend == "down" and macd_bias == "bear":

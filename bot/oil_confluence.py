@@ -233,6 +233,9 @@ def build_oil_confluence_setup(
     apply_chase_filter: bool = True,
     require_close_break: bool = True,
     news_entry_max_age_hours: float = 1.0,
+    use_ut_bot: bool = False,
+    ut_key_value: float = 1.0,
+    ut_atr_period: int = 10,
 ) -> OilConfluenceSetup | None:
     """Голосование факторов. None / WAIT-side если нет сильного края."""
     from .oil_entry_filters import (
@@ -383,7 +386,13 @@ def build_oil_confluence_setup(
     try:
         from .oil_signal_gate import evaluate_oil_signal_gate, gate_apply_to_side
 
-        gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+        gate = evaluate_oil_signal_gate(
+            bars,
+            interval_minutes=interval_minutes,
+            use_ut_bot=use_ut_bot,
+            ut_key_value=ut_key_value,
+            ut_atr_period=ut_atr_period,
+        )
         factors.extend(list(gate.factors_ru[:3]))
         if gate.macd_bias == "bull":
             long_pts += 2
@@ -956,10 +965,13 @@ def setup_passes_gate(
     bars: Sequence[Any] | None = None,
     interval_minutes: int = 15,
     forecast: Any | None = None,
+    use_ut_bot: bool = False,
+    ut_key_value: float = 1.0,
+    ut_atr_period: int = 10,
 ) -> bool:
     """True только для отправки A+ в ручной TA.
 
-    Редкость: сторона + quality + касание уровня + гейт тренд/MACD
+    Редкость: сторона + quality + касание уровня + гейт тренд/MACD/UT
     + прогноз не противоречит (если есть).
     """
     if setup is None:
@@ -974,7 +986,13 @@ def setup_passes_gate(
         try:
             from .oil_signal_gate import evaluate_oil_signal_gate
 
-            gate = evaluate_oil_signal_gate(bars, interval_minutes=interval_minutes)
+            gate = evaluate_oil_signal_gate(
+                bars,
+                interval_minutes=interval_minutes,
+                use_ut_bot=use_ut_bot,
+                ut_key_value=ut_key_value,
+                ut_atr_period=ut_atr_period,
+            )
             if setup.side == "LONG" and not gate.allow_long:
                 return False
             if setup.side == "SHORT" and not gate.allow_short:

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 90
+SETTINGS_VERSION = 91
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -616,6 +616,16 @@ class ScannerSettings:
     oil_micro_cooldown_seconds: int = 1800
     oil_micro_max_per_hour: int = 2
     oil_micro_min_quality: int = 8
+    # UT Bot Alerts (Pine) — ATR trailing Buy/Sell
+    oil_ut_bot_alerts_enabled: bool = True
+    oil_ut_bot_gate_enabled: bool = True
+    oil_ut_bot_key_value: float = 1.0
+    oil_ut_bot_atr_period: int = 10
+    oil_ut_bot_heikin_ashi: bool = False
+    oil_ut_bot_interval_minutes: int = 5
+    oil_ut_bot_cooldown_seconds: int = 900
+    oil_ut_bot_max_per_hour: int = 4
+    oil_ut_bot_chase_block_pct: float = 0.45  # не алертить если уже |ход| 15м >
     # Качество входа: сессия / anti-chase / close за уровнем
     oil_entry_session_filter: bool = True
     oil_session_block_minutes: float = 20.0
@@ -1253,6 +1263,21 @@ class ScannerSettings:
             oil_micro_cooldown_seconds=int(base.get("oil_micro_cooldown_seconds", 1800)),
             oil_micro_max_per_hour=int(base.get("oil_micro_max_per_hour", 2)),
             oil_micro_min_quality=int(base.get("oil_micro_min_quality", 8)),
+            oil_ut_bot_alerts_enabled=bool(base.get("oil_ut_bot_alerts_enabled", True)),
+            oil_ut_bot_gate_enabled=bool(base.get("oil_ut_bot_gate_enabled", True)),
+            oil_ut_bot_key_value=float(base.get("oil_ut_bot_key_value", 1.0)),
+            oil_ut_bot_atr_period=int(base.get("oil_ut_bot_atr_period", 10)),
+            oil_ut_bot_heikin_ashi=bool(base.get("oil_ut_bot_heikin_ashi", False)),
+            oil_ut_bot_interval_minutes=int(
+                base.get("oil_ut_bot_interval_minutes", 5)
+            ),
+            oil_ut_bot_cooldown_seconds=int(
+                base.get("oil_ut_bot_cooldown_seconds", 900)
+            ),
+            oil_ut_bot_max_per_hour=int(base.get("oil_ut_bot_max_per_hour", 4)),
+            oil_ut_bot_chase_block_pct=float(
+                base.get("oil_ut_bot_chase_block_pct", 0.45)
+            ),
             oil_entry_session_filter=bool(base.get("oil_entry_session_filter", True)),
             oil_session_block_minutes=float(base.get("oil_session_block_minutes", 20.0)),
             oil_entry_chase_filter=bool(base.get("oil_entry_chase_filter", True)),
@@ -2061,6 +2086,16 @@ class SettingsManager:
                 merged["oil_fastlane_max_per_poll"] = max(
                     3, int(merged.get("oil_fastlane_max_per_poll", 3) or 3)
                 )
+            if version < 91:
+                merged.setdefault("oil_ut_bot_alerts_enabled", True)
+                merged.setdefault("oil_ut_bot_gate_enabled", True)
+                merged.setdefault("oil_ut_bot_key_value", 1.0)
+                merged.setdefault("oil_ut_bot_atr_period", 10)
+                merged.setdefault("oil_ut_bot_heikin_ashi", False)
+                merged.setdefault("oil_ut_bot_interval_minutes", 5)
+                merged.setdefault("oil_ut_bot_cooldown_seconds", 900)
+                merged.setdefault("oil_ut_bot_max_per_hour", 4)
+                merged.setdefault("oil_ut_bot_chase_block_pct", 0.45)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

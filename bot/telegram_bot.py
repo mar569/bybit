@@ -2155,6 +2155,29 @@ class TelegramBot:
             chat_id, message, self._oil_signal_keyboard(), is_priority=True,
         )
 
+    async def dispatch_oil_ut_alert(self, message: str, png: bytes | None = None) -> bool:
+        """UT Bot Buy/Sell → oil news chat (+ PNG как на TV)."""
+        if self.application is None:
+            return False
+        settings = self.settings_manager.settings
+        if self._bot_notifications_blocked():
+            return False
+        if not getattr(settings, "oil_news_enabled", False):
+            return False
+        if not getattr(settings, "oil_ut_bot_alerts_enabled", True):
+            return False
+        chat_id = self.config.oil_news_chat_id
+        if chat_id is None:
+            return False
+        keyboard = self._oil_signal_keyboard()
+        if png:
+            return await self._send_chart(
+                chat_id, png, message, is_priority=True, keyboard=keyboard,
+            )
+        return await self._send_to_chat(
+            chat_id, message, keyboard, is_priority=True,
+        )
+
     def _oil_context_keyboard(self) -> InlineKeyboardMarkup:
         """Быстрые кнопки под ответами Почему/Запасы/Ормуз — без команд."""
         return InlineKeyboardMarkup([
@@ -4730,8 +4753,11 @@ class TelegramBot:
             f"CD <b>{getattr(s, 'oil_level_alert_cooldown_seconds', 1800)}с</b>\n"
             f"Микро-сигналы: <b>{'ON' if getattr(s, 'oil_micro_signals_enabled', False) else 'OFF'}</b> · "
             f"TP <b>{getattr(s, 'oil_micro_tp_pct', 0.30):g}%</b> · "
-            f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.28):g}%</b> "
-            f"<i>(по умолч. OFF — режим ПРО)</i>\n"
+            f"стоп <b>{getattr(s, 'oil_micro_sl_pct', 0.28):g}%</b>\n"
+            f"UT Bot: <b>{'ON' if getattr(s, 'oil_ut_bot_alerts_enabled', True) else 'OFF'}</b> · "
+            f"gate <b>{'ON' if getattr(s, 'oil_ut_bot_gate_enabled', True) else 'OFF'}</b> · "
+            f"{getattr(s, 'oil_ut_bot_interval_minutes', 5)}m · "
+            f"Key <b>{getattr(s, 'oil_ut_bot_key_value', 1):g}</b> ATR <b>{getattr(s, 'oil_ut_bot_atr_period', 10)}</b>\n"
             f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
             f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', False) else 'OFF'}</b> · "
             f"ключи: <b>{'Gemini' if self.config.gemini_configured else ''}"
@@ -4829,6 +4855,13 @@ class TelegramBot:
                         getattr(s, "oil_micro_signals_enabled", True),
                     ),
                     callback_data="oil:micro",
+                ),
+                InlineKeyboardButton(
+                    self._mark(
+                        "UT Bot",
+                        getattr(s, "oil_ut_bot_alerts_enabled", True),
+                    ),
+                    callback_data="oil:utbot",
                 ),
             ],
             [
@@ -6030,6 +6063,10 @@ class TelegramBot:
             cur = bool(getattr(s, "oil_micro_signals_enabled", True))
             self.settings_manager.update(oil_micro_signals_enabled=not cur)
             label = f"Micro → {'ON' if not cur else 'OFF'}"
+        elif action == "utbot":
+            cur = bool(getattr(s, "oil_ut_bot_alerts_enabled", True))
+            self.settings_manager.update(oil_ut_bot_alerts_enabled=not cur)
+            label = f"UT Bot → {'ON' if not cur else 'OFF'}"
         elif action == "forecast":
             cur = bool(getattr(s, "oil_forecast_enabled", True))
             self.settings_manager.update(oil_forecast_enabled=not cur)

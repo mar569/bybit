@@ -3994,6 +3994,7 @@ class OilMonitorEngine:
         on_extra_chart: Callable[[str, bytes], Awaitable[bool]] | None = None,
         on_signal: Callable[[str], Awaitable[bool]] | None = None,
         on_setup: Callable[[str, bytes | None], Awaitable[bool]] | None = None,
+        on_ut_alert: Callable[[str, bytes | None], Awaitable[bool]] | None = None,
         on_admin_desk: Callable[[str], Awaitable[bool]] | None = None,
         gemini_api_key: Callable[[], str | None] | str | None = None,
         gemini_model: Callable[[], str] | str | None = None,
@@ -4006,6 +4007,7 @@ class OilMonitorEngine:
         self._on_extra_chart = on_extra_chart
         self._on_signal = on_signal or on_level_alert
         self._on_setup = on_setup
+        self._on_ut_alert = on_ut_alert
         self._on_admin_desk = on_admin_desk
         self._gemini_api_key = gemini_api_key
         self._gemini_model = gemini_model
@@ -4019,6 +4021,9 @@ class OilMonitorEngine:
         self._last_brent_bars: list | None = None
         self._last_micro_signal_ts: float = 0.0
         self._micro_signal_hour: list[float] = []
+        self._last_ut_alert_ts: float = 0.0
+        self._ut_alert_hour: list[float] = []
+        self._last_ut_flip_key: str = ""
         self._last_setup_ts: float = 0.0
         self._last_setup_side: str = ""
         self._last_trade_brief_ts: float = 0.0
@@ -4668,6 +4673,149 @@ class OilMonitorEngine:
         )
         return 1
 
+    async def _tick_ut_bot_alerts(self, settings: Any) -> int:
+        """UT Bot Alerts: Buy/Sell flip на закрытой свече + PNG как на TV."""
+        if not getattr(settings, "oil_ut_bot_alerts_enabled", True):
+            return 0
+        if not self._oil_entry_signals_allowed(settings):
+            return 0
+        dispatch = self._on_ut_alert or self._on_setup
+        if dispatch is None:
+            return 0
+        now = time.time()
+        cooldown = int(getattr(settings, "oil_ut_bot_cooldown_seconds", 900))
+        if now - self._last_ut_alert_ts < cooldown:
+            return 0
+        max_h = int(getattr(settings, "oil_ut_bot_max_per_hour", 4))
+        self._ut_alert_hour = [t for t in self._ut_alert_hour if now - t < 3600]
+        if len(self._ut_alert_hour) >= max_h:
+            return 0
+
+        im = int(getattr(settings, "oil_ut_bot_interval_minutes", 5) or 5)
+        im = max(5, min(60, im))
+        try:
+            bars = await asyncio.to_thread(
+                _fetch_oil_bars,
+                yahoo_symbol=OIL_BRENT_YAHOO,
+                bybit_symbol=OIL_BRENT_BYBIT,
+                interval_minutes=im,
+                limit=120,
+            )
+        except Exception:
+            logger.debug("Oil UT bars failed", exc_info=True)
+            return 0
+        if not bars or len(bars) < 30:
+            return 0
+
+        from .oil_ut_bot import compute_oil_ut_bot, format_oil_ut_alert
+
+        ut = compute_oil_ut_bot(
+            bars,
+            key_value=float(getattr(settings, "oil_ut_bot_key_value", 1.0) or 1.0),
+            atr_period=int(getattr(settings, "oil_ut_bot_atr_period", 10) or 10),
+            heikin_ashi=bool(getattr(settings, "oil_ut_bot_heikin_ashi", False)),
+            exclude_forming=True,
+        )
+        if ut is None or (not ut.buy and not ut.sell):
+            return 0
+
+        flip_key = f"{'buy' if ut.buy else 'sell'}:{ut.src:.3f}:{ut.trail:.3f}"
+        if flip_key == self._last_ut_flip_key:
+            return 0
+
+        # Не против жёсткого гейта тренд+MACD
+        proposed = "LONG" if ut.buy else "SHORT"
+        try:
+            from .oil_signal_gate import evaluate_oil_signal_gate
+
+            gate = evaluate_oil_signal_gate(
+                bars[:-1] if len(bars) > 1 else bars,
+                interval_minutes=im,
+                proposed_side=proposed,
+            )
+            if proposed == "LONG" and not gate.allow_long:
+                logger.info("Oil UT Buy skipped by gate: %s", gate.reason_ru)
+                return 0
+            if proposed == "SHORT" and not gate.allow_short:
+                logger.info("Oil UT Sell skipped by gate: %s", gate.reason_ru)
+                return 0
+        except Exception:
+            logger.debug("Oil UT gate check failed", exc_info=True)
+
+        # Не догонять после гео-спайка
+        chase_pct = float(getattr(settings, "oil_ut_bot_chase_block_pct", 0.45) or 0.45)
+        try:
+            from .oil_entry_filters import measure_recent_move
+
+            move = measure_recent_move(
+                bars,
+                interval_minutes=im,
+                priced_in_30m_pct=chase_pct,
+                priced_in_60m_pct=chase_pct * 1.5,
+            )
+            if move is not None:
+                m15_bars = max(1, int(round(15 / im)))
+                if len(bars) > m15_bars + 1:
+                    c0 = float(bars[-(m15_bars + 1)].close)
+                    c1 = float(bars[-2].close)  # last closed
+                    if c0 > 0:
+                        m15 = (c1 - c0) / c0 * 100.0
+                        if ut.buy and m15 >= chase_pct:
+                            logger.info("Oil UT Buy skipped chase +%.2f%%/15м", m15)
+                            return 0
+                        if ut.sell and m15 <= -chase_pct:
+                            logger.info("Oil UT Sell skipped chase %.2f%%/15м", m15)
+                            return 0
+        except Exception:
+            pass
+
+        msg = format_oil_ut_alert(ut, interval_minutes=im)
+        png: bytes | None = None
+        try:
+            from .chart_renderer import render_oil_ut_chart
+
+            png = render_oil_ut_chart(
+                bars,
+                ut,
+                symbol_label="UKOUSD",
+                interval_minutes=im,
+            )
+        except Exception:
+            logger.debug("Oil UT chart failed", exc_info=True)
+
+        try:
+            ok = await dispatch(msg, png)
+        except TypeError:
+            # fallback если callback только message
+            try:
+                ok = await dispatch(msg)  # type: ignore[misc, call-arg]
+            except Exception:
+                logger.exception("Oil UT alert dispatch failed")
+                return 0
+        except Exception:
+            logger.exception("Oil UT alert dispatch failed")
+            return 0
+        if not ok:
+            return 0
+
+        self._last_ut_alert_ts = now
+        self._ut_alert_hour.append(now)
+        self._last_ut_flip_key = flip_key
+        tp_guess = float(ut.src) + (2.0 * float(ut.atr) if ut.buy else -2.0 * float(ut.atr))
+        self._setup_journal.register(
+            side="long" if ut.buy else "short",
+            entry=float(ut.src),
+            stop=float(ut.trail) if ut.trail > 0 else float(ut.src) * 0.995,
+            tp1=tp_guess,
+            tp2=None,
+            price=float(ut.src),
+            catalyst=ut.line_ru,
+            quality=8,
+            source="ut_bot",
+        )
+        logger.info("Oil UT %s @ %.2f trail=%.2f", proposed, ut.src, ut.trail)
+        return 1
+
     async def _tick_fastlane(self, settings: Any) -> int:
         """‼️ КРИТИЧНО: wire + WSJ/Reuters/Bloomberg → сразу в чат (ИИ в том же flash)."""
         if not getattr(settings, "oil_fastlane_enabled", True):
@@ -5020,6 +5168,7 @@ class OilMonitorEngine:
         sent += await self._tick_reaction_confirm(settings)
         sent += await self._tick_level_alerts(settings)
         sent += await self._tick_micro_signals(settings)
+        sent += await self._tick_ut_bot_alerts(settings)
         sent += await self._tick_fastlane(settings)
         sent += await self._tick_hormuz_alert(settings)
         sent += await self._tick_preopen_alert(settings)
@@ -6137,6 +6286,9 @@ class OilMonitorEngine:
             news_entry_max_age_hours=float(
                 getattr(settings, "oil_news_entry_max_age_hours", 0.5)
             ),
+            use_ut_bot=bool(getattr(settings, "oil_ut_bot_gate_enabled", True)),
+            ut_key_value=float(getattr(settings, "oil_ut_bot_key_value", 1.0) or 1.0),
+            ut_atr_period=int(getattr(settings, "oil_ut_bot_atr_period", 10) or 10),
         )
         if not setup_passes_gate(
             setup,
@@ -6144,6 +6296,9 @@ class OilMonitorEngine:
             bars=bundle.brent_bars,
             interval_minutes=bundle.interval_minutes,
             forecast=forecast,
+            use_ut_bot=bool(getattr(settings, "oil_ut_bot_gate_enabled", True)),
+            ut_key_value=float(getattr(settings, "oil_ut_bot_key_value", 1.0) or 1.0),
+            ut_atr_period=int(getattr(settings, "oil_ut_bot_atr_period", 10) or 10),
         ):
             return 0
         assert setup is not None

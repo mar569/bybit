@@ -137,6 +137,7 @@ async def main() -> None:
         on_extra_chart=telegram.dispatch_oil_extra_chart,
         on_signal=telegram.dispatch_oil_micro_signal,
         on_setup=telegram.dispatch_oil_setup,
+        on_ut_alert=telegram.dispatch_oil_ut_alert,
         on_admin_desk=telegram.dispatch_oil_admin_desk,
         gemini_api_key=lambda: config.gemini_api_key,
         gemini_model=lambda: config.gemini_model,

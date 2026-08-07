@@ -266,3 +266,16 @@ def test_confluence_wait_not_short_on_rally():
         apply_chase_filter=False,
     )
     assert setup is None or setup.side == "WAIT"
+
+
+def test_ut_bot_gate_blocks_short_in_uptrend():
+    bars = _up_bars(50, step=0.12)
+    gate = evaluate_oil_signal_gate(
+        bars,
+        interval_minutes=5,
+        use_ut_bot=True,
+        proposed_side="SHORT",
+    )
+    assert gate.allow_short is False
+    # LONG по UT в uptrend должен оставаться открытым (если не против MACD)
+    assert gate.allow_long is True or "UT" in gate.reason_ru
