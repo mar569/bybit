@@ -1179,10 +1179,24 @@ def _draw_essential_oil_overlays(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
 ) -> None:
-    """Минимум для нефти: S/R, ключевой Fib, вход/SL/TP — без треугольников/Elliott/ликв."""
+    """Лёгкий анализ нефти: зоны, S/R, Fib, вход/SL/TP — без Elliott/треугольников/панелей."""
     if not bars:
         return
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+
+    # Зоны поддержки/сопротивления + buy/sell flat
+    try:
+        draw_buy_flat_sell_zones(ax, bars, ta)
+    except Exception:
+        logger.debug("buy/flat/sell zones skipped", exc_info=True)
+    try:
+        _draw_zones(ax, bars, ta)
+    except Exception:
+        logger.debug("zones skipped", exc_info=True)
+    try:
+        _draw_channel(ax, bars, ta)
+    except Exception:
+        logger.debug("channel skipped", exc_info=True)
 
     if ta.breakout_level:
         ax.axhline(
@@ -1198,44 +1212,55 @@ def _draw_essential_oil_overlays(
             linestyle="-", linewidth=0.9, alpha=0.8,
         )
 
-    for lv in (ta.levels or [])[:2]:
+    for lv in (ta.levels or [])[:3]:
         color = (
             CHART_STYLE["level_support"]
             if getattr(lv, "kind", "") == "support"
             else CHART_STYLE["level_resistance"]
         )
-        ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.8, alpha=0.55)
+        ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.85, alpha=0.6)
 
-    # Только ключевые Fib 50% / 61.8% — без полной сетки
+    # Ключевые Fib — 38.2 / 50 / 61.8
     for fl in getattr(ta, "fib_levels", None) or []:
         ratio = float(getattr(fl, "ratio", 0) or 0)
-        if ratio not in {0.5, 0.618}:
+        if abs(ratio - 0.382) > 0.01 and abs(ratio - 0.5) > 0.01 and abs(ratio - 0.618) > 0.01:
             continue
         ax.axhline(
             float(fl.price),
             color=CHART_STYLE["fib_key"],
             linestyle="--",
-            linewidth=0.75,
-            alpha=0.55,
+            linewidth=0.8,
+            alpha=0.6,
         )
 
-    if not is_wait and ta.invalidation_price:
+    if ta.invalidation_price:
         ax.axhline(
             ta.invalidation_price, color=CHART_STYLE["inv"],
-            linestyle="--", linewidth=1.05, alpha=0.9,
+            linestyle="--", linewidth=1.05, alpha=0.85,
         )
-    if not is_wait:
-        for tp in (ta.target_prices or [])[:2]:
-            if ta.verdict == "SHORT" and tp >= ta.current_price:
-                continue
-            if ta.verdict == "LONG" and tp <= ta.current_price:
-                continue
-            ax.axhline(tp, color=CHART_STYLE["target"], linestyle=":", linewidth=0.85, alpha=0.7)
+    for tp in (ta.target_prices or [])[:2]:
+        if is_wait:
+            break
+        if ta.verdict == "SHORT" and tp >= ta.current_price:
+            continue
+        if ta.verdict == "LONG" and tp <= ta.current_price:
+            continue
+        ax.axhline(tp, color=CHART_STYLE["target"], linestyle=":", linewidth=0.9, alpha=0.75)
 
-    if ta.entry_zone and not is_wait:
+    if ta.entry_zone:
         lo, hi = ta.entry_zone
-        ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.10)
-    # Без боковых текстовых блоков и без правых «описаний» — только линии уровней
+        ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.12)
+
+    try:
+        _draw_signal_markers(ax, bars, ta)
+    except Exception:
+        logger.debug("signal markers skipped", exc_info=True)
+
+    # Короткие ценники справа (не боковые «ИТОГ/ПЛАН»)
+    try:
+        _draw_right_price_labels(ax, bars, ta)
+    except Exception:
+        logger.debug("right labels skipped", exc_info=True)
 
 
 def _draw_ta_annotations(
@@ -1948,9 +1973,8 @@ def _render_chart_figure(
     ut_overlay: Any | None = None,
     clean_chart: bool = False,
 ) -> bytes:
-    """clean_chart: UT + важное (S/R, Fib 50/61.8, SL/TP) — без треугольников/Elliott/панелей."""
-    use_enhanced = enhanced
-    # Чистый UT-вид: без боковых панелей; essential overlays — да
+    """clean_chart: лёгкий анализ + UT + Vol/RSI; без боковых ИТОГ/ПЛАН и без Elliott/треугольников."""
+    use_enhanced = enhanced  # Vol + RSI оставляем
     if clean_chart:
         show_info_panels = False
     fig_size, height_ratios = _chart_figure_layout(
@@ -2002,8 +2026,8 @@ def _render_chart_figure(
         draw_rsi_panel(
             ax_rsi,
             bars,
-            # На clean-графике не путаем UT Buy/Sell с RSI Bull/Bear
-            divergences=[] if clean_chart else (getattr(ta, "rsi_divergences", None) or []),
+            # RSI-дивергенции — полезный анализ снизу (не путать с UT Buy/Sell на цене)
+            divergences=(getattr(ta, "rsi_divergences", None) or [])[:4],
             rsi_values=getattr(ta, "rsi_values", None) or None,
             rsi_sma=getattr(ta, "rsi_sma", None) or None,
         )
@@ -3031,14 +3055,14 @@ def render_oil_chart(
         interval_minutes=im,
         pro_mode=False,
         display_hours=zoom,
-        enhanced=True,
+        enhanced=True,  # Vol + RSI снизу
         height_scale=max(1.35, float(height_scale or 1.45)),
         wave_focus=False,
         urals_price=None,
         urals_change_pct=None,
         show_info_panels=False,
         ut_overlay=ut_overlay,
-        clean_chart=True,  # UT + S/R/Fib50·618/SL·TP; без треугольников/Elliott/панелей
+        clean_chart=True,  # лёгкий анализ + UT; без боковых панелей / Elliott
     )
 
 

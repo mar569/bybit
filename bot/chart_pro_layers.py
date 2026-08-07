@@ -377,9 +377,28 @@ def draw_volume_panel(ax: plt.Axes, bars: list[KlineBar]) -> None:
     if not bars:
         return
     times = _bar_times(bars)
+    vols = [max(0.0, float(getattr(b, "volume", 0) or 0)) for b in bars]
+    # TradFi/MT5 часто даёт пустой/плоский volume — тогда activity = диапазон свечи
+    nonzero = sum(1 for v in vols if v > 0)
+    use_proxy = nonzero < max(3, len(vols) // 4)
+    if not use_proxy and max(vols) > 0:
+        vmin = min(vols)
+        if vmin > 0 and (max(vols) / vmin) < 1.08:
+            use_proxy = True
+    if use_proxy:
+        vals = [
+            max(1e-9, float(b.high) - float(b.low)) * 100.0
+            + abs(float(b.close) - float(b.open)) * 50.0
+            for b in bars
+        ]
+        ylabel = "Act"
+    else:
+        vals = vols
+        ylabel = "Vol"
     colors = [("#26a69a" if b.close >= b.open else "#ef5350") for b in bars]
-    ax.bar(times, [b.volume for b in bars], width=0.003, color=colors, alpha=0.75)
-    ax.set_ylabel("Vol", color=CHART_TEXT, fontsize=7)
+    width = max(_bar_width_days(bars) * 0.7, 0.0008)
+    ax.bar(times, vals, width=width, color=colors, alpha=0.75)
+    ax.set_ylabel(ylabel, color=CHART_TEXT, fontsize=7)
     ax.tick_params(colors=CHART_TEXT, labelsize=6)
     ax.set_facecolor(CHART_BG)
     ax.grid(True, color=CHART_GRID, linewidth=0.35, alpha=0.6)
