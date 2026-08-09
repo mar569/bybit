@@ -1174,15 +1174,122 @@ def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnaly
         )
 
 
+def _draw_oil_price_action_overlays(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+) -> None:
+    """EMA 9/21/50 + зоны спроса/предложения + подпись режима PA."""
+    try:
+        from .oil_price_action import analyze_oil_price_action
+    except Exception:
+        return
+    pa = analyze_oil_price_action(bars, ta)
+    if pa is None:
+        return
+    from datetime import datetime, timezone
+
+    times = [
+        datetime.fromtimestamp(float(b.open_time), tz=timezone.utc) for b in bars
+    ]
+    n = len(times)
+    if n >= 2 and len(pa.ema9_series) == n:
+        ax.plot(
+            times, list(pa.ema9_series),
+            color="#58a6ff", linewidth=1.05, alpha=0.9, label="EMA9", zorder=4,
+        )
+        ax.plot(
+            times, list(pa.ema21_series),
+            color="#e3b341", linewidth=1.1, alpha=0.9, label="EMA21", zorder=4,
+        )
+        ax.plot(
+            times, list(pa.ema50_series),
+            color="#f85149", linewidth=1.2, alpha=0.85, label="EMA50", zorder=4,
+        )
+    # Order blocks / demand-supply
+    for ob in (pa.demand, pa.supply):
+        if ob is None:
+            continue
+        color = CHART_STYLE["accent_long"] if ob.side == "demand" else CHART_STYLE["accent_short"]
+        i0 = max(0, min(ob.start_idx, n - 1))
+        x0 = mdates.date2num(times[i0])
+        x1 = mdates.date2num(times[-1])
+        try:
+            from matplotlib.patches import Rectangle
+
+            ax.add_patch(
+                Rectangle(
+                    (x0, ob.bottom),
+                    max(0.0001, x1 - x0),
+                    max(1e-6, ob.top - ob.bottom),
+                    facecolor=color,
+                    edgecolor=color,
+                    alpha=0.18,
+                    linewidth=0.9,
+                    zorder=2,
+                )
+            )
+        except Exception:
+            ax.axhspan(ob.bottom, ob.top, facecolor=color, alpha=0.12, zorder=1)
+        ax.text(
+            times[-1],
+            (ob.top + ob.bottom) / 2.0,
+            f" {ob.label_ru}",
+            color=color,
+            fontsize=6.5,
+            fontweight="bold",
+            va="center",
+            ha="left",
+            zorder=6,
+        )
+    # Режим PA в углу
+    mode_color = (
+        CHART_STYLE["accent_long"] if pa.bias == "long"
+        else CHART_STYLE["accent_short"] if pa.bias == "short"
+        else CHART_STYLE["warning"]
+    )
+    ax.text(
+        0.01, 0.98,
+        pa.line_ru,
+        transform=ax.transAxes,
+        color=mode_color,
+        fontsize=7.2,
+        fontweight="bold",
+        va="top",
+        ha="left",
+        zorder=10,
+        bbox=dict(
+            boxstyle="round,pad=0.25",
+            facecolor="#0d1117",
+            edgecolor=mode_color,
+            alpha=0.88,
+        ),
+    )
+
+
 def _draw_essential_oil_overlays(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
 ) -> None:
-    """Лёгкий анализ нефти: зоны, S/R, Fib, вход/SL/TP — без Elliott/треугольников/панелей."""
+    """Лёгкий анализ нефти: PA/EMA/зоны/Fib/фигуры — без боковых панелей."""
     if not bars:
         return
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+
+    # EMA + order blocks + режим пробой/отскок/ретест
+    try:
+        _draw_oil_price_action_overlays(ax, bars, ta)
+    except Exception:
+        logger.debug("oil PA overlays skipped", exc_info=True)
+
+    # FVG / SMC кратко
+    try:
+        smc = getattr(ta, "smc", None)
+        if smc is not None:
+            _draw_smc_annotations(ax, bars, ta)
+    except Exception:
+        logger.debug("oil SMC overlays skipped", exc_info=True)
 
     # Зоны поддержки/сопротивления + buy/sell flat
     try:

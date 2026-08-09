@@ -41,8 +41,9 @@ def score_oil_tech_pack(
     *,
     px: float,
     full_weight: bool = True,
+    bars: Sequence[Any] | None = None,
 ) -> tuple[int, int, list[str], dict[str, float | None]]:
-    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза.
+    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза / PA."""
 
     full_weight=True — нет сильных новостей, техника ведёт.
     full_weight=False — новость HOT, техника только подтверждает.
@@ -191,8 +192,26 @@ def score_oil_tech_pack(
     if full_weight:
         if "быч" in structure:
             long_pts += 1
-        if "медвеж" in structure:
+        if "медв" in structure:  # "медв." / "медвеж"
             short_pts += 1
+
+    # Price Action система: EMA 9/21/50 + пробой/отскок/ретест/OB
+    try:
+        from .oil_price_action import analyze_oil_price_action, score_price_action_votes
+
+        pa = analyze_oil_price_action(bars, ta)
+        if pa is not None:
+            pl, ps, pf, plv = score_price_action_votes(pa, weight=w)
+            long_pts += pl
+            short_pts += ps
+            factors.extend(pf[:4])
+            if full_weight:
+                if plv.get("stop") and levels["stop"] is None:
+                    levels["stop"] = plv["stop"]
+                if plv.get("tp1") and levels["tp1"] is None:
+                    levels["tp1"] = plv["tp1"]
+    except Exception:
+        pass
 
     channel = getattr(ta, "channel", None)
     if channel is not None and full_weight:
@@ -401,7 +420,7 @@ def build_oil_confluence_setup(
     else:
         factors.append("режим: НОВОСТЬ + техника")
     t_long, t_short, t_factors, tech_levels = score_oil_tech_pack(
-        ta, px=px, full_weight=tech_full
+        ta, px=px, full_weight=tech_full, bars=bars
     )
     # Не толкать технику против блока новостей
     if news_assess.block_long:
@@ -435,6 +454,26 @@ def build_oil_confluence_setup(
                 factors.append(tri_plan.why_ru[:120])
     except Exception:
         tri_plan = None
+
+    # PA: не входить против стека EMA+структуры
+    try:
+        from .oil_price_action import analyze_oil_price_action, pa_blocks_side
+
+        pa_plan = analyze_oil_price_action(bars, ta)
+        if pa_plan is not None:
+            if pa_blocks_side(pa_plan, "long"):
+                long_pts = 0
+                factors.append(f"PA блок LONG: {pa_plan.line_ru[:80]}")
+            if pa_blocks_side(pa_plan, "short"):
+                short_pts = 0
+                factors.append(f"PA блок SHORT: {pa_plan.line_ru[:80]}")
+            if pa_plan.mode in {"breakout", "retest", "bounce"} and pa_plan.bias in {
+                "long",
+                "short",
+            }:
+                factors.append(pa_plan.why_ru[:120])
+    except Exception:
+        pass
 
     # Единый гейт: тренд + MACD первыми (новости только подтверждают)
     try:

@@ -3262,10 +3262,18 @@ def _snapshot_from_ta(
             tri_note = plan.line_ru[:100]
     except Exception:
         tri_note = ""
+    pa_note = ""
+    try:
+        from .oil_price_action import analyze_oil_price_action
+
+        pa = analyze_oil_price_action(bars, ta)
+        if pa is not None and pa.mode != "wait":
+            pa_note = pa.line_ru[:90]
+    except Exception:
+        pa_note = ""
     elliott_line = (ta.elliott_label or "")[:120]
-    if tri_note:
-        elliott_line = f"{tri_note}" + (f" · {elliott_line}" if elliott_line else "")
-        elliott_line = elliott_line[:160]
+    extra = " · ".join(x for x in (pa_note, tri_note, elliott_line) if x)
+    elliott_line = (extra or elliott_line)[:160]
     return OilMarketSnapshot(
         label=label,
         symbol=sym,
