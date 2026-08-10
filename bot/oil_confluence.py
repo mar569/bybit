@@ -43,7 +43,7 @@ def score_oil_tech_pack(
     full_weight: bool = True,
     bars: Sequence[Any] | None = None,
 ) -> tuple[int, int, list[str], dict[str, float | None]]:
-    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза / PA."""
+    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза / PA.
 
     full_weight=True — нет сильных новостей, техника ведёт.
     full_weight=False — новость HOT, техника только подтверждает.
