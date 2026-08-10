@@ -1,4 +1,8 @@
-"""Экономический календарь нефти: FF JSON + EIA/API + desk-брифинг админу."""
+"""Экономический календарь нефти: Forex Factory + Energy EXCH + desk-брифинг.
+
+FF (forexfactory.com) и EE (energyexch.com) — одна семья Fair Economy.
+JSON недели: nfs.faireconomy.media/{ff|ee}_calendar_thisweek.json
+"""
 from __future__ import annotations
 
 import json
@@ -22,16 +26,43 @@ except Exception:  # pragma: no cover
     _ET = timezone(timedelta(hours=-5), name="ET")
 
 _FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_EE_URL = "https://nfs.faireconomy.media/ee_calendar_thisweek.json"
+# зеркало на случай rate-limit
+_FF_URL_ALT = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
+_EE_URL_ALT = "https://cdn-nfs.faireconomy.media/ee_calendar_thisweek.json"
+_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-# Только то, что реально двигает нефть / USD-risk для Brent
-_OIL_TITLE_KW = (
+# Кэш сырого JSON — иначе FF/EE дают 429 при частом poll
+_JSON_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_JSON_CACHE_TTL = 180.0  # 3 мин
+_EVENTS_CACHE: tuple[float, list[Any]] | None = None
+_EVENTS_CACHE_TTL = 120.0
+
+# Нефть / энергия (EE + FF)
+_OIL_CORE_KW = (
     "crude", "oil inventory", "oil inventories", "api weekly", "eia",
-    "opec", "petroleum", "gasoline inventory", "distillate",
+    "opec", "petroleum", "gasoline inventory", "gasoline inventories",
+    "distillate", "crude oil", "oil market report", "short-term energy",
+    "energy outlook", "steo", "baker hughes oil", "oil rig",
+    "heating oil", "iea", "spr", "strategic petroleum",
+)
+
+# USD-risk макро, которое двигает Brent (только FF)
+_OIL_MACRO_KW = (
     "non-farm", "nonfarm", "nfp", "cpi", "ppi", "fomc", "fed chair",
     "interest rate", "powell", "bessent", "trump speaks", "president trump",
     "white house", "adp", "ism manufacturing", "ism services",
-    "crude oil", "natural gas storage",
+    "natural gas storage",
 )
+
+_OIL_TITLE_KW = _OIL_CORE_KW + _OIL_MACRO_KW
 
 _SPEECH_RE = re.compile(
     r"("
@@ -49,11 +80,16 @@ class OilCalendarEvent:
     key: str
     title_ru: str
     when_ts: float
-    kind: str  # eia | api | opec | fed | cpi | ppi | nfp | speech | inventory | macro | other
+    kind: str  # eia | api | opec | fed | cpi | ppi | nfp | speech | inventory | rig | steo | macro | other
     impact: str = "Medium"  # High | Medium | Low
     lock_before_min: float = 20.0
     lock_after_min: float = 15.0
     country: str = ""
+    title_en: str = ""
+    actual: str = ""
+    forecast: str = ""
+    previous: str = ""
+    source: str = "ff"  # ff | ee
 
 
 @dataclass(frozen=True)
@@ -62,6 +98,23 @@ class OilCalendarLock:
     reason_ru: str = ""
     until_ts: float = 0.0
     event: OilCalendarEvent | None = None
+
+
+@dataclass(frozen=True)
+class OilCalendarRelease:
+    """Свежий actual из календаря FF/EE (EIA/API/OPEC и т.д.)."""
+    key: str
+    title_ru: str
+    title_en: str
+    when_ts: float
+    kind: str
+    impact: str
+    actual: str
+    forecast: str
+    previous: str
+    source: str
+    bias: str  # bullish | bearish | neutral
+    note_ru: str = ""
 
 
 def _as_msk(now: datetime | None = None) -> datetime:
@@ -85,10 +138,24 @@ def _kind_from_title(title: str) -> str:
     low = (title or "").lower()
     if "api" in low and ("oil" in low or "crude" in low or "statistical" in low):
         return "api"
-    if "crude oil" in low or "oil inventor" in low or "eia" in low:
-        return "eia" if "eia" in low or "crude oil inventor" in low else "inventory"
+    if "crude oil inventor" in low or ("eia" in low and "oil" in low):
+        return "eia"
+    if "crude oil" in low and "inventor" in low:
+        return "eia"
+    if "gasoline" in low and "inventor" in low:
+        return "inventory"
+    if "distillate" in low and "inventor" in low:
+        return "inventory"
+    if "oil inventor" in low:
+        return "inventory"
     if "opec" in low:
         return "opec"
+    if "oil market report" in low or "iea" in low:
+        return "opec"
+    if "short-term energy" in low or "steo" in low or "energy outlook" in low:
+        return "steo"
+    if "baker hughes" in low or "oil rig" in low:
+        return "rig"
     if "cpi" in low:
         return "cpi"
     if "ppi" in low:
@@ -117,6 +184,8 @@ def _title_ru(title: str, kind: str) -> str:
         "ppi": "PPI США",
         "nfp": "NFP (занятость США)",
         "fed": "ФРС / FOMC",
+        "steo": "EIA STEO (прогноз энергии)",
+        "rig": "Baker Hughes — нефтяные буровые",
     }
     if kind in mapping_kind and kind != "speech":
         # уточнение спикера, если есть
@@ -164,10 +233,20 @@ def _title_ru(title: str, kind: str) -> str:
         return "Запасы нефти США"
     if "gasoline" in low and "inventor" in low:
         return "Запасы бензина США"
+    if "distillate" in low and "inventor" in low:
+        return "Запасы дистиллятов США"
     if "natural gas" in low:
         return "Запасы газа США"
     if "opec" in low:
         return "ОПЕК / встреча"
+    if "oil market report" in low:
+        return "IEA Oil Market Report"
+    if "short-term energy" in low or "steo" in low:
+        return "EIA STEO (прогноз)"
+    if "baker hughes" in low and "oil" in low:
+        return "Baker Hughes — нефтяные буровые"
+    if "baker hughes" in low:
+        return "Baker Hughes — буровые"
 
     # fallback — без сырого EN
     if kind == "macro":
@@ -201,23 +280,32 @@ def _lock_windows(kind: str, impact: str) -> tuple[float, float]:
         return 25.0, 20.0
     if kind in {"nfp", "cpi"} or impact == "High":
         return 30.0, 20.0
-    if kind in {"fed", "opec", "speech"}:
+    if kind in {"fed", "opec", "speech", "steo"}:
         return 20.0, 30.0
     if impact == "Medium":
         return 15.0, 15.0
     return 10.0, 10.0
 
 
-def _is_oil_relevant_ff(row: dict[str, Any]) -> bool:
+def _is_core_oil_title(title: str) -> bool:
+    low = (title or "").lower()
+    return any(k in low for k in _OIL_CORE_KW)
+
+
+def _is_oil_relevant_row(row: dict[str, Any], *, source: str) -> bool:
     title = str(row.get("title") or "")
     country = str(row.get("country") or "")
     impact = str(row.get("impact") or "")
     low = title.lower()
     if impact == "Holiday":
         return False
+    # Energy EXCH: только явная нефть/энергия (там много шумного макро Low)
+    if source == "ee":
+        if "gas rig" in low and "oil" not in low:
+            return False
+        return _is_core_oil_title(title)
     if any(k in low for k in _OIL_TITLE_KW):
         return True
-    # USD High macro всегда влияет на risk/нефть
     if country == "USD" and impact == "High":
         return True
     if country == "USD" and impact == "Medium" and any(
@@ -227,45 +315,258 @@ def _is_oil_relevant_ff(row: dict[str, Any]) -> bool:
     return False
 
 
-def fetch_ff_oil_events(*, timeout: float = 12.0) -> list[OilCalendarEvent]:
-    """ForexFactory this-week JSON → только oil/USD-risk события."""
-    try:
-        req = urllib.request.Request(
-            _FF_URL,
-            headers={"User-Agent": "BybitOilBot/1.0", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception:
-        logger.debug("FF calendar fetch failed", exc_info=True)
-        return []
-    if not isinstance(data, list):
-        return []
+def _fetch_calendar_json(url: str, *, timeout: float, alt: str | None = None) -> list[dict[str, Any]]:
+    now = time.time()
+    cached = _JSON_CACHE.get(url)
+    if cached and now - cached[0] < _JSON_CACHE_TTL:
+        return list(cached[1])
+
+    urls = [url] + ([alt] if alt else [])
+    last_err: Exception | None = None
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, headers=_UA)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not isinstance(data, list):
+                return []
+            rows = [row for row in data if isinstance(row, dict)]
+            _JSON_CACHE[url] = (now, rows)
+            return list(rows)
+        except Exception as exc:
+            last_err = exc
+            continue
+    if last_err is not None:
+        logger.warning("Calendar fetch failed (%s): %s", url, last_err)
+    return []
+
+
+def _row_to_event(row: dict[str, Any], *, source: str) -> OilCalendarEvent | None:
+    ts = _parse_ff_date(str(row.get("date") or ""))
+    if ts is None:
+        return None
+    title = str(row.get("title") or "").strip()
+    if not title:
+        return None
+    kind = _kind_from_title(title)
+    impact = str(row.get("impact") or "Medium")
+    # EE помечает Crude Inventories как High — доверяем
+    if source == "ee" and kind in {"eia", "api", "inventory"} and impact == "Low":
+        impact = "Medium"
+    before, after = _lock_windows(kind, impact)
+    actual = str(row.get("actual") or "").strip()
+    forecast = str(row.get("forecast") or "").strip()
+    previous = str(row.get("previous") or "").strip()
+    return OilCalendarEvent(
+        key=f"{source}-{kind}-{int(ts)}-{title[:24]}",
+        title_ru=_title_ru(title, kind),
+        when_ts=ts,
+        kind=kind,
+        impact=impact,
+        lock_before_min=before,
+        lock_after_min=after,
+        country=str(row.get("country") or ""),
+        title_en=title,
+        actual=actual,
+        forecast=forecast,
+        previous=previous,
+        source=source,
+    )
+
+
+def _event_rank(ev: OilCalendarEvent) -> tuple[int, int]:
+    """Выше = лучше при дедупе FF↔EE."""
+    impact_score = {"High": 3, "Medium": 2, "Low": 1}.get(ev.impact, 0)
+    src_score = 2 if ev.source == "ee" and ev.kind in {
+        "eia", "api", "inventory", "opec", "steo", "rig"
+    } else 1
+    return (impact_score, src_score)
+
+
+def fetch_ff_oil_events(*, timeout: float = 12.0, force: bool = False) -> list[OilCalendarEvent]:
+    """FF + Energy EXCH this-week JSON → oil/USD-risk события."""
+    global _EVENTS_CACHE
+    now = time.time()
+    if (
+        not force
+        and _EVENTS_CACHE is not None
+        and now - _EVENTS_CACHE[0] < _EVENTS_CACHE_TTL
+    ):
+        return list(_EVENTS_CACHE[1])
+
+    rows_ff = _fetch_calendar_json(_FF_URL, timeout=timeout, alt=_FF_URL_ALT)
+    rows_ee = _fetch_calendar_json(_EE_URL, timeout=timeout, alt=_EE_URL_ALT)
     out: list[OilCalendarEvent] = []
-    for row in data:
-        if not isinstance(row, dict) or not _is_oil_relevant_ff(row):
+    for row in rows_ff:
+        if _is_oil_relevant_row(row, source="ff"):
+            ev = _row_to_event(row, source="ff")
+            if ev:
+                out.append(ev)
+    for row in rows_ee:
+        if _is_oil_relevant_row(row, source="ee"):
+            ev = _row_to_event(row, source="ee")
+            if ev:
+                out.append(ev)
+    # дедуп: один kind в окне 30 мин — берём сильнее
+    best: dict[str, OilCalendarEvent] = {}
+    for ev in out:
+        bucket = f"{ev.kind}-{int(ev.when_ts // 1800)}"
+        # для inventory уточняем по EN title (gasoline vs crude)
+        if ev.kind == "inventory" and ev.title_en:
+            tip = ev.title_en.lower().split()[0:2]
+            bucket = f"{bucket}-{'-'.join(tip)}"
+        prev = best.get(bucket)
+        if prev is None or _event_rank(ev) > _event_rank(prev):
+            best[bucket] = ev
+    merged = sorted(best.values(), key=lambda e: e.when_ts)
+    if merged:
+        logger.debug(
+            "Oil calendar: %d events (ff=%d ee=%d)",
+            len(merged),
+            sum(1 for e in merged if e.source == "ff"),
+            sum(1 for e in merged if e.source == "ee"),
+        )
+    _EVENTS_CACHE = (now, merged)
+    return list(merged)
+
+
+def _parse_signed_number(raw: str) -> float | None:
+    s = (raw or "").strip().replace(",", "").replace(" ", "")
+    if not s or s in {"-", "—", "n/a", "N/A"}:
+        return None
+    m = re.match(r"^([+-]?\d+(?:\.\d+)?)([KMB%]?)$", s, re.I)
+    if not m:
+        m2 = re.search(r"([+-]?\d+(?:\.\d+)?)", s)
+        if not m2:
+            return None
+        try:
+            return float(m2.group(1))
+        except ValueError:
+            return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    suf = (m.group(2) or "").upper()
+    if suf == "K":
+        val *= 1_000.0
+    elif suf == "M":
+        val *= 1_000_000.0
+    elif suf == "B":
+        val *= 1_000_000_000.0
+    return val
+
+
+def _inventory_bias(actual: str, forecast: str, previous: str) -> tuple[str, str]:
+    """Для запасов: draw (отриц.) = bullish нефть, build = bearish."""
+    act = _parse_signed_number(actual)
+    fc = _parse_signed_number(forecast)
+    prev = _parse_signed_number(previous)
+    if act is None:
+        return "neutral", "факт вышел"
+    # vs forecast предпочтительнее
+    ref = fc if fc is not None else prev
+    if ref is None:
+        if act < 0:
+            return "bullish", f"draw {actual}"
+        if act > 0:
+            return "bearish", f"build {actual}"
+        return "neutral", f"факт {actual}"
+    # меньше факт (более сильный draw / слабый build) → bullish
+    if act < ref:
+        return "bullish", f"{actual} vs ожид. {forecast or previous}"
+    if act > ref:
+        return "bearish", f"{actual} vs ожид. {forecast or previous}"
+    return "neutral", f"в линию {actual}"
+
+
+def _release_bias(ev: OilCalendarEvent) -> tuple[str, str]:
+    kind = ev.kind
+    title = (ev.title_en or ev.title_ru).lower()
+    if kind in {"eia", "api", "inventory"} or "inventor" in title:
+        return _inventory_bias(ev.actual, ev.forecast, ev.previous)
+    if kind == "rig":
+        act = _parse_signed_number(ev.actual)
+        prev = _parse_signed_number(ev.previous)
+        if act is not None and prev is not None:
+            if act < prev:
+                return "bullish", f"буровые ↓ {ev.actual} (было {ev.previous})"
+            if act > prev:
+                return "bearish", f"буровые ↑ {ev.actual} (было {ev.previous})"
+        return "neutral", f"буровые {ev.actual}"
+    return "neutral", "релиз вышел"
+
+
+def format_calendar_release_flash(rel: OilCalendarRelease) -> str:
+    mark = {"bullish": "🟢", "bearish": "🔴"}.get(rel.bias, "🟡")
+    side = {"bullish": "в плюс нефти", "bearish": "в минус нефти"}.get(
+        rel.bias, "нейтрально"
+    )
+    src = "Energy EXCH" if rel.source == "ee" else "Forex Factory"
+    lines = [
+        f"🗓 <b>Календарь · релиз</b> · {src}",
+        f"{mark} <b>{rel.title_ru}</b> · {side}",
+        f"Факт: <b>{rel.actual or '—'}</b>",
+    ]
+    if rel.forecast:
+        lines.append(f"Ожид.: {rel.forecast}")
+    if rel.previous:
+        lines.append(f"Пред.: {rel.previous}")
+    if rel.note_ru:
+        lines.append(f"<i>{rel.note_ru}</i>")
+    return "\n".join(lines)
+
+
+def detect_fresh_calendar_releases(
+    *,
+    seen_keys: set[str] | None = None,
+    events: Sequence[OilCalendarEvent] | None = None,
+    now_ts: float | None = None,
+    max_age_hours: float = 6.0,
+) -> list[OilCalendarRelease]:
+    """Новые actual по нефтяным событиям (EIA/API/OPEC/STEO/rigs)."""
+    t0 = now_ts if now_ts is not None else time.time()
+    seen = seen_keys if seen_keys is not None else set()
+    evs = list(events) if events is not None else fetch_ff_oil_events()
+    oil_kinds = {"eia", "api", "inventory", "opec", "steo", "rig"}
+    out: list[OilCalendarRelease] = []
+    for ev in evs:
+        if ev.kind not in oil_kinds:
             continue
-        ts = _parse_ff_date(str(row.get("date") or ""))
-        if ts is None:
+        if not (ev.actual or "").strip():
             continue
-        title = str(row.get("title") or "").strip()
-        kind = _kind_from_title(title)
-        impact = str(row.get("impact") or "Medium")
-        before, after = _lock_windows(kind, impact)
+        # ещё не вышел по времени (с запасом) — не шлём
+        if ev.when_ts > t0 + 120:
+            continue
+        if ev.when_ts < t0 - max_age_hours * 3600:
+            continue
+        key = f"rel-{ev.source}-{ev.kind}-{int(ev.when_ts)}-{(ev.title_en or ev.title_ru)[:40]}"
+        if key in seen:
+            continue
+        bias, note = _release_bias(ev)
         out.append(
-            OilCalendarEvent(
-                key=f"ff-{kind}-{int(ts)}-{title[:24]}",
-                title_ru=_title_ru(title, kind),
-                when_ts=ts,
-                kind=kind,
-                impact=impact,
-                lock_before_min=before,
-                lock_after_min=after,
-                country=str(row.get("country") or ""),
+            OilCalendarRelease(
+                key=key,
+                title_ru=ev.title_ru,
+                title_en=ev.title_en or ev.title_ru,
+                when_ts=ev.when_ts,
+                kind=ev.kind,
+                impact=ev.impact,
+                actual=ev.actual,
+                forecast=ev.forecast,
+                previous=ev.previous,
+                source=ev.source,
+                bias=bias,
+                note_ru=note,
             )
         )
-    out.sort(key=lambda e: e.when_ts)
+    out.sort(key=lambda r: r.when_ts)
     return out
+
+
+# backward-compat alias
+def _is_oil_relevant_ff(row: dict[str, Any]) -> bool:
+    return _is_oil_relevant_row(row, source="ff")
 
 
 def _next_weekday_et(weekday: int, hour: int, minute: int, *, now: datetime) -> datetime:
@@ -436,6 +737,7 @@ def important_events_today(
     now_ts = now_m.timestamp()
     important_kinds = {
         "eia", "api", "inventory", "opec", "nfp", "cpi", "ppi", "fed", "speech",
+        "steo", "rig",
     }
     out: list[OilCalendarEvent] = []
     for e in events:
@@ -489,7 +791,7 @@ def format_morning_desk_brief(
     today = [e for e in evs if e.when_ts <= day_end + 1800]
     tomorrow = [e for e in evs if day_end + 1800 < e.when_ts <= tomorrow_end]
 
-    oil_kinds = {"eia", "api", "inventory", "opec"}
+    oil_kinds = {"eia", "api", "inventory", "opec", "steo", "rig"}
     oil_today = [e for e in today if e.kind in oil_kinds]
     speech_today = [e for e in today if e.kind == "speech"]
     macro_today = [

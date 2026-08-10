@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 92
+SETTINGS_VERSION = 93
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -558,6 +558,8 @@ class ScannerSettings:
     oil_calendar_lock_enabled: bool = True
     oil_calendar_brief_enabled: bool = True
     oil_calendar_brief_hour_msk: int = 8
+    # FF / Energy EXCH: пуш когда выходит actual (запасы, OPEC, STEO…)
+    oil_calendar_release_alerts_enabled: bool = True
     oil_speech_freeze_minutes: float = 60.0
     # X (Twitter): Bearer или RSSHub fallback
     oil_x_enabled: bool = True
@@ -1201,6 +1203,9 @@ class ScannerSettings:
             ),
             oil_calendar_brief_hour_msk=int(
                 base.get("oil_calendar_brief_hour_msk", 8)
+            ),
+            oil_calendar_release_alerts_enabled=bool(
+                base.get("oil_calendar_release_alerts_enabled", True)
             ),
             oil_speech_freeze_minutes=float(
                 base.get("oil_speech_freeze_minutes", 60.0)
@@ -2099,6 +2104,11 @@ class SettingsManager:
             if version < 92:
                 # News-bounce ловил нож на Ормуз-заголовках — по умолчанию OFF
                 merged["oil_bounce_alerts_enabled"] = False
+            if version < 93:
+                # Forex Factory / Energy EXCH calendar releases
+                merged["oil_calendar_release_alerts_enabled"] = True
+                merged.setdefault("oil_calendar_lock_enabled", True)
+                merged.setdefault("oil_calendar_brief_enabled", True)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

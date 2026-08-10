@@ -191,6 +191,37 @@ def test_newsroom_flash_only_when_important():
     assert "EIA" in text
 
 
+def test_calendar_release_inventory_bias():
+    from bot.oil_calendar import (
+        OilCalendarEvent,
+        detect_fresh_calendar_releases,
+        format_calendar_release_flash,
+    )
+
+    now = time.time()
+    ev = OilCalendarEvent(
+        key="eia-t",
+        title_ru="EIA запасы нефти (Crude)",
+        title_en="Crude Oil Inventories",
+        when_ts=now - 60,
+        kind="eia",
+        impact="High",
+        actual="-3.2M",
+        forecast="1.0M",
+        previous="2.5M",
+        source="ee",
+    )
+    fresh = detect_fresh_calendar_releases(seen_keys=set(), events=[ev], now_ts=now)
+    assert len(fresh) == 1
+    assert fresh[0].bias == "bullish"
+    text = format_calendar_release_flash(fresh[0])
+    assert "релиз" in text.lower() or "Календарь" in text
+    assert "-3.2M" in text
+    # dedupe
+    seen = {fresh[0].key}
+    assert detect_fresh_calendar_releases(seen_keys=seen, events=[ev], now_ts=now) == []
+
+
 def test_x_oil_relevant_filter():
     assert _oil_relevant("OIL: Brent jumps after Hormuz headlines")
     assert not _oil_relevant("Celebrity wears new dress at gala")

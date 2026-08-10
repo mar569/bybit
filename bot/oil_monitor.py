@@ -383,6 +383,10 @@ NEWS_QUERIES_EN: tuple[str, ...] = (
     "US Iran crude oil sanctions when:12h",
     "EIA crude oil inventory stocks when:12h",
     "OPEC oil production quota when:1d",
+    # Forex Factory / Energy EXCH (Fair Economy) — календарь+новости по нефти
+    "site:forexfactory.com oil OR crude OR Brent OR EIA OR OPEC OR Hormuz when:1d",
+    "site:energyexch.com oil OR crude OR Brent OR EIA OR OPEC OR inventory when:1d",
+    "Forex Factory Crude Oil Inventories OR API Weekly OR OPEC when:1d",
     "SPR oil release OR strategic petroleum reserve when:1d",
     "crude oil tanker Hormuz when:12h",
     "Strait of Hormuz tanker traffic OR shipping OR transit when:12h",
@@ -4097,6 +4101,8 @@ class OilMonitorEngine:
         self._speech_freeze_until: float = 0.0
         self._speech_freeze_reason: str = ""
         self._last_calendar_brief_day: str = ""
+        self._seen_calendar_releases: set[str] = set()
+        self._last_calendar_release_poll_ts: float = 0.0
         self._x_bearer_token: Callable[[], str | None] | str | None = None
         from .oil_journal import OilSetupJournal
 
@@ -4367,6 +4373,83 @@ class OilMonitorEngine:
             logger.info("Oil DESK brief sent for %s", day_key)
             return 1
         return 0
+
+    async def _tick_calendar_releases(self, settings: Any) -> int:
+        """FF/Energy EXCH: алерт когда выходит actual (EIA/API/OPEC/STEO/rigs)."""
+        if not bool(getattr(settings, "oil_calendar_release_alerts_enabled", True)):
+            return 0
+        now = time.time()
+        # не чаще раза в ~3 мин — JSON кэшируется, actual обновляется редко
+        if now - float(self._last_calendar_release_poll_ts or 0) < 180.0:
+            return 0
+        self._last_calendar_release_poll_ts = now
+        try:
+            from .oil_calendar import (
+                detect_fresh_calendar_releases,
+                fetch_ff_oil_events,
+                format_calendar_release_flash,
+            )
+
+            events = await asyncio.to_thread(fetch_ff_oil_events)
+            fresh = detect_fresh_calendar_releases(
+                seen_keys=self._seen_calendar_releases,
+                events=events,
+                now_ts=now,
+            )
+        except Exception:
+            logger.debug("Oil calendar release poll failed", exc_info=True)
+            return 0
+        if not fresh:
+            return 0
+        sent = 0
+        for rel in fresh[:6]:
+            self._seen_calendar_releases.add(rel.key)
+            msg = format_calendar_release_flash(rel)
+            ok = False
+            if self._on_news is not None and bool(
+                getattr(settings, "oil_news_enabled", False)
+            ):
+                try:
+                    ok = bool(await self._on_news(msg))
+                except Exception:
+                    logger.debug("Oil release → news failed", exc_info=True)
+            if not ok and self._on_admin_desk is not None:
+                try:
+                    ok = bool(await self._on_admin_desk(msg))
+                except Exception:
+                    logger.debug("Oil release → admin failed", exc_info=True)
+            if ok:
+                sent += 1
+                # подмешать в recent как нейтральную/направленную новость
+                try:
+                    impact = rel.bias if rel.bias in {"bullish", "bearish"} else "neutral"
+                    self._recent_news.append(
+                        OilNewsItem(
+                            title=f"{rel.title_en}: {rel.actual}",
+                            url="https://www.energyexch.com/calendar"
+                            if rel.source == "ee"
+                            else "https://www.forexfactory.com/calendar",
+                            source="EnergyEXCH" if rel.source == "ee" else "ForexFactory",
+                            published_ts=now,
+                            impact=impact,
+                            theme=(
+                                "inventory"
+                                if rel.kind in {"eia", "api", "inventory"}
+                                else "opec"
+                                if rel.kind == "opec"
+                                else ""
+                            ),
+                        )
+                    )
+                    if len(self._recent_news) > 80:
+                        self._recent_news = self._recent_news[-50:]
+                except Exception:
+                    pass
+        if len(self._seen_calendar_releases) > 200:
+            self._seen_calendar_releases = set(
+                list(self._seen_calendar_releases)[-100:]
+            )
+        return sent
 
     async def calendar_desk_now(self) -> tuple[bool, str]:
         """Ручная кнопка «Календарь»: свежий DESK прямо сейчас."""
@@ -5262,6 +5345,7 @@ class OilMonitorEngine:
 
         # --- Ops: не зависят от тумблера «Нефть» ---
         sent += await self._tick_calendar_brief(settings)
+        sent += await self._tick_calendar_releases(settings)
         sent += await self._tick_price_crash(settings)
         # A+ ПРО в ручной TA — отдельно от дайджеста
         sent += await self._tick_confluence_setup(settings)

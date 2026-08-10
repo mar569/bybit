@@ -49,6 +49,7 @@ FAST_LANE_QUERIES_EN: tuple[str, ...] = (
     "site:nytimes.com Iran OR Hormuz OR oil OR Trump when:1d",
     "site:whitehouse.gov Iran OR Hormuz OR oil when:1d",
     "EIA crude oil inventory OR STEO when:1d",
+    "site:forexfactory.com OR site:energyexch.com oil OR crude OR EIA OR OPEC OR inventory when:12h",
     "site:farsnews.ir Hormuz OR Strait OR Iran OR tanker OR oil when:12h",
     "Fars News Agency Hormuz OR Iran Strait OR refuse OR reject OR reopen when:12h",
     "site:tasnimnews.com Hormuz OR Iran oil OR Strait when:12h",
