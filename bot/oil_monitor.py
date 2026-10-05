@@ -803,7 +803,7 @@ class OilMarketSnapshot:
     breakdown: float | None
     breakout: float | None
     phase: str
-    elliott: str
+    context_note: str
     reason: str
     entry_zone: tuple[float, float] | None = None
     stop: float | None = None
@@ -2319,7 +2319,6 @@ def apply_oil_bounce_to_ta(
     ta.entry_zone = (float(plan.entry_lo), float(plan.entry_hi))
     ta.target_prices = [float(t) for t in plan.targets[:3]]
     ta.invalidation_price = float(plan.stop)
-    ta.elliott_stop_price = float(plan.stop)
     ta.action_priority = "high" if plan.strong else "elevated"
     label = "новостной отскок LONG" if plan.side == "long" else "новостной отскок SHORT"
     scenario = TradeScenario(
@@ -3251,12 +3250,10 @@ def _snapshot_from_ta(
     targets: list[float] = []
     if ta.target_prices:
         targets = [float(t) for t in ta.target_prices[:3] if t]
-    elif ta.elliott_tp_prices:
-        targets = [float(t) for t in ta.elliott_tp_prices[:3] if t]
     entry_zone = None
     if ta.entry_zone and len(ta.entry_zone) >= 2:
         entry_zone = (float(ta.entry_zone[0]), float(ta.entry_zone[1]))
-    stop = ta.elliott_stop_price or ta.invalidation_price
+    stop = ta.invalidation_price
     tri_note = ""
     try:
         from .oil_triangle import interpret_oil_triangle
@@ -3275,9 +3272,7 @@ def _snapshot_from_ta(
             pa_note = pa.line_ru[:90]
     except Exception:
         pa_note = ""
-    elliott_line = (ta.elliott_label or "")[:120]
-    extra = " · ".join(x for x in (pa_note, tri_note, elliott_line) if x)
-    elliott_line = (extra or elliott_line)[:160]
+    context_note = " · ".join(x for x in (pa_note, tri_note) if x)[:160]
     return OilMarketSnapshot(
         label=label,
         symbol=sym,
@@ -3291,7 +3286,7 @@ def _snapshot_from_ta(
         breakdown=ta.breakdown_level,
         breakout=ta.breakout_level,
         phase=(ta.phase_label or ""),
-        elliott=elliott_line,
+        context_note=context_note,
         reason=(ta.verdict_reason or ta.professional_summary or "")[:200],
         entry_zone=entry_zone,
         stop=float(stop) if stop else None,
@@ -3865,8 +3860,8 @@ def _oil_trading_plan(
 
     if market_mood:
         lines.append(f"• {market_mood.split('—')[0].strip()[:60]}")
-    if snap.elliott:
-        lines.append(f"• EW: {snap.elliott}")
+    if snap.context_note:
+        lines.append(f"• Контекст: {snap.context_note}")
     return lines
 
 
@@ -6770,4 +6765,3 @@ class OilMonitorEngine:
             except Exception:
                 logger.exception("Oil monitor loop error")
             await asyncio.sleep(sleep_s)
-

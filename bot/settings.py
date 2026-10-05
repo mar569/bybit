@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 93
+SETTINGS_VERSION = 94
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Balanced PRO — меньше шума, только качественные ENTRY (период 10м, OI 3.5%, prob 72%, TA≥8).
@@ -406,7 +406,7 @@ class ScannerSettings:
     market_structure_enabled: bool = True
     market_structure_hours: int = 5
 
-    # График к сигналу: annotated = TA-разметка, tradingview, coinglass, generated
+    # Все сигналы используют единый аннотированный график.
     signal_chart_enabled: bool = True
     signal_chart_source: str = "annotated"
     signal_chart_hours: int = 18
@@ -419,15 +419,17 @@ class ScannerSettings:
     pattern_detection_enabled: bool = True
     pattern_min_confidence: float = 0.68
 
-    # Ручной TA: tv_annotated = TradingView + уровни, annotated = matplotlib
-    manual_ta_chart_source: str = "tv_annotated"
+    # Ручной TA использует единый чистый график без внешних боковых панелей.
+    manual_ta_chart_source: str = "annotated"
 
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
 
     # Hot playbook + Pro в чат анализов / кнопка «Подробнее»
-    signal_playbook_enabled: bool = True
-    signal_pro_to_analysis_chat: bool = True
+    signal_playbook_enabled: bool = False
+    signal_pro_to_analysis_chat: bool = False
+    # Отдельным сообщением сразу после сигнала: разбор деривативов/потока Coinglass
+    signal_coinglass_breakdown_enabled: bool = True
     target_watcher_enabled: bool = True
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
@@ -464,7 +466,7 @@ class ScannerSettings:
     liquidation_all_symbols: bool = True
     liquidation_show_reversal_hint: bool = True
 
-    # Аномалии (volume/OI/funding/pump-dump) → TELEGRAM_ANOMALY_CHAT_ID или analysis
+    # Аномалии отправляются в общий канал анализа.
     anomaly_enabled: bool = False
     anomaly_min_oi_change_pct: float = 3.0
     anomaly_min_price_change_pct: float = 4.0
@@ -483,45 +485,6 @@ class ScannerSettings:
     anomaly_batch_interval_seconds: int = 60
     anomaly_symbol_cooldown_seconds: int = 1800
     anomaly_min_importance: float = 55.0
-
-    # Wave Watcher — только Elliott 1–5 + Fib → TELEGRAM_WAVE_CHAT_ID / anomaly / analysis
-    wave_enabled: bool = False
-    wave_min_importance: float = 72.0
-    wave_min_confidence: int = 6
-    wave_min_impulse_quality: int = 65
-    wave_require_fib_classic: bool = True
-    wave_require_entry_ready: bool = True
-    wave_require_impulse_valid: bool = True
-    wave_allow_diagonal_signals: bool = False
-    wave_allow_structure_watch: bool = False
-    wave_allow_path_alerts: bool = False
-    wave_allow_complete_alerts: bool = False
-    wave_setup_modes: tuple[str, ...] = (
-        "wave3_impulse",
-        "wave5_bounce",
-    )
-    wave_phases_enabled: tuple[str, ...] = (
-        "impulse_2",
-        "impulse_3",
-        "impulse_4",
-        "impulse_complete",
-        "abc_C",
-    )
-    wave_max_per_minute: int = 1
-    wave_max_per_batch: int = 1
-    wave_batch_interval_seconds: int = 180
-    wave_symbol_cooldown_seconds: int = 2400
-    wave_scan_interval_seconds: int = 120
-    wave_scan_limit: int = 40
-    wave_scan_concurrency: int = 3
-    wave_chart_enabled: bool = True
-    wave_chart_hours: int = 18
-    wave_interval_minutes: int = 5
-    wave_watch_enabled: bool = True
-    wave_watch_minutes: int = 90
-    wave_watch_enroll_cooldown_seconds: int = 900
-    wave_watch_near_pct: float = 0.35
-    wave_watch_tick_seconds: float = 15.0
 
     # Oil monitor — новости Iran/US + дайджест Brent/WTI
     oil_news_enabled: bool = True
@@ -1022,17 +985,20 @@ class ScannerSettings:
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
-            signal_chart_source=str(base.get("signal_chart_source", "annotated")),
+            signal_chart_source="annotated",
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_display_hours=int(base.get("signal_chart_display_hours", 12)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_chart_height_scale=float(base.get("signal_chart_height_scale", 1.0)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
-            manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
+            manual_ta_chart_source="annotated",
             signal_message_compact=bool(base.get("signal_message_compact", True)),
-            signal_playbook_enabled=bool(base.get("signal_playbook_enabled", True)),
-            signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", True)),
+            signal_playbook_enabled=bool(base.get("signal_playbook_enabled", False)),
+            signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", False)),
+            signal_coinglass_breakdown_enabled=bool(
+                base.get("signal_coinglass_breakdown_enabled", True)
+            ),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
             signal_quality_scanner_skip_enabled=bool(
@@ -1108,54 +1074,6 @@ class ScannerSettings:
                 base.get("anomaly_symbol_cooldown_seconds", 1800)
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
-            wave_enabled=bool(base.get("wave_enabled", False)),
-            wave_min_importance=float(base.get("wave_min_importance", 72.0)),
-            wave_min_confidence=int(base.get("wave_min_confidence", 6)),
-            wave_min_impulse_quality=int(base.get("wave_min_impulse_quality", 65)),
-            wave_require_fib_classic=bool(base.get("wave_require_fib_classic", True)),
-            wave_require_entry_ready=bool(base.get("wave_require_entry_ready", True)),
-            wave_require_impulse_valid=bool(
-                base.get("wave_require_impulse_valid", True)
-            ),
-            wave_allow_diagonal_signals=bool(
-                base.get("wave_allow_diagonal_signals", False)
-            ),
-            wave_allow_structure_watch=bool(base.get("wave_allow_structure_watch", False)),
-            wave_allow_path_alerts=bool(base.get("wave_allow_path_alerts", False)),
-            wave_allow_complete_alerts=bool(base.get("wave_allow_complete_alerts", False)),
-            wave_setup_modes=cls._parse_str_tuple(
-                base.get("wave_setup_modes"),
-                ("wave3_impulse", "wave5_bounce"),
-            ),
-            wave_phases_enabled=cls._parse_str_tuple(
-                base.get("wave_phases_enabled"),
-                (
-                    "impulse_2",
-                    "impulse_3",
-                    "impulse_4",
-                    "impulse_complete",
-                    "abc_C",
-                ),
-            ),
-            wave_max_per_minute=int(base.get("wave_max_per_minute", 1)),
-            wave_max_per_batch=int(base.get("wave_max_per_batch", 1)),
-            wave_batch_interval_seconds=int(base.get("wave_batch_interval_seconds", 180)),
-            wave_symbol_cooldown_seconds=int(
-                base.get("wave_symbol_cooldown_seconds", 2400)
-            ),
-            wave_scan_interval_seconds=int(base.get("wave_scan_interval_seconds", 120)),
-            wave_scan_limit=int(base.get("wave_scan_limit", 40)),
-            wave_scan_concurrency=int(base.get("wave_scan_concurrency", 3)),
-            wave_chart_enabled=bool(base.get("wave_chart_enabled", True)),
-            wave_chart_hours=int(base.get("wave_chart_hours", 18)),
-            wave_interval_minutes=int(base.get("wave_interval_minutes", 5)),
-            wave_watch_enabled=bool(base.get("wave_watch_enabled", True)),
-            wave_watch_minutes=int(base.get("wave_watch_minutes", 90)),
-            wave_watch_enroll_cooldown_seconds=int(
-                base.get("wave_watch_enroll_cooldown_seconds", 900)
-            ),
-            wave_watch_near_pct=float(base.get("wave_watch_near_pct", 0.35)),
-            wave_watch_tick_seconds=float(base.get("wave_watch_tick_seconds", 15.0)),
             oil_news_enabled=bool(base.get("oil_news_enabled", True)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
@@ -1665,7 +1583,7 @@ class SettingsManager:
                 ]
                 merged["trade_decision_block_chase_watch"] = True
             if version < 45:
-                # pulse late у хая → WATCH вместо ложного ENTRY; EW/chase жёстче в гейте
+                # pulse late у хая → WATCH вместо ложного ENTRY; chase жёстче в гейте
                 merged["signal_watch_allow_types"] = [
                     "trend_seed",
                     "impulse_pump",
@@ -1764,61 +1682,6 @@ class SettingsManager:
                 merged.setdefault("oil_chart_enabled", True)
                 merged.setdefault("oil_chart_display_hours", 12)
                 merged.setdefault("oil_news_separate_messages", True)
-            if version < 52:
-                merged.setdefault("wave_min_importance", 72.0)
-                merged.setdefault("wave_min_confidence", 6)
-                merged.setdefault("wave_min_impulse_quality", 65)
-                merged.setdefault("wave_require_entry_ready", True)
-                merged.setdefault(
-                    "wave_setup_modes",
-                    ["wave3_impulse", "wave5_bounce"],
-                )
-                merged.setdefault(
-                    "wave_phases_enabled",
-                    [
-                        "impulse_2",
-                        "impulse_3",
-                        "impulse_4",
-                        "impulse_complete",
-                        "abc_C",
-                    ],
-                )
-                merged.setdefault("wave_max_per_minute", 1)
-                merged.setdefault("wave_max_per_batch", 1)
-                merged.setdefault("wave_batch_interval_seconds", 180)
-            if version < 51:
-                # Wave Watcher: EW+Fib сигналы вместо anomaly-радара
-                merged.setdefault("wave_enabled", True)
-                merged.setdefault("wave_min_importance", 58.0)
-                merged.setdefault("wave_min_confidence", 5)
-                merged.setdefault("wave_min_impulse_quality", 58)
-                merged.setdefault("wave_require_fib_classic", True)
-                merged.setdefault("wave_require_entry_ready", False)
-                merged.setdefault("wave_allow_structure_watch", False)
-                merged.setdefault("wave_allow_path_alerts", False)
-                merged.setdefault("wave_allow_complete_alerts", False)
-                merged.setdefault(
-                    "wave_phases_enabled",
-                    [
-                        "impulse_2",
-                        "impulse_4",
-                        "abc_C",
-                    ],
-                )
-                merged.setdefault("wave_max_per_minute", 2)
-                merged.setdefault("wave_batch_interval_seconds", 90)
-                merged.setdefault("wave_symbol_cooldown_seconds", 2400)
-                merged.setdefault("wave_scan_interval_seconds", 120)
-                merged.setdefault("wave_scan_limit", 40)
-                merged.setdefault("wave_scan_concurrency", 3)
-                merged.setdefault("wave_chart_enabled", True)
-                merged.setdefault("wave_chart_hours", 18)
-                merged.setdefault("wave_interval_minutes", 5)
-                merged.setdefault("wave_watch_enabled", True)
-                merged.setdefault("wave_watch_minutes", 90)
-                merged.setdefault("wave_watch_enroll_cooldown_seconds", 900)
-                merged.setdefault("wave_watch_near_pct", 0.35)
-                merged.setdefault("wave_watch_tick_seconds", 15.0)
             if version < 60:
                 merged.setdefault("oil_micro_signals_enabled", True)
                 merged.setdefault("oil_micro_tp_pct", 0.25)
@@ -1889,7 +1752,6 @@ class SettingsManager:
                 merged["liquidation_alerts_enabled"] = False
                 merged["analysis_enabled"] = False
                 merged["anomaly_enabled"] = False
-                merged["wave_enabled"] = False
                 merged["scenario_watch_enabled"] = False
                 merged["manual_ta_alerts_enabled"] = False
                 merged["oil_news_enabled"] = True
@@ -1900,6 +1762,9 @@ class SettingsManager:
                 # «Спросить ИИ» и ручной AI важнее. Включить снова кнопкой в панели.
                 merged["oil_fastlane_gemini"] = False
                 merged["oil_forecast_gemini"] = False
+            if version < 94:
+                merged["signal_playbook_enabled"] = False
+                merged["signal_pro_to_analysis_chat"] = False
             if version < 73:
                 merged.setdefault("oil_entry_session_filter", True)
                 merged.setdefault("oil_session_block_minutes", 20.0)

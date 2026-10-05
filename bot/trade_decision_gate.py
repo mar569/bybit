@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .ta_analysis import TAAnalysisResult
 
 _PULLBACK_PHASES = frozenset({
-    "shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction",
+    "shallow_pullback", "fib_golden_zone", "deep_pullback", "mid_correction",
 })
 _CHASE_TYPES = frozenset({
     "mega_pump", "mega_dump", "impulse_pump", "impulse_dump",
@@ -47,7 +47,7 @@ DEFAULT_CHASE_RANGE_MID_PCT = 78.0
 class TradeDecision:
     action: str  # entry | watch | skip
     reason: str
-    location: str = ""  # fib | sr | retest | trigger | abc | none
+    location: str = ""  # fib | confluence | pattern | sr | retest | trigger | none
     chase: bool = False
     setup_score: int = 0
 
@@ -81,21 +81,12 @@ def _is_late_chase(
     rp = float(getattr(ta, "range_position", 0.5) or 0.5)
     mom = float(getattr(ta, "momentum_pct", 0.0) or 0.0)
     phase = (getattr(ta, "wave_phase", "") or "").lower()
-    ew_phase = (getattr(ta, "elliott_phase", "") or "").lower()
     fib_status = (getattr(ta, "fib_status", "") or "").lower()
     hi = max(0.70, min(float(range_high_pct) / 100.0, 0.95))
     mid = max(0.65, min(float(range_mid_pct) / 100.0, hi - 0.02))
 
     if phase == "late_impulse" or fib_status == "late_impulse":
         return True, "финал импульса — ждать откат"
-
-    # EW 1–5 завершён / волна 5: не входить вдогонку по направлению импульса
-    if ew_phase in {"impulse_5", "impulse_complete"}:
-        ew_bias = (getattr(ta, "wave_bias", "") or "").lower()
-        if side == "long" and ew_bias in {"long", "neutral", ""}:
-            return True, "EW волна 5/complete — не лонг вдогонку"
-        if side == "short" and ew_bias in {"short", "neutral", ""}:
-            return True, "EW волна 5/complete — не шорт вдогонку"
 
     if side == "long":
         if rp >= hi and mom >= 0.35:
@@ -177,43 +168,8 @@ def _retest_location_ok(ta: TAAnalysisResult, side: str, *, tol_pct: float = 0.7
     return False
 
 
-def _abc_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
-    phase = (getattr(ta, "abc_phase", "") or "").upper()
-    if phase not in {"C", "COMPLETE"}:
-        return False
-    bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
-    if side == "long" and bias in {"long", "neutral"}:
-        return True
-    if side == "short" and bias in {"short", "neutral"}:
-        return True
-    return False
-
-
-def _elliott_entry_ok(ta: TAAnalysisResult, side: str) -> bool:
-    """Готовый вход по EW: чек-лист + классические Fib + ready."""
-    if not bool(getattr(ta, "elliott_entry_ready", False)):
-        return False
-    mode = (getattr(ta, "elliott_entry_mode", "") or "").lower()
-    if mode not in {"conservative", "aggressive"}:
-        return False
-    entry = getattr(ta, "elliott_entry_price", None)
-    if entry is None or float(entry) <= 0:
-        return False
-    # Без классических пропорций Fib — не локация elliott
-    if not bool(getattr(ta, "elliott_fib_classic_ok", True)):
-        return False
-    bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
-    if side == "long" and bias in {"long", "neutral"}:
-        return True
-    if side == "short" and bias in {"short", "neutral"}:
-        return True
-    if bias == "neutral" and mode in {"conservative", "aggressive"}:
-        return True
-    return False
-
-
 def _confluence_location_ok(ta: TAAnalysisResult, side: str) -> bool:
-    """Идеальный Pro-сетап (HTF EW + фигура + Fib/SMC) на стороне сигнала."""
+    """Actionable setup from price patterns, levels, and SMC."""
     if not bool(getattr(ta, "setup_ideal_ready", False)):
         return False
     grade = (getattr(ta, "setup_grade", "") or "").upper()
@@ -229,12 +185,8 @@ def _confluence_location_ok(ta: TAAnalysisResult, side: str) -> bool:
 def detect_location(ta: TAAnalysisResult, side: str) -> str:
     if _fib_location_ok(ta, side):
         return "fib"
-    if _elliott_entry_ok(ta, side):
-        return "elliott"
     if _confluence_location_ok(ta, side):
         return "confluence"
-    if _abc_entry_ok(ta, side):
-        return "abc"
     if pattern_location_ok(
         getattr(ta, "primary_chart_pattern", None),
         side=side,
@@ -396,9 +348,7 @@ def score_trade_setup(
 
     loc_map = {
         "fib": 28,
-        "elliott": 27,
         "confluence": 27,
-        "abc": 26,
         "retest": 24,
         "pattern": 22,
         "sr": 16,
@@ -409,21 +359,11 @@ def score_trade_setup(
         factors.append(f"локация {location}")
 
     phase = (ta.wave_phase or "").lower()
-    if phase == "wave_2_4_zone":
+    if phase == "fib_golden_zone":
         wave += 16
         factors.append("Fib 0.5–0.618")
     elif phase in _PULLBACK_PHASES:
         wave += 8
-    if getattr(ta, "abc_phase", "") in {"C", "complete"}:
-        wave += 14
-        factors.append("ABC волна C")
-    if getattr(ta, "elliott_entry_ready", False):
-        wave += 12
-        mode = getattr(ta, "elliott_entry_mode", "") or ""
-        factors.append(f"EW {mode}" if mode else "EW вход")
-    elif getattr(ta, "elliott_phase", ""):
-        wave += 6
-        factors.append("EW структура")
     if getattr(ta, "wave_has_confluence", False):
         wave += min(12, 4 * int(getattr(ta, "wave_confluence_count", 0) or 0))
 
@@ -435,7 +375,7 @@ def score_trade_setup(
         grade=(getattr(ta, "setup_grade", "") or "D"),
         side=(getattr(ta, "setup_side", "") or "neutral"),
         ideal_ready=bool(getattr(ta, "setup_ideal_ready", False)),
-        htf_bias=(getattr(ta, "htf_elliott_bias", "") or "neutral"),
+        htf_bias=(getattr(ta, "htf_bias", "") or "neutral"),
     )
     conf_pts, conf_notes = confluence_boosts_gate(conf_setup, side)
     if conf_pts >= 0:
@@ -443,12 +383,6 @@ def score_trade_setup(
     else:
         penalties += abs(conf_pts)
     factors.extend(conf_notes)
-    if getattr(ta, "is_ending_diagonal", False):
-        wave += 4
-        factors.append("ending diagonal")
-    if getattr(ta, "is_abcde", False):
-        wave += 4
-        factors.append("ABCDE")
 
     flow, flow_notes = _flow_score(ta, side)
     factors.extend(flow_notes)
@@ -530,7 +464,7 @@ def decide_trade_action(
     location = setup.location_kind
     aligned, align_reason = _side_aligned(ta, side)
     has_location = location in {
-        "fib", "abc", "elliott", "confluence", "retest", "sr", "trigger", "pattern",
+        "fib", "confluence", "retest", "sr", "trigger", "pattern",
     }
     st = (signal.signal_type or "").lower()
     details = signal.details or {}
@@ -538,21 +472,10 @@ def decide_trade_action(
     # Ранний seed по фактам (ещё <8% от mid базы) — не режем как late chase TA
     early_seed = st == "trend_seed" and seed_ext <= 8.0
 
-    # Жёстко: финал импульса / волна 5 → никогда ENTRY вдогонку.
-    # После impulse_complete контртренд (fade) можно — но только ниже по коду при ready+локации.
+    # Avoid chasing a stretched impulse; this is based on price/Fib extension only.
     wave_phase = (getattr(ta, "wave_phase", "") or "").lower()
     fib_status = (getattr(ta, "fib_status", "") or "").lower()
-    ew_phase = (getattr(ta, "elliott_phase", "") or "").lower()
-    ew_bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
     late_hard = wave_phase == "late_impulse" or fib_status == "late_impulse"
-    if ew_phase == "impulse_5":
-        late_hard = True
-    elif ew_phase == "impulse_complete":
-        # продолжение завершённого импульса = погоня; обратная сторона — не late_hard
-        if side == "long" and ew_bias in {"long", "neutral"}:
-            late_hard = True
-        elif side == "short" and ew_bias in {"short", "neutral"}:
-            late_hard = True
     if late_hard or (chase and not early_seed):
         reason = chase_reason or "финал импульса / погоня — ждать откат"
         if watch_allowed:
@@ -585,7 +508,7 @@ def decide_trade_action(
 
     # trend_seed раньше WAIT-правила: ранний потенциал не режем бейджем WAIT
     if st == "trend_seed" and watch_allowed:
-        has_loc = location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "confluence", "retest", "sr", "pattern"}
         cvd_miss = float(details.get("seed_cvd_missing", 0) or 0)
         if has_loc and setup.total >= min_entry_score and not chase:
             return TradeDecision(
@@ -634,7 +557,7 @@ def decide_trade_action(
         except (TypeError, ValueError):
             cvd_f = None
         cvd_ok = _cvd_confirms_side(side, cvd_f)
-        has_loc = location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}
+        has_loc = location in {"fib", "confluence", "retest", "sr", "pattern"}
         if has_loc and cvd_ok and setup.total >= min_entry_score and not chase:
             return TradeDecision(
                 "entry",
@@ -676,7 +599,7 @@ def decide_trade_action(
         and has_location
         and not chase
     )
-    if can_entry and (ready or location in {"fib", "abc", "elliott", "confluence", "retest", "sr", "pattern"}):
+    if can_entry and (ready or location in {"fib", "confluence", "retest", "sr", "pattern"}):
         reason = f"сетап {setup.total}/100"
         if ready_reason:
             reason = f"{reason} · {ready_reason}"

@@ -36,7 +36,7 @@ from .bybit_market_data import (
     format_bybit_real_data_block,
     format_bybit_real_data_compact,
 )
-from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart, render_wave_chart
+from .chart_renderer import get_signal_chart_png, render_analysis_chart, render_annotated_chart, render_signal_chart
 from .bybit_klines import BybitKlineCache
 from .manual_ta import (
     MANUAL_TA_CHART_SOURCES,
@@ -109,8 +109,6 @@ from .liquidation_analysis import (
 )
 from .analysis_outcome_tracker import AnalysisOutcomeSummary
 from .anomaly_alerts import AnomalyEvent, format_anomaly_alert
-from .wave_alerts import WaveEvent, format_wave_alert
-from .wave_watcher import WaveLevelWatcher, WaveWatchUpdate, format_wave_watch_update
 from .trade_playbook import (
     build_hot_caption,
     build_pro_detail_html,
@@ -125,7 +123,7 @@ from .signal_quality_gate import (
 )
 from .trade_decision_gate import apply_decision_to_quality_tier, decide_trade_action
 from .bybit_cvd import get_taker_cvd_cache
-from .chart_screenshot import chart_capture_service
+from .market_participation import coinglass_breakdown_html, signal_market_metrics
 from .settings import SettingsManager, clamp_cooldown_seconds
 
 logger = logging.getLogger(__name__)
@@ -216,10 +214,8 @@ class TelegramBot:
         self._account_ratio_cache = BybitAccountRatioCache()
         self.scenario_watcher = ScenarioWatcher()
         self._scenario_watch_task: asyncio.Task | None = None
-        self.wave_level_watcher = WaveLevelWatcher()
         self.oil_monitor: Any | None = None
         self._oil_force_dispatch = False
-        self._wave_watch_task: asyncio.Task | None = None
         # Контекст последнего сигнала для кнопок «Ждать LONG/SHORT»
         self._signal_watch_ctx: dict[str, dict[str, Any]] = {}
         self._pause_snapshot: dict[str, bool] | None = None
@@ -241,7 +237,6 @@ class TelegramBot:
         "liquidation_alerts_enabled",
         "analysis_enabled",
         "anomaly_enabled",
-        "wave_enabled",
         "scenario_watch_enabled",
         "manual_ta_alerts_enabled",
         "oil_news_enabled",
@@ -252,7 +247,6 @@ class TelegramBot:
         ("liquidation_alerts_enabled", "liq", "💧 Ликвидации"),
         ("analysis_enabled", "analysis", "🧠 Анализ ликвидаций"),
         ("anomaly_enabled", "anomaly", "⚡ Аномалии"),
-        ("wave_enabled", "wave", "🌊 Волны Эллиотта"),
         ("scenario_watch_enabled", "scenario", "🔮 Сценарии (фаза 2)"),
         ("manual_ta_alerts_enabled", "mta_alert", "🔔 Алерты ручного TA"),
         ("oil_news_enabled", "oil", "🛢 Нефть UKOUSD Bybit"),
@@ -277,8 +271,6 @@ class TelegramBot:
     def _on_channel_disabled(self, channel_id: str) -> None:
         if channel_id == "scenario":
             self.scenario_watcher.clear_all()
-        elif channel_id == "wave":
-            self.wave_level_watcher.clear_all()
         elif channel_id == "mta_alert":
             self._manual_ta_alerts.clear()
         elif channel_id == "oil":
@@ -290,7 +282,6 @@ class TelegramBot:
         self._sync_bot_paused_from_channels()
         if not enabled:
             self.scenario_watcher.clear_all()
-            self.wave_level_watcher.clear_all()
             self._manual_ta_alerts.clear()
 
     def _toggle_notification_channel(self, channel_id: str) -> str:
@@ -332,7 +323,7 @@ class TelegramBot:
         parts = label.split(" ", 1)
         if len(parts) == 2:
             emoji, rest = parts[0], parts[1]
-            # «Волны Эллиотта» → «Волны», «Сигналы сканера» → «Сигналы»
+            # «Сигналы сканера» → «Сигналы»
             short_name = rest.split(" ", 1)[0][:16]
             return f"{emoji} {short_name} {'ON' if on else 'OFF'}"
         return f"{label[:22]} {'ON' if on else 'OFF'}"
@@ -524,8 +515,7 @@ class TelegramBot:
                     + f"\n🧠 Анализ: {'вкл' if s.analysis_enabled and self.config.analysis_chat_configured else 'выкл'} "
                     f"(≥${int(s.analysis_min_liq_usd):,} · conf≥{s.analysis_min_confidence:.0f}%)".replace(",", " ")
                     + f"\n📈 График к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
-                    f"· режим <b>{s.signal_chart_source}</b> "
-                    f"{'(TA-разметка)' if s.signal_chart_source == 'annotated' else '(скрин TV/CG)'}"
+                    "· единый TA-стиль без боковых панелей"
                     + (
                         f"\n📐 Ручной TA-чат: <b>ON</b> (id {self.config.telegram_manual_ta_chat_id})"
                         if self.config.manual_ta_chat_configured
@@ -611,8 +601,6 @@ class TelegramBot:
             self._manual_ta_alert_task = asyncio.create_task(self._manual_ta_alert_loop())
         if self._scenario_watch_task is None or self._scenario_watch_task.done():
             self._scenario_watch_task = asyncio.create_task(self._scenario_watch_loop())
-        if self._wave_watch_task is None or self._wave_watch_task.done():
-            self._wave_watch_task = asyncio.create_task(self._wave_watch_loop())
 
     async def stop(self) -> None:
         if self.application is None:
@@ -634,13 +622,6 @@ class TelegramBot:
             except asyncio.CancelledError:
                 pass
             self._scenario_watch_task = None
-        if self._wave_watch_task is not None:
-            self._wave_watch_task.cancel()
-            try:
-                await self._wave_watch_task
-            except asyncio.CancelledError:
-                pass
-            self._wave_watch_task = None
         if self.redis is not None:
             try:
                 await self.redis.close()
@@ -652,16 +633,8 @@ class TelegramBot:
             return "TELEGRAM_ALERT_CHAT_ID"
         if self.config.telegram_analysis_chat_id == chat_id:
             return "TELEGRAM_ANALYSIS_CHAT_ID"
-        if self.config.telegram_wave_chat_id == chat_id:
-            return "TELEGRAM_WAVE_CHAT_ID"
-        if self.config.telegram_anomaly_chat_id == chat_id:
-            return "TELEGRAM_ANOMALY_CHAT_ID"
-        if self.config.wave_chat_id == chat_id:
-            return "TELEGRAM_WAVE_CHAT_ID (fallback anomaly/analysis)"
         if self.config.anomaly_chat_id == chat_id:
-            if self.config.telegram_anomaly_chat_id is None:
-                return "TELEGRAM_ANALYSIS_CHAT_ID (аномалии)"
-            return "TELEGRAM_ANOMALY_CHAT_ID"
+            return "TELEGRAM_ANALYSIS_CHAT_ID (аномалии)"
         if self.config.telegram_manual_ta_chat_id == chat_id:
             return "TELEGRAM_MANUAL_TA_CHAT_ID"
         return f"chat_id={chat_id}"
@@ -1033,7 +1006,7 @@ class TelegramBot:
             user_text=(
                 f"WORKING_TF={interval_minutes}m. "
                 "По POSITION_CALL и всему пакету алгоритмов бота дай мнение о позиции: "
-                "что открывать (LONG/SHORT) или WAIT, почему (волны/фигуры/EW/RSI/liq/gate), "
+                "что открывать (LONG/SHORT) или WAIT, почему (структура/фигуры/RSI/liq/gate), "
                 "как войти (триггер close), стоп, TP1/TP2. "
                 "Не выдумывай уровни вне пакета. "
                 "Ответ ПОЛНЫЙ — 7 пунктов, без обрыва. Без markdown. Окно 24h."
@@ -1625,6 +1598,7 @@ class TelegramBot:
                             coinglass_url=signal.link,
                             oi_bars=oi_bars,
                             liq_context=liq_context,
+                            market_metrics=signal_market_metrics(signal),
                             display_hours=int(
                                 getattr(settings, "signal_chart_display_hours", 7) or 7
                             ),
@@ -1650,6 +1624,7 @@ class TelegramBot:
                             interval_minutes=settings.signal_chart_interval_minutes,
                             oi_bars=oi_bars,
                             liq_context=liq_context,
+                            market_metrics=signal_market_metrics(signal),
                             neutral=True,
                             chart_source=settings.signal_chart_source,
                             exchange=signal.exchange.lower(),
@@ -1912,6 +1887,28 @@ class TelegramBot:
         if (
             sent_any
             and ta_result is not None
+            and getattr(settings, "signal_coinglass_breakdown_enabled", True)
+        ):
+            try:
+                breakdown = coinglass_breakdown_html(
+                    ta_result,
+                    symbol=signal.symbol,
+                    working_tf=f"{int(settings.signal_chart_interval_minutes)}м",
+                )
+                if breakdown:
+                    await self._send_to_chat(
+                        notify_chat_id, breakdown, None, is_priority,
+                    )
+            except Exception:
+                logger.debug(
+                    "Coinglass breakdown send failed for %s",
+                    signal.symbol,
+                    exc_info=True,
+                )
+
+        if (
+            sent_any
+            and ta_result is not None
             and settings.signal_pro_to_analysis_chat
             and not skip_dedupe
         ):
@@ -2034,7 +2031,7 @@ class TelegramBot:
             return False
         if not settings.anomaly_enabled:
             return False
-        chat_id = self.config.anomaly_chat_id
+        chat_id = self.config.effective_analysis_chat_id
         if chat_id is None:
             return False
 
@@ -2310,86 +2307,6 @@ class TelegramBot:
         except Exception:
             await message.reply_text(text)
 
-    async def dispatch_wave(self, event: WaveEvent) -> bool:
-        """Волновой сигнал EW+Fib → wave chat с графиком разметки."""
-        if self.application is None:
-            return False
-        settings = self.settings_manager.settings
-        if self._bot_notifications_blocked():
-            return False
-        if not getattr(settings, "wave_enabled", False):
-            return False
-        chat_id = self.config.wave_chat_id
-        if chat_id is None:
-            return False
-
-        message = format_wave_alert(event)
-        keyboard = InlineKeyboardMarkup([
-            self._coinglass_link_buttons(event.symbol, event.exchange),
-        ])
-
-        png: bytes | None = None
-        if getattr(settings, "wave_chart_enabled", True):
-            side = event.side if event.side in {"long", "short"} else "wait"
-            chart_hours = int(
-                getattr(settings, "wave_chart_hours", None)
-                or getattr(settings, "signal_chart_hours", 18)
-            )
-            interval = int(getattr(settings, "wave_interval_minutes", 5))
-            display_hours = int(getattr(settings, "signal_chart_display_hours", 12) or 12)
-            try:
-                png, _ta = await asyncio.wait_for(
-                    render_wave_chart(
-                        event.symbol,
-                        side=side,
-                        hours=chart_hours,
-                        interval_minutes=interval,
-                        expect_ru=event.expect_ru or event.path_reason,
-                        entry_price=event.entry_price,
-                        stop_price=event.stop_price,
-                        tp_prices=event.tp_prices,
-                        invalidation=event.invalidation,
-                        display_hours=display_hours,
-                        height_scale=float(
-                            getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
-                        ),
-                        ew_draw_ot=event.ew_draw_ot or None,
-                        ew_global_ot=event.ew_global_ot or None,
-                        ew_local_ot=event.ew_local_ot or None,
-                        confidence=event.confidence,
-                    ),
-                    timeout=25.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Wave chart timeout %s", event.symbol)
-                png = None
-            except Exception:
-                logger.exception("Wave chart failed %s", event.symbol)
-                png = None
-
-        if png:
-            sent = await self._send_chart(
-                chat_id, png, message, is_priority=True, keyboard=keyboard,
-            )
-        else:
-            sent = await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
-
-        if sent:
-            logger.info(
-                "Wave %s %s %s/%s",
-                event.exchange,
-                event.symbol,
-                event.setup_kind,
-                event.side,
-            )
-            try:
-                self.wave_level_watcher.try_enroll(
-                    event, settings, chat_id=chat_id,
-                )
-            except Exception:
-                logger.exception("Wave watch enroll failed %s", event.symbol)
-        return sent
-
     async def dispatch_trend_risk(
         self,
         risk: TrendExhaustionRisk,
@@ -2479,40 +2396,9 @@ class TelegramBot:
                     liq_context = None
             png = None
             ta_result = None
-            chart_src = getattr(settings, "analysis_chart_source", "annotated")
             try:
-                if chart_src == "annotated":
-                    png, ta_result = await asyncio.wait_for(
-                        render_analysis_chart(
-                            result.symbol,
-                            direction=result.direction,
-                            hours=settings.signal_chart_hours,
-                            interval_minutes=settings.signal_chart_interval_minutes,
-                            invalidation_price=result.invalidation_price,
-                            oi_bars=oi_bars,
-                            liq_context=liq_context,
-                            exchange=result.exchange,
-                        ),
-                        timeout=20.0,
-                    )
-                else:
-                    png = await asyncio.wait_for(
-                        chart_capture_service.capture_tradingview(
-                            result.exchange,
-                            result.symbol,
-                            interval_minutes=settings.analysis_chart_interval_minutes,
-                        ),
-                        timeout=20.0,
-                    )
-            except asyncio.TimeoutError:
-                logger.warning("Analysis chart timeout for %s", result.symbol)
-                png = None
-            except Exception:
-                logger.exception("Analysis chart capture failed for %s", result.symbol)
-                png = None
-            if png is None and chart_src != "annotated":
-                try:
-                    png, ta_result = await render_analysis_chart(
+                png, ta_result = await asyncio.wait_for(
+                    render_analysis_chart(
                         result.symbol,
                         direction=result.direction,
                         hours=settings.signal_chart_hours,
@@ -2521,9 +2407,15 @@ class TelegramBot:
                         oi_bars=oi_bars,
                         liq_context=liq_context,
                         exchange=result.exchange,
-                    )
-                except Exception:
-                    logger.exception("Analysis annotated fallback failed for %s", result.symbol)
+                    ),
+                    timeout=20.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Analysis chart timeout for %s", result.symbol)
+                png = None
+            except Exception:
+                logger.exception("Analysis chart render failed for %s", result.symbol)
+                png = None
             if png:
                 caption = (
                     f"📊 #{base_ticker(result.symbol)} · {result.direction_label} "
@@ -2732,8 +2624,19 @@ class TelegramBot:
         return self._is_manual_ta_chat(update) or self._is_admin(update)
 
     async def _fetch_manual_ta_market_details(self, symbol: str) -> dict[str, Any]:
-        """Реальные Bybit L/S + ликвидации — как в обычных сигналах."""
+        """Fetch real Bybit positioning, funding, and liquidation context."""
         details: dict[str, Any] = {}
+        if self.scanner is not None:
+            try:
+                details.update(
+                    self.scanner.get_metrics_since(
+                        "bybit", symbol, time.time() - 60 * 60,
+                    )
+                )
+                details["oi_period_minutes"] = 60
+                details["source"] = "Bybit"
+            except Exception:
+                logger.debug("Manual TA OI/funding fetch failed for %s", symbol, exc_info=True)
         try:
             snap = await self._account_ratio_cache.get_ratio(symbol)
             if snap is not None:
@@ -2750,27 +2653,13 @@ class TelegramBot:
         return details
 
     async def _manual_ta_flow_caption_block(self, symbol: str, ta: Any) -> str:
-        """Блок «Баланс и поток» для caption ручного TA."""
-        try:
-            cvd_snap = await get_taker_cvd_cache().get_cvd(
-                symbol,
-                lookback_minutes=float(
-                    self.settings_manager.settings.signal_cvd_lookback_minutes
-                ) * 1.5,
-            )
-        except Exception:
-            cvd_snap = None
-        market_details = await self._fetch_manual_ta_market_details(symbol)
-        flow_html = format_manual_ta_flow_html(
-            ta,
-            cvd_snap=cvd_snap,
-            cvd_short_max=self.settings_manager.settings.signal_cvd_short_max_ratio,
-            cvd_long_min=self.settings_manager.settings.signal_cvd_long_min_ratio,
-            market_details=market_details or None,
-        )
-        if not flow_html:
+        """Краткие показатели, синхронизированные с данными на графике."""
+        participation = getattr(ta, "market_participation_lines", []) or []
+        if len(participation) <= 1:
             return ""
-        return f"\n\n<b>📊 Баланс и поток</b>\n{flow_html}"
+        return "\n\n" + "\n".join(
+            html.escape(line) for line in participation[1:4]
+        )
 
     def _manual_ta_tf_keyboard(
         self,
@@ -2791,6 +2680,7 @@ class TelegramBot:
             rows.append(
                 self._coinglass_link_buttons(
                     symbol, "bybit", interval_minutes=interval_minutes,
+                    include_ai=False,
                 )
             )
         return InlineKeyboardMarkup(rows)
@@ -2802,23 +2692,11 @@ class TelegramBot:
         *,
         wizard: bool = False,
     ) -> InlineKeyboardMarkup:
-        default_source = self.settings_manager.settings.manual_ta_chart_source
-        if default_source not in MANUAL_TA_CHART_SOURCES:
-            default_source = "tv_annotated"
         builder = build_mtcw_callback if wizard else build_mtc_callback
         rows: list[list[InlineKeyboardButton]] = [[
             InlineKeyboardButton(
-                ("✅ " if default_source == "tv_annotated" else "") + "TV + TA (overlay)",
-                callback_data=builder(symbol, interval_minutes, "tv_annotated"),
-            ),
-            InlineKeyboardButton(
-                ("✅ " if default_source == "annotated" else "") + "Полный TA (annotated)",
+                "📊 Единый график + TA",
                 callback_data=builder(symbol, interval_minutes, "annotated"),
-            ),
-        ], [
-            InlineKeyboardButton(
-                ("✅ " if default_source == "annotated_pro" else "") + "PRO annotated",
-                callback_data=builder(symbol, interval_minutes, "annotated_pro"),
             ),
         ]]
         if wizard:
@@ -2826,7 +2704,7 @@ class TelegramBot:
         else:
             rows.append(
                 self._coinglass_link_buttons(
-                    symbol, "bybit", interval_minutes=interval_minutes,
+                    symbol, "bybit", interval_minutes=interval_minutes, include_ai=False,
                 )
             )
         return InlineKeyboardMarkup(rows)
@@ -2839,62 +2717,9 @@ class TelegramBot:
         *,
         chat_id: int | None = None,
     ) -> InlineKeyboardMarkup:
-        base = self._manual_ta_tf_keyboard(
+        return self._manual_ta_tf_keyboard(
             symbol, wizard=False, interval_minutes=interval_minutes,
-        ).inline_keyboard
-        rows = [list(row) for row in base]
-        side = "long"
-        if ta_result is not None:
-            verdict = getattr(ta_result, "verdict", "")
-            priority = getattr(ta_result, "action_priority", "")
-            if verdict == "SHORT" or priority == "short":
-                side = "short"
-
-        if chat_id is not None and self._is_manual_ta_muted(chat_id, symbol):
-            rows.append([
-                InlineKeyboardButton(
-                    f"🔔 Включить {symbol}",
-                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "unmute"),
-                ),
-            ])
-        else:
-            rows.append([
-                InlineKeyboardButton(
-                    "🔻 Мой SHORT",
-                    callback_data=build_mta_intent_callback(symbol, interval_minutes, "short"),
-                ),
-                InlineKeyboardButton(
-                    "🔺 Мой LONG",
-                    callback_data=build_mta_intent_callback(symbol, interval_minutes, "long"),
-                ),
-            ])
-            rows.append([
-                InlineKeyboardButton(
-                    "🔔 Пробой",
-                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "breakout"),
-                ),
-                InlineKeyboardButton(
-                    "🔁 Ретест",
-                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "retest"),
-                ),
-                InlineKeyboardButton(
-                    "📈 Объём",
-                    callback_data=build_mta_alert_callback(symbol, interval_minutes, side, "volume"),
-                ),
-            ])
-            active = self._active_manual_ta_alerts_count(chat_id, symbol) if chat_id else 0
-            stop_label = f"⏹ Стоп ({active})" if active else "⏹ Стоп алерты"
-            rows.append([
-                InlineKeyboardButton(
-                    stop_label,
-                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "stop"),
-                ),
-                InlineKeyboardButton(
-                    "🔕 Монета OFF",
-                    callback_data=build_mta_mute_callback(symbol, interval_minutes, "mute"),
-                ),
-            ])
-        return InlineKeyboardMarkup(rows)
+        )
 
     def _is_manual_ta_muted(self, chat_id: int, symbol: str) -> bool:
         key = (chat_id, symbol.upper())
@@ -3046,48 +2871,6 @@ class TelegramBot:
                 raise
             except Exception:
                 logger.exception("Scenario watch loop error")
-
-    async def _wave_watch_loop(self) -> None:
-        while True:
-            try:
-                settings = self.settings_manager.settings
-                interval = float(getattr(settings, "wave_watch_tick_seconds", 15.0))
-                await asyncio.sleep(interval)
-                if (
-                    not getattr(settings, "wave_enabled", False)
-                    or not getattr(settings, "wave_watch_enabled", True)
-                    or settings.bot_paused
-                    or self.scanner is None
-                    or self.application is None
-                    or self.wave_level_watcher.active_count == 0
-                ):
-                    continue
-                updates = self.wave_level_watcher.tick(self.scanner, settings)
-                for upd in updates:
-                    try:
-                        await self._dispatch_wave_watch_update(upd)
-                    except Exception:
-                        logger.exception(
-                            "Wave watch update failed %s %s",
-                            upd.watch.exchange,
-                            upd.watch.symbol,
-                        )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Wave watch loop error")
-
-    async def _dispatch_wave_watch_update(self, upd: WaveWatchUpdate) -> None:
-        if self.application is None or self._bot_notifications_blocked():
-            return
-        chat_id = upd.watch.chat_id or self.config.wave_chat_id
-        if chat_id is None:
-            return
-        message = format_wave_watch_update(upd)
-        keyboard = InlineKeyboardMarkup([
-            self._coinglass_link_buttons(upd.watch.symbol, upd.watch.exchange),
-        ])
-        await self._send_to_chat(chat_id, message, keyboard, is_priority=True)
 
     async def _dispatch_scenario_update(self, upd: ScenarioUpdate) -> None:
         if self.application is None:
@@ -3617,6 +3400,7 @@ class TelegramBot:
                     chart_source=chart_source,
                     exchange="bybit",
                     liq_context=liq_context,
+                    market_metrics=await self._fetch_manual_ta_market_details(symbol),
                 ),
                 timeout=50.0,
             )
@@ -3793,6 +3577,7 @@ class TelegramBot:
                     chart_source=chart_source,
                     exchange="bybit",
                     liq_context=liq_context,
+                    market_metrics=await self._fetch_manual_ta_market_details(symbol),
                 ),
                 timeout=50.0,
             )
@@ -3903,7 +3688,12 @@ class TelegramBot:
                 reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
             )
         else:
-            await self._prompt_manual_ta_timeframe(update, symbol)
+            interval = 5
+            await update.message.reply_text(
+                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
+            )
 
     async def on_manual_ta_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -3961,7 +3751,12 @@ class TelegramBot:
                 reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
             )
         else:
-            await self._prompt_manual_ta_timeframe(update, symbol)
+            interval = 5
+            await update.message.reply_text(
+                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
+            )
 
     async def on_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
@@ -3986,7 +3781,13 @@ class TelegramBot:
 
         try:
             png, ta = await asyncio.wait_for(
-                render_annotated_chart(symbol, side=side, hours=hours, oi_bars=oi_bars),
+                render_annotated_chart(
+                    symbol,
+                    side=side,
+                    hours=hours,
+                    oi_bars=oi_bars,
+                    market_metrics=await self._fetch_manual_ta_market_details(symbol),
+                ),
                 timeout=25.0,
             )
         except asyncio.TimeoutError:
@@ -4320,7 +4121,6 @@ class TelegramBot:
                     "liquidation_alerts_enabled": True,
                     "analysis_enabled": True,
                     "anomaly_enabled": settings.anomaly_enabled,
-                    "wave_enabled": getattr(settings, "wave_enabled", True),
                     "scenario_watch_enabled": True,
                     "manual_ta_alerts_enabled": True,
                 }
@@ -4333,7 +4133,6 @@ class TelegramBot:
                 f"• ликвидации: <b>{'ВКЛ' if restore.get('liquidation_alerts_enabled') else 'ВЫКЛ'}</b>\n"
                 f"• анализ: <b>{'ВКЛ' if restore.get('analysis_enabled') else 'ВЫКЛ'}</b>\n"
                 f"• аномалии: <b>{'ВКЛ' if restore.get('anomaly_enabled') else 'ВЫКЛ'}</b>\n"
-                f"• волны EW: <b>{'ВКЛ' if restore.get('wave_enabled') else 'ВЫКЛ'}</b>\n"
                 f"• сценарии: <b>{'ВКЛ' if restore.get('scenario_watch_enabled') else 'ВЫКЛ'}</b>\n"
                 f"• алерты руч. TA: <b>{'ВКЛ' if restore.get('manual_ta_alerts_enabled') else 'ВЫКЛ'}</b>\n\n"
                 "Или настройте выборочно: <b>🎛 Каналы</b>."
@@ -4978,10 +4777,6 @@ class TelegramBot:
             else list(s.flash_price_tiers)
         )
         mega_label = ",".join(f"{int(t)}%" if t == int(t) else str(t) for t in mega_tiers) or "—"
-        wave_on = bool(getattr(s, "wave_enabled", False) and self.config.wave_chat_configured)
-        _wave_status = (
-            f" · волны {int(getattr(s, 'wave_max_per_minute', 2))}/мин" if wave_on else ""
-        )
         return (
             "<b>⚙ Настройки сканера</b>\n"
             f"{self._signals_status_line()}\n"
@@ -5040,8 +4835,8 @@ class TelegramBot:
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "
             f"макс <b>{getattr(s, 'analysis_max_per_hour', 4)}</b>/ч · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
             f"{'альты OFF' if s.analysis_skip_alt_tier else 'альты ON'}"
-            f"{'' if not (s.anomaly_enabled and self.config.anomaly_chat_configured) else f' · аномалии {s.anomaly_max_per_minute}/мин'}"
-            f"{_wave_status})\n\n"
+            f"{'' if not (s.anomaly_enabled and self.config.analysis_chat_configured) else f' · аномалии {s.anomaly_max_per_minute}/мин (в этом чате)'}"
+            ")\n\n"
             "<i>В уведомлении % — фактическое движение, не порог</i>\n"
             "Точная настройка: /set help"
         ).replace(",", " ")
@@ -5511,18 +5306,6 @@ class TelegramBot:
             self.settings_manager.update(actionable_signals_only=not current)
             state = "ON" if not current else "OFF"
             await query.answer(f"✅ Готовый вход → {state}", show_alert=False)
-            await self._safe_edit_message_text(
-                query,
-                self._build_settings_panel_text(),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._settings_keyboard(),
-            )
-        elif payload == "toggle_wave":
-            if not self._is_admin(update):
-                await query.answer("Нет доступа.", show_alert=True)
-                return
-            label = self._toggle_notification_channel("wave")
-            await query.answer(f"✅ {label}" if label else "OK", show_alert=False)
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -6146,22 +5929,13 @@ class TelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🎛 Каналы", callback_data="open_channels")],
             [InlineKeyboardButton("🛢 Нефть", callback_data="open_oil")],
-            [
-                InlineKeyboardButton(
-                    self._mark(
-                        f"🌊 Волны {'ON' if getattr(s, 'wave_enabled', False) else 'OFF'}",
-                        bool(getattr(s, "wave_enabled", False)),
-                    ),
-                    callback_data="toggle_wave",
+            [InlineKeyboardButton(
+                self._mark(
+                    f"Готовый вход {'ON' if s.actionable_signals_only else 'OFF'}",
+                    s.actionable_signals_only,
                 ),
-                InlineKeyboardButton(
-                    self._mark(
-                        f"Готовый вход {'ON' if s.actionable_signals_only else 'OFF'}",
-                        s.actionable_signals_only,
-                    ),
-                    callback_data="toggle_actionable",
-                ),
-            ],
+                callback_data="toggle_actionable",
+            )],
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),

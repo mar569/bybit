@@ -421,7 +421,7 @@ def test_build_oil_bounce_plan_long_and_apply_ta():
     apply_oil_bounce_to_ta(ta, plan)
     assert ta.verdict == "LONG"
     assert ta.entry_zone is not None
-    assert ta.elliott_stop_price == plan.stop
+    assert ta.invalidation_price == plan.stop
     assert ta.target_prices[:3] == list(plan.targets[:3])
     assert ta.bullish_scenario is not None
 

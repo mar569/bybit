@@ -81,46 +81,14 @@ def test_late_impulse_with_fib_is_watch_not_entry() -> None:
     assert d.chase is True
 
 
-def test_ew_complete_blocks_long_continuation() -> None:
-    """После EW complete лонг вдогонку → WATCH; шорт fade при WAIT без ready → WATCH."""
-    ta_long = TAAnalysisResult(
-        verdict="LONG",
-        action_priority="long",
-        current_price=0.0085,
-        range_position=0.88,
-        momentum_pct=0.2,
-        elliott_phase="impulse_complete",
-        wave_bias="long",
-        wave_has_confluence=True,
-        wave_phase="wave_2_4_zone",
-        nearest_support=0.0084,
-    )
-    d_long = decide_trade_action(
-        _sig(signal_type="pulse_pump", side="long"),
-        ta_long,
-        readiness=(True, "armed"),
-        watch_allowed=True,
-        min_entry_score=50,
-    )
-    assert d_long.action == "watch"
+def test_legacy_wave_metadata_does_not_create_entry_location() -> None:
+    from bot.trade_decision_gate import detect_location
 
-    ta_fade = TAAnalysisResult(
-        verdict="WAIT",
-        action_priority="short",
-        current_price=0.0085,
-        range_position=0.88,
-        momentum_pct=-0.5,
-        elliott_phase="impulse_complete",
-        wave_bias="long",
-    )
-    d_fade = decide_trade_action(
-        _sig(signal_type="pulse_dump", side="short", price_direction="down"),
-        ta_fade,
-        readiness=(False, "ждать"),
-        watch_allowed=True,
-    )
-    assert d_fade.action == "watch"
-    assert d_fade.action != "entry"
+    ta = TAAnalysisResult(verdict="LONG", current_price=1.0)
+    ta.elliott_entry_ready = True
+    ta.elliott_entry_mode = "aggressive"
+    ta.elliott_entry_price = 1.0
+    assert detect_location(ta, "long") != "elliott"
 
 def test_chart_wait_without_ready_is_watch() -> None:
     ta = TAAnalysisResult(
@@ -147,7 +115,7 @@ def test_fib_setup_scores_entry() -> None:
         current_price=1.05,
         range_position=0.45,
         momentum_pct=-0.2,
-        wave_phase="wave_2_4_zone",
+        wave_phase="fib_golden_zone",
         wave_bias="long",
         wave_has_confluence=True,
         wave_confluence_count=2,
@@ -245,7 +213,7 @@ def test_reversal_weak_cvd_not_entry() -> None:
         range_position=0.55,
         momentum_pct=0.9,
         wave_has_confluence=True,
-        wave_phase="wave_2_4_zone",
+        wave_phase="fib_golden_zone",
         wave_bias="long",
         nearest_support=0.316,
     )

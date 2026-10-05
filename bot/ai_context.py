@@ -84,17 +84,28 @@ def parse_interval_from_text(text: str, *, default: int = 5) -> int:
 def build_multi_tf_map(interval_minutes: int) -> dict[str, Any]:
     """How the model should stack timeframes for this request."""
     working = int(interval_minutes) if interval_minutes in ALLOWED_INTERVALS else 5
+    if working <= 15:
+        intermediate, htf, macro = "15m", "1h", "4h"
+        intermediate_role = "проверка локального импульса"
+        htf_role = "основная структура и направленный контекст"
+        macro_role = "старший фон; не отменяет локальный вход без подтверждения"
+    else:
+        intermediate, htf, macro = None, "4h", None
+        intermediate_role = ""
+        htf_role = "старшая структура и направленный контекст"
+        macro_role = ""
     return {
         "working_tf": f"{working}m",
         "working_minutes": working,
-        "htf": "1h",
-        "htf_role": "bias / крупные фигуры / конфликт → приоритет HTF",
-        "working_role": "основная структура, триггер close, стоп/TP зоны",
-        "micro_role": (
-            "1m/15s или импульс свечей на скрине — только тайминг входа; "
-            "не подменяет HTF bias"
-        ),
-        "synthesis": "HTF bias → WORKING levels/trigger → micro timing → конкретика",
+        "intermediate_tf": intermediate,
+        "intermediate_role": intermediate_role,
+        "htf": htf,
+        "htf_role": htf_role,
+        "macro_tf": macro,
+        "macro_role": macro_role,
+        "working_role": "локальный сетап, триггер close, стоп и ближайшие цели",
+        "micro_role": "микроимпульс — только тайминг; не самостоятельное направление",
+        "synthesis": "рабочий ТФ для входа → средний ТФ для подтверждения → HTF/4h для контекста",
     }
 
 def _round(v: Any, nd: int = 6) -> Any:
@@ -214,9 +225,12 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "primary_htf_pattern": htf_primary,
         "pattern_foresight": pattern_foresight,
         "fib": fib,
-        "wave": {
-            "phase": ta.wave_phase,
-            "bias": ta.wave_bias,
+        "fib_structure": {
+            "pullback_phase": {
+                "fib_golden_zone": "golden_fib_zone",
+                "late_impulse": "near_price_extreme",
+            }.get(ta.wave_phase, ta.wave_phase),
+            "direction": ta.wave_bias,
             "confidence": ta.wave_confidence,
             "has_confluence": ta.wave_has_confluence,
             "confluence_count": ta.wave_confluence_count,
@@ -225,36 +239,6 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
             "fib_status": ta.fib_status,
             "fib_reject": ta.fib_reject_reason,
         },
-        "elliott": {
-            "label": ta.elliott_label,
-            "phase": ta.elliott_phase,
-            "confidence": ta.elliott_confidence,
-            "entry_mode": ta.elliott_entry_mode,
-            "entry_ready": ta.elliott_entry_ready,
-            "entry": _round(ta.elliott_entry_price),
-            "stop": _round(ta.elliott_stop_price),
-            "tps": [_round(x) for x in (ta.elliott_tp_prices or [])[:3]],
-            "fib_classic_ok": ta.elliott_fib_classic_ok,
-            "extension": ta.elliott_extension,
-            "truncated": ta.elliott_truncated,
-            "diagonal": ta.elliott_diagonal,
-            "corr_type": ta.elliott_corr_type,
-            "triangle": ta.elliott_triangle_kind,
-            "triangle_bias": ta.elliott_triangle_bias,
-            "complex": ta.elliott_complex_kind,
-            "structure_note": (ta.elliott_structure_note or "")[:200],
-            "path_bias": ta.elliott_path_bias,
-            "path_reason": (ta.elliott_path_reason or "")[:200],
-            "path_horizon_hours": getattr(ta, "elliott_path_horizon_hours", 0) or None,
-            "path_scenario": getattr(ta, "elliott_path_scenario", "") or "",
-            "path_invalidation": _round(getattr(ta, "elliott_path_invalidation", None)),
-            "path_prices": [_round(x) for x in (getattr(ta, "elliott_path_prices", None) or [])[:6]],
-            "path_labels": list(getattr(ta, "elliott_path_labels", None) or [])[:6],
-            "global_label": ta.elliott_global_label,
-            "local_label": ta.elliott_local_label,
-            "fib_clusters": getattr(ta, "elliott_fib_clusters", []) or [],
-        },
-        "abc": {"phase": ta.abc_phase, "label_ru": ta.abc_label_ru},
         "setup_confluence": {
             "score": ta.setup_score,
             "grade": ta.setup_grade,
@@ -266,10 +250,14 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
             "stop": _round(ta.setup_stop),
             "tps": [_round(x) for x in (ta.setup_tps or [])[:3]],
             "trigger": ta.setup_trigger,
-            "ending_diagonal": ta.is_ending_diagonal,
-            "abcde": ta.is_abcde,
         },
         "smc": smc,
+        "market_metrics": {
+            key: value
+            for key, value in (ta.market_metrics or {}).items()
+            if value is not None
+        },
+        "market_participation": (ta.market_participation_lines or [])[:7],
         "smc_score": ta.smc_score,
         "smc_summary": (ta.smc_summary or "")[:240],
         "forecast_summary": (ta.forecast_summary or "")[:280],
@@ -310,10 +298,8 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "factor_lines": (ta.factor_lines or [])[:10],
         "trader_plan": (ta.trader_plan or [])[:8],
         "professional_summary": (ta.professional_summary or "")[:320],
-        "htf_elliott": {
-            "label": ta.htf_elliott_label,
-            "phase": ta.htf_elliott_phase,
-            "bias": ta.htf_elliott_bias,
+        "higher_timeframe": {
+            "bias": ta.htf_bias,
         },
         "range_trade": {
             "label": ta.range_trade_label,
@@ -378,7 +364,7 @@ def attach_gates(pack: dict[str, Any], ta: TAAnalysisResult, symbol: str, exchan
             "parts": {
                 "structure": setup.structure,
                 "location": setup.location,
-                "wave": setup.wave,
+                "fib": setup.wave,
                 "flow": setup.flow,
                 "penalties": setup.penalties,
             },
@@ -427,7 +413,6 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
     vol = pack.get("volatility_regime") or {}
     foresight = ta.get("pattern_foresight") or {}
     setup = ta.get("setup_confluence") or {}
-    elliott = ta.get("elliott") or {}
     rsi = ta.get("rsi") or {}
     primary = ta.get("primary_pattern") or {}
     htf_pat = ta.get("primary_htf_pattern") or {}
@@ -439,11 +424,6 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
     foresight_bias = str(foresight.get("bias") or "neutral").lower()
     setup_side = str(setup.get("side") or "neutral").lower()
     rsi_bias = str(rsi.get("bias") or "neutral").lower()
-    ew_bias = str(elliott.get("path_bias") or elliott.get("bias") or "").lower()
-    if ew_bias in {"up", "bull", "bullish"}:
-        ew_bias = "long"
-    elif ew_bias in {"down", "bear", "bearish"}:
-        ew_bias = "short"
 
     votes: dict[str, int] = {"long": 0, "short": 0}
     reasons: list[str] = []
@@ -474,8 +454,6 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
         _vote(setup_side, 2, f"setup_{setup.get('grade')}")
     elif setup_side in {"long", "short"}:
         _vote(setup_side, 1, f"setup_{setup.get('grade') or 'C'}")
-    if ew_bias in {"long", "short"}:
-        _vote(ew_bias, 2 if elliott.get("entry_ready") else 1, "elliott")
     if rsi_bias in {"long", "short"}:
         _vote(rsi_bias, 1, "rsi_divergence")
 
@@ -572,8 +550,6 @@ def build_bot_position_call(pack: dict[str, Any]) -> dict[str, Any]:
         thesis_bits.append(f"foresight:{str(foresight.get('summary'))[:80]}")
     if setup.get("label_ru"):
         thesis_bits.append(f"setup:{setup.get('label_ru')}")
-    if elliott.get("label"):
-        thesis_bits.append(f"EW:{elliott.get('label')}")
 
     how = "market_now"
     if mode == "watch" or position == "WAIT":
@@ -718,22 +694,6 @@ def build_meaningful_levels(
             candidates.append(("setup_stop", float(setup["stop"])))
         except (TypeError, ValueError):
             pass
-    ew = ta.get("elliott") or {}
-    for t in ew.get("tps") or []:
-        try:
-            candidates.append(("ew_tp", float(t)))
-        except (TypeError, ValueError):
-            continue
-    if ew.get("entry") is not None:
-        try:
-            candidates.append(("ew_entry", float(ew["entry"])))
-        except (TypeError, ValueError):
-            pass
-    if ew.get("stop") is not None:
-        try:
-            candidates.append(("ew_stop", float(ew["stop"])))
-        except (TypeError, ValueError):
-            pass
     # Fib retracements / extensions from wave pack
     for fl in ta.get("fib") or []:
         try:
@@ -743,11 +703,11 @@ def build_meaningful_levels(
             candidates.append((f"fib_{kind}_{ratio:g}", lvl))
         except (TypeError, ValueError, KeyError):
             continue
-    wave = ta.get("wave") or {}
-    for key, label in (("leg_start", "wave_leg_start"), ("leg_end", "wave_leg_end")):
-        if wave.get(key) is not None:
+    fib_structure = ta.get("fib_structure") or {}
+    for key, label in (("leg_start", "fib_leg_start"), ("leg_end", "fib_leg_end")):
+        if fib_structure.get(key) is not None:
             try:
-                candidates.append((label, float(wave[key])))
+                candidates.append((label, float(fib_structure[key])))
             except (TypeError, ValueError):
                 pass
     primary = ta.get("primary_pattern") or {}
@@ -780,7 +740,7 @@ def build_meaningful_levels(
         "min_pct": min_pct,
         "guide": (
             f"Первая цель/ход ≥{vol['tp1_min_pct']}% (режим {vol['regime']}, "
-            f"горизонт {vol['horizon']}). Fib/EW/ABC/pattern/magnet из списка. "
+            f"горизонт {vol['horizon']}). Fib, price-pattern, SMC и ликвидационные данные из списка. "
             "Ближе min_pct — шум, не сценарий."
         ),
         "above": above[:8],
@@ -806,7 +766,9 @@ def format_context_text(pack: dict[str, Any]) -> str:
         f"SYMBOL={sym} EXCHANGE={ex} WINDOW={hours}h WORKING_TF={multi.get('working_tf')}",
         (
             f"MULTI_TF working={multi.get('working_tf')} ({multi.get('working_role')}) | "
+            f"intermediate={multi.get('intermediate_tf')} ({multi.get('intermediate_role')}) | "
             f"HTF={multi.get('htf')} ({multi.get('htf_role')}) | "
+            f"macro={multi.get('macro_tf')} ({multi.get('macro_role')}) | "
             f"micro={multi.get('micro_role')} | synth={multi.get('synthesis')}"
         ),
         f"PRICE={ta.get('price')} VERDICT={ta.get('verdict')} CONF={ta.get('confidence')}/10",
@@ -822,10 +784,11 @@ def format_context_text(pack: dict[str, Any]) -> str:
         f"PRIMARY_PATTERN={ta.get('primary_pattern')}",
         f"HTF_PATTERNS={ta.get('htf_chart_patterns')} PRIMARY_HTF={ta.get('primary_htf_pattern')}",
         f"PATTERN_FORESIGHT={ta.get('pattern_foresight')}",
-        f"ELLIOTT={ta.get('elliott')} HTF_ELLIOTT={ta.get('htf_elliott')}",
-        f"WAVE={ta.get('wave')} ABC={ta.get('abc')}",
+        f"HTF_CONTEXT={ta.get('higher_timeframe')} FIB_STRUCTURE={ta.get('fib_structure')}",
         f"SETUP={ta.get('setup_confluence')}",
         f"SMC={ta.get('smc_summary')} score={ta.get('smc_score')}",
+        f"MARKET_PARTICIPATION={ta.get('market_participation')}",
+        f"MARKET_METRICS={ta.get('market_metrics')}",
         f"FORECAST={ta.get('forecast_summary')}",
         f"CVD={ta.get('cvd_source')} delta={ta.get('cvd_delta')} LIQ_CASCADE={ta.get('liq_cascade')}",
         f"RSI_DIVERGENCE={ta.get('rsi')}",

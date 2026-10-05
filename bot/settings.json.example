@@ -165,11 +165,12 @@
   "signal_chart_hours": 5,
   "signal_chart_interval_minutes": 5,
   "signal_chart_height_scale": 1.0,
-  "manual_ta_chart_source": "tv_annotated",
+  "manual_ta_chart_source": "annotated",
   "signal_message_compact": true,
 
   "signal_playbook_enabled": true,
   "signal_pro_to_analysis_chat": true,
+  "signal_coinglass_breakdown_enabled": true,
   "target_watcher_enabled": true,
 
   "signal_quality_gate_enabled": true,

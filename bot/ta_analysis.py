@@ -1,6 +1,7 @@
 """Технический анализ OHLC: уровни, тренды, паттерны, линейка %, BTC-контекст."""
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass, field
 
 from .bybit_klines import KlineBar
@@ -158,6 +159,11 @@ class TAAnalysisResult:
     verdict_confidence: int = 5
     verdict_reason: str = ""
     btc_context: str = ""
+    analysis_interval_minutes: int = 5
+    mid_interval_minutes: int = 15
+    htf_interval_minutes: int = 60
+    macro_interval_minutes: int = 240
+    volume_participation: str = ""
     breakout_level: float | None = None
     breakdown_level: float | None = None
     invalidation_price: float | None = None
@@ -205,6 +211,8 @@ class TAAnalysisResult:
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
     cvd_delta: float | None = None
+    market_participation_lines: list[str] = field(default_factory=list)
+    market_metrics: dict[str, object] = field(default_factory=dict)
     # Free liq-map proxy: stop magnets above/below (equal highs/lows + live liq)
     liq_magnet_bias: str = "neutral"
     liq_magnet_label: str = ""
@@ -232,44 +240,6 @@ class TAAnalysisResult:
     wave_confluence_sr: bool = False
     wave_confluence_round: bool = False
     wave_confluence_retest: bool = False
-    elliott_label: str = ""
-    abc_phase: str = ""
-    abc_label_ru: str = ""
-    elliott_phase: str = ""
-    elliott_confidence: int = 0
-    elliott_entry_mode: str = ""
-    elliott_entry_ready: bool = False
-    elliott_entry_price: float | None = None
-    elliott_stop_price: float | None = None
-    elliott_tp_prices: list[float] = field(default_factory=list)
-    elliott_draw_points: list = field(default_factory=list)
-    elliott_fib_classic_ok: bool = False
-    elliott_fib_w2: float = 0.0
-    elliott_fib_w4: float = 0.0
-    # PPT-структуры: растяжение / усечение / диагональ / тип ABC
-    elliott_extension: str = ""
-    elliott_truncated: bool = False
-    elliott_diagonal: str = ""
-    elliott_corr_type: str = ""
-    elliott_structure_note: str = ""
-    elliott_triangle_kind: str = ""
-    elliott_triangle_bias: str = ""
-    elliott_complex_kind: str = ""
-    elliott_fib_targets: list[float] = field(default_factory=list)
-    elliott_fib_target_labels: list[str] = field(default_factory=list)
-    elliott_path_bias: str = ""
-    elliott_path_prices: list[float] = field(default_factory=list)
-    elliott_path_labels: list[str] = field(default_factory=list)
-    elliott_path_reason: str = ""
-    elliott_path_horizon_hours: float = 0.0
-    elliott_path_scenario: str = ""
-    elliott_path_invalidation: float | None = None
-    elliott_fib_clusters: list = field(default_factory=list)
-    elliott_triangle_obj: object | None = None
-    elliott_global_draw_points: list = field(default_factory=list)
-    elliott_local_draw_points: list = field(default_factory=list)
-    elliott_global_label: str = ""
-    elliott_local_label: str = ""
     fib_status: str = ""
     fib_reject_reason: str = ""
     chart_patterns: list[ChartPattern] = field(default_factory=list)
@@ -286,7 +256,7 @@ class TAAnalysisResult:
     pattern_foresight_watch_only: bool = False
     pattern_foresight_hot: str = ""
     pattern_foresight_pro_html: str = ""
-    # Pro confluence (HTF EW + фигуры + Fib + SMC)
+    # Price-pattern, Fib, and SMC confluence
     setup_score: int = 0
     setup_grade: str = ""
     setup_side: str = "neutral"
@@ -297,14 +267,9 @@ class TAAnalysisResult:
     setup_stop: float | None = None
     setup_tps: list[float] = field(default_factory=list)
     setup_trigger: str = ""
-    htf_elliott_label: str = ""
-    htf_elliott_phase: str = ""
-    htf_elliott_bias: str = "neutral"
-    is_ending_diagonal: bool = False
-    is_abcde: bool = False
+    htf_bias: str = "neutral"
     forecast_path_prices: list[float] = field(default_factory=list)
     forecast_path_labels: list[str] = field(default_factory=list)
-    htf_elliott_draw_points: list = field(default_factory=list)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -1181,6 +1146,49 @@ def _momentum_label_ru(momentum: str, pct: float) -> str:
     if momentum == "up":
         return f"импульс вверх {pct:+.1f}%"
     return "боковое движение"
+
+
+def summarize_volume_participation(bars: list[KlineBar]) -> str:
+    """Compare the latest three-bar participation with the preceding twelve bars."""
+    if len(bars) < 16:
+        return "объём: недостаточно истории"
+    baseline = sorted(float(bar.volume) for bar in bars[-15:-3] if bar.volume > 0)
+    recent = [float(bar.volume) for bar in bars[-3:] if bar.volume > 0]
+    if not baseline or not recent:
+        return "объём: нет данных"
+    middle = len(baseline) // 2
+    median = (
+        baseline[middle]
+        if len(baseline) % 2
+        else (baseline[middle - 1] + baseline[middle]) / 2
+    )
+    if median <= 0:
+        return "объём: нет данных"
+    relative = (sum(recent) / len(recent)) / median
+    price_change = (bars[-1].close - bars[-4].close) / max(bars[-4].close, 1e-12) * 100
+    reference_high = max(float(bar.high) for bar in bars[-15:-3])
+    recent_high = max(float(bar.high) for bar in bars[-3:])
+    if (
+        price_change >= 0.2
+        and reference_high > 0
+        and recent_high >= reference_high * 0.99
+        and relative < 0.75
+    ):
+        test_type = "обновление максимума" if recent_high > reference_high * 1.001 else "повторный тест максимума"
+        return (
+            f"{test_type} на слабом объёме — спрос не подтверждает рост, "
+            "риск отката; это не сигнал SHORT"
+        )
+    if price_change >= 0.2 and relative < 0.75:
+        return "рост без поддержки объёмом — импульс ослабевает, это не сигнал SHORT"
+    if price_change <= -0.2 and relative < 0.75:
+        return "снижение без роста объёма — продавцы не усилились"
+    if abs(price_change) >= 0.2 and relative >= 1.35:
+        direction = "покупки" if price_change > 0 else "продажи"
+        return f"движение подтверждено повышенным объёмом ({direction})"
+    if relative < 0.75:
+        return "объём ниже недавней нормы — пробой требует подтверждения"
+    return "объём без явного перекоса"
 
 
 def _pick_pullback_target(
@@ -2258,6 +2266,8 @@ def run_ta_analysis(
     oi_bars: list[FiveMinOiBar] | None = None,
     btc_bars: list[KlineBar] | None = None,
     htf_bars: list[KlineBar] | None = None,
+    mid_bars: list[KlineBar] | None = None,
+    macro_bars: list[KlineBar] | None = None,
     symbol: str = "",
     hours: int = 5,
     invalidation_price: float | None = None,
@@ -2266,10 +2276,37 @@ def run_ta_analysis(
     interval_minutes: int = 5,
     history_bars: list[KlineBar] | None = None,
     taker_cvd: object | None = None,
+    market_metrics: dict[str, object] | None = None,
+    htf_interval_minutes: int = 60,
+    mid_interval_minutes: int = 15,
+    macro_interval_minutes: int = 240,
     pattern_detection_enabled: bool = True,
     pattern_min_confidence: float = 0.55,
 ) -> TAAnalysisResult:
     oi_bars = oi_bars or []
+    volume_participation = summarize_volume_participation(bars)
+    if htf_bars:
+        htf_volume = summarize_volume_participation(htf_bars)
+        if "на слабом объёме" in htf_volume or "без поддержки объёмом" in htf_volume:
+            if htf_interval_minutes >= 240:
+                htf_label = "4ч"
+            elif htf_interval_minutes >= 60:
+                htf_label = "1ч"
+            else:
+                htf_label = f"{htf_interval_minutes}м"
+            volume_participation = f"{htf_label}: {htf_volume}"
+    from .market_participation import market_participation_lines
+
+    cvd_ratio = (
+        float(getattr(taker_cvd, "ratio", 0) or 0)
+        if taker_cvd is not None and getattr(taker_cvd, "trade_count", 0) > 0
+        else None
+    )
+    participation_lines = market_participation_lines(
+        market_metrics,
+        cvd_ratio=cvd_ratio,
+        volume_participation=volume_participation,
+    )
     swings = find_swing_points(bars)
     levels = detect_horizontal_levels(bars, swings)
     zones = detect_price_zones(bars, swings)
@@ -2360,21 +2397,20 @@ def run_ta_analysis(
     )
     signal_markers = detect_signal_markers(bars, levels)
     smc = analyze_smc(
-        bars, htf_bars=htf_bars, swings=swings, interval_minutes=interval_minutes,
+        bars,
+        mid_bars=mid_bars,
+        htf_bars=htf_bars,
+        macro_bars=macro_bars,
+        swings=swings,
+        interval_minutes=interval_minutes,
     )
-    # Pro confluence: HTF Elliott + фигуры + Fib + SMC → идеальный вход
+    # Combine price structure, patterns, Fib levels, and SMC without wave counting.
     from .setup_confluence import analyze_setup_confluence
-    from .elliott_wave import ElliottWaveResult
-
-    ew_ltf = getattr(wave, "elliott_result", None)
-    if ew_ltf is not None and not isinstance(ew_ltf, ElliottWaveResult):
-        ew_ltf = None
     setup = analyze_setup_confluence(
         bars,
         swings,
         htf_bars=htf_bars,
         wave=wave,
-        ew_ltf=ew_ltf,
         pattern=primary_chart_pattern,
         htf_pattern=primary_htf_chart_pattern,
         smc=smc,
@@ -2736,7 +2772,7 @@ def run_ta_analysis(
         wave.valid
         and wave.has_confluence
         and wave.entry_hint_price
-        and wave.wave_phase in {"shallow_pullback", "wave_2_4_zone", "deep_pullback"}
+        and wave.wave_phase in {"shallow_pullback", "fib_golden_zone", "deep_pullback"}
         and not range_aligned
         and not (liq_cascade.active and verdict == "SHORT")
     ):
@@ -3027,22 +3063,11 @@ def run_ta_analysis(
         post_pump=post_pump,
         compression=candle_compression,
     )
-
-    _ew_conf = int(getattr(wave, "elliott_confidence", 0) or 0)
-    _ew_global_pts = _filter_elliott_draw_points(
-        list(getattr(wave, "elliott_global_draw_points", None) or []),
-        bars=bars,
-        phase=ms.phase,
-        consolidation=consolidation is not None,
-        confidence=_ew_conf,
-    )
-    _ew_local_pts = _filter_elliott_draw_points(
-        list(getattr(wave, "elliott_local_draw_points", None) or []),
-        bars=bars,
-        phase=ms.phase,
-        consolidation=consolidation is not None,
-        confidence=_ew_conf,
-    )
+    participation_summary = " · ".join(participation_lines[1:4])
+    if participation_summary:
+        narrative_basis = (
+            f"{narrative_basis}<br><b>Участие:</b> {participation_summary}"
+        )
 
     return TAAnalysisResult(
         swings=swings,
@@ -3065,6 +3090,11 @@ def run_ta_analysis(
         verdict_confidence=conf,
         verdict_reason=reason,
         btc_context=btc_ctx,
+        analysis_interval_minutes=interval_minutes,
+        mid_interval_minutes=mid_interval_minutes,
+        htf_interval_minutes=htf_interval_minutes,
+        macro_interval_minutes=macro_interval_minutes,
+        volume_participation=volume_participation,
         breakout_level=breakout,
         breakdown_level=breakdown,
         invalidation_price=inv,
@@ -3135,10 +3165,12 @@ def run_ta_analysis(
             and getattr(taker_cvd, "trade_count", 0) > 0
             else None
         ),
+        market_participation_lines=participation_lines,
+        market_metrics=dict(market_metrics or {}),
         fib_levels=list(wave.chart_fib_levels),
         wave_phase=wave.wave_phase if wave.leg else "",
         wave_bias=wave.wave_bias or "neutral",
-        wave_confidence=wave.confidence if (wave.leg or wave.elliott_entry_ready) else 0,
+        wave_confidence=wave.confidence if wave.leg else 0,
         wave_leg_start=wave.leg.start_price if wave.leg else None,
         wave_leg_end=wave.leg.end_price if wave.leg else None,
         wave_has_confluence=bool(wave.has_confluence) if wave.leg else False,
@@ -3146,53 +3178,6 @@ def run_ta_analysis(
         wave_confluence_sr=bool(wave.confluence_sr) if wave.leg else False,
         wave_confluence_round=bool(wave.confluence_round) if wave.leg else False,
         wave_confluence_retest=bool(wave.confluence_retest) if wave.leg else False,
-        elliott_label=wave.elliott_label or "",
-        abc_phase=wave.abc_phase or "",
-        abc_label_ru=wave.abc_label_ru or "",
-        elliott_phase=getattr(wave, "elliott_phase", "") or "",
-        elliott_confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
-        elliott_entry_mode=getattr(wave, "elliott_entry_mode", "") or "",
-        elliott_entry_ready=bool(getattr(wave, "elliott_entry_ready", False)),
-        elliott_entry_price=getattr(wave, "elliott_entry_price", None),
-        elliott_stop_price=getattr(wave, "elliott_stop_price", None),
-        elliott_tp_prices=list(getattr(wave, "elliott_tp_prices", None) or []),
-        elliott_draw_points=(
-            list(_ew_global_pts) + list(_ew_local_pts)
-            if (_ew_global_pts or _ew_local_pts)
-            else _filter_elliott_draw_points(
-                list(getattr(wave, "elliott_draw_points", None) or []),
-                bars=bars,
-                phase=ms.phase,
-                consolidation=consolidation is not None,
-                confidence=int(getattr(wave, "elliott_confidence", 0) or 0),
-            )
-        ),
-        elliott_fib_classic_ok=bool(getattr(wave, "elliott_fib_classic_ok", False)),
-        elliott_fib_w2=float(getattr(wave, "elliott_fib_w2", 0) or 0),
-        elliott_fib_w4=float(getattr(wave, "elliott_fib_w4", 0) or 0),
-        elliott_extension=str(getattr(wave, "elliott_extension", "") or ""),
-        elliott_truncated=bool(getattr(wave, "elliott_truncated", False)),
-        elliott_diagonal=str(getattr(wave, "elliott_diagonal", "") or ""),
-        elliott_corr_type=str(getattr(wave, "elliott_corr_type", "") or ""),
-        elliott_structure_note=str(getattr(wave, "elliott_structure_note", "") or ""),
-        elliott_triangle_kind=str(getattr(wave, "elliott_triangle_kind", "") or ""),
-        elliott_triangle_bias=str(getattr(wave, "elliott_triangle_bias", "") or ""),
-        elliott_complex_kind=str(getattr(wave, "elliott_complex_kind", "") or ""),
-        elliott_fib_targets=list(getattr(wave, "elliott_fib_targets", None) or []),
-        elliott_fib_target_labels=list(getattr(wave, "elliott_fib_target_labels", None) or []),
-        elliott_path_bias=str(getattr(wave, "elliott_path_bias", "") or ""),
-        elliott_path_prices=list(getattr(wave, "elliott_path_prices", None) or []),
-        elliott_path_labels=list(getattr(wave, "elliott_path_labels", None) or []),
-        elliott_path_reason=str(getattr(wave, "elliott_path_reason", "") or ""),
-        elliott_path_horizon_hours=float(getattr(wave, "elliott_path_horizon_hours", 0) or 0),
-        elliott_path_scenario=str(getattr(wave, "elliott_path_scenario", "") or ""),
-        elliott_path_invalidation=getattr(wave, "elliott_path_invalidation", None),
-        elliott_fib_clusters=list(getattr(wave, "elliott_fib_clusters", None) or []),
-        elliott_triangle_obj=getattr(wave, "elliott_triangle_obj", None),
-        elliott_global_draw_points=_ew_global_pts,
-        elliott_local_draw_points=_ew_local_pts,
-        elliott_global_label=str(getattr(wave, "elliott_global_label", "") or ""),
-        elliott_local_label=str(getattr(wave, "elliott_local_label", "") or ""),
         fib_status=getattr(wave, "fib_status", "") or "",
         fib_reject_reason=getattr(wave, "fib_reject_reason", "") or "",
         chart_patterns=chart_patterns,
@@ -3219,19 +3204,9 @@ def run_ta_analysis(
         setup_stop=setup.stop_price,
         setup_tps=list(setup.tp_prices[:3]),
         setup_trigger=setup.trigger,
-        htf_elliott_label=setup.htf_label_ru,
-        htf_elliott_phase=setup.htf_phase,
-        htf_elliott_bias=setup.htf_bias,
-        is_ending_diagonal=bool(setup.is_ending_diagonal)
-        or str(getattr(wave, "elliott_diagonal", "") or "") == "ending",
-        is_abcde=bool(setup.is_abcde)
-        or str(getattr(wave, "elliott_corr_type", "") or "") == "triangle"
-        or bool(getattr(wave, "elliott_triangle_kind", "")),
-        forecast_path_prices=[wp.price for wp in setup.forecast_path]
-        or list(getattr(wave, "elliott_path_prices", None) or []),
-        forecast_path_labels=[wp.label for wp in setup.forecast_path]
-        or list(getattr(wave, "elliott_path_labels", None) or []),
-        htf_elliott_draw_points=list(setup.htf_draw_points),
+        htf_bias=setup.htf_bias,
+        forecast_path_prices=[wp.price for wp in setup.forecast_path],
+        forecast_path_labels=[wp.label for wp in setup.forecast_path],
     )
 
 
@@ -3312,41 +3287,6 @@ def primary_forecast_direction(ta: TAAnalysisResult) -> str:
     if ta.verdict == "SHORT":
         return "short"
     return "neutral"
-
-
-def _filter_elliott_draw_points(
-    points: list,
-    *,
-    bars: list[KlineBar],
-    phase: str,
-    consolidation: bool,
-    confidence: int,
-) -> list:
-    """Не рисовать микро 1–5 внутри боковика — шум.
-    Крупный импульс/дамп и локальный слой (i–v) сохраняем мягче.
-    """
-    if not points:
-        return []
-    prices = [float(getattr(p, "price", 0) or 0) for p in points]
-    prices = [p for p in prices if p > 0]
-    if len(prices) < 2:
-        return []
-    mid = (max(prices) + min(prices)) / 2.0
-    span_pct = (max(prices) - min(prices)) / mid * 100.0 if mid > 0 else 0.0
-    local_labs = {"·0", "i", "ii", "iii", "iv", "v", "a", "b", "c", "d", "e", "w", "x", "y", "z", "x2"}
-    is_local = any(str(getattr(p, "label", "")) in local_labs for p in points)
-    # Крупная структура (DEXE −70% и т.п.) — всегда рисуем
-    if span_pct >= 12.0:
-        return list(points)
-    # Локальный слой: достаточно 1.8% размаха
-    if is_local and span_pct >= 1.8 and confidence >= 4:
-        return list(points)
-    noisy_phase = phase in {"consolidation", "breakout_setup", "post_crash_weak"} or consolidation
-    if noisy_phase and (span_pct < 4.5 or confidence < 6):
-        return []
-    if span_pct < 2.2 and confidence < 7:
-        return []
-    return list(points)
 
 
 def _manual_now_action_html(ta: TAAnalysisResult) -> str:
@@ -4997,177 +4937,60 @@ def _manual_verdict_headline(ta: TAAnalysisResult) -> str:
 
 
 def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
-    """Ручной TA: компактно и с акцентом на решение."""
-    score = ta_display_score(ta)
-    rr_bad = "вход невыгоден" in (ta.verdict_reason or "").lower()
-    signal_status = _manual_signal_status(ta)
-
-    p_short = 34
-    p_long = 33
-    if ta.verdict == "SHORT":
-        p_short, p_long = 62, 20
-    elif ta.verdict == "LONG":
-        p_long, p_short = 62, 20
-    elif getattr(ta, "candle_compression", False) and ta.post_pump and ta.verdict == "WAIT":
-        # Сжатие: оба пробоя — не рисовать 52/24 как «почти SHORT»
-        cont = int(ta.flow_continuation or 50)
-        corr = int(ta.flow_correction or 50)
-        total = max(1, cont + corr)
-        p_long = int(round(38 + 12 * (cont - corr) / total))
-        p_short = int(round(38 + 12 * (corr - cont) / total))
-        p_long = max(28, min(48, p_long))
-        p_short = max(28, min(48, p_short))
-    elif ta.action_priority == "short":
-        p_short, p_long = 52, 24
-    elif ta.action_priority == "long":
-        p_long, p_short = 52, 24
-    p_flat = max(8, 100 - p_short - p_long)
-
+    """Compact manual TA: context, participation, actionable level, invalidation."""
     lines = [
         _manual_verdict_headline(ta),
-        f"📍 <b>Сейчас:</b> цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст'}",
-        f"🧭 <b>Статус:</b> {signal_status}.",
-        f"📊 <b>Сценарии TA:</b> SHORT {p_short}% · LONG {p_long}% · FLAT {p_flat}%.",
+        f"📍 Цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст не выражен'}",
     ]
-
-    try:
-        from .trade_analyst import fib_action_line_html
-
-        lines.append(fib_action_line_html(ta))
-    except Exception:
-        if getattr(ta, "fib_reject_reason", None):
-            lines.append(f"📐 Fib не строим: {ta.fib_reject_reason[:90]}")
-        elif ta.fib_levels:
-            lines.append("📐 Fib на графике · вход только с confluence П/С")
-
-    if ta.narrative_plain:
-        lines.append(ta.narrative_plain)
-    flow_dir = format_flow_direction_label(ta)
-    if flow_dir:
-        lines.append(f"🧭 {flow_dir}")
-    factor_bits: list[str] = []
+    htf_structure = getattr(getattr(ta, "smc", None), "htf_structure", "")
+    context_text = ""
+    if ta.htf_bias in {"long", "short"} or htf_structure:
+        timeframe = "4ч" if ta.htf_interval_minutes == 240 else f"{ta.htf_interval_minutes}м"
+        htf_context = ta.htf_bias.upper() if ta.htf_bias in {"long", "short"} else htf_structure
+        context_text = f"{timeframe} {htf_context}"
     if ta.phase_label and ta.phase_label != "Без явной фазы":
-        factor_bits.append(ta.phase_label)
-    if ta.oi_narrative_label and ta.oi_narrative_label != "Мало данных OI":
-        factor_bits.append(f"OI: {ta.oi_narrative_label}")
-    if ta.smc and ta.smc.htf_structure:
-        factor_bits.append(f"HTF {ta.smc.htf_structure}")
-    if factor_bits:
-        lines.append("📊 " + " · ".join(factor_bits[:4]))
+        local_context = f"LTF {ta.phase_label}"
+        context_text = f"{context_text} · {local_context}" if context_text else local_context
+    if context_text:
+        lines.append(f"🧱 <b>Структура:</b> {html.escape(context_text)}")
 
-    bo_lvl, bd_lvl = _effective_breakout_breakdown(ta)
-    long_lvl = fmt_price(bo_lvl) if bo_lvl else "—"
-    short_lvl = fmt_price(bd_lvl) if bd_lvl else "—"
-    from .pro_invariants import resolve_wait_plan_levels
-
-    plan_stop, plan_tp, _plan_trig = resolve_wait_plan_levels(ta)
-    inv = plan_stop if plan_stop is not None else _display_invalidation(ta)
-    stop_lvl = fmt_price(inv) if inv else "—"
-    tp1 = fmt_price(plan_tp) if plan_tp else "—"
-
-    if rr_bad:
-        lines.append("⛔ <b>Решение:</b> <b>NO TRADE</b> (пропуск до лучшей точки входа).")
-    elif ta.verdict == "LONG":
-        lines.append(f"✅ <b>Решение:</b> LONG только после подтверждения выше <b>{long_lvl}</b>.")
-    elif ta.verdict == "SHORT":
-        lines.append(f"✅ <b>Решение:</b> SHORT только после подтверждения ниже <b>{short_lvl}</b>.")
+    breakout, breakdown = _effective_breakout_breakdown(ta)
+    interval = max(1, int(getattr(ta, "analysis_interval_minutes", 5) or 5))
+    if "вход невыгоден" in (ta.verdict_reason or "").lower():
+        lines.append("⛔ <b>Действие:</b> NO TRADE — точка входа невыгодна.")
     else:
-        lines.append(
-            f"⏳ <b>Решение:</b> WAIT. Ждать 5m close выше <b>{long_lvl}</b> "
-            f"или ниже <b>{short_lvl}</b>."
-        )
-
-    if ta.current_price > 0 and bd_lvl and bd_lvl < ta.current_price:
-        dist_short = (ta.current_price - bd_lvl) / ta.current_price * 100.0
-        lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> (до уровня ~{dist_short:.1f}%).")
-    elif bd_lvl:
-        lines.append(f"👉 <b>Триггер SHORT:</b> 5m close ниже <b>{short_lvl}</b> + ретест снизу.")
-
-    if ta.current_price > 0 and bo_lvl and bo_lvl > ta.current_price:
-        dist_long = (bo_lvl - ta.current_price) / ta.current_price * 100.0
-        lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> (до уровня ~{dist_long:.1f}%).")
-    elif bo_lvl:
-        lines.append(f"👉 <b>Триггер LONG:</b> 5m close выше <b>{long_lvl}</b> + ретест сверху.")
-
-    lines.append(f"🎯 <b>План:</b> вход по факту · отмена <b>{stop_lvl}</b> · TP1 <b>{tp1}</b>.")
-    if ta.verdict == "WAIT":
-        lines.append(
-            "⏱ <b>Протухание идеи:</b> если 12 свечей 5m (~1ч) без пробоя границ — пересмотреть."
-        )
-    elif ta.verdict_reason:
-        lines.append(
-            "⏱ <b>Протухание идеи:</b> если 3 свечи 5m без подтверждения — отменить вход."
-        )
-
-    risk_bits: list[str] = []
-    if getattr(ta, "candle_compression", False) and ta.post_pump:
-        risk_bits.append("сжатие после пампа — оба направления до пробоя")
-    elif ta.post_pump:
-        risk_bits.append("перегрев после пампа")
-    if ta.repeat_spike_dump_risk:
-        risk_bits.append("повторяемый spike→dump")
-    if (
-        ta.post_pump
-        and ta.flow_correction > ta.flow_continuation + 8
-        and not getattr(ta, "candle_compression", False)
-    ):
-        risk_bits.append("базовый сценарий — откат")
-    elif ta.action_priority == "short" and not getattr(ta, "candle_compression", False):
-        risk_bits.append("приоритет short")
-    elif ta.action_priority == "long":
-        risk_bits.append("приоритет long")
-    if not risk_bits and ta.verdict_reason:
-        risk_bits.append(ta.verdict_reason.split(" · ")[0])
-    if risk_bits:
-        lines.append(f"⚠️ <b>Риск:</b> {', '.join(risk_bits[:3])}.")
-
-    if ta.forecast_summary:
-        lines.append(f"🔮 <b>Прогноз:</b> {ta.forecast_summary}")
-
-    if ta.rsi_divergences:
-        from .rsi_divergence import RsiDivergenceResult, format_rsi_divergence_html
-
-        pack = RsiDivergenceResult(
-            rsi_last=float(ta.rsi_last or 50),
-            divergences=list(ta.rsi_divergences),
-            last=ta.rsi_divergences[-1],
-            summary=ta.rsi_divergence_summary,
-            bias=ta.rsi_divergence_bias,
-        )
-        rsi_html = format_rsi_divergence_html(pack)
-        if rsi_html:
-            lines.append(rsi_html)
-    elif ta.rsi_last is not None:
-        lines.append(f"📉 <b>RSI</b> {ta.rsi_last:.0f}")
-
-    if ta.cvd_delta is not None and ta.cvd_delta < 0 and (
-        ta.verdict == "LONG" or ta.action_priority == "long"
-    ):
-        lines.append(
-            f"⚠️ <b>CVD Δ отриц.</b> ({ta.cvd_delta / 1000:.1f}K) — агрессивные продажи, "
-            "лонг только после подтверждения пробоя."
-        )
-
-    for fl in ta.factor_lines:
-        if "CVD" in fl:
-            src = {"live": "Bybit live", "taker": "Bybit taker"}.get(
-                ta.cvd_source, "прокси по свечам",
+        side = ta.verdict if ta.verdict in {"LONG", "SHORT"} else ta.action_priority.upper()
+        if side in {"LONG", "SHORT"}:
+            trigger = breakout if side == "LONG" else breakdown
+            scenario = ta.bullish_scenario if side == "LONG" else ta.bearish_scenario
+            if trigger is None and scenario is not None:
+                trigger = scenario.trigger_price
+            relation = "выше" if side == "LONG" else "ниже"
+            trigger_text = f" {relation} <b>{fmt_price(trigger)}</b>" if trigger else ""
+            target = next(
+                (
+                    price for price in ta.target_prices
+                    if (side == "LONG" and price > ta.current_price)
+                    or (side == "SHORT" and price < ta.current_price)
+                ),
+                None,
             )
-            lines.append(f"📈 <b>CVD ({src}):</b> {fl}")
-            break
-
-    smc_brief = _manual_smc_brief_html(ta.smc) if ta.smc else ""
-    if smc_brief:
-        lines.append(smc_brief)
-
-    if ta.liq_magnet_bias and ta.liq_magnet_bias != "neutral":
-        bits = [f"🧲 <b>Liq magnet:</b> {ta.liq_magnet_label or ta.liq_magnet_bias}"]
-        if ta.liq_magnet_above is not None:
-            bits.append(f"↑{fmt_price(ta.liq_magnet_above)}")
-        if ta.liq_magnet_below is not None:
-            bits.append(f"↓{fmt_price(ta.liq_magnet_below)}")
-        lines.append(" · ".join(bits))
-
+            target_text = f" · цель <b>{fmt_price(target)}</b>" if target else ""
+            lines.append(
+                f"🎯 <b>Действие:</b> {side} по закрытию {interval}m{trigger_text}{target_text}."
+            )
+        else:
+            bounds = (
+                f" <b>{fmt_price(breakdown)}–{fmt_price(breakout)}</b>"
+                if breakout and breakdown else ""
+            )
+            lines.append(
+                f"⏳ <b>Действие:</b> WAIT — нет подтверждённого направления; "
+                f"ждать выхода{bounds}."
+            )
+    invalidation = _display_invalidation(ta)
+    if invalidation:
+        lines.append(f"🚫 <b>Отмена сценария:</b> {fmt_price(invalidation)}.")
     return "\n".join(lines)
 
 
@@ -5177,6 +5000,7 @@ def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:
     if ta.verdict_reason:
         note = ta.verdict_reason.split(" · ")[0][:60]
         lines.append(f"<i>{note}</i>")
+    lines.extend(html.escape(line) for line in ta.market_participation_lines[1:3])
     return "\n".join(lines)
 
 
@@ -5210,13 +5034,7 @@ def ta_analysis_chart_caption_html(
 
     if ta.phase_label and ta.verdict == "WAIT":
         lines.append(f"<i>{ta.phase_label}</i>")
-
-    for fl in ta.factor_lines:
-        if "CVD" in fl or "taker" in fl.lower() or "live" in fl.lower():
-            src = {"live": "live", "taker": "taker"}.get(ta.cvd_source, "")
-            if src:
-                lines.append(f"📈 {fl}")
-            break
+    lines.extend(html.escape(line) for line in ta.market_participation_lines[1:3])
 
     return "\n".join(lines)
 
@@ -5319,6 +5137,7 @@ def ta_chart_context_text(ta: TAAnalysisResult) -> str:
         lines.append(f"bias: {ta.market_bias}")
     if ta.oi_narrative_label:
         lines.append(f"OI: {ta.oi_narrative_label}")
+    lines.extend(ta.market_participation_lines[1:4])
     if ta.range_position:
         lines.append(f"в range: {ta.range_position * 100:.0f}%")
     if ta.post_pump:

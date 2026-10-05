@@ -79,7 +79,7 @@ def test_clean_impulse_gets_valid_fib() -> None:
     assert wave.fib_levels
     assert wave.wave_phase in {
         "shallow_pullback",
-        "wave_2_4_zone",
+        "fib_golden_zone",
         "deep_pullback",
         "mid_correction",
     }
@@ -119,7 +119,7 @@ def test_fib_with_sr_confluence_gives_entry_hint() -> None:
     assert wave.fib_status == "ready"
     assert wave.fib_reject_reason == ""
     cont, _ = wave_flow_adjustments(wave, action_priority="long")
-    if wave.wave_phase in {"shallow_pullback", "wave_2_4_zone"}:
+    if wave.wave_phase in {"shallow_pullback", "fib_golden_zone"}:
         assert cont >= 5
 
 

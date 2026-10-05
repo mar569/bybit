@@ -56,7 +56,7 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 
 def pattern_chart_hours(interval_minutes: int) -> int:
-    """Окно истории для поиска графических фигур / EW (анализ, не зум экрана)."""
+    """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
     return {5: 18, 10: 14, 15: 24, 60: 72}.get(interval_minutes, 18)
 
 
@@ -75,7 +75,7 @@ def structure_aware_display_hours(
     analysis_hours: int,
     configured: int | None,
     drawdown_pct: float = 0.0,
-    elliott_span_bars: int = 0,
+    structure_span_bars: int = 0,
     fib_span_bars: int = 0,
 ) -> int:
     """Расширяет зум, чтобы на экране был весь импульс/дамп (как DEXE с 9 утра)."""
@@ -86,8 +86,8 @@ def structure_aware_display_hours(
         need = max(need, 14 if interval_minutes <= 5 else 16)
     elif drawdown_pct >= 20.0:
         need = max(need, 12)
-    # Покрыть размах EW / Fib-ноги (+ запас ~1ч)
-    span = max(elliott_span_bars, fib_span_bars)
+    # Покрыть импульсную ногу Fib (+ запас ~1ч)
+    span = max(structure_span_bars, fib_span_bars)
     if span > 0 and interval_minutes > 0:
         span_h = int(span * interval_minutes / 60.0) + 2
         need = max(need, min(span_h, analysis_hours))

@@ -108,29 +108,7 @@ def interpret_oil_triangle(
     """Vataga-план по треугольнику на текущем TA."""
     pat = pick_oil_triangle_pattern(ta)
     if pat is None:
-        # Elliott ABCDE triangle fallback
-        e_kind = (getattr(ta, "elliott_triangle_kind", "") or "").strip() if ta else ""
-        e_bias = (getattr(ta, "elliott_triangle_bias", "") or "").lower() if ta else ""
-        if not e_kind:
-            return None
-        priority = _side(e_bias) if e_bias else "neutral"
-        if "expand" in e_kind.lower():
-            priority = "caution"
-        return OilTrianglePlan(
-            kind=f"elliott_{e_kind}",
-            label_ru=f"EW-треугольник ({e_kind})",
-            status="forming",
-            priority=priority,
-            action="wait",
-            allow_long=priority in {"long", "neutral"},
-            allow_short=priority in {"short", "neutral"},
-            confidence=0.55,
-            stop=None,
-            tp1=None,
-            line_ru=f"△ EW {e_kind} · приоритет {priority.upper() if priority != 'neutral' else 'WAIT'}",
-            why_ru="Elliott-треугольник: внутри сжатия ждать close-пробой",
-            factors_ru=(f"EW-треугольник {e_kind} → {priority}",),
-        )
+        return None
 
     kind = (getattr(pat, "kind", "") or "").lower()
     status = (getattr(pat, "status", "") or "forming").lower()

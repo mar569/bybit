@@ -43,7 +43,7 @@ def score_oil_tech_pack(
     full_weight: bool = True,
     bars: Sequence[Any] | None = None,
 ) -> tuple[int, int, list[str], dict[str, float | None]]:
-    """Полный техпакет: волны / Эллиотт / треугольники / фигуры / фаза / PA.
+    """Полный техпакет: структура цены / треугольники / фигуры / фаза / PA.
 
     full_weight=True — нет сильных новостей, техника ведёт.
     full_weight=False — новость HOT, техника только подтверждает.
@@ -62,79 +62,38 @@ def score_oil_tech_pack(
 
     w = 1.0 if full_weight else 0.55
 
-    ew_ready = bool(getattr(ta, "elliott_entry_ready", False))
-    ew_conf = int(getattr(ta, "elliott_confidence", 0) or 0)
-    ew_label = (getattr(ta, "elliott_label", "") or "")[:80]
-    ew_path = (getattr(ta, "elliott_path_bias", "") or "").lower()
-    wave_bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
-    wave_conf = int(getattr(ta, "wave_confidence", 0) or 0)
-
-    if ew_ready and ew_conf >= 5:
-        pts = int(round((3 if ew_conf >= 7 else 2) * w))
-        mode = (getattr(ta, "elliott_entry_mode", "") or "").lower()
-        if "short" in mode or ew_path == "short" or wave_bias == "short":
-            short_pts += pts
-            factors.append(
-                f"EW вход SHORT · {ew_conf}/10"
-                + (f" · {ew_label}" if ew_label else "")
-            )
-        elif "long" in mode or ew_path == "long" or wave_bias == "long":
-            long_pts += pts
-            factors.append(
-                f"EW вход LONG · {ew_conf}/10"
-                + (f" · {ew_label}" if ew_label else "")
-            )
-        if getattr(ta, "elliott_entry_price", None):
-            levels["entry"] = float(ta.elliott_entry_price)
-        if getattr(ta, "elliott_stop_price", None):
-            levels["stop"] = float(ta.elliott_stop_price)
-        tps = list(getattr(ta, "elliott_tp_prices", None) or [])
-        if tps:
-            levels["tp1"] = float(tps[0])
-        if len(tps) > 1:
-            levels["tp2"] = float(tps[1])
-    elif wave_bias in {"long", "short"} and wave_conf >= 5:
-        pts = int(round((2 if wave_conf >= 7 else 1) * w))
-        if wave_bias == "long":
-            long_pts += pts
+    fib_bias = (getattr(ta, "wave_bias", "") or "neutral").lower()
+    fib_confidence = int(getattr(ta, "wave_confidence", 0) or 0)
+    if ta.wave_has_confluence and fib_bias in {"long", "short"} and fib_confidence >= 5:
+        points = int(round((2 if fib_confidence >= 7 else 1) * w))
+        if fib_bias == "long":
+            long_pts += points
         else:
-            short_pts += pts
-        factors.append(f"Волна {wave_bias.upper()} · {wave_conf}/10")
+            short_pts += points
+        factors.append(f"Fib confluence {fib_bias.upper()} · {fib_confidence}/10")
+    if ta.invalidation_price:
+        levels["stop"] = float(ta.invalidation_price)
+    if ta.entry_zone:
+        levels["entry"] = (float(ta.entry_zone[0]) + float(ta.entry_zone[1])) / 2
+    if ta.target_prices:
+        levels["tp1"] = float(ta.target_prices[0])
+        if len(ta.target_prices) > 1:
+            levels["tp2"] = float(ta.target_prices[1])
 
-    tri_kind = (getattr(ta, "elliott_triangle_kind", "") or "").strip()
-    tri_bias = (getattr(ta, "elliott_triangle_bias", "") or "").lower()
-    # Vataga / BuyHold треугольник — основной голос (классика + EW fallback)
-    try:
-        from .oil_triangle import interpret_oil_triangle, score_triangle_votes
+    # Vataga / BuyHold triangles are ordinary price-pattern evidence.
+    from .oil_triangle import interpret_oil_triangle, score_triangle_votes
 
-        tri_plan = interpret_oil_triangle(ta)
-        if tri_plan is not None:
-            tl, ts, tf = score_triangle_votes(tri_plan, weight=w)
-            long_pts += tl
-            short_pts += ts
-            factors.extend(tf[:3])
-            if full_weight:
-                if tri_plan.stop is not None and levels["stop"] is None:
-                    levels["stop"] = float(tri_plan.stop)
-                if tri_plan.tp1 is not None and levels["tp1"] is None:
-                    levels["tp1"] = float(tri_plan.tp1)
-        elif tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
-            pts = int(round(2 * w))
-            side = "long" if tri_bias in {"long", "bullish"} else "short"
-            if side == "long":
-                long_pts += pts
-            else:
-                short_pts += pts
-            factors.append(f"Треугольник {tri_kind} → {side.upper()}")
-    except Exception:
-        if tri_kind and tri_bias in {"long", "short", "bullish", "bearish"}:
-            pts = int(round(2 * w))
-            side = "long" if tri_bias in {"long", "bullish"} else "short"
-            if side == "long":
-                long_pts += pts
-            else:
-                short_pts += pts
-            factors.append(f"Треугольник {tri_kind} → {side.upper()}")
+    tri_plan = interpret_oil_triangle(ta)
+    if tri_plan is not None:
+        tl, ts, tf = score_triangle_votes(tri_plan, weight=w)
+        long_pts += tl
+        short_pts += ts
+        factors.extend(tf[:3])
+        if full_weight:
+            if tri_plan.stop is not None and levels["stop"] is None:
+                levels["stop"] = float(tri_plan.stop)
+            if tri_plan.tp1 is not None and levels["tp1"] is None:
+                levels["tp1"] = float(tri_plan.tp1)
 
     try:
         from .chart_patterns import format_chart_pattern_compact, pick_primary_pattern
@@ -411,7 +370,7 @@ def build_oil_confluence_setup(
     except Exception:
         pass
 
-    # Техпакет: волны / EW / треугольники / фигуры — ведёт, если нет HOT-новостей
+    # Техпакет: структура цены / треугольники / фигуры — ведёт без HOT-новостей
     tech_full = news_assess.mode in {"none", "cold"} or (
         news_assess.mode == "warm" and not news_assess.for_entry
     )
@@ -787,7 +746,7 @@ def build_oil_confluence_setup(
             inv = stop
             trigger = "ждать цену у R или close ниже breakdown↓"
 
-    # Техпакет: уровни EW/фигуры приоритетнее «голого» S/R, если техника ведёт
+    # Техпакет: ценовая структура/фигуры приоритетнее «голого» S/R, если техника ведёт
     if tech_full and tech_levels:
         te = tech_levels.get("entry")
         ts_ = tech_levels.get("stop")
@@ -796,7 +755,7 @@ def build_oil_confluence_setup(
         if te and te > 0:
             entry_lo = float(te) * 0.999
             entry_hi = float(te) * 1.001
-            trigger = f"техвход EW/фигура ≈{fmt_price(te)}"
+            trigger = f"техвход по структуре/фигуре ≈{fmt_price(te)}"
         if ts_ and ts_ > 0:
             stop = float(ts_)
             inv = stop

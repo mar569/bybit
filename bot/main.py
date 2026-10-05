@@ -15,7 +15,6 @@ from .exchanges.bybit import BybitScanner
 from .bybit_liquidations import BybitLiquidationTracker
 from .binance_liquidations import BinanceLiquidationTracker
 from .anomaly_alerts import AnomalyBatcher
-from .wave_alerts import WaveBatcher, WaveScanEngine
 from .oil_monitor import OilMonitorEngine
 from .liquidation_alerts import LiquidationAlertService
 from .liquidation_analysis import LiquidationAnalysisEngine, format_liquidation_analysis
@@ -120,7 +119,6 @@ async def main() -> None:
     settings = SettingsManager()
     telegram = TelegramBot(config, settings)
     anomaly_batcher = AnomalyBatcher(telegram.dispatch_anomaly)
-    wave_batcher = WaveBatcher(telegram.dispatch_wave)
     scanner = SignalEngine(
         settings,
         telegram.dispatch_signal,
@@ -128,7 +126,6 @@ async def main() -> None:
     )
     scanner.attach_anomaly_batcher(anomaly_batcher)
     telegram.scanner = scanner
-    wave_engine = WaveScanEngine(settings, scanner, wave_batcher)
     oil_monitor = OilMonitorEngine(
         settings,
         telegram.dispatch_oil_news,
@@ -277,7 +274,6 @@ async def main() -> None:
     binance_liq_task: asyncio.Task | None = None
     cvd_task: asyncio.Task | None = None
     anomaly_task: asyncio.Task | None = None
-    wave_task: asyncio.Task | None = None
     oil_task: asyncio.Task | None = None
     analysis_heartbeat_task: asyncio.Task | None = None
     try:
@@ -301,24 +297,14 @@ async def main() -> None:
             )
         s = settings.settings
         logger.info(
-            "Startup: signals=%s liq=%s analysis=%s anomaly=%s wave=%s | Bybit %d | Binance %d",
+            "Startup: signals=%s liq=%s analysis=%s anomaly=%s | Bybit %d | Binance %d",
             "ON" if s.signals_enabled else "OFF",
             "ON" if s.liquidation_alerts_enabled else "OFF",
             "ON" if s.analysis_enabled and config.analysis_chat_configured else "OFF",
             "ON" if s.anomaly_enabled and config.anomaly_chat_configured else "OFF",
-            "ON" if getattr(s, "wave_enabled", False) and config.wave_chat_configured else "OFF",
             len(bybit.symbols),
             len(binance.symbols),
         )
-        if getattr(s, "wave_enabled", False) and config.wave_chat_configured:
-            logger.info(
-                "Wave chat=%s · scan every %ss · top %d · Fib classic=%s · chart=%s",
-                config.wave_chat_id,
-                int(getattr(s, "wave_scan_interval_seconds", 120)),
-                int(getattr(s, "wave_scan_limit", 40)),
-                "ON" if getattr(s, "wave_require_fib_classic", True) else "OFF",
-                "ON" if getattr(s, "wave_chart_enabled", True) else "OFF",
-            )
         if getattr(s, "oil_news_enabled", False) and config.oil_news_chat_configured:
             logger.info(
                 "Oil chat=%s · news every %ss · digest every %.0fh · chart=%s",
@@ -330,11 +316,6 @@ async def main() -> None:
         elif getattr(s, "oil_news_enabled", False):
             logger.warning(
                 "oil_news_enabled=ON but TELEGRAM_OIL_NEWS_CHAT_ID not set",
-            )
-        elif getattr(s, "wave_enabled", False):
-            logger.warning(
-                "wave_enabled=ON but no chat id — set TELEGRAM_WAVE_CHAT_ID "
-                "or TELEGRAM_ANOMALY_CHAT_ID / TELEGRAM_ANALYSIS_CHAT_ID",
             )
         if config.analysis_chat_configured:
             logger.info(
@@ -367,7 +348,6 @@ async def main() -> None:
             target_task = asyncio.create_task(telegram.target_watcher.run_loop())
         eval_task = asyncio.create_task(scanner.run_evaluation_loop(interval=1.5))
         anomaly_task = asyncio.create_task(scanner.run_anomaly_flush_loop(interval=15.0))
-        wave_task = asyncio.create_task(wave_engine.run_loop())
         oil_task = asyncio.create_task(oil_monitor.run_loop())
         heartbeat_task = asyncio.create_task(_scanner_heartbeat_loop(scanner))
         analysis_heartbeat_task = asyncio.create_task(
@@ -418,8 +398,6 @@ async def main() -> None:
             cvd_task.cancel()
         if anomaly_task is not None:
             anomaly_task.cancel()
-        if wave_task is not None:
-            wave_task.cancel()
         if oil_task is not None:
             oil_task.cancel()
         await asyncio.gather(
@@ -437,7 +415,6 @@ async def main() -> None:
                     binance_liq_task,
                     cvd_task,
                     anomaly_task,
-                    wave_task,
                     oil_task,
                 )
                 if t is not None

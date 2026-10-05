@@ -40,10 +40,24 @@ class SmcMarker:
     direction: str  # long / short
 
 
+@dataclass(frozen=True)
+class OrderBlock:
+    start_idx: int
+    break_idx: int
+    top: float
+    bottom: float
+    direction: str  # bullish / bearish
+    mitigated: bool
+
+
 @dataclass
 class SmcContext:
     htf_structure: str = "unknown"
     htf_structure_label: str = ""
+    mid_structure: str = "unknown"
+    mid_structure_label: str = ""
+    macro_structure: str = "unknown"
+    macro_structure_label: str = ""
     ltf_structure: str = "unknown"
     ltf_structure_label: str = ""
     structure_break: bool = False
@@ -62,6 +76,7 @@ class SmcContext:
     sweep_direction: str = "none"
     aligned_with_htf: bool = False
     fvgs: list[FairValueGap] = field(default_factory=list)
+    order_blocks: list[OrderBlock] = field(default_factory=list)
     liquidity_levels: list[LiquidityLevel] = field(default_factory=list)
     markers: list[SmcMarker] = field(default_factory=list)
     smc_score: int = 0
@@ -213,6 +228,75 @@ def _detect_liquidity_sweep(
     return False, "none", None
 
 
+def detect_order_blocks(
+    bars: list[KlineBar],
+    *,
+    lookback: int = 120,
+) -> list[OrderBlock]:
+    """Find the last opposing candle before a range-expanding structure break."""
+    if len(bars) < 16:
+        return []
+    found: list[OrderBlock] = []
+    first = max(12, len(bars) - lookback)
+    for idx in range(first, len(bars)):
+        current = bars[idx]
+        prior = bars[idx - 12 : idx]
+        if len(prior) < 12:
+            continue
+        prior_high = max(bar.high for bar in prior)
+        prior_low = min(bar.low for bar in prior)
+        avg_range = sum(bar.high - bar.low for bar in prior) / len(prior)
+        candle_range = current.high - current.low
+        body = abs(current.close - current.open)
+        if avg_range <= 0 or candle_range < avg_range * 1.3 or body < avg_range * 0.65:
+            continue
+
+        if current.close > prior_high and current.close > current.open:
+            direction = "bullish"
+            origin = next(
+                (j for j in range(idx - 1, max(first - 1, idx - 7), -1)
+                 if bars[j].close < bars[j].open),
+                None,
+            )
+        elif current.close < prior_low and current.close < current.open:
+            direction = "bearish"
+            origin = next(
+                (j for j in range(idx - 1, max(first - 1, idx - 7), -1)
+                 if bars[j].close > bars[j].open),
+                None,
+            )
+        else:
+            continue
+        if origin is None:
+            continue
+
+        source = bars[origin]
+        top = source.open if direction == "bullish" else source.high
+        bottom = source.low if direction == "bullish" else source.open
+        if top <= bottom:
+            continue
+        later = bars[idx + 1 :]
+        invalidated = any(
+            bar.close < bottom if direction == "bullish" else bar.close > top
+            for bar in later
+        )
+        if invalidated:
+            continue
+        mitigated = any(
+            bar.low <= top and bar.high >= bottom
+            for bar in later
+        )
+        found.append(OrderBlock(
+            start_idx=origin,
+            break_idx=idx,
+            top=top,
+            bottom=bottom,
+            direction=direction,
+            mitigated=mitigated,
+        ))
+    return found[-4:]
+
+
 def _detect_reversal_pattern(
     bars: list[KlineBar],
     swings: list,
@@ -346,7 +430,9 @@ def _detect_reversal_pattern(
 def analyze_smc(
     bars: list[KlineBar],
     *,
+    mid_bars: list[KlineBar] | None = None,
     htf_bars: list[KlineBar] | None = None,
+    macro_bars: list[KlineBar] | None = None,
     swings: list | None = None,
     interval_minutes: int = 5,
 ) -> SmcContext:
@@ -356,11 +442,20 @@ def analyze_smc(
     swings = swings or _swing_points(bars)
     ltf_struct, ltf_label = _structure_from_swings(swings)
     htf_struct, htf_label = ("unknown", "")
+    mid_struct, mid_label = ("unknown", "")
+    macro_struct, macro_label = ("unknown", "")
+    if mid_bars:
+        mid_swings = _swing_points(mid_bars, window=2)
+        mid_struct, mid_label = _structure_from_swings(mid_swings)
     if htf_bars:
         htf_swings = _swing_points(htf_bars, window=2)
         htf_struct, htf_label = _structure_from_swings(htf_swings)
+    if macro_bars:
+        macro_swings = _swing_points(macro_bars, window=2)
+        macro_struct, macro_label = _structure_from_swings(macro_swings)
 
     fvgs = detect_fair_value_gaps(bars)
+    order_blocks = detect_order_blocks(bars)
     liq_levels = detect_liquidity_levels(bars, swings, interval_minutes=interval_minutes)
     sweep, sweep_dir, sweep_marker = _detect_liquidity_sweep(bars, swings, liq_levels)
     reversal = _detect_reversal_pattern(bars, swings)
@@ -425,12 +520,26 @@ def analyze_smc(
         parts.append(f"разворот {direction.upper()} · этап {reversal['stage']}")
     if sweep:
         parts.append(f"свип ликвидности ({sweep_dir})")
+    active_blocks = [block for block in order_blocks if not block.mitigated]
+    if active_blocks:
+        newest = active_blocks[-1]
+        parts.append(
+            "OB спроса" if newest.direction == "bullish" else "OB предложения"
+        )
     if htf_struct != "unknown":
         parts.append(f"HTF: {htf_label}")
+    if mid_struct != "unknown":
+        parts.append(f"средний ТФ: {mid_label}")
+    if macro_struct != "unknown":
+        parts.append(f"4ч: {macro_label}")
 
     return SmcContext(
         htf_structure=htf_struct,
         htf_structure_label=htf_label,
+        mid_structure=mid_struct,
+        mid_structure_label=mid_label,
+        macro_structure=macro_struct,
+        macro_structure_label=macro_label,
         ltf_structure=ltf_struct,
         ltf_structure_label=ltf_label,
         structure_break=bos,
@@ -449,6 +558,7 @@ def analyze_smc(
         sweep_direction=sweep_dir,
         aligned_with_htf=aligned,
         fvgs=fvgs,
+        order_blocks=order_blocks,
         liquidity_levels=liq_levels,
         markers=markers,
         smc_score=score,

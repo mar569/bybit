@@ -1,7 +1,7 @@
-"""Профессиональный аналитический слой: тезис сделки с Elliott ABC + Fib + уровнями.
+"""Профессиональный аналитический слой: тезис сделки по структуре цены и Fib.
 
 Не «цена пошла вверх» — а аргументированный план:
-структура → волна → Fib/confluence → вход / стоп / цели → когда НЕ входить.
+структура → Fib/confluence → вход / стоп / цели → когда НЕ входить.
 """
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ if TYPE_CHECKING:
 
 _PHASE_RU = {
     "shallow_pullback": "мелкий откат",
-    "wave_2_4_zone": "зона Fib 0.5–0.618",
+    "fib_golden_zone": "зона Fib 0.5–0.618",
     "deep_pullback": "глубокий откат",
     "mid_correction": "коррекция",
-    "late_impulse": "финал импульса",
+    "late_impulse": "цена у края движения",
 }
 
 
@@ -201,7 +201,7 @@ def build_fib_action_text(
                     "Не входить сейчас · после пампа возможен Fib-откат "
                     "ИЛИ continuation-пробой вверх — ждать close за range"
                 )
-            return "Не входить сейчас · финал импульса — ждать откат к Fib 0.5–0.618"
+            return "Не входить сейчас · цена у края движения — ждать откат к Fib 0.5–0.618"
         if status == "chart_only" or (ta.fib_levels and not ta.wave_has_confluence):
             return (
                 "Не входить по Fib · нет confluence с П/С — "
@@ -224,7 +224,7 @@ def build_fib_action_text(
         return "Fib на графике · без confluence — не вход, только ориентир"
 
     if status == "late_impulse" or ta.wave_phase == "late_impulse":
-        return "Финал импульса — не вдогонку · ждать Fib 0.5–0.618"
+        return "Цена у края движения — не вдогонку · ждать Fib 0.5–0.618"
 
     if status == "ready" and wait_px:
         return f"Fib готов · зона ≈ {fmt_price(wait_px)} (0.5–0.618)"
@@ -262,16 +262,7 @@ def _resolve_levels(
     stop = ta.invalidation_price
     targets = [t for t in (ta.target_prices or []) if t > 0][:4]
 
-    # Точный EW-вход перекрывает зону/пробой
-    if ta.elliott_entry_ready and ta.elliott_entry_price:
-        entry = float(ta.elliott_entry_price)
-        if ta.elliott_stop_price:
-            stop = float(ta.elliott_stop_price)
-        if ta.elliott_tp_prices:
-            targets = [float(t) for t in ta.elliott_tp_prices if t][:4]
-        pad = abs(entry) * 0.0015
-        zone = (entry - pad, entry + pad)
-    elif (
+    if (
         getattr(ta, "setup_ideal_ready", False)
         and getattr(ta, "setup_entry", None)
         and (getattr(ta, "setup_side", "") or "").lower() == side
@@ -366,25 +357,15 @@ def build_trade_thesis(
     wave_bits: list[str] = []
     if ta.wave_leg_start and ta.wave_leg_end:
         wave_bits.append(
-            f"импульс A→B {fmt_price(ta.wave_leg_start)}→{fmt_price(ta.wave_leg_end)}"
+            f"Fib-отрезок {fmt_price(ta.wave_leg_start)}→{fmt_price(ta.wave_leg_end)}"
         )
-    if ta.elliott_label:
-        wave_bits.append(ta.elliott_label)
-    elif ta.wave_phase:
+    if ta.wave_phase:
         wave_bits.append(_PHASE_RU.get(ta.wave_phase, ta.wave_phase))
-    if ta.abc_label_ru and ta.abc_label_ru not in (ta.elliott_label or ""):
-        wave_bits.append(ta.abc_label_ru)
-    if getattr(ta, "htf_elliott_label", ""):
-        wave_bits.append(f"HTF: {ta.htf_elliott_label}")
+    if ta.htf_bias in {"long", "short"}:
+        wave_bits.append(f"HTF {ta.htf_bias.upper()}")
     if getattr(ta, "setup_label_ru", ""):
         wave_bits.append(ta.setup_label_ru)
-    if ta.elliott_entry_mode in {"conservative", "aggressive"} and ta.elliott_entry_price:
-        mode_ru = "конс." if ta.elliott_entry_mode == "conservative" else "агр."
-        wave_bits.append(
-            f"EW {mode_ru} вход ≈ {fmt_price(ta.elliott_entry_price)}"
-            + (" ✓" if ta.elliott_entry_ready else "")
-        )
-    wave_line = "Импульс: " + (" · ".join(wave_bits) if wave_bits else "не подтверждён")
+    wave_line = "Контекст: " + (" · ".join(wave_bits) if wave_bits else "не выражен")
 
     fib_action = build_fib_action_text(
         ta,
@@ -428,7 +409,7 @@ def build_trade_thesis(
     if getattr(ta, "pattern_foresight_htf_conflict", False):
         risks.append("конфликт LTF/HTF фигур — приоритет 1h")
     if ta.wave_phase == "late_impulse":
-        risks.append("финал импульса — вход только после отката")
+        risks.append("цена у края движения — вход только после отката или подтверждения")
     if ta.post_pump and ta.range_position >= 0.85:
         risks.append(f"post-pump у хая ({ta.range_position:.0%} range)")
     if ta.repeat_spike_dump_risk:
@@ -481,30 +462,13 @@ def build_trade_thesis(
         ):
             thesis = (
                 f"Pro confluence <b>{ta.setup_grade}</b> ({ta.setup_score}/100): "
-                f"{ta.setup_label_ru or 'HTF EW + фигура + Fib/SMC'}. "
+                f"{ta.setup_label_ru or 'старший контекст + фигура + Fib/SMC'}. "
                 f"{ta.setup_trigger or 'вход по согласованной структуре'}."
             )
-        elif location == "elliott" or (
-            ta.elliott_entry_ready and ta.elliott_entry_mode in {"conservative", "aggressive"}
-        ):
-            mode_ru = (
-                "консервативный (пробой волны 1/3)"
-                if ta.elliott_entry_mode == "conservative"
-                else "агрессивный (Fib C 1.272/1.618×B)"
-            )
+        elif location == "fib" or ta.wave_phase == "fib_golden_zone":
             thesis = (
-                f"Волны Эллиотта: <b>{mode_ru}</b> вход. "
-                f"{ta.elliott_label or 'структура 1–5+ABC'}."
-            )
-        elif location == "fib" or ta.wave_phase == "wave_2_4_zone":
-            thesis = (
-                f"Импульс завершён, цена в зоне <b>Fib 0.5–0.618</b>. "
+                f"Цена в зоне <b>Fib 0.5–0.618</b>. "
                 f"{_confluence_text(ta)} — вход лимиткой в зону, не market вдогонку."
-            )
-        elif ta.abc_phase == "C":
-            thesis = (
-                f"Коррекция к импульсу в зоне продолжения. "
-                f"{_confluence_text(ta)}."
             )
         elif decision and decision.location == "retest":
             thesis = "Ретест уровня пробоя после слома структуры — классический профи-вход."

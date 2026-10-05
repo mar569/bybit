@@ -307,20 +307,18 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
             value = raw_value.lower()
-            if value not in {"tradingview", "coinglass", "generated", "annotated"}:
+            if value != "annotated":
                 return SetResult(
                     False,
-                    "График: <code>annotated</code> | <code>tradingview</code> | "
-                    "<code>coinglass</code> | <code>generated</code>",
+                    "Доступен единый чистый график: <code>annotated</code>.",
                     {},
                 )
         elif field == "manual_ta_chart_source":
             value = raw_value.lower()
-            if value not in {"tv_annotated", "tradingview", "annotated"}:
+            if value != "annotated":
                 return SetResult(
                     False,
-                    "Ручной TA: <code>tv_annotated</code> | <code>tradingview</code> | "
-                    "<code>annotated</code>",
+                    "Доступен единый чистый график: <code>annotated</code>.",
                     {},
                 )
         elif field == "signal_chart_height_scale":

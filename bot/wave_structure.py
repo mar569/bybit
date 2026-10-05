@@ -27,9 +27,9 @@ if TYPE_CHECKING:
     from .bybit_klines import KlineBar
     from .ta_analysis import SwingPoint
 
-FIB_RETRACEMENT_RATIOS: tuple[float, ...] = (0.236, 0.382, 0.5, 0.618, 0.786)
+FIB_RETRACEMENT_RATIOS: tuple[float, ...] = (0.236, 0.382, 0.5, 0.618, 0.705, 0.786)
 FIB_EXTENSION_RATIOS: tuple[float, ...] = (1.0, 1.272, 1.618)
-FIB_CHART_RATIOS: tuple[float, ...] = (0.382, 0.5, 0.618, 1.272, 1.618)
+FIB_CHART_RATIOS: tuple[float, ...] = (0.5, 0.618, 0.705, 1.272, 1.618)
 
 # Жёсткие пороги качества
 MIN_IMPULSE_PCT = 2.2          # абсолютный минимум хода, %
@@ -575,7 +575,7 @@ def classify_wave_phase(
             conf = min(9, conf + 1)
         elif f618 and f500 and f618 <= current <= (f382 or current):
             # Золотая зона 0.5–0.618
-            phase, bias = "wave_2_4_zone", "long"
+            phase, bias = "fib_golden_zone", "long"
             conf = min(9, conf + 2)
         elif f786 and f618 and current < f618 and current >= f786:
             phase, bias = "deep_pullback", "long"
@@ -596,7 +596,7 @@ def classify_wave_phase(
             phase, bias = "shallow_pullback", "short"
             conf = min(9, conf + 1)
         elif f618 and f500 and (f382 or 0) <= current <= f618:
-            phase, bias = "wave_2_4_zone", "short"
+            phase, bias = "fib_golden_zone", "short"
             conf = min(9, conf + 2)
         elif f786 and f618 and current > f618 and current <= f786:
             phase, bias = "deep_pullback", "short"
@@ -893,7 +893,7 @@ def _elliott_label_ru(
         return "импульс → ABC завершена → ждать новый импульс"
     mapping = {
         "shallow_pullback": "импульс 1–3 · мелкий откат (волна 2/4)",
-        "wave_2_4_zone": "импульс · золотая зона Fib 0.5–0.618 (волна 2/4)",
+        "fib_golden_zone": "цена в золотой зоне Fib 0.5–0.618",
         "deep_pullback": "глубокий откат · риск слома структуры",
         "mid_correction": "коррекция внутри импульса",
         "late_impulse": "финал импульса (волна 5) — не входить вдогонку",
@@ -905,7 +905,7 @@ def _elliott_label_ru(
     return f"медв. {base}"
 
 
-def analyze_wave_structure(
+def _legacy_analyze_wave_structure(
     bars: list["KlineBar"],
     swings: list["SwingPoint"],
     *,
@@ -1060,12 +1060,12 @@ def analyze_wave_structure(
     # Подсказки цены — только если есть сочетание с сильным фактором
     if conf_count >= 1:
         if leg.direction == "up":
-            if phase in {"shallow_pullback", "wave_2_4_zone"}:
-                entry_hint = f618 if phase == "wave_2_4_zone" else (f500 or f618)
+            if phase in {"shallow_pullback", "fib_golden_zone"}:
+                entry_hint = f618 if phase == "fib_golden_zone" else (f500 or f618)
             elif phase == "deep_pullback":
                 entry_hint = _fib_price(fib_levels, 0.786) or f618
             stop_hint = min(leg.start_price, _fib_price(fib_levels, 0.786) or leg.start_price) * 0.998
-            if phase in {"shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction"}:
+            if phase in {"shallow_pullback", "fib_golden_zone", "deep_pullback", "mid_correction"}:
                 if leg.end_price > current * 1.002:
                     targets.append(leg.end_price)
                 if f127 and f127 > current:
@@ -1073,12 +1073,12 @@ def analyze_wave_structure(
                 if f161 and f161 > current and leg.quality >= 75 and conf_count >= 2:
                     targets.append(f161)
         else:
-            if phase in {"shallow_pullback", "wave_2_4_zone"}:
-                entry_hint = f618 if phase == "wave_2_4_zone" else (f500 or f618)
+            if phase in {"shallow_pullback", "fib_golden_zone"}:
+                entry_hint = f618 if phase == "fib_golden_zone" else (f500 or f618)
             elif phase == "deep_pullback":
                 entry_hint = _fib_price(fib_levels, 0.786) or f618
             stop_hint = max(leg.start_price, _fib_price(fib_levels, 0.786) or leg.start_price) * 1.002
-            if phase in {"shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction"}:
+            if phase in {"shallow_pullback", "fib_golden_zone", "deep_pullback", "mid_correction"}:
                 if leg.end_price < current * 0.998:
                     targets.append(leg.end_price)
                 if f127 and f127 < current:
@@ -1195,6 +1195,105 @@ def analyze_wave_structure(
     )
 
 
+def analyze_wave_structure(
+    bars: list["KlineBar"],
+    swings: list["SwingPoint"],
+    *,
+    structure_label: str = "",
+    sr_prices: list[float] | None = None,
+    breakout: float | None = None,
+    breakdown: float | None = None,
+) -> WaveStructureResult:
+    """Calculate Fib retracements and confluence from a price impulse."""
+    empty = WaveStructureResult(
+        fib_status=FIB_STATUS_EMPTY,
+        fib_reject_reason="мало данных для импульса",
+    )
+    if len(bars) < 12:
+        return empty
+    leg, reject_reason = detect_impulse_leg_detailed(swings, bars)
+    if leg is None:
+        status, reason = _fib_status_for(
+            leg=None,
+            valid=False,
+            phase="unknown",
+            conf_count=0,
+            reject_reason=reject_reason,
+        )
+        return WaveStructureResult(fib_status=status, fib_reject_reason=reason)
+
+    fib_levels = build_fib_levels(leg)
+    current = bars[-1].close
+    phase, bias, confidence, notes = classify_wave_phase(
+        leg, current, fib_levels, structure_label=structure_label,
+    )
+    confluence_sr, confluence_round, confluence_retest, confluence_count = (
+        score_fib_confluence(
+            fib_levels,
+            current=current,
+            sr_prices=sr_prices,
+            breakout=breakout,
+            breakdown=breakdown,
+            direction=leg.direction,
+        )
+    )
+    valid = leg.quality >= MIN_QUALITY_TO_USE and phase not in {"unknown", "late_impulse"}
+    show_fib = valid or (
+        leg.quality >= MIN_QUALITY_TO_USE and phase == "late_impulse"
+    )
+    fib_status, fib_reject = _fib_status_for(
+        leg=leg,
+        valid=valid,
+        phase=phase,
+        conf_count=confluence_count,
+        reject_reason="",
+    )
+
+    entry_hint = stop_hint = None
+    targets: list[float] = []
+    f500 = _fib_price(fib_levels, 0.5)
+    f618 = _fib_price(fib_levels, 0.618)
+    f786 = _fib_price(fib_levels, 0.786)
+    f127 = _fib_price(fib_levels, 1.272)
+    f161 = _fib_price(fib_levels, 1.618)
+    pullback_phases = {
+        "shallow_pullback", "fib_golden_zone", "deep_pullback", "mid_correction",
+    }
+    if valid and confluence_count:
+        if phase in {"shallow_pullback", "fib_golden_zone"}:
+            entry_hint = f618 if phase == "fib_golden_zone" else (f500 or f618)
+        elif phase == "deep_pullback":
+            entry_hint = f786 or f618
+        stop_hint = (
+            min(leg.start_price, f786 or leg.start_price) * 0.998
+            if leg.direction == "up"
+            else max(leg.start_price, f786 or leg.start_price) * 1.002
+        )
+        if phase in pullback_phases:
+            if leg.direction == "up":
+                targets = [p for p in (leg.end_price, f127, f161) if p and p > current * 1.002]
+            else:
+                targets = [p for p in (leg.end_price, f127, f161) if p and p < current * 0.998]
+    return WaveStructureResult(
+        leg=leg,
+        fib_levels=fib_levels if show_fib else [],
+        wave_phase=phase,
+        wave_bias=bias,
+        confidence=confidence if valid and confluence_count else min(confidence, 4),
+        entry_hint_price=entry_hint,
+        stop_hint_price=stop_hint,
+        target_hint_prices=targets[:3],
+        notes=notes[:3],
+        valid=valid,
+        confluence_sr=confluence_sr,
+        confluence_round=confluence_round,
+        confluence_retest=confluence_retest,
+        confluence_count=confluence_count,
+        fib_status=fib_status,
+        fib_reject_reason=fib_reject,
+    )
+
+
 def apply_wave_to_trade_plan(
     *,
     verdict: str,
@@ -1206,30 +1305,15 @@ def apply_wave_to_trade_plan(
     breakdown: float | None,
     wave: WaveStructureResult,
 ) -> tuple[float | None, list[float], int, int]:
-    """Fib не решает вход. Трогаем план при valid+confluence ИЛИ готовом EW-входе."""
-    ew_ready = bool(getattr(wave, "elliott_entry_ready", False) and getattr(wave, "elliott_entry_price", None))
+    """Apply independent Fib levels only when price and confluence support them."""
     if current <= 0:
         return inv, targets, 0, 0
-    if not ew_ready and (not wave.valid or not wave.has_confluence or wave.leg is None):
+    if not wave.valid or not wave.has_confluence or wave.leg is None:
         return inv, targets, 0, 0
 
     new_inv = inv
     new_targets = list(targets)
     phase = wave.wave_phase
-
-    # EW stop/targets имеют приоритет
-    if ew_ready:
-        ew_stop = getattr(wave, "elliott_stop_price", None)
-        ew_tps = list(getattr(wave, "elliott_tp_prices", None) or [])
-        if ew_stop:
-            new_inv = float(ew_stop)
-        for tp in ew_tps:
-            if tp and tp not in new_targets:
-                if (verdict == "LONG" or action_priority == "long") and tp > current * 1.002:
-                    new_targets.append(float(tp))
-                elif (verdict == "SHORT" or action_priority == "short") and tp < current * 0.998:
-                    new_targets.append(float(tp))
-        return new_inv, new_targets[:4], 8, 0
 
     if wave.stop_hint_price and new_inv:
         if verdict == "LONG" or action_priority == "long":
@@ -1250,7 +1334,7 @@ def apply_wave_to_trade_plan(
     side_long = verdict == "LONG" or (verdict == "WAIT" and action_priority == "long")
     side_short = verdict == "SHORT" or (verdict == "WAIT" and action_priority == "short")
 
-    if phase in {"shallow_pullback", "wave_2_4_zone", "deep_pullback"}:
+    if phase in {"shallow_pullback", "fib_golden_zone", "deep_pullback"}:
         for tp in wave.target_hint_prices:
             if side_long and tp > current * 1.003:
                 new_targets.append(tp)
@@ -1290,7 +1374,7 @@ def wave_flow_adjustments(
     corr = 0
 
     if bias == "long" and action_priority == "long":
-        if phase == "wave_2_4_zone":
+        if phase == "fib_golden_zone":
             cont += int(8 * mult)
         elif phase == "shallow_pullback":
             cont += int(5 * mult)
@@ -1300,7 +1384,7 @@ def wave_flow_adjustments(
         elif phase == "impulse_invalidated":
             corr += 8
     elif bias == "short" and action_priority == "short":
-        if phase == "wave_2_4_zone":
+        if phase == "fib_golden_zone":
             cont += int(8 * mult)
         elif phase == "shallow_pullback":
             cont += int(5 * mult)
@@ -1310,10 +1394,10 @@ def wave_flow_adjustments(
         elif phase == "impulse_invalidated":
             corr += 8
     elif bias == "long" and action_priority == "short":
-        if phase in {"shallow_pullback", "wave_2_4_zone"}:
+        if phase in {"shallow_pullback", "fib_golden_zone"}:
             corr += int(5 * mult)
     elif bias == "short" and action_priority == "long":
-        if phase in {"shallow_pullback", "wave_2_4_zone"}:
+        if phase in {"shallow_pullback", "fib_golden_zone"}:
             corr += int(5 * mult)
 
     return cont, corr

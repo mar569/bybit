@@ -127,25 +127,16 @@ def resolve_trade_playbook(signal: Signal, ta: TAAnalysisResult) -> TradePlayboo
 
 def _playbook_logic(signal: Signal, ta: TAAnalysisResult, side: str) -> str:
     st = signal.signal_type or ""
-    if ta.elliott_entry_ready and ta.elliott_entry_mode in {"conservative", "aggressive"}:
-        mode_ru = "конс. EW" if ta.elliott_entry_mode == "conservative" else "агр. EW"
-        return f"{mode_ru}: {ta.elliott_label or '1–5+ABC'}"[:100]
     if ta.wave_has_confluence and ta.wave_phase in {
-        "shallow_pullback", "wave_2_4_zone", "deep_pullback", "mid_correction",
+        "shallow_pullback", "fib_golden_zone", "deep_pullback", "mid_correction",
     }:
         phase = {
             "shallow_pullback": "мелкий откат",
-            "wave_2_4_zone": "Fib 0.5–0.618",
+            "fib_golden_zone": "Fib 0.5–0.618",
             "deep_pullback": "глубокий Fib",
             "mid_correction": "коррекция",
         }.get(ta.wave_phase, "откат")
         return f"откат к Fib ({phase})"[:100]
-    if ta.abc_label_ru and ta.wave_has_confluence:
-        return f"откат к Fib · {ta.abc_label_ru}"[:100]
-    if ta.abc_label_ru:
-        return ta.abc_label_ru[:90]
-    if ta.elliott_label:
-        return ta.elliott_label[:90]
     if st in {"trend_dump", "trend_pump"}:
         prior = signal.details.get("trend_prior_pct")
         if prior is not None:
@@ -337,6 +328,6 @@ def build_pro_detail_html(
     if trade_dec:
         lines.append(f"⚖️ Арбитр: <i>{trade_dec}</i>")
     lines.append(
-        "📈 <b>График:</b> Fib / уровни / ABC — разметка на картинке."
+        "📈 <b>График:</b> структура цены / уровни / Fib."
     )
     return "\n".join(lines)

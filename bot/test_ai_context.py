@@ -97,14 +97,15 @@ def test_serialize_ta_compact() -> None:
         current_price=100.5,
         phase="consolidation",
         phase_label="боковик",
-        elliott_label="коррекция ABC",
+        htf_bias="long",
         setup_grade="C",
         chart_patterns=[],
     )
     data = serialize_ta(ta)
     assert data["verdict"] == "WAIT"
     assert data["price"] == 100.5
-    assert data["elliott"]["label"] == "коррекция ABC"
+    assert data["higher_timeframe"]["bias"] == "long"
+    assert "elliott" not in data
     assert "fib" in data
     assert "smc" in data
 

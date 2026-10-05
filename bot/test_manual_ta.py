@@ -54,7 +54,7 @@ def test_chart_display_default_12h() -> None:
         analysis_hours=18,
         configured=12,
         drawdown_pct=70.0,
-        elliott_span_bars=120,
+        structure_span_bars=120,
     ) >= 12
 
 

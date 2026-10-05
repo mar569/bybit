@@ -1,4 +1,4 @@
-"""Тесты Pro confluence: HTF EW + ABCDE + score/grade."""
+"""Tests for price-pattern, HTF, Fib, and SMC confluence."""
 from __future__ import annotations
 
 from bot.bybit_klines import KlineBar
@@ -6,10 +6,7 @@ from bot.setup_confluence import (
     SetupConfluence,
     analyze_setup_confluence,
     confluence_boosts_gate,
-    detect_abcde_correction,
-    detect_ending_diagonal,
 )
-from bot.elliott_wave import ElliottImpulse, ElliottPoint
 from bot.ta_analysis import SwingPoint
 
 
@@ -27,41 +24,6 @@ def _bar(i: int, price: float, *, step: int = 300) -> KlineBar:
 
 def _swing(idx: int, price: float, kind: str) -> SwingPoint:
     return SwingPoint(index=idx, price=price, kind=kind)
-
-
-def test_abcde_converging_down() -> None:
-    # 0 high + A low B high C low D high E low (схождение)
-    prices = [100, 90, 96, 91, 94, 91.5]
-    kinds = ["high", "low", "high", "low", "high", "low"]
-    swings = [_swing(i * 3, p, k) for i, (p, k) in enumerate(zip(prices, kinds))]
-    bars = [_bar(i, 95.0) for i in range(20)]
-    abcde = detect_abcde_correction(swings, bars, direction="down")
-    assert abcde is not None
-    assert abcde.valid
-    assert len(abcde.points) == 5
-    assert [p.label for p in abcde.points] == ["A", "B", "C", "D", "E"]
-
-
-def test_ending_diagonal_with_wedge_kind() -> None:
-    pts = [
-        ElliottPoint("0", 0, 100),
-        ElliottPoint("1", 1, 110),
-        ElliottPoint("2", 2, 104),
-        ElliottPoint("3", 3, 118),
-        ElliottPoint("4", 4, 112),
-        ElliottPoint("5", 5, 116),
-    ]
-    impulse = ElliottImpulse(
-        direction="up",
-        points=pts,
-        current_wave="5",
-        valid=True,
-    )
-
-    class _Pat:
-        kind = "wedge_rising"
-
-    assert detect_ending_diagonal(impulse, _Pat()) is True
 
 
 def test_confluence_boosts_gate_a() -> None:

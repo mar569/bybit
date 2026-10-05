@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 from dataclasses import dataclass
@@ -21,16 +20,13 @@ from .chart_pattern_draw import (
     draw_htf_pattern_levels,
     draw_pattern_foresight_path,
 )
-from .chart_elliott_draw import draw_elliott_waves, draw_setup_forecast_path
+from .chart_elliott_draw import draw_elliott_waves
 from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
-    draw_rsi_panel,
-    draw_volume_panel,
 )
 from .manual_ta import pattern_chart_hours, chart_display_hours, structure_aware_display_hours
-from .chart_screenshot import chart_capture_service
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
     TAAnalysisResult,
@@ -1104,7 +1100,6 @@ def _draw_wave_focus_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnaly
     """Только волны + ключевые Fib + зона входа — крупные метки, без шума."""
     setattr(ta, "_wave_focus", True)
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
-    _draw_elliott_from_ta(ax, bars, ta, is_wait=is_wait)
 
     # Не дублируем Fib из wave_structure — уже золотая сетка EW
     inv = getattr(ta, "elliott_path_invalidation", None) or getattr(ta, "invalidation_price", None)
@@ -1401,14 +1396,8 @@ def _draw_ta_annotations(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
-    *,
-    wave_focus: bool = False,
 ) -> None:
     if not bars:
-        return
-
-    if wave_focus:
-        _draw_wave_focus_annotations(ax, bars, ta)
         return
 
     is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
@@ -1456,31 +1445,6 @@ def _draw_ta_annotations(
             status=str(getattr(ta, "pattern_foresight_status", "") or ""),
             quiet_labels=True,
         )
-    # Волны Эллиотта (1–5 + ABC) — поверх / рядом с фигурами
-    _draw_elliott_from_ta(ax, bars, ta, is_wait=is_wait)
-
-    # HTF Elliott уже внутри _draw_elliott_from_ta
-
-    setup_path = getattr(ta, "forecast_path_prices", None) or []
-    setup_side = (getattr(ta, "setup_side", "") or "").lower()
-    verdict = (getattr(ta, "verdict", "") or "").upper()
-    path_ok = (
-        not is_wait
-        and len(setup_path) >= 2
-        and getattr(ta, "setup_grade", "") in {"A", "B", "C"}
-        and (
-            (verdict == "LONG" and setup_side == "long")
-            or (verdict == "SHORT" and setup_side == "short")
-        )
-    )
-    if path_ok:
-        draw_setup_forecast_path(
-            ax,
-            bars,
-            list(setup_path),
-            list(getattr(ta, "forecast_path_labels", None) or []),
-        )
-
     if ta.breakout_level:
         ax.axhline(ta.breakout_level, color=CHART_STYLE["entry"], linestyle="-", linewidth=1.0, alpha=0.85)
     if ta.breakdown_level and (
@@ -1564,6 +1528,203 @@ def _draw_ta_annotations(
         ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.1)
 
     _draw_right_price_labels(ax, bars, ta)
+
+
+def _draw_clean_market_annotations(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+) -> None:
+    """Show only the strongest structure, nearby levels, and actionable prices."""
+    if not bars:
+        return
+
+    current = bars[-1].close
+    if ta.primary_chart_pattern is not None:
+        draw_chart_patterns(
+            ax,
+            bars,
+            [ta.primary_chart_pattern],
+            max_patterns=1,
+            min_confidence=MIN_DRAW_CONFIDENCE,
+            force_primary=ta.primary_chart_pattern,
+            draw_target_labels=False,
+        )
+    draw_htf_pattern_levels(
+        ax,
+        bars,
+        ta.primary_htf_chart_pattern,
+        conflict=bool(ta.pattern_foresight_htf_conflict),
+        quiet=True,
+    )
+
+    smc = ta.smc
+    if smc is not None:
+        if smc.structure_break_level and abs(smc.structure_break_level / current - 1) <= 0.12:
+            color = CHART_STYLE["accent_long"] if smc.structure_break_direction == "long" else CHART_STYLE["accent_short"]
+            ax.axhline(
+                smc.structure_break_level,
+                color=color,
+                linestyle="-.",
+                linewidth=1.0,
+                alpha=0.78,
+                zorder=2,
+            )
+        if smc.liquidity_sweep:
+            marker = next(
+                (item for item in reversed(smc.markers) if item.kind == "sweep"),
+                None,
+            )
+            if marker is not None and 0 <= marker.index < len(bars):
+                when = _idx_to_date(bars, marker.index)
+                color = CHART_STYLE["accent_long"] if marker.direction == "long" else CHART_STYLE["accent_short"]
+                ax.annotate(
+                    "снятие ликвидности",
+                    xy=(when, marker.price),
+                    xytext=(when, marker.price * (1.008 if marker.direction == "long" else 0.992)),
+                    color=color,
+                    fontsize=7,
+                    arrowprops={"arrowstyle": "->", "color": color, "lw": 0.8},
+                    zorder=8,
+                )
+        nearby_blocks = [
+            block for block in smc.order_blocks
+            if not block.mitigated
+            and abs(((block.top + block.bottom) / 2 - current) / current) <= 0.025
+        ]
+        if nearby_blocks:
+            block = min(
+                nearby_blocks,
+                key=lambda item: abs((item.top + item.bottom) / 2 - current),
+            )
+            x0 = mdates.date2num(_idx_to_date(bars, max(0, block.start_idx)))
+            x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+            color = CHART_STYLE["accent_long"] if block.direction == "bullish" else CHART_STYLE["accent_short"]
+            ax.add_patch(Rectangle(
+                (x0, block.bottom),
+                max(x1 - x0, 0.001),
+                max(block.top - block.bottom, 1e-9),
+                facecolor=color,
+                edgecolor=color,
+                alpha=0.09,
+                linewidth=0.8,
+                zorder=1,
+            ))
+            ax.text(
+                x1, block.top, " OB",
+                color=color, fontsize=6.5, va="bottom", ha="right", zorder=3,
+            )
+        nearby_gaps = [
+            gap for gap in smc.fvgs
+            if abs(((gap.top + gap.bottom) / 2 - current) / current) <= 0.025
+        ]
+        if nearby_gaps:
+            gap = nearby_gaps[-1]
+            x0 = mdates.date2num(_idx_to_date(bars, max(0, gap.start_idx)))
+            x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+            color = CHART_STYLE["accent_long"] if gap.direction == "bullish" else CHART_STYLE["accent_short"]
+            ax.add_patch(Rectangle(
+                (x0, gap.bottom),
+                max(x1 - x0, 0.001),
+                max(gap.top - gap.bottom, 1e-9),
+                facecolor=color,
+                edgecolor=color,
+                alpha=0.13,
+                linewidth=0.8,
+                zorder=1,
+            ))
+
+    for label, price, color in (
+        ("Поддержка", ta.nearest_support, CHART_STYLE["level_support"]),
+        ("Сопротивление", ta.nearest_resistance, CHART_STYLE["level_resistance"]),
+    ):
+        if price is not None and price > 0 and abs(price / current - 1) <= 0.12:
+            ax.axhline(price, color=color, linestyle=":", linewidth=0.9, alpha=0.75, zorder=2)
+
+    for level in ta.fib_levels:
+        if level.ratio not in {0.618, 0.705} or abs(level.price / current - 1) > 0.12:
+            continue
+        ax.axhline(
+            level.price,
+            color=CHART_STYLE["fib_key"],
+            linestyle="-.",
+            linewidth=0.9,
+            alpha=0.72,
+            zorder=2,
+        )
+
+    if ta.breakout_level and ta.verdict in {"LONG", "WAIT"}:
+        ax.axhline(
+            ta.breakout_level,
+            color=CHART_STYLE["accent_long"],
+            linewidth=1.1,
+            alpha=0.85,
+            zorder=3,
+        )
+    if ta.breakdown_level and ta.verdict in {"SHORT", "WAIT"}:
+        ax.axhline(
+            ta.breakdown_level,
+            color=CHART_STYLE["accent_short"],
+            linewidth=1.1,
+            alpha=0.85,
+            zorder=3,
+        )
+    if ta.verdict in {"LONG", "SHORT"}:
+        if ta.invalidation_price:
+            ax.axhline(
+                ta.invalidation_price,
+                color=CHART_STYLE["inv"],
+                linestyle="--",
+                linewidth=0.9,
+                alpha=0.8,
+                zorder=3,
+            )
+        if ta.target_prices:
+            ax.axhline(
+                ta.target_prices[0],
+                color=CHART_STYLE["target"],
+                linestyle=":",
+                linewidth=0.9,
+                alpha=0.8,
+                zorder=3,
+            )
+
+    context = []
+    if smc is not None:
+        if smc.mid_structure_label:
+            context.append(f"15М: {smc.mid_structure_label}")
+        if smc.htf_structure_label:
+            context.append(
+                f"{ta.htf_interval_minutes // 60}Ч: {smc.htf_structure_label}"
+                if ta.htf_interval_minutes >= 60
+                else f"{ta.htf_interval_minutes}М: {smc.htf_structure_label}"
+            )
+        if smc.macro_structure_label:
+            context.append(f"4Ч ФОН: {smc.macro_structure_label}")
+        if smc.ltf_structure_label:
+            context.append(
+                f"{ta.analysis_interval_minutes}М: {smc.ltf_structure_label}"
+            )
+    context.extend(ta.market_participation_lines[:6])
+    if context:
+        ax.text(
+            0.012,
+            0.985,
+            "\n".join(context[:9]),
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            color=CHART_STYLE["text"],
+            fontsize=6.2,
+            linespacing=1.12,
+            zorder=10,
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": CHART_STYLE["panel"],
+                "edgecolor": CHART_STYLE["panel_border"],
+                "alpha": 0.93,
+            },
+        )
 
 
 def _draw_info_panels(fig: plt.Figure, ta: TAAnalysisResult, *, with_subpanels: bool = False) -> None:
@@ -2097,47 +2258,23 @@ def _render_chart_figure(
     accent_color: str,
     interval_minutes: int = 5,
     pro_mode: bool = False,
-    enhanced: bool = True,
     display_hours: int | None = None,
     height_scale: float | None = None,
-    wave_focus: bool = False,
     urals_price: float | None = None,
     urals_change_pct: float | None = None,
-    show_info_panels: bool = True,
     ut_overlay: Any | None = None,
     clean_chart: bool = False,
 ) -> bytes:
-    """clean_chart: лёгкий анализ + UT + Vol/RSI; без боковых ИТОГ/ПЛАН и без Elliott/треугольников."""
-    use_enhanced = enhanced  # Vol + RSI оставляем
-    if clean_chart:
-        show_info_panels = False
-    fig_size, height_ratios = _chart_figure_layout(
-        enhanced=use_enhanced,
-        pro_mode=pro_mode and not wave_focus,
+    """Рисует единый график без RSI/volume-панелей и боковых информационных колонок."""
+    fig_size, _ = _chart_figure_layout(
+        enhanced=False,
+        pro_mode=pro_mode,
         height_scale=height_scale,
     )
-    if use_enhanced:
-        fig = plt.figure(figsize=fig_size, dpi=120)
-        gs = fig.add_gridspec(3, 1, height_ratios=height_ratios, hspace=0.04)
-        ax = fig.add_subplot(gs[0])
-        ax_vol = fig.add_subplot(gs[1], sharex=ax)
-        ax_rsi = fig.add_subplot(gs[2], sharex=ax)
-        fig.patch.set_facecolor(CHART_STYLE["bg"])
-        if show_info_panels:
-            fig.subplots_adjust(left=0.130, right=0.805, top=0.92, bottom=0.08)
-        else:
-            # Без боковых «ИТОГ/ПЛАН/СЦЕНАРИЙ» — свечи на всю ширину
-            fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.08)
-    else:
-        fig, ax = plt.subplots(figsize=fig_size, dpi=120)
-        ax_vol = None
-        ax_rsi = None
-        fig.patch.set_facecolor(CHART_STYLE["bg"])
-        ax.set_facecolor(CHART_STYLE["bg"])
-        if pro_mode and not wave_focus:
-            fig.subplots_adjust(left=0.11, right=0.89, top=0.93, bottom=0.09)
-        else:
-            fig.subplots_adjust(left=0.08, right=0.96, top=0.92, bottom=0.10)
+    fig, ax = plt.subplots(figsize=fig_size, dpi=120)
+    fig.patch.set_facecolor(CHART_STYLE["bg"])
+    ax.set_facecolor(CHART_STYLE["bg"])
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
@@ -2147,7 +2284,7 @@ def _render_chart_figure(
         except Exception:
             logger.debug("Essential oil overlays failed", exc_info=True)
     else:
-        _draw_ta_annotations(ax, bars, ta, wave_focus=wave_focus)
+        _draw_clean_market_annotations(ax, bars, ta)
     if ut_overlay is not None:
         try:
             _draw_ut_bot_overlay(
@@ -2155,40 +2292,13 @@ def _render_chart_figure(
             )
         except Exception:
             logger.debug("UT overlay draw failed", exc_info=True)
-    if use_enhanced and ax_vol is not None and ax_rsi is not None:
-        draw_volume_panel(ax_vol, bars)
-        draw_rsi_panel(
-            ax_rsi,
-            bars,
-            # RSI-дивергенции — полезный анализ снизу (не путать с UT Buy/Sell на цене)
-            divergences=(getattr(ta, "rsi_divergences", None) or [])[:4],
-            rsi_values=getattr(ta, "rsi_values", None) or None,
-            rsi_sma=getattr(ta, "rsi_sma", None) or None,
-        )
-        plt.setp(ax.get_xticklabels(), visible=False)
-        plt.setp(ax_vol.get_xticklabels(), visible=False)
-
     current = bars[-1].close
     ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
     ax.text(
         _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
         color=accent_color, fontsize=7, va="center", ha="left",
     )
-    if wave_focus and not clean_chart:
-        phase = str(getattr(ta, "elliott_phase", "") or "")
-        conf = int(getattr(ta, "elliott_confidence", 0) or 0)
-        title_core = f"{symbol}  ·  WAVE {ta.verdict}"
-        if conf:
-            title_core += f" {conf}/9"
-        if phase:
-            title_core += f"  ·  {phase}"
-        ax.set_title(
-            f"{title_core}  ·  {title_suffix}",
-            color=CHART_STYLE["text"], fontsize=12, pad=14,
-        )
-        if show_info_panels:
-            _draw_wave_info_panels(fig, ta, with_subpanels=use_enhanced)
-    elif clean_chart:
+    if clean_chart:
         ut_sfx = " · UT" if ut_overlay is not None else ""
         ax.set_title(
             f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{ut_sfx}",
@@ -2201,26 +2311,13 @@ def _render_chart_figure(
             f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
         )
-        if show_info_panels:
-            if pro_mode:
-                _draw_info_panels_pro(fig, ta, with_subpanels=use_enhanced)
-            else:
-                _draw_info_panels(fig, ta, with_subpanels=use_enhanced)
     _style_axes(ax, bars)
     # Зум: анализ может быть на 18ч, экран — последние N часов (читаемые свечи)
     from .manual_ta import chart_display_hours
 
     zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
     _apply_display_zoom(ax, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=True)
-    if use_enhanced and ax_vol is not None and ax_rsi is not None:
-        # vol/rsi только по X; Y у них свой
-        _apply_display_zoom(
-            ax_vol, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
-        )
-        _apply_display_zoom(
-            ax_rsi, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=False,
-        )
-    if urals_price and urals_price > 0 and not wave_focus and not clean_chart:
+    if urals_price and urals_price > 0 and not clean_chart:
         try:
             _draw_urals_inset(
                 ax,
@@ -2268,9 +2365,8 @@ async def _fetch_bars(
     *,
     interval_minutes: int = 5,
 ) -> list[KlineBar]:
-    per_hour = max(1, 60 // interval_minutes)
-    # 18ч×5m = 216 баров; запас до ~20ч
-    limit = max(24, min(hours * per_hour + 8, 280))
+    bar_count = max(1, (hours * 60 + interval_minutes - 1) // interval_minutes)
+    limit = max(24, min(bar_count + 8, 280))
     bars = await _kline_cache.get_klines(
         symbol,
         limit=limit,
@@ -2278,7 +2374,7 @@ async def _fetch_bars(
     )
     if len(bars) < 12:
         return []
-    return bars[-hours * per_hour:]
+    return bars[-bar_count:]
 
 
 # Область свечей на скриншоте TradingView (норм. координаты, 0=низ)
@@ -2845,20 +2941,13 @@ async def render_annotated_chart(
     chart_source: str = "annotated",
     exchange: str = "bybit",
     liq_context: dict | None = None,
+    market_metrics: dict[str, object] | None = None,
     pattern_detection_enabled: bool = True,
     pattern_min_confidence: float = 0.55,
     display_hours: int | None = None,
     height_scale: float | None = None,
-    wave_focus: bool = False,
-    wave_expect_ru: str = "",
-    wave_entry_price: float | None = None,
-    wave_stop_price: float | None = None,
-    wave_tp_prices: list[float] | None = None,
-    wave_draw_ot: tuple[tuple[str, float, float], ...] | None = None,
-    wave_global_ot: tuple[tuple[str, float, float], ...] | None = None,
-    wave_local_ot: tuple[tuple[str, float, float], ...] | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
-    # Полный lookback для паттернов/EW; на экране — зум display_hours
+    # Analyze enough history for patterns, then zoom the display window.
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
     zoom_hours = chart_display_hours(interval_minutes, configured=display_hours)
     zoom_hours = min(zoom_hours, analysis_hours)
@@ -2867,12 +2956,39 @@ async def render_annotated_chart(
         return None, None
 
     btc_bars: list[KlineBar] | None = None
+    mid_bars: list[KlineBar] | None = None
     htf_bars: list[KlineBar] | None = None
+    macro_bars: list[KlineBar] | None = None
     history_bars: list[KlineBar] | None = bars
     if symbol.upper() not in {"BTCUSDT", "BTCUSD", "BTCUSDC"}:
         btc_bars = await _fetch_bars("BTCUSDT", analysis_hours, interval_minutes=interval_minutes)
+    mid_interval_minutes = 15
+    htf_interval_minutes = 60
+    macro_interval_minutes = 240
     if interval_minutes <= 15:
-        htf_bars = await _fetch_bars(symbol, max(24, analysis_hours * 2), interval_minutes=60)
+        mid_bars = await _fetch_bars(
+            symbol,
+            max(24 * 3, analysis_hours),
+            interval_minutes=mid_interval_minutes,
+        )
+        htf_bars = await _fetch_bars(
+            symbol,
+            max(24 * 10, analysis_hours * 2),
+            interval_minutes=htf_interval_minutes,
+        )
+        macro_bars = await _fetch_bars(
+            symbol,
+            max(24 * 30, analysis_hours * 4),
+            interval_minutes=macro_interval_minutes,
+        )
+    else:
+        htf_interval_minutes = 240
+        macro_interval_minutes = 0
+        htf_bars = await _fetch_bars(
+            symbol,
+            max(24 * 30, analysis_hours * 2),
+            interval_minutes=htf_interval_minutes,
+        )
 
     taker_cvd = None
     if symbol:
@@ -2884,120 +3000,106 @@ async def render_annotated_chart(
         except Exception:
             logger.debug("Taker CVD fetch failed for %s", symbol, exc_info=True)
 
+    metrics: dict[str, object] = dict(market_metrics or {})
+    try:
+        from .coinglass_api import get_coinglass_client
+
+        coinglass = await get_coinglass_client().market_context(
+            symbol,
+            interval_minutes=interval_minutes,
+            exchange=exchange,
+        )
+    except Exception:
+        logger.exception("CoinGlass context request failed for %s", symbol)
+        coinglass = {
+            "coinglass_status": "ошибка запроса",
+            "coinglass_available_metrics": [],
+            "coinglass_missing_metrics": [
+                "price", "oi", "funding", "account_ratio", "liquidations", "taker",
+            ],
+        }
+    for metric_name in (
+        "price_change_pct",
+        "oi_change_pct",
+        "oi_period_minutes",
+        "funding_rate",
+        "account_ratio",
+        "liquidations",
+        "taker_buy_ratio",
+        "taker_buy_vol_usd",
+        "taker_sell_vol_usd",
+        "oi_usd",
+        "futures_taker_buy_ratio",
+        "futures_taker_buy_vol_usd",
+        "futures_taker_sell_vol_usd",
+        "futures_taker_window_minutes",
+        "spot_taker_buy_ratio",
+        "spot_taker_buy_vol_usd",
+        "spot_taker_sell_vol_usd",
+        "spot_taker_window_minutes",
+    ):
+        if (
+            metric_name in {"price_change_pct", "oi_change_pct", "oi_period_minutes"}
+            and (
+                coinglass.get("price_change_pct") is None
+                or coinglass.get("oi_change_pct") is None
+            )
+        ):
+            continue
+        value = coinglass.get(metric_name)
+        if value is not None:
+            metrics[metric_name] = value
+    metrics["coinglass_status"] = coinglass.get("coinglass_status", "ошибка запроса")
+    metrics["coinglass_available_metrics"] = coinglass.get("coinglass_available_metrics", [])
+    metrics["coinglass_missing_metrics"] = coinglass.get("coinglass_missing_metrics", [])
+    if metrics["coinglass_available_metrics"]:
+        metrics["source"] = "CoinGlass V4 + Bybit fallback"
+    elif not metrics.get("source"):
+        metrics["source"] = exchange.title()
+    market_metrics = metrics
+
     is_long = side == "long"
-    # Wave-focus: фигуры не нужны — только EW/Fib (быстрее и чище)
     ta = run_ta_analysis(
         bars,
         is_long=is_long,
         oi_bars=oi_bars,
         btc_bars=btc_bars,
+        mid_bars=mid_bars,
         htf_bars=htf_bars,
+        macro_bars=macro_bars,
         symbol=symbol,
         hours=analysis_hours,
         invalidation_price=invalidation_price,
         neutral=neutral,
         liq_context=liq_context,
         interval_minutes=interval_minutes,
+        htf_interval_minutes=htf_interval_minutes,
+        mid_interval_minutes=mid_interval_minutes,
+        macro_interval_minutes=macro_interval_minutes,
         history_bars=history_bars,
         taker_cvd=taker_cvd,
-        pattern_detection_enabled=(
-            False if wave_focus else pattern_detection_enabled
-        ),
+        market_metrics=market_metrics,
+        pattern_detection_enabled=pattern_detection_enabled,
         pattern_min_confidence=pattern_min_confidence,
     )
     if verdict_override:
         ta.verdict = verdict_override
-    if wave_expect_ru:
-        ta.verdict_reason = wave_expect_ru
-        ta.elliott_path_reason = wave_expect_ru
-    if wave_entry_price:
-        ta.elliott_entry_price = float(wave_entry_price)
-    if wave_stop_price:
-        ta.elliott_stop_price = float(wave_stop_price)
-    if wave_tp_prices:
-        ta.elliott_tp_prices = [float(t) for t in wave_tp_prices if t][:4]
-    if invalidation_price and wave_focus:
-        ta.elliott_path_invalidation = float(invalidation_price)
-        ta.invalidation_price = float(invalidation_price)
-    if wave_focus and side in {"long", "short"}:
-        ta.wave_bias = side
-
-    # Wave-chart: сначала точки с алерта (open_time), иначе сырой EW без фильтра
-    if wave_focus:
-        applied = _apply_wave_snapshot_points(
-            ta,
-            bars,
-            draw_ot=wave_draw_ot,
-            global_ot=wave_global_ot,
-            local_ot=wave_local_ot,
-        )
-        if not applied:
-            _ensure_wave_elliott_points(ta, bars)
-
-    # Зум экрана: ≥12ч на 5m + расширить, если EW/дамп шире окна
-    ew_idxs = _ta_elliott_indices(ta)
-    elliott_span = (max(ew_idxs) - min(ew_idxs)) if len(ew_idxs) >= 2 else 0
     zoom_hours = structure_aware_display_hours(
         interval_minutes=interval_minutes,
         analysis_hours=analysis_hours,
         configured=display_hours,
         drawdown_pct=float(getattr(ta, "drawdown_from_high_pct", 0) or 0),
-        elliott_span_bars=elliott_span,
+        structure_span_bars=0,
         fib_span_bars=0,
     )
-    # Wave-chart: зум от самой ранней волны до сейчас (иначе круги слева за кадром)
-    if wave_focus and ew_idxs:
-        zoom_hours = _wave_chart_zoom_hours(
-            bars=bars,
-            interval_minutes=interval_minutes,
-            analysis_hours=float(analysis_hours),
-            base_zoom=float(zoom_hours),
-            point_indices=ew_idxs,
-        )
 
-    source = (chart_source or "annotated").lower()
-    # Wave chart — всегда matplotlib wave_focus (не TradingView Hot-overlay)
-    if wave_focus:
-        source = "annotated"
-
-    if source in {"tv_annotated", "tradingview"}:
-        try:
-            tv_png = await asyncio.wait_for(
-                chart_capture_service.capture_tradingview(
-                    exchange, symbol, interval_minutes=interval_minutes,
-                ),
-                timeout=18.0,
-            )
-        except asyncio.TimeoutError:
-            tv_png = None
-        if tv_png:
-            if source == "tv_annotated":
-                return (
-                    _overlay_ta_on_tradingview(
-                        tv_png, bars, ta,
-                        symbol=symbol,
-                        interval_minutes=interval_minutes,
-                        hours=hours,
-                    ),
-                    ta,
-                )
-            return tv_png, ta
-        logger.info("TradingView unavailable for %s, fallback to matplotlib", symbol)
+    source = "annotated"
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
-    if wave_focus:
-        if (ta.verdict or "").upper() == "SHORT":
-            accent = CHART_STYLE["accent_short"]
-        elif (ta.verdict or "").upper() == "LONG":
-            accent = CHART_STYLE["accent_long"]
-        else:
-            accent = CHART_STYLE["warning"]
-    pro_mode = source == "annotated_pro" and not wave_focus
+    pro_mode = source == "annotated_pro"
     title = f"Bybit {interval_minutes}m · вид {zoom_hours}ч"
     if analysis_hours > zoom_hours:
         title = f"{title} (анализ {analysis_hours}ч)"
-    if wave_focus:
-        title = f"WAVE · {title}"
     png = _render_chart_figure(
         bars, ta,
         symbol=symbol,
@@ -3006,111 +3108,7 @@ async def render_annotated_chart(
         interval_minutes=interval_minutes,
         pro_mode=pro_mode,
         display_hours=zoom_hours,
-        enhanced=source in {"annotated", "annotated_pro"},
         height_scale=height_scale,
-        wave_focus=wave_focus,
-    )
-    return png, ta
-
-
-async def render_wave_chart(
-    symbol: str,
-    *,
-    side: str = "long",
-    hours: int = 18,
-    interval_minutes: int = 5,
-    expect_ru: str = "",
-    entry_price: float | None = None,
-    stop_price: float | None = None,
-    tp_prices: tuple[float, ...] | list[float] | None = None,
-    invalidation: float | None = None,
-    oi_bars: list[FiveMinOiBar] | None = None,
-    liq_context: dict | None = None,
-    exchange: str = "bybit",
-    display_hours: int | None = None,
-    height_scale: float | None = None,
-    ew_draw_ot: tuple[tuple[str, float, float], ...] | None = None,
-    ew_global_ot: tuple[tuple[str, float, float], ...] | None = None,
-    ew_local_ot: tuple[tuple[str, float, float], ...] | None = None,
-    confidence: int = 0,
-) -> tuple[bytes | None, TAAnalysisResult | None]:
-    """Быстрый волновой график: только bars + EW точки, без полного TA (OI/CVD/HTF)."""
-    _ = oi_bars, liq_context, exchange
-    analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
-    bars = await _fetch_bars(symbol, analysis_hours, interval_minutes=interval_minutes)
-    if not bars:
-        return None, None
-
-    verdict = "WAIT"
-    if side == "long":
-        verdict = "LONG"
-    elif side == "short":
-        verdict = "SHORT"
-
-    ta = TAAnalysisResult(
-        verdict=verdict,
-        verdict_reason=expect_ru or "",
-        current_price=float(bars[-1].close),
-        elliott_entry_price=float(entry_price) if entry_price else None,
-        elliott_stop_price=float(stop_price) if stop_price else None,
-        elliott_tp_prices=[float(t) for t in (tp_prices or []) if t][:4],
-        elliott_path_reason=expect_ru or "",
-        elliott_path_invalidation=float(invalidation) if invalidation else None,
-        invalidation_price=float(invalidation) if invalidation else None,
-        elliott_entry_mode="conservative" if entry_price else "wait",
-        elliott_entry_ready=bool(entry_price),
-        wave_bias=side if side in {"long", "short"} else "",
-        elliott_confidence=int(confidence or 0),
-    )
-
-    applied = _apply_wave_snapshot_points(
-        ta,
-        bars,
-        draw_ot=ew_draw_ot,
-        global_ot=ew_global_ot,
-        local_ot=ew_local_ot,
-    )
-    if not applied:
-        _ensure_wave_elliott_points(ta, bars)
-
-    ew_idxs = _ta_elliott_indices(ta)
-    base_zoom = chart_display_hours(interval_minutes, configured=display_hours)
-    zoom_hours = structure_aware_display_hours(
-        interval_minutes=interval_minutes,
-        analysis_hours=analysis_hours,
-        configured=display_hours,
-        drawdown_pct=0.0,
-        elliott_span_bars=(max(ew_idxs) - min(ew_idxs)) if len(ew_idxs) >= 2 else 0,
-        fib_span_bars=0,
-    )
-    if ew_idxs:
-        zoom_hours = _wave_chart_zoom_hours(
-            bars=bars,
-            interval_minutes=interval_minutes,
-            analysis_hours=float(analysis_hours),
-            base_zoom=float(zoom_hours),
-            point_indices=ew_idxs,
-        )
-
-    accent = (
-        CHART_STYLE["accent_long"] if verdict == "LONG"
-        else CHART_STYLE["accent_short"] if verdict == "SHORT"
-        else CHART_STYLE["warning"]
-    )
-    title = f"WAVE · Bybit {interval_minutes}m · вид {int(zoom_hours)}ч"
-    h_scale = float(height_scale or 1.0)
-    png = _render_chart_figure(
-        bars,
-        ta,
-        symbol=symbol,
-        title_suffix=title,
-        accent_color=accent,
-        interval_minutes=interval_minutes,
-        pro_mode=False,
-        display_hours=int(zoom_hours),
-        enhanced=True,
-        height_scale=h_scale,
-        wave_focus=True,
     )
     return png, ta
 
@@ -3148,20 +3146,11 @@ def render_oil_chart(
         base = max(8, min(configured, 36 if im <= 15 else 72))
     analysis_h = max(base, int(len(bars) * im / 60))
     drawdown = float(getattr(ta, "drawdown_from_high_pct", 0.0) or 0.0)
-    ew_span = 0
-    try:
-        pts = getattr(ta, "elliott_points", None) or []
-        if len(pts) >= 2:
-            idxs = [int(getattr(p, "index", 0) or 0) for p in pts]
-            ew_span = max(idxs) - min(idxs)
-    except Exception:
-        ew_span = 0
     zoom = structure_aware_display_hours(
         interval_minutes=im,
         analysis_hours=min(analysis_h, 72 if im <= 15 else 120),
         configured=base,
         drawdown_pct=drawdown,
-        elliott_span_bars=ew_span,
     )
     max_zoom = {5: 14, 10: 16, 15: 28, 30: 40, 60: 72}.get(im, 24)
     zoom = max(8, min(int(zoom), max_zoom))
@@ -3189,12 +3178,9 @@ def render_oil_chart(
         interval_minutes=im,
         pro_mode=False,
         display_hours=zoom,
-        enhanced=True,  # Vol + RSI снизу
         height_scale=max(1.35, float(height_scale or 1.45)),
-        wave_focus=False,
         urals_price=None,
         urals_change_pct=None,
-        show_info_panels=False,
         ut_overlay=ut_overlay,
         clean_chart=True,  # лёгкий анализ + UT + треугольник Vataga; без боковых панелей
     )
@@ -3344,6 +3330,7 @@ async def render_signal_chart(
     probability_percent: float | None = None,
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
+    market_metrics: dict[str, object] | None = None,
     chart_source: str = "annotated",
     exchange: str = "bybit",
     display_hours: int | None = None,
@@ -3357,6 +3344,7 @@ async def render_signal_chart(
         structure_warning=structure_warning,
         oi_bars=oi_bars,
         liq_context=liq_context,
+        market_metrics=market_metrics,
         neutral=True,
         chart_source=chart_source,
         exchange=exchange,
@@ -3382,6 +3370,7 @@ async def render_analysis_chart(
     invalidation_price: float | None = None,
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
+    market_metrics: dict[str, object] | None = None,
     exchange: str = "bybit",
     height_scale: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
@@ -3395,6 +3384,7 @@ async def render_analysis_chart(
         invalidation_price=invalidation_price,
         oi_bars=oi_bars,
         liq_context=liq_context,
+        market_metrics=market_metrics,
         neutral=True,
         exchange=exchange,
         verdict_override=verdict_override,
@@ -3415,69 +3405,10 @@ async def get_signal_chart_png(
     coinglass_url: str = "",
     oi_bars: list[FiveMinOiBar] | None = None,
     liq_context: dict | None = None,
+    market_metrics: dict[str, object] | None = None,
     display_hours: int | None = None,
     height_scale: float | None = None,
 ) -> tuple[bytes | None, str, TAAnalysisResult | None, str]:
-    source = (chart_source or "annotated").lower()
-    fail_reason = ""
-
-    if source in {"annotated", "annotated_pro", "tv_annotated"}:
-        png, ta = await render_signal_chart(
-            signal_symbol,
-            side=side,
-            hours=chart_hours,
-            interval_minutes=chart_interval_minutes,
-            structure_warning=structure_warning,
-            probability_percent=probability_percent,
-            oi_bars=oi_bars,
-            liq_context=liq_context,
-            chart_source=source,
-            exchange=signal_exchange,
-            display_hours=display_hours,
-            height_scale=height_scale,
-        )
-        if png:
-            return png, source, ta, ""
-        return None, "none", ta, "нет свечей Bybit или ошибка matplotlib"
-
-    if source == "tradingview":
-        try:
-            png = await asyncio.wait_for(
-                chart_capture_service.capture_tradingview(
-                    signal_exchange,
-                    signal_symbol,
-                    interval_minutes=chart_interval_minutes,
-                ),
-                timeout=12.0,
-            )
-            if png:
-                return png, "tradingview", None, ""
-            fail_reason = "TradingView screenshot пустой"
-        except asyncio.TimeoutError:
-            fail_reason = "TradingView timeout 12с"
-        except Exception as exc:
-            fail_reason = f"TradingView: {exc}"
-            logger.warning("TradingView chart failed for %s: %s", signal_symbol, exc)
-    elif source == "coinglass" and coinglass_url:
-        try:
-            png = await asyncio.wait_for(
-                chart_capture_service.capture_coinglass(coinglass_url),
-                timeout=12.0,
-            )
-            if png:
-                return png, "coinglass", None, ""
-            fail_reason = "CoinGlass screenshot пустой"
-        except asyncio.TimeoutError:
-            fail_reason = "CoinGlass timeout 12с"
-        except Exception as exc:
-            fail_reason = f"CoinGlass: {exc}"
-            logger.warning("CoinGlass chart failed for %s: %s", signal_symbol, exc)
-    elif source == "coinglass":
-        fail_reason = "нет URL CoinGlass"
-
-    if source not in {"generated", "annotated", "annotated_pro", "tv_annotated"}:
-        logger.info("Chart %s unavailable for %s (%s), fallback to annotated", source, signal_symbol, fail_reason)
-
     png, ta = await render_signal_chart(
         signal_symbol,
         side=side,
@@ -3487,10 +3418,12 @@ async def get_signal_chart_png(
         probability_percent=probability_percent,
         oi_bars=oi_bars,
         liq_context=liq_context,
+        market_metrics=market_metrics,
         chart_source="annotated",
         exchange=signal_exchange,
+        display_hours=display_hours,
+        height_scale=height_scale,
     )
     if png:
-        return png, "annotated", ta, fail_reason
-    extra = fail_reason or "annotated fallback не удался"
-    return None, "none", ta, extra
+        return png, "annotated", ta, ""
+    return None, "none", ta, "нет свечей Bybit или ошибка matplotlib"
