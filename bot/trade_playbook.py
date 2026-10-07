@@ -241,24 +241,28 @@ def build_hot_caption(
     quality_tier: str | None = None,
     decision: TradeDecision | None = None,
 ) -> str:
-    """Короткий caption: профи-тезис + план входа."""
+    """Alert caption: reading/scenario (как manual) + тезис только на ENTRY."""
+    from .signal_pipeline import build_signal_alert_caption
+
     thesis = build_trade_thesis(
         signal, ta, decision=decision, readiness=readiness,
     )
-    parts = [header.strip()]
-    if quality_html:
-        parts.append(quality_html.strip())
-    parts.append(format_thesis_hot_html(thesis, skip_headline=bool(quality_tier)))
-    # Fallback playbook если нет уровней в тезисе
-    if thesis.action == "entry" and not thesis.entry_price and not thesis.entry_zone:
-        pb = resolve_trade_playbook(signal, ta)
-        if pb:
-            parts.append(format_playbook_html(pb, readiness=readiness, minimal=True))
-
-    text = "\n\n".join(p for p in parts if p)
-    if len(text) > 980:
-        text = text[:977] + "…"
-    return text
+    action = ""
+    if (quality_tier or "").lower() == "entry" and thesis.action == "entry":
+        action = format_thesis_hot_html(thesis, skip_headline=True)
+        if thesis.action == "entry" and not thesis.entry_price and not thesis.entry_zone:
+            pb = resolve_trade_playbook(signal, ta)
+            if pb:
+                action = f"{action}\n{format_playbook_html(pb, readiness=readiness, minimal=True)}"
+    return build_signal_alert_caption(
+        header,
+        ta,
+        symbol=signal.symbol,
+        quality_tier=quality_tier,
+        quality_html=quality_html,
+        action_line=action.strip(),
+        compact=True,
+    )
 
 
 def build_pro_detail_html(
@@ -281,6 +285,10 @@ def build_pro_detail_html(
     body = "\n".join(lines)
     if quality_html:
         body = _append_unique(lines, body, quality_html)
+
+    scenario = str(getattr(ta, "scenario_report_html", "") or "").strip()
+    if scenario:
+        body = _append_unique(lines, body, scenario)
 
     thesis = build_trade_thesis(
         signal, ta, decision=decision, readiness=readiness,

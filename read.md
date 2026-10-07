@@ -1,0 +1,100 @@
+OTBET
+
+HAL
+
+
+OTBET
+
+GBOP
+
+NaTTepH
+
+
+## OTBET
+
+## PETECT 30HbI
+
+a 3aTeM
+
+B
+
+K
+
+
+v/
+
+## OTBET —
+
+## CBOW
+
+UMNYNbCA. B 3TOM LieHa pocna, 3aTeM pasBepHynach. 3TOT NaTTePH MOXHO COYETaTh C
+
+“nn c60pOM
+
+PA3BOPOT
+
+- «/ CTPYKTYPA PA3BOPOTA
+
+- 0B
+
+
+## KOMINPECCUS OTKATA
+
+NPOAABLIOB MOXHO
+
+COBET:
+
+CBEYEW B
+
+MO
+
+YEM BOJIbLUE CBEYEN, TEM C/TABEE UMNYJIbC.
+
+
+## CNPOC ED
+
+OT
+
+Moaaepxka u
+
+BEPOATHO, Pa3BEPHETCA YXKe Aenana ato lena
+
+3TH 30HbI YEPE3 HECKOJIbKO
+
+cHayana
+
+OKYCUPYIOTCA Ha YPOBHAX UMN 30HAX,
+
+Cnpoc 1 npeanoxenue hoKycupyloTcs Ha 6ase BO3HUK aTux 30H He TpeByeTcA
+
+u
+
+
+## PA3BOPOT
+
+
+## 1.0
+
+*MAHUNYNALMSA BOKPYT OYEBUAHBIX MATTEPHOB YACTb 1 — UMEWTE B*
+
+*MPABU/IbHbIX (0)*
+
+*YT0 370*
+
+*U Mbl BCE PbIHOK*
+
+*NO-PA3HOMY.*
+
+*OTBETOB*
+
+*WIN*
+
+*HET.*
+
+
+He
+
+kak
+
+
+yBUOETb MOU

@@ -8,6 +8,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT_DIR / ".env"
 load_dotenv(ENV_PATH)
 
+from .env_ru import apply_env_ru_aliases
+
+apply_env_ru_aliases()
+
 class Config(BaseSettings):
     telegram_token: str = Field(..., env="TELEGRAM_TOKEN")
     telegram_admin_id: int = Field(..., env="TELEGRAM_ADMIN_ID")

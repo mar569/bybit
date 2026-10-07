@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Ellipse, Rectangle
 
-from .bybit_klines import BybitKlineCache, KlineBar
+from .bybit_klines import BybitKlineCache, KlineBar, fetch_bybit_klines_sync
 from .bybit_cvd import get_taker_cvd_cache
 from .chart_pattern_draw import (
     draw_chart_patterns,
@@ -22,6 +23,7 @@ from .chart_pattern_draw import (
 )
 from .chart_elliott_draw import draw_elliott_waves
 from .pattern_specs import MAX_CHART_PATTERNS, MIN_DRAW_CONFIDENCE
+from .chart_reference_levels import draw_reference_horizontals
 from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
@@ -448,6 +450,33 @@ def _draw_wait_chart_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRes
     """WAIT: лёгкие пути по lean; без «жирной» стрелки против текста ИТОГ."""
     if (getattr(ta, "verdict", "") or "").upper() != "WAIT":
         return
+    if getattr(ta, "reading_draw_both_forecasts", True) is False:
+        lean = (getattr(ta, "action_priority", "") or "").lower()
+        if lean == "long":
+            if ta.continuation_path and ta.continuation_path.waypoints:
+                _draw_zigzag_forecast_path(
+                    ax,
+                    bars,
+                    ta.continuation_path.waypoints,
+                    color=CHART_STYLE["accent_long"],
+                    label=ta.continuation_path.label,
+                    alpha=0.55,
+                    lw=1.0,
+                )
+            return
+        if lean == "short":
+            if ta.correction_path and ta.correction_path.waypoints:
+                _draw_zigzag_forecast_path(
+                    ax,
+                    bars,
+                    ta.correction_path.waypoints,
+                    color="#ffa657",
+                    label=ta.correction_path.label,
+                    alpha=0.55,
+                    lw=1.0,
+                )
+            return
+        return
     lean = (getattr(ta, "action_priority", "") or "").lower()
     if lean not in {"long", "short"}:
         ps = (getattr(ta, "primary_scenario", "") or "").lower()
@@ -456,23 +485,25 @@ def _draw_wait_chart_paths(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRes
         elif "вниз" in ps or "short" in ps:
             lean = "short"
 
-    # Только приоритетная сторона ярко; альтернатива — еле видно
+    draw_both = getattr(ta, "reading_draw_both_forecasts", True)
     if ta.bullish_scenario and ta.bullish_scenario.target_prices:
-        _draw_scenario_path(
-            ax,
-            bars,
-            ta.bullish_scenario,
-            color=CHART_STYLE["scenario_bull"],
-            alpha=0.75 if lean == "long" else (0.22 if lean == "short" else 0.35),
-        )
+        if draw_both or lean in {"long", ""}:
+            _draw_scenario_path(
+                ax,
+                bars,
+                ta.bullish_scenario,
+                color=CHART_STYLE["scenario_bull"],
+                alpha=0.75 if lean == "long" else (0.22 if lean == "short" else 0.35),
+            )
     if ta.bearish_scenario and ta.bearish_scenario.target_prices:
-        _draw_scenario_path(
-            ax,
-            bars,
-            ta.bearish_scenario,
-            color=CHART_STYLE["scenario_bear"],
-            alpha=0.75 if lean == "short" else (0.22 if lean == "long" else 0.35),
-        )
+        if draw_both or lean in {"short", ""}:
+            _draw_scenario_path(
+                ax,
+                bars,
+                ta.bearish_scenario,
+                color=CHART_STYLE["scenario_bear"],
+                alpha=0.75 if lean == "short" else (0.22 if lean == "long" else 0.35),
+            )
     # Zigzag прогнозы — не дублируем обе стороны против lean
     if lean != "long" and ta.correction_path and ta.correction_path.waypoints:
         _draw_zigzag_forecast_path(
@@ -790,6 +821,8 @@ def _draw_smc_annotations(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
 
 def _draw_fib_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     """Fib 0.382 / 0.5 / 0.618 (+ extensions) — ключевые 0.5/0.618 заметнее."""
+    if not getattr(ta, "reading_accept_fib", True):
+        return
     levels = getattr(ta, "fib_levels", None) or []
     if not levels or not bars:
         return
@@ -1406,26 +1439,29 @@ def _draw_ta_annotations(
     draw_buy_flat_sell_zones(ax, bars, ta)
     _draw_zones(ax, bars, ta)
     _draw_smc_annotations(ax, bars, ta)
-    _draw_channel(ax, bars, ta)
+    if getattr(ta, "reading_accept_channel", True):
+        _draw_channel(ax, bars, ta)
     _draw_extended_trend_lines(ax, bars, ta)
     _draw_consolidation_box(ax, bars, ta)
-    draw_chart_patterns(
-        ax,
-        bars,
-        ta.chart_patterns,
-        max_patterns=MAX_CHART_PATTERNS,
-        min_confidence=MIN_DRAW_CONFIDENCE,
-        force_primary=getattr(ta, "primary_chart_pattern", None),
-        draw_target_labels=False,  # цель/SL — только линии; текст справа / path
-    )
+    if getattr(ta, "reading_accept_pattern", True):
+        draw_chart_patterns(
+            ax,
+            bars,
+            ta.chart_patterns,
+            max_patterns=MAX_CHART_PATTERNS,
+            min_confidence=MIN_DRAW_CONFIDENCE,
+            force_primary=getattr(ta, "primary_chart_pattern", None),
+            draw_target_labels=False,  # цель/SL — только линии; текст справа / path
+        )
     # HTF фигура (уровни) — без лишнего текста на WAIT оставляем линии
-    draw_htf_pattern_levels(
-        ax,
-        bars,
-        getattr(ta, "primary_htf_chart_pattern", None),
-        conflict=bool(getattr(ta, "pattern_foresight_htf_conflict", False)),
-        quiet=is_wait,
-    )
+    if getattr(ta, "reading_accept_htf_pattern", True):
+        draw_htf_pattern_levels(
+            ax,
+            bars,
+            getattr(ta, "primary_htf_chart_pattern", None),
+            conflict=bool(getattr(ta, "pattern_foresight_htf_conflict", False)),
+            quiet=is_wait,
+        )
     # Foresight-стрелка только при LONG/SHORT и если нет setup-path
     setup_path_preview = getattr(ta, "forecast_path_prices", None) or []
     setup_grade = getattr(ta, "setup_grade", "") or ""
@@ -1433,6 +1469,7 @@ def _draw_ta_annotations(
     if (
         not has_setup_path
         and getattr(ta, "pattern_foresight_summary", "")
+        and getattr(ta, "reading_accept_pattern", True)
     ):
         draw_pattern_foresight_path(
             ax,
@@ -1530,17 +1567,212 @@ def _draw_ta_annotations(
     _draw_right_price_labels(ax, bars, ta)
 
 
+def _chart_reading_overlay_lines(ta: TAAnalysisResult) -> list[str]:
+    """Текст на графике — как в manual/JPG: ТФ + есть/нет + режим, без простыни метрик."""
+    lines: list[str] = []
+    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
+    if stack:
+        lines.append(stack)
+    elif getattr(ta, "smc", None) is not None:
+        smc = ta.smc
+        if getattr(smc, "macro_structure_label", ""):
+            lines.append(f"W/H4: {smc.macro_structure_label}")
+        if getattr(smc, "htf_structure_label", ""):
+            h = ta.htf_interval_minutes
+            tag = f"{h // 60}H" if h >= 60 else f"{h}m"
+            lines.append(f"{tag}: {smc.htf_structure_label}")
+        if getattr(smc, "mid_structure_label", ""):
+            lines.append(f"15m: {smc.mid_structure_label}")
+        if getattr(smc, "ltf_structure_label", ""):
+            lines.append(f"{ta.analysis_interval_minutes}m: {smc.ltf_structure_label}")
+    narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
+    if narrative:
+        lines.append(narrative[:140])
+    seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
+    if seek and seek not in narrative:
+        lines.append(f"→ {seek[:100]}")
+    present = [str(x).strip() for x in (getattr(ta, "reading_present", None) or []) if str(x).strip()]
+    absent = [str(x).strip() for x in (getattr(ta, "reading_absent", None) or []) if str(x).strip()]
+    if present:
+        lines.append("Есть: " + "; ".join(present[:3]))
+    if absent:
+        lines.append("Нет: " + "; ".join(absent[:2]))
+    mode = str(getattr(ta, "scenario_entry_mode", "") or "").strip()
+    if mode:
+        lines.append(f"Режим входа: {mode}")
+    live = str(getattr(ta, "reading_live_scenario", "") or "").strip()
+    if live and live not in {"range"}:
+        lines.append(f"Сценарий: {live[:80]}")
+    return lines[:9]
+
+
+_PDF_ZONE_COLORS: dict[str, str] = {
+    "demand": "#3fb950",
+    "supply": "#f85149",
+    "sr_support": "#58a6ff",
+    "sr_resistance": "#d29922",
+    "ob_bull": "#2ea043",
+    "ob_bear": "#da3633",
+    "breaker_bull": "#a371f7",
+    "breaker_bear": "#bc8cff",
+}
+
+
+def _draw_pdf_zone_layers(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    current: float,
+) -> None:
+    metrics = getattr(ta, "market_metrics", None) or {}
+    raw_zones = metrics.get("pdf_zones") if isinstance(metrics, dict) else None
+    if not raw_zones or not bars:
+        return
+    from matplotlib.patches import Rectangle
+
+    x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    kind_short = {
+        "demand": "спрос",
+        "supply": "предл.",
+        "ob_bull": "OB↑",
+        "ob_bear": "OB↓",
+        "sr_support": "S",
+        "sr_resistance": "R",
+        "breaker_bull": "BR↑",
+        "breaker_bear": "BR↓",
+    }
+    for z in raw_zones[:4]:
+        if not isinstance(z, dict):
+            continue
+        if not z.get("valid", False):
+            continue
+        top, bot = float(z.get("top", 0)), float(z.get("bottom", 0))
+        if top <= bot or top <= 0:
+            continue
+        if abs((top + bot) / 2 - current) / current > 0.12:
+            continue
+        kind = str(z.get("kind", "demand"))
+        base = _PDF_ZONE_COLORS.get(kind, "#8b949e")
+        start_i = int(z.get("start_idx", max(0, len(bars) - 40)))
+        x0 = mdates.date2num(_idx_to_date(bars, max(0, start_i)))
+        ax.add_patch(
+            Rectangle(
+                (x0, bot),
+                max(x1 - x0, 0.001),
+                top - bot,
+                facecolor=base,
+                edgecolor=base,
+                alpha=0.24,
+                linewidth=1.0,
+                zorder=1,
+            )
+        )
+        tag = str(z.get("tf", "LTF"))
+        lbl = kind_short.get(kind, kind[:6])
+        note = str(z.get("label", "") or "")[:28]
+        ax.text(
+            x1,
+            top,
+            f" {tag}·{lbl} {note}".strip(),
+            color=base,
+            fontsize=6.2,
+            fontweight="bold",
+            va="bottom",
+            ha="right",
+            zorder=3,
+            bbox=dict(
+                boxstyle="round,pad=0.1",
+                facecolor="#0d1117",
+                edgecolor=base,
+                alpha=0.85,
+                linewidth=0.35,
+            ),
+        )
+    poc_label = str(getattr(ta, "volume_poc_label", "") or "")
+    if poc_label and "POC" in poc_label:
+        import re
+
+        m = re.search(r"POC\s*≈\s*([\d.]+)", poc_label)
+        if m:
+            poc = float(m.group(1))
+            if abs(poc - current) / current <= 0.2:
+                ax.axhline(
+                    poc,
+                    color="#8b949e",
+                    linestyle=":",
+                    linewidth=0.9,
+                    alpha=0.75,
+                    zorder=2,
+                )
+                ax.text(
+                    x1,
+                    poc,
+                    " POC",
+                    color="#8b949e",
+                    fontsize=6,
+                    va="center",
+                    ha="right",
+                )
+
+
+def _draw_retest_markers(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    current: float,
+) -> None:
+    metrics = getattr(ta, "market_metrics", None) or {}
+    raw = metrics.get("retests") if isinstance(metrics, dict) else None
+    if not raw or not bars:
+        return
+    x = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    for r in raw[:2]:
+        if not isinstance(r, dict):
+            continue
+        price = float(r.get("price") or 0)
+        if price <= 0 or abs(price - current) / current > 0.08:
+            continue
+        q = str(r.get("quality", ""))
+        color = "#3fb950" if q == "ideal" else "#d29922" if q == "good" else "#8b949e"
+        ax.plot(x, price, marker="o", color=color, markersize=5, zorder=9)
+        ax.text(
+            x,
+            price,
+            f" R",
+            color=color,
+            fontsize=6,
+            va="center",
+            ha="left",
+        )
+
+
 def _draw_clean_market_annotations(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
+    *,
+    signal_chart: bool = False,
 ) -> None:
     """Show only the strongest structure, nearby levels, and actionable prices."""
     if not bars:
         return
 
     current = bars[-1].close
-    if ta.primary_chart_pattern is not None:
+    try:
+        draw_reference_horizontals(ax, bars, ta)
+    except Exception:
+        logger.debug("reference horizontals skipped", exc_info=True)
+    if getattr(ta, "trend_lines", None):
+        try:
+            _draw_extended_trend_lines(ax, bars, ta)
+        except Exception:
+            logger.debug("trend lines skipped", exc_info=True)
+    accept_pat = getattr(ta, "reading_accept_pattern", True)
+    if signal_chart:
+        accept_pat = accept_pat and ta.primary_chart_pattern is not None
+    if accept_pat and ta.primary_chart_pattern is not None:
         draw_chart_patterns(
             ax,
             bars,
@@ -1550,13 +1782,14 @@ def _draw_clean_market_annotations(
             force_primary=ta.primary_chart_pattern,
             draw_target_labels=False,
         )
-    draw_htf_pattern_levels(
-        ax,
-        bars,
-        ta.primary_htf_chart_pattern,
-        conflict=bool(ta.pattern_foresight_htf_conflict),
-        quiet=True,
-    )
+    if getattr(ta, "reading_accept_htf_pattern", True):
+        draw_htf_pattern_levels(
+            ax,
+            bars,
+            ta.primary_htf_chart_pattern,
+            conflict=bool(ta.pattern_foresight_htf_conflict),
+            quiet=True,
+        )
 
     smc = ta.smc
     if smc is not None:
@@ -1569,6 +1802,17 @@ def _draw_clean_market_annotations(
                 linewidth=1.0,
                 alpha=0.78,
                 zorder=2,
+            )
+            bk = getattr(smc, "structure_break_kind", "bos") or "bos"
+            ax.text(
+                mdates.date2num(_idx_to_date(bars, len(bars) - 1)),
+                smc.structure_break_level,
+                f" {bk.upper()}",
+                color=color,
+                fontsize=6.5,
+                va="bottom",
+                ha="right",
+                zorder=3,
             )
         if smc.liquidity_sweep:
             marker = next(
@@ -1587,11 +1831,13 @@ def _draw_clean_market_annotations(
                     arrowprops={"arrowstyle": "->", "color": color, "lw": 0.8},
                     zorder=8,
                 )
-        nearby_blocks = [
-            block for block in smc.order_blocks
-            if not block.mitigated
-            and abs(((block.top + block.bottom) / 2 - current) / current) <= 0.025
-        ]
+        nearby_blocks = []
+        if getattr(ta, "reading_accept_ob", True):
+            nearby_blocks = [
+                block for block in smc.order_blocks
+                if not block.mitigated
+                and abs(((block.top + block.bottom) / 2 - current) / current) <= 0.025
+            ]
         if nearby_blocks:
             block = min(
                 nearby_blocks,
@@ -1634,6 +1880,9 @@ def _draw_clean_market_annotations(
                 zorder=1,
             ))
 
+    _draw_pdf_zone_layers(ax, bars, ta, current=current)
+    _draw_retest_markers(ax, bars, ta, current=current)
+
     for label, price, color in (
         ("Поддержка", ta.nearest_support, CHART_STYLE["level_support"]),
         ("Сопротивление", ta.nearest_resistance, CHART_STYLE["level_resistance"]),
@@ -1641,17 +1890,18 @@ def _draw_clean_market_annotations(
         if price is not None and price > 0 and abs(price / current - 1) <= 0.12:
             ax.axhline(price, color=color, linestyle=":", linewidth=0.9, alpha=0.75, zorder=2)
 
-    for level in ta.fib_levels:
-        if level.ratio not in {0.618, 0.705} or abs(level.price / current - 1) > 0.12:
-            continue
-        ax.axhline(
-            level.price,
-            color=CHART_STYLE["fib_key"],
-            linestyle="-.",
-            linewidth=0.9,
-            alpha=0.72,
-            zorder=2,
-        )
+    if getattr(ta, "reading_accept_fib", True) and ta.fib_levels:
+        for level in ta.fib_levels:
+            if level.ratio not in {0.618, 0.705} or abs(level.price / current - 1) > 0.12:
+                continue
+            ax.axhline(
+                level.price,
+                color=CHART_STYLE["fib_key"],
+                linestyle="-.",
+                linewidth=0.9,
+                alpha=0.72,
+                zorder=2,
+            )
 
     if ta.breakout_level and ta.verdict in {"LONG", "WAIT"}:
         ax.axhline(
@@ -1689,28 +1939,12 @@ def _draw_clean_market_annotations(
                 zorder=3,
             )
 
-    context = []
-    if smc is not None:
-        if smc.mid_structure_label:
-            context.append(f"15М: {smc.mid_structure_label}")
-        if smc.htf_structure_label:
-            context.append(
-                f"{ta.htf_interval_minutes // 60}Ч: {smc.htf_structure_label}"
-                if ta.htf_interval_minutes >= 60
-                else f"{ta.htf_interval_minutes}М: {smc.htf_structure_label}"
-            )
-        if smc.macro_structure_label:
-            context.append(f"4Ч ФОН: {smc.macro_structure_label}")
-        if smc.ltf_structure_label:
-            context.append(
-                f"{ta.analysis_interval_minutes}М: {smc.ltf_structure_label}"
-            )
-    context.extend(ta.market_participation_lines[:6])
+    context = _chart_reading_overlay_lines(ta)
     if context:
         ax.text(
             0.012,
             0.985,
-            "\n".join(context[:9]),
+            "\n".join(context[:8]),
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -2264,6 +2498,7 @@ def _render_chart_figure(
     urals_change_pct: float | None = None,
     ut_overlay: Any | None = None,
     clean_chart: bool = False,
+    signal_chart: bool = False,
 ) -> bytes:
     """Рисует единый график без RSI/volume-панелей и боковых информационных колонок."""
     fig_size, _ = _chart_figure_layout(
@@ -2278,13 +2513,30 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
-    if clean_chart:
+    if clean_chart and not signal_chart:
         try:
             _draw_essential_oil_overlays(ax, bars, ta)
         except Exception:
             logger.debug("Essential oil overlays failed", exc_info=True)
     else:
-        _draw_clean_market_annotations(ax, bars, ta)
+        _draw_clean_market_annotations(ax, bars, ta, signal_chart=signal_chart)
+        if signal_chart and (getattr(ta, "setup_grade", "") or "").upper() in {"A", "B"}:
+            try:
+                prices = list(getattr(ta, "forecast_path_prices", None) or [])
+                if len(prices) >= 2:
+                    last_t = _idx_to_date(bars, len(bars) - 1)
+                    t1 = mdates.num2date(mdates.date2num(last_t) + 0.022, tz=timezone.utc)
+                    p0 = bars[-1].close
+                    ax.plot(
+                        [last_t, t1],
+                        [p0, prices[0]],
+                        color=CHART_STYLE["accent_long"] if ta.verdict == "LONG" else CHART_STYLE["accent_short"],
+                        linestyle="--",
+                        linewidth=1.2,
+                        alpha=0.75,
+                    )
+            except Exception:
+                logger.debug("signal forecast path skipped", exc_info=True)
     if ut_overlay is not None:
         try:
             _draw_ut_bot_overlay(
@@ -2946,6 +3198,10 @@ async def render_annotated_chart(
     pattern_min_confidence: float = 0.55,
     display_hours: int | None = None,
     height_scale: float | None = None,
+    signal_chart: bool = False,
+    as_of_bar_index: int | None = None,
+    as_of_open_time_ms: int | float | None = None,
+    as_of_price: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     # Analyze enough history for patterns, then zoom the display window.
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
@@ -3002,15 +3258,15 @@ async def render_annotated_chart(
 
     metrics: dict[str, object] = dict(market_metrics or {})
     try:
-        from .coinglass_api import get_coinglass_client
+        from .market_flow import market_context
 
-        coinglass = await get_coinglass_client().market_context(
+        coinglass = await market_context(
             symbol,
             interval_minutes=interval_minutes,
             exchange=exchange,
         )
     except Exception:
-        logger.exception("CoinGlass context request failed for %s", symbol)
+        logger.exception("Market flow context request failed for %s", symbol)
         coinglass = {
             "coinglass_status": "ошибка запроса",
             "coinglass_available_metrics": [],
@@ -3052,11 +3308,30 @@ async def render_annotated_chart(
     metrics["coinglass_status"] = coinglass.get("coinglass_status", "ошибка запроса")
     metrics["coinglass_available_metrics"] = coinglass.get("coinglass_available_metrics", [])
     metrics["coinglass_missing_metrics"] = coinglass.get("coinglass_missing_metrics", [])
-    if metrics["coinglass_available_metrics"]:
+    flow_source = coinglass.get("source")
+    flow_provider = coinglass.get("flow_provider")
+    if flow_provider:
+        metrics["flow_provider"] = flow_provider
+    if flow_source:
+        metrics["source"] = flow_source
+    elif metrics["coinglass_available_metrics"]:
         metrics["source"] = "CoinGlass V4 + Bybit fallback"
     elif not metrics.get("source"):
         metrics["source"] = exchange.title()
     market_metrics = metrics
+
+    weekly_bars: list[KlineBar] | None = None
+    try:
+        weekly_bars = await asyncio.to_thread(
+            fetch_bybit_klines_sync,
+            symbol,
+            interval="W",
+            limit=54,
+        )
+        if weekly_bars is not None and len(weekly_bars) < 4:
+            weekly_bars = None
+    except Exception:
+        logger.debug("Weekly klines failed for %s", symbol, exc_info=True)
 
     is_long = side == "long"
     ta = run_ta_analysis(
@@ -3067,6 +3342,7 @@ async def render_annotated_chart(
         mid_bars=mid_bars,
         htf_bars=htf_bars,
         macro_bars=macro_bars,
+        weekly_bars=weekly_bars,
         symbol=symbol,
         hours=analysis_hours,
         invalidation_price=invalidation_price,
@@ -3081,7 +3357,16 @@ async def render_annotated_chart(
         market_metrics=market_metrics,
         pattern_detection_enabled=pattern_detection_enabled,
         pattern_min_confidence=pattern_min_confidence,
+        as_of_bar_index=as_of_bar_index,
+        as_of_open_time_ms=as_of_open_time_ms,
+        as_of_price=as_of_price,
     )
+    if ta is not None and symbol:
+        from .market_state_store import get_market_state_store
+
+        get_market_state_store().put_from_ta(
+            symbol, ta, interval_minutes=interval_minutes
+        )
     if verdict_override:
         ta.verdict = verdict_override
     zoom_hours = structure_aware_display_hours(
@@ -3109,6 +3394,7 @@ async def render_annotated_chart(
         pro_mode=pro_mode,
         display_hours=zoom_hours,
         height_scale=height_scale,
+        signal_chart=signal_chart,
     )
     return png, ta
 
@@ -3335,6 +3621,9 @@ async def render_signal_chart(
     exchange: str = "bybit",
     display_hours: int | None = None,
     height_scale: float | None = None,
+    as_of_bar_index: int | None = None,
+    as_of_open_time_ms: int | float | None = None,
+    as_of_price: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     png, ta = await render_annotated_chart(
         symbol,
@@ -3350,6 +3639,10 @@ async def render_signal_chart(
         exchange=exchange,
         display_hours=display_hours,
         height_scale=height_scale,
+        signal_chart=True,
+        as_of_bar_index=as_of_bar_index,
+        as_of_open_time_ms=as_of_open_time_ms,
+        as_of_price=as_of_price,
     )
     if png is None:
         return None, None

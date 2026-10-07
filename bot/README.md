@@ -36,14 +36,16 @@ cp .env.example .env
 Обязательно:
 
 ```env
-TELEGRAM_TOKEN=ваш_токен_от_BotFather
-TELEGRAM_ADMIN_ID=ваш_telegram_user_id
+ТЕЛЕГРАМ_ТОКЕН=...        # @BotFather
+ТЕЛЕГРАМ_ID_АДМИНА=...    # ваш user id
 ```
 
 Опционально:
 
 ```env
-TELEGRAM_ALERT_CHAT_ID=-1001234567890   # группа/канал для алертов
+ТЕЛЕГРАМ_ЧАТ_АНАЛИЗ=-100...   # WATCH/разборы
+КЛЮЧ_GEMINI=                   # https://aistudio.google.com/apikey
+КЛЮЧ_GROQ=                     # https://console.groq.com/keys
 ```
 
 ### 2. Запуск

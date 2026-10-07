@@ -72,13 +72,13 @@ git clone <your-repo-url>
 cd Bybit_bot
 ```
 
-3. Скопировать `.env.example` в `.env` и отредактировать (указать `TELEGRAM_TOKEN`, `TELEGRAM_ADMIN_ID` и опционально ключи бирж):
+3. Скопировать `.env.example` в `.env` и заполнить (имена на русском, см. шаблон; латиница тоже работает):
 
 ```bash
 cp .env.example .env
-nano .env
-# заполните TELEGRAM_TOKEN и TELEGRAM_ADMIN_ID
 ```
+
+Обязательно: `ТЕЛЕГРАМ_ТОКЕН`, `ТЕЛЕГРАМ_ID_АДМИНА`. ИИ (опционально): [Gemini](https://aistudio.google.com/apikey), [Groq](https://console.groq.com/keys).
 
 4. (Опционально) проверьте `bot/settings.json` после первого запуска — там сохраняются inline-настройки. Можно заранее создать `bot/settings.json`, но не обязательно.
 
@@ -108,9 +108,9 @@ docker compose logs -f bot
 - Ликвидации: в текущей версии реализована простая эвристика (если доступны поля `liquidation`/`cvd` в `additional` — они используются). Для точных данных по ликвидациям рекомендуется платный API (CoinGlass) или парсинг биржевых endpoint'ов, если у биржи есть соответствующие публичные каналы.
 - Если вы хотите добавить MEXC или другие биржи — можно реализовать дополнительный `ExchangeScanner` в `bot/exchanges/` аналогично `binance.py` и `bybit.py`.
 
-### CoinGlass в TA-графиках
+### Поток деривативов в TA-графиках (без CoinGlass по умолчанию)
 
-Добавьте `COINGLASS_API_KEY` в локальный `.env`, чтобы графики TA дополнялись данными CoinGlass API v4: изменением цены и OI, funding, long/short аккаунтов, ликвидациями и taker buy/sell. API key не нужно добавлять в `settings.json` или отправлять в Telegram.
+По умолчанию **PerpFinder + Bybit** (без ключа). CoinGlass: `КЛЮЧ_COINGLASS` в `.env`, кабинет [coinglass.com/account](https://www.coinglass.com/account).
 
 На графике используется единый полноширинный стиль без боковых панелей, RSI и отдельной volume-панели. Поддержка/сопротивление, BOS, sweep, ближайший FVG/order block и краткий блок метрик остаются на цене. Elliott/ABC-разметка отключена в активном TA, гейте и графиках; геометрические фигуры остаются самостоятельными ценовыми паттернами. CoinGlass-данные кэшируются на 30 секунд; при отсутствии ключа, неподдерживаемой паре или ограничениях тарифа ошибка попадёт в журнал, а доступные Bybit-метрики сохраняются. Для некоторых endpoint тариф CoinGlass ограничивает минимальный интервал (Hobbyist — от 4ч, Startup — от 30м); long/short аккаунтов запрашивается на 4ч.
 

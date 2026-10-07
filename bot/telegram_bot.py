@@ -124,6 +124,12 @@ from .signal_quality_gate import (
 from .trade_decision_gate import apply_decision_to_quality_tier, decide_trade_action
 from .bybit_cvd import get_taker_cvd_cache
 from .market_participation import coinglass_breakdown_html, signal_market_metrics
+from .signal_pipeline import (
+    build_signal_alert_caption,
+    merge_alert_caption,
+    should_attach_signal_chart,
+    should_route_pro_analysis,
+)
 from .settings import SettingsManager, clamp_cooldown_seconds
 
 logger = logging.getLogger(__name__)
@@ -197,6 +203,8 @@ class TelegramBot:
         self._last_signal_analysis_time: dict[str, float] = {}
         self._last_send_time: dict[int, float] = {}
         self._minute_send_times: dict[int, list[float]] = {}
+        self._hour_send_times: dict[int, list[float]] = {}
+        self._last_proactive_intel_time: dict[str, float] = {}
         self._unreachable_chats: set[int] = set()
         self._send_lock = asyncio.Lock()
         self._last_symbol_signal_time: dict[str, float] = {}
@@ -209,6 +217,7 @@ class TelegramBot:
         self._manual_ta_last_by_chat: dict[int, dict[str, Any]] = {}
         self._manual_ta_alerts: dict[tuple[int, str, int, str], dict[str, Any]] = {}
         self._manual_ta_muted: dict[tuple[int, str], float] = {}
+        self._manual_ta_replay: dict[tuple[int, str], dict[str, object]] = {}
         self._manual_ta_alert_task: asyncio.Task | None = None
         self._manual_alert_kline_cache = BybitKlineCache(ttl_seconds=15.0)
         self._account_ratio_cache = BybitAccountRatioCache()
@@ -687,6 +696,18 @@ class TelegramBot:
                     settings.telegram_max_per_minute,
                 )
                 return False
+            hour_cap = int(getattr(settings, "telegram_max_per_hour", 0) or 0)
+            if hour_cap > 0:
+                recent_h = [
+                    t for t in self._hour_send_times.get(chat_id, []) if now - t < 3600.0
+                ]
+                if len(recent_h) >= hour_cap:
+                    logger.warning(
+                        "Telegram hourly limit: skip chat %s (%d msg/h)",
+                        chat_id,
+                        hour_cap,
+                    )
+                    return False
 
             last = self._last_send_time.get(chat_id, 0.0)
             wait_for = settings.telegram_min_interval_seconds - (now - last)
@@ -708,6 +729,9 @@ class TelegramBot:
                     bucket = self._minute_send_times.setdefault(chat_id, [])
                     bucket.append(sent_at)
                     self._minute_send_times[chat_id] = [t for t in bucket if sent_at - t < 60.0]
+                    hb = self._hour_send_times.setdefault(chat_id, [])
+                    hb.append(sent_at)
+                    self._hour_send_times[chat_id] = [t for t in hb if sent_at - t < 3600.0]
 
                     return True
                 except RetryAfter as exc:
@@ -1344,6 +1368,80 @@ class TelegramBot:
             is_priority=True,
         )
 
+    async def _dispatch_proactive_intel(
+        self,
+        signal: Signal,
+        ta_result: Any,
+        *,
+        quality_reason: str = "",
+    ) -> bool:
+        settings = self.settings_manager.settings
+        if not getattr(settings, "signal_intel_watch_enabled", False):
+            return False
+        chat_id = self.config.effective_analysis_chat_id
+        if chat_id is None:
+            return False
+        sym = signal.symbol.upper()
+        cd = max(900, int(settings.signal_cooldown_seconds) // 2)
+        now = time.time()
+        if now - self._last_proactive_intel_time.get(sym, 0.0) < cd:
+            return False
+        from .proactive_intel import build_proactive_intel_html
+
+        body = build_proactive_intel_html(
+            signal, ta_result, quality_reason=quality_reason,
+        )
+        keyboard = InlineKeyboardMarkup([
+            self._coinglass_link_buttons(
+                signal.symbol,
+                signal.exchange or "binance",
+                chart_url=signal.link,
+            ),
+        ])
+        sent = False
+        if (
+            getattr(settings, "signal_chart_enabled", True)
+            and getattr(settings, "signal_chart_on_watch", False)
+        ):
+            try:
+                oi_bars = None
+                if self.scanner is not None:
+                    try:
+                        oi_bars = self.scanner.get_five_min_oi_bars(
+                            signal.exchange, signal.symbol,
+                        )
+                    except Exception:
+                        oi_bars = None
+                png, _ta = await asyncio.wait_for(
+                    render_signal_chart(
+                        signal.symbol,
+                        side=signal.side or "long",
+                        hours=settings.signal_chart_hours,
+                        interval_minutes=settings.signal_chart_interval_minutes,
+                        oi_bars=oi_bars,
+                        chart_source=settings.signal_chart_source,
+                        exchange=(signal.exchange or "binance").lower(),
+                        height_scale=float(
+                            getattr(settings, "signal_chart_height_scale", 1.0) or 1.0
+                        ),
+                    ),
+                    timeout=40.0,
+                )
+                if png:
+                    sent = await self._send_chart(
+                        chat_id, png, body, is_priority=False, keyboard=keyboard,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("Proactive intel chart timeout %s", sym)
+            except Exception:
+                logger.exception("Proactive intel chart failed %s", sym)
+        if not sent:
+            sent = await self._send_to_chat(chat_id, body, keyboard, is_priority=False)
+        if sent:
+            self._last_proactive_intel_time[sym] = now
+            logger.info("Proactive intel %s %s → analysis chat", signal.exchange, sym)
+        return sent
+
     async def _dispatch_signal_pro_analysis(
         self,
         signal: Signal,
@@ -1418,6 +1516,12 @@ class TelegramBot:
         if not skip_dedupe and self._bot_notifications_blocked():
             return
         if not skip_dedupe and not self.settings_manager.settings.signals_enabled:
+            return
+        settings = self.settings_manager.settings
+        ex = (signal.exchange or "").lower()
+        if not settings.enabled_bybit and "bybit" in ex:
+            return
+        if not settings.enabled_binance and "binance" in ex:
             return
 
         async with self._get_symbol_dispatch_lock(signal.symbol):
@@ -1546,6 +1650,8 @@ class TelegramBot:
         trade_decision = None
         png: bytes | None = None
         pro_text = ""
+        route_pro = False
+        attach_chart = True
         need_ta = (
             settings.signal_chart_enabled
             or settings.signal_playbook_enabled
@@ -1728,6 +1834,38 @@ class TelegramBot:
                 signal.details["quality_tier"] = quality.tier
                 signal.details["quality_block"] = quality.block_reason
 
+                if ta_result is not None:
+                    from .scenario_report import enrich_ta_scenario_fields
+
+                    ta_result = enrich_ta_scenario_fields(
+                        ta_result,
+                        symbol=signal.symbol,
+                        signal=signal,
+                        signal_side=signal.side,
+                        readiness=readiness,
+                        quality_tier=quality.tier,
+                    )
+
+                intel_only = (
+                    quality.tier == "watch"
+                    and getattr(settings, "signal_intel_watch_enabled", False)
+                    and not getattr(settings, "signal_intel_main_channel", False)
+                    and ta_result is not None
+                    and not skip_dedupe
+                )
+                if intel_only:
+                    await self._dispatch_proactive_intel(
+                        signal,
+                        ta_result,
+                        quality_reason=quality.block_reason or readiness[1] if readiness else "",
+                    )
+                    logger.info(
+                        "Intel-only WATCH %s %s — main channel skipped",
+                        signal.exchange,
+                        signal.symbol,
+                    )
+                    return
+
                 if not (is_vertical or is_impulse or is_trend or is_trend_seed):
                     message = self._format_signal_message(
                         signal,
@@ -1810,6 +1948,29 @@ class TelegramBot:
                 tier_prefix = "👀 <b>WATCH</b> · "
             signal_header = f"{tier_prefix}{message}"
 
+            attach_chart = should_attach_signal_chart(
+                ta_result,
+                quality_tier=quality.tier if quality else None,
+                trade_decision=trade_decision,
+                settings=settings,
+            )
+            if not attach_chart:
+                png = None
+                if want_chart and ta_result is not None:
+                    logger.info(
+                        "Signal %s %s: chart withheld (tier=%s grade=%s)",
+                        signal.exchange,
+                        signal.symbol,
+                        quality.tier if quality else "?",
+                        getattr(ta_result, "setup_grade", ""),
+                    )
+            route_pro = should_route_pro_analysis(
+                ta_result,
+                quality_tier=quality.tier if quality else None,
+                trade_decision=trade_decision,
+                settings=settings,
+            )
+
             ta_caption = ""
             pro_text = ""
             pro_token = ""
@@ -1849,7 +2010,15 @@ class TelegramBot:
                         signal_type=signal.signal_type,
                     )
                     self._store_signal_watch_ctx(signal, ta_result)
-                chart_caption = f"{signal_header}\n\n{ta_caption}" if ta_caption else signal_header
+                chart_caption = build_signal_alert_caption(
+                    signal_header,
+                    ta_result,
+                    symbol=signal.symbol,
+                    quality_tier=quality.tier if quality else None,
+                    quality_html=hot_quality_html if quality else "",
+                    action_line=ta_caption if (quality and quality.tier == "entry") else "",
+                    compact=settings.signal_message_compact,
+                )
                 keyboard = self._signal_keyboard(
                     signal,
                     quality_tier=quality.tier if quality else None,
@@ -1887,7 +2056,52 @@ class TelegramBot:
         if (
             sent_any
             and ta_result is not None
-            and getattr(settings, "signal_coinglass_breakdown_enabled", True)
+            and getattr(settings, "signal_alert_reading_snippet_enabled", True)
+            and not skip_dedupe
+        ):
+            try:
+                from .ai_alert_snippet import format_signal_ai_reading_snippet
+
+                snippet = format_signal_ai_reading_snippet(
+                    ta_result, symbol=signal.symbol,
+                )
+                if snippet and len(snippet) > 40:
+                    await self._send_to_chat(
+                        notify_chat_id, snippet, None, is_priority,
+                    )
+            except Exception:
+                logger.debug("Alert reading snippet failed for %s", signal.symbol, exc_info=True)
+
+        if (
+            sent_any
+            and ta_result is not None
+            and getattr(settings, "signal_alert_llm_validate_enabled", False)
+            and not skip_dedupe
+        ):
+            try:
+                from .ai_alert_validate import run_alert_llm_validate
+
+                llm_review = await run_alert_llm_validate(
+                    api_key=self.config.gemini_api_key,
+                    model=self.config.gemini_model,
+                    ta=ta_result,
+                    symbol=signal.symbol,
+                    signal_side=signal.side or "",
+                    signal_type=signal.signal_type or "",
+                )
+                if llm_review and len(llm_review) > 30:
+                    await self._send_to_chat(
+                        notify_chat_id, llm_review, None, is_priority,
+                    )
+            except Exception:
+                logger.debug(
+                    "Alert LLM validate failed for %s", signal.symbol, exc_info=True,
+                )
+
+        if (
+            sent_any
+            and ta_result is not None
+            and getattr(settings, "signal_coinglass_breakdown_enabled", False)
         ):
             try:
                 breakdown = coinglass_breakdown_html(
@@ -1909,7 +2123,7 @@ class TelegramBot:
         if (
             sent_any
             and ta_result is not None
-            and settings.signal_pro_to_analysis_chat
+            and route_pro
             and not skip_dedupe
         ):
             try:
@@ -2879,6 +3093,9 @@ class TelegramBot:
             return
         watch = upd.watch
         settings = self.settings_manager.settings
+        mode = str(getattr(settings, "scenario_watch_mode", "off") or "off").lower()
+        if not getattr(settings, "scenario_watch_push_enabled", False) or mode == "off":
+            return
         notify_chat_id = self.config.notification_chat_id
 
         ta_fresh = None
@@ -2911,7 +3128,25 @@ class TelegramBot:
             target_hints=list(getattr(watch, "target_hints", ()) or []),
             user_intent=getattr(watch, "user_intent", "") or "",
         )
-        if upd.kind in {"entry_short", "entry_long"}:
+        if mode == "context" and upd.kind in {"entry_short", "entry_long"}:
+            from .scenario_context import format_scenario_context_html
+
+            side_note = (
+                "Уровень для short пробит — проверьте TA, не автомат-вход."
+                if upd.kind == "entry_short"
+                else "Уровень для long пробит — проверьте TA, не автомат-вход."
+            )
+            message = format_scenario_context_html(
+                symbol=watch.symbol,
+                exchange=watch.exchange,
+                note=side_note,
+                price=upd.price,
+                ta=ta_fresh,
+            )
+            notify_chat_id = self.config.effective_analysis_chat_id or notify_chat_id
+        elif upd.kind in {"entry_short", "entry_long"} and mode != "legacy":
+            return
+        elif upd.kind in {"entry_short", "entry_long"}:
             label = "SHORT" if upd.kind == "entry_short" else "LONG"
             prefix = "🎯 <b>ГОТОВО · ENTRY</b>" if watch.is_user_watch else "🎯 <b>TRIGGER · ENTRY</b>"
             message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
@@ -2950,26 +3185,49 @@ class TelegramBot:
                     timeout=35.0,
                 )
                 if ta_fresh is not None:
-                    message = format_scenario_update_html(
-                        symbol=watch.symbol,
-                        exchange=watch.exchange,
-                        update_kind=upd.kind,
-                        price=upd.price,
-                        move_pct=upd.move_pct,
-                        reference_price=upd.reference_price,
-                        correction_target=watch.correction_target,
-                        breakdown_level=watch.breakdown_level,
-                        breakout_level=watch.breakout_level,
-                        ta=ta_fresh,
-                        stop_hint=getattr(watch, "stop_hint", None),
-                        target_hints=list(getattr(watch, "target_hints", ()) or []),
-                        user_intent=getattr(watch, "user_intent", "") or "",
-                    )
-                    if upd.kind in {"entry_short", "entry_long"}:
-                        label = "SHORT" if upd.kind == "entry_short" else "LONG"
-                        prefix = "🎯 <b>ГОТОВО · ENTRY</b>" if watch.is_user_watch else "🎯 <b>TRIGGER · ENTRY</b>"
-                        message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
-                    followup = ta_scenario_followup_caption_html(ta_fresh, upd.kind, watch.side)
+                    if mode == "context" and upd.kind in {"entry_short", "entry_long"}:
+                        from .scenario_context import format_scenario_context_html
+
+                        side_note = (
+                            "Уровень для short пробит — проверьте TA, не автомат-вход."
+                            if upd.kind == "entry_short"
+                            else "Уровень для long пробит — проверьте TA, не автомат-вход."
+                        )
+                        message = format_scenario_context_html(
+                            symbol=watch.symbol,
+                            exchange=watch.exchange,
+                            note=side_note,
+                            price=upd.price,
+                            ta=ta_fresh,
+                        )
+                        followup = ""
+                    else:
+                        message = format_scenario_update_html(
+                            symbol=watch.symbol,
+                            exchange=watch.exchange,
+                            update_kind=upd.kind,
+                            price=upd.price,
+                            move_pct=upd.move_pct,
+                            reference_price=upd.reference_price,
+                            correction_target=watch.correction_target,
+                            breakdown_level=watch.breakdown_level,
+                            breakout_level=watch.breakout_level,
+                            ta=ta_fresh,
+                            stop_hint=getattr(watch, "stop_hint", None),
+                            target_hints=list(getattr(watch, "target_hints", ()) or []),
+                            user_intent=getattr(watch, "user_intent", "") or "",
+                        )
+                        if upd.kind in {"entry_short", "entry_long"}:
+                            label = "SHORT" if upd.kind == "entry_short" else "LONG"
+                            prefix = (
+                                "🎯 <b>ГОТОВО · ENTRY</b>"
+                                if watch.is_user_watch
+                                else "🎯 <b>TRIGGER · ENTRY</b>"
+                            )
+                            message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
+                        followup = ta_scenario_followup_caption_html(
+                            ta_fresh, upd.kind, watch.side
+                        )
                     caption = f"{message}\n{followup}" if followup else message
                 else:
                     caption = message
@@ -3011,7 +3269,10 @@ class TelegramBot:
         symbol = parts[3].upper()
         settings = self.settings_manager.settings
         if not settings.scenario_watch_enabled:
-            await query.answer("Сценарии выключены в настройках", show_alert=True)
+            await query.answer(
+                "Слежка сценариев отключена — используйте manual TA и ENTRY из основного канала.",
+                show_alert=True,
+            )
             return
 
         if action == "cancel":
@@ -3346,10 +3607,20 @@ class TelegramBot:
         notify_chat_id: int | None = None,
         photo_file_id: str | None = None,
         chart_source: str | None = None,
+        as_of_bar_index: int | None = None,
+        as_of_open_time_ms: int | float | None = None,
+        as_of_price: float | None = None,
     ) -> None:
         chat = update.effective_chat
         if chat is None:
             return
+
+        if chat is not None and as_of_bar_index is None and as_of_price is None and as_of_open_time_ms is None:
+            pending = self._manual_ta_replay.pop((chat.id, symbol.upper()), None)
+            if isinstance(pending, dict):
+                as_of_bar_index = pending.get("bar_index")  # type: ignore[assignment]
+                as_of_price = pending.get("price")  # type: ignore[assignment]
+                as_of_open_time_ms = pending.get("open_time_ms")  # type: ignore[assignment]
 
         target_chat_id = deliver_chat_id if deliver_chat_id is not None else chat.id
         from_wizard = deliver_chat_id is not None and notify_chat_id is not None
@@ -3401,6 +3672,9 @@ class TelegramBot:
                     exchange="bybit",
                     liq_context=liq_context,
                     market_metrics=await self._fetch_manual_ta_market_details(symbol),
+                    as_of_bar_index=as_of_bar_index,
+                    as_of_open_time_ms=as_of_open_time_ms,
+                    as_of_price=as_of_price,
                 ),
                 timeout=50.0,
             )
@@ -3428,6 +3702,10 @@ class TelegramBot:
                 await update.message.reply_text(err)
             return
 
+        from .scenario_report import enrich_ta_scenario_fields
+
+        ta = enrich_ta_scenario_fields(ta, symbol=symbol, full_html=True)
+
         if photo_file_id and self.application is not None:
             ref_caption = f"📷 Референс · <b>{symbol}</b> · {interval_minutes}m"
             if from_wizard and update.effective_user:
@@ -3444,7 +3722,7 @@ class TelegramBot:
 
         caption = (
             f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
-            f"{ta_manual_detailed_html(ta)}"
+            f"{ta_manual_detailed_html(ta, symbol=symbol)}"
         )
         try:
             caption += await self._manual_ta_flow_caption_block(symbol, ta)
@@ -3737,23 +4015,36 @@ class TelegramBot:
             )
             return
 
-        symbol, interval = parse_manual_ta_input(text)
+        from .bar_replay import parse_replay_from_text
+
+        cleaned, bar_idx, replay_price, open_ms = parse_replay_from_text(text)
+        symbol, interval = parse_manual_ta_input(cleaned)
         if not symbol:
             await update.message.reply_text(
-                "Не распознал тикер. Пример: <code>GRASSUSDT</code> или <code>GRASS 10m</code>",
+                "Не распознал тикер. Пример: <code>GRASSUSDT</code> или <code>GRASS 10m @0.034</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        if chat_id and any(x is not None for x in (bar_idx, replay_price, open_ms)):
+            self._manual_ta_replay[(chat_id, symbol.upper())] = {
+                "bar_index": bar_idx,
+                "price": replay_price,
+                "open_time_ms": open_ms,
+            }
+        replay_hint = ""
+        if bar_idx is not None or replay_price is not None or open_ms is not None:
+            replay_hint = "\n⏪ <i>Replay — срез по метке, после выбора графика.</i>"
         if interval in MANUAL_TA_TIMEFRAMES:
             await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
+                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:{replay_hint}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
             )
         else:
             interval = 5
             await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:",
+                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:{replay_hint}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
             )

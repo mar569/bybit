@@ -61,6 +61,7 @@ class SmcContext:
     ltf_structure: str = "unknown"
     ltf_structure_label: str = ""
     structure_break: bool = False
+    structure_break_kind: str = "none"  # bos | mss | none
     structure_break_level: float | None = None
     structure_break_direction: str = "none"
     equilibrium_50: float | None = None
@@ -142,17 +143,18 @@ def detect_liquidity_levels(
     if not bars:
         return []
     levels: list[LiquidityLevel] = []
-    bars_per_day = max(12, int(24 * 60 / max(interval_minutes, 1)))
-    day_seg = bars[-min(bars_per_day, len(bars)):]
-    day_high = max(b.high for b in day_seg)
-    day_low = min(b.low for b in day_seg)
-    levels.append(LiquidityLevel(day_high, "daily_high", "макс. дня"))
-    levels.append(LiquidityLevel(day_low, "daily_low", "мин. дня"))
+    from .chart_reference_levels import session_reference_levels
 
-    week_seg = bars[-min(bars_per_day * 7, len(bars)):]
-    if len(week_seg) > bars_per_day:
-        levels.append(LiquidityLevel(max(b.high for b in week_seg), "weekly_high", "макс. недели"))
-        levels.append(LiquidityLevel(min(b.low for b in week_seg), "weekly_low", "мин. недели"))
+    for ref in session_reference_levels(bars):
+        if ref.kind in {
+            "daily_high",
+            "daily_low",
+            "prev_daily_high",
+            "prev_daily_low",
+            "weekly_high",
+            "weekly_low",
+        }:
+            levels.append(LiquidityLevel(ref.price, ref.kind, ref.label))
 
     highs = [s for s in swings if s.kind == "high"]
     lows = [s for s in swings if s.kind == "low"]
@@ -487,8 +489,29 @@ def analyze_smc(
             active_fvg = True
             break
 
+    break_kind = "none"
+    if bos:
+        if (direction == "long" and htf_struct == "bearish") or (
+            direction == "short" and htf_struct == "bullish"
+        ):
+            break_kind = "mss"
+        elif sweep:
+            break_kind = "mss"
+        else:
+            break_kind = "bos"
+        for m in markers:
+            if getattr(m, "kind", "") == "bos":
+                markers[markers.index(m)] = SmcMarker(
+                    index=m.index,
+                    price=m.price,
+                    kind="mss" if break_kind == "mss" else "bos",
+                    label="MSS" if break_kind == "mss" else "BOS",
+                    direction=m.direction,
+                )
+                break
+
     checklist: list[tuple[str, bool]] = [
-        ("Слом структуры (BOS)", bos),
+        (f"Слом структуры ({break_kind.upper()})" if break_kind != "none" else "Слом структуры (BOS)", bos),
         ("Откат в зону дисконта", discount),
         ("Расширение структуры", expansion),
         ("Свип ликвидности", sweep),
@@ -543,6 +566,7 @@ def analyze_smc(
         ltf_structure=ltf_struct,
         ltf_structure_label=ltf_label,
         structure_break=bos,
+        structure_break_kind=break_kind,
         structure_break_level=reversal.get("bos_level"),
         structure_break_direction=direction if bos else "none",
         equilibrium_50=reversal.get("equilibrium"),

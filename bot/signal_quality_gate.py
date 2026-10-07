@@ -175,6 +175,21 @@ def _outcome_blocks_fade(
     return True, f"тип {signal_type} winrate {winrate:.0f}% ({samples} исх.) — слабый edge"
 
 
+def _cap_tier_for_signal(
+    tier: str,
+    signal: Signal,
+    ta: TAAnalysisResult | None,
+) -> tuple[str, str | None]:
+    from .scenario_report import cap_quality_for_scanner_event
+
+    capped = cap_quality_for_scanner_event(signal.signal_type, tier, ta)
+    if capped == tier:
+        return tier, None
+    if capped == "watch":
+        return capped, "событие сканера — ждём setup B+ и уровень"
+    return capped, None
+
+
 def assess_signal_quality(
     signal: Signal,
     *,
@@ -209,8 +224,14 @@ def assess_signal_quality(
 
     if not getattr(settings, "signal_quality_gate_enabled", True):
         ready = bool(readiness and readiness[0])
+        tier, cap_reason = _cap_tier_for_signal(
+            "entry" if ready else "watch",
+            signal,
+            ta,
+        )
         return SignalQualityResult(
-            tier="entry" if ready else "watch",
+            tier=tier,
+            block_reason=cap_reason or "",
             flow_label=flow_label,
             cvd_ratio=cvd_ratio,
             cvd_detail=cvd_detail,
@@ -302,7 +323,15 @@ def assess_signal_quality(
             warnings.append(btc_msg)
 
     if ta is not None:
+        from .human_trade_brief import scanner_side_blocked_by_scenario
         from .ta_analysis import ta_conflicts_with_signal, ta_opposes_signal_direction
+
+        scen_block = scanner_side_blocked_by_scenario(ta, side)
+        if scen_block:
+            if aggressive:
+                warnings.append(scen_block[:120])
+            else:
+                hard_blocks.append(scen_block[:120])
 
         if ta_conflicts_with_signal(ta, signal.side):
             hard_blocks.append("сканер vs TA — не входить по алерту")
@@ -334,45 +363,39 @@ def assess_signal_quality(
             cvd_detail=cvd_detail,
         )
 
-    ready = bool(readiness and readiness[0])
-    if ready and not warnings:
+    def _finish(tier: str, *, block_reason: str = "") -> SignalQualityResult:
+        tier, cap_reason = _cap_tier_for_signal(tier, signal, ta)
+        reason = block_reason
+        if cap_reason and tier != "entry":
+            reason = cap_reason if not reason else f"{reason} · {cap_reason}"
         return SignalQualityResult(
-            tier="entry",
+            tier=tier,
+            block_reason=reason,
             warnings=tuple(warnings),
             flow_label=flow_label,
             cvd_ratio=cvd_ratio,
             cvd_detail=cvd_detail,
         )
 
+    ready = bool(readiness and readiness[0])
+    if ready and not warnings:
+        return _finish("entry")
+
     if ready and len(warnings) <= (2 if aggressive else 1):
-        return SignalQualityResult(
-            tier="entry",
-            warnings=tuple(warnings),
-            flow_label=flow_label,
-            cvd_ratio=cvd_ratio,
-            cvd_detail=cvd_detail,
-        )
+        return _finish("entry")
 
     allow = {str(x).lower() for x in (getattr(settings, "signal_watch_allow_types", ()) or ())}
     st = (signal.signal_type or "").lower()
     watch_ok = bool(getattr(settings, "signal_watch_mode_enabled", False)) or st in allow
     if watch_ok:
-        return SignalQualityResult(
-            tier="watch",
+        return _finish(
+            "watch",
             block_reason=readiness[1] if readiness and not readiness[0] else "ждать подтверждение",
-            warnings=tuple(warnings),
-            flow_label=flow_label,
-            cvd_ratio=cvd_ratio,
-            cvd_detail=cvd_detail,
         )
 
-    return SignalQualityResult(
-        tier="skip",
+    return _finish(
+        "skip",
         block_reason=readiness[1] if readiness else "не готов к входу",
-        warnings=tuple(warnings),
-        flow_label=flow_label,
-        cvd_ratio=cvd_ratio,
-        cvd_detail=cvd_detail,
     )
 
 

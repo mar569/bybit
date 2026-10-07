@@ -592,6 +592,12 @@ def draw_pro_chart_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     """
     draw_swing_liquidity_marks(ax, bars, ta)
     draw_sweep_circles(ax, bars, ta)
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+    if is_wait:
+        return "default"
+    if getattr(ta, "reading_draw_both_forecasts", True) is False:
+        if not getattr(ta, "reading_live_scenario", ""):
+            return "default"
     if draw_trend_dump_path(ax, bars, ta):
         return "trend_dump"
     if draw_trend_dump_risk_path(ax, bars, ta):

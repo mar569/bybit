@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pdfvision": {
+      "command": "C:\\Users\\User\\AppData\\Roaming\\npm\\pdfvision.cmd",
+      "args": ["mcp"]
+    }
+  }
+}

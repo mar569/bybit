@@ -207,6 +207,31 @@ class TAAnalysisResult:
     narrative_plain: str = ""
     narrative_plan: str = ""
     narrative_basis: str = ""
+    reading_narrative: str = ""
+    reading_present: list[str] = field(default_factory=list)
+    reading_absent: list[str] = field(default_factory=list)
+    reading_live_scenario: str = ""
+    reading_seek_label: str = ""
+    reading_tf_stack: str = ""
+    reading_draw_both_forecasts: bool = False
+    reading_accept_pattern: bool = False
+    reading_accept_htf_pattern: bool = False
+    reading_accept_channel: bool = False
+    reading_accept_fib: bool = False
+    reading_accept_ob: bool = False
+    scenario_entry_mode: str = ""
+    scenario_report_html: str = ""
+    htf_ltf_plan_html: str = ""
+    volume_poc_label: str = ""
+    entry_quality: str = ""
+    market_state_summary: str = ""
+    scenario_engine_id: str = ""
+    scenario_engine_quality: str = ""
+    scenario_engine_action: str = ""
+    verdict_scenario_note: str = ""
+    human_trade_brief: str = ""
+    human_trade_brief_html: str = ""
+    bar_replay_label: str = ""
     liq_cascade_active: bool = False
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
@@ -1120,6 +1145,16 @@ def btc_alt_spread_pct(btc_bars: list[KlineBar] | None, alt_bars: list[KlineBar]
     btc_chg = (btc_bars[-1].close - btc_bars[-13].close) / btc_bars[-13].close * 100.0
     alt_chg = (alt_bars[-1].close - alt_bars[-13].close) / alt_bars[-13].close * 100.0
     return alt_chg - btc_chg
+
+
+def _btc_regime_metrics(btc_bars: list[KlineBar] | None) -> dict[str, object]:
+    from .btc_regime import btc_regime_label
+
+    regime, chg, note = btc_regime_label(btc_bars)
+    out: dict[str, object] = {"btc_regime": regime, "btc_regime_chg_pct": chg}
+    if note:
+        out["btc_regime_note_ru"] = note
+    return out
 
 
 def detect_recent_momentum(bars: list[KlineBar], *, lookback: int = 8) -> tuple[str, float]:
@@ -2268,6 +2303,7 @@ def run_ta_analysis(
     htf_bars: list[KlineBar] | None = None,
     mid_bars: list[KlineBar] | None = None,
     macro_bars: list[KlineBar] | None = None,
+    weekly_bars: list[KlineBar] | None = None,
     symbol: str = "",
     hours: int = 5,
     invalidation_price: float | None = None,
@@ -2282,7 +2318,32 @@ def run_ta_analysis(
     macro_interval_minutes: int = 240,
     pattern_detection_enabled: bool = True,
     pattern_min_confidence: float = 0.55,
+    as_of_bar_index: int | None = None,
+    as_of_open_time_ms: int | float | None = None,
+    as_of_price: float | None = None,
 ) -> TAAnalysisResult:
+    bar_replay_label = ""
+    if bars and any(x is not None for x in (as_of_bar_index, as_of_open_time_ms, as_of_price)):
+        from .bar_replay import resolve_as_of_index, trim_bars, trim_bars_to_time
+
+        sel = resolve_as_of_index(
+            bars,
+            bar_index=as_of_bar_index,
+            open_time_ms=as_of_open_time_ms,
+            price=as_of_price,
+        )
+        if sel is not None:
+            bar_replay_label = sel.label_ru
+            cutoff = sel.open_time_ms
+            bars = trim_bars(bars, sel.end_index)
+            mid_bars = trim_bars_to_time(list(mid_bars) if mid_bars else None, cutoff)
+            htf_bars = trim_bars_to_time(list(htf_bars) if htf_bars else None, cutoff)
+            macro_bars = trim_bars_to_time(list(macro_bars) if macro_bars else None, cutoff)
+            weekly_bars = trim_bars_to_time(list(weekly_bars) if weekly_bars else None, cutoff)
+            if history_bars:
+                history_bars = trim_bars(list(history_bars), sel.end_index)
+            if btc_bars:
+                btc_bars = trim_bars_to_time(list(btc_bars), cutoff)
     oi_bars = oi_bars or []
     volume_participation = summarize_volume_participation(bars)
     if htf_bars:
@@ -2363,6 +2424,28 @@ def run_ta_analysis(
         interval_minutes=interval_minutes,
         current_price=float(pattern_bars[-1].close) if pattern_bars else 0.0,
     )
+
+    import os
+    from .market_reading import (
+        analyze_market_reading,
+        apply_reading_chart_gates,
+        apply_reading_to_verdict,
+        trim_forecast_paths_for_reading,
+    )
+
+    evidence_reading = os.getenv("EVIDENCE_READING_ENABLED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    market_reading = None
+    volume_poc_label = ""
+    if bars and len(bars) >= 12:
+        from .volume_profile import volume_poc_price as _vol_poc
+
+        _, volume_poc_label = _vol_poc(bars)
+
     rulers = compute_rulers(bars, swings)
     structure = classify_structure(swings)
     key_levels = build_key_levels(bars, levels, zones)
@@ -2416,6 +2499,78 @@ def run_ta_analysis(
         smc=smc,
         current=bars[-1].close if bars else None,
     )
+    if evidence_reading:
+        mid_swings = find_swing_points(mid_bars) if mid_bars else None
+        htf_swings = find_swing_points(htf_bars) if htf_bars else None
+        macro_swings = find_swing_points(macro_bars) if macro_bars else None
+        weekly_swings = find_swing_points(weekly_bars) if weekly_bars else None
+        market_reading = analyze_market_reading(
+            bars,
+            swings,
+            mid_bars=mid_bars,
+            mid_swings=mid_swings,
+            htf_bars=htf_bars,
+            htf_swings=htf_swings,
+            macro_bars=macro_bars,
+            macro_swings=macro_swings,
+            weekly_bars=weekly_bars,
+            weekly_swings=weekly_swings,
+            oi_bars=oi_bars,
+            pattern=primary_chart_pattern,
+            htf_pattern=primary_htf_chart_pattern,
+            channel=channel,
+            smc=smc,
+            wave=wave if wave.leg else None,
+            interval_minutes=interval_minutes,
+            mid_interval_minutes=mid_interval_minutes,
+            htf_interval_minutes=htf_interval_minutes,
+            macro_interval_minutes=macro_interval_minutes,
+            current=(bars[-1].close if bars else None),
+            symbol=symbol,
+            cvd_ratio=cvd_ratio,
+        )
+        (
+            chart_patterns,
+            primary_chart_pattern,
+            htf_chart_patterns,
+            primary_htf_chart_pattern,
+            channel,
+        ) = apply_reading_chart_gates(
+            chart_patterns=chart_patterns,
+            primary_chart_pattern=primary_chart_pattern,
+            htf_chart_patterns=htf_chart_patterns,
+            primary_htf_chart_pattern=primary_htf_chart_pattern,
+            channel=channel,
+            reading=market_reading,
+        )
+        from dataclasses import replace as _reading_replace
+        if volume_poc_label:
+            present = list(market_reading.present)
+            if volume_poc_label not in " ".join(present):
+                present.append(volume_poc_label[:90])
+            market_reading = _reading_replace(market_reading, present=present[:10])
+        if wave and getattr(wave, "fib_status", ""):
+            from .wave_structure import FIB_STATUS_READY
+
+            if wave.fib_status != FIB_STATUS_READY:
+                absent = list(market_reading.absent)
+                reason = (getattr(wave, "fib_reject_reason", "") or wave.fib_status)[:90]
+                if reason and reason not in absent:
+                    absent.append(f"Fib: {reason}")
+                market_reading = _reading_replace(
+                    market_reading,
+                    accept_fib=False,
+                    absent=absent[:10],
+                )
+        if not market_reading.accept_pattern and pattern_foresight.active:
+            pattern_foresight = build_pattern_foresight(
+                chart_patterns,
+                htf_patterns=htf_chart_patterns,
+                primary=primary_chart_pattern,
+                atr=_pat_atr,
+                interval_minutes=interval_minutes,
+                current_price=float(bars[-1].close) if bars else 0.0,
+            )
     ms = analyze_market_structure(bars, oi_bars, is_long=is_long, hours=hours)
     btc_ctx = ""
     btc_spread: float | None = None
@@ -2861,9 +3016,15 @@ def run_ta_analysis(
 
     primary_scenario = ""
     if post_pump and candle_compression:
-        primary_scenario = (
-            "сжатие после пампа — два сценария: пробой вверх ИЛИ слив к Fib/имбалансам"
-        )
+        if market_reading is not None and not market_reading.draw_both_forecasts:
+            primary_scenario = (
+                market_reading.seek_label
+                or "сжатие после пампа — один сценарий по структуре, ждать close за range"
+            )
+        else:
+            primary_scenario = (
+                "сжатие после пампа — два сценария: пробой вверх ИЛИ слив к Fib/имбалансам"
+            )
     elif post_pump:
         primary_scenario = "консолидация после пампа — пробой границ локального range"
     elif verdict == "LONG" and targets:
@@ -2996,6 +3157,30 @@ def run_ta_analysis(
         momentum=momentum,
         drawdown_from_high_pct=ms.drawdown_from_high_pct,
     )
+    if market_reading is not None:
+        verdict, conf, reason = apply_reading_to_verdict(
+            verdict=verdict,
+            conf=conf,
+            reason=reason,
+            reading=market_reading,
+        )
+        from .blowoff_squeeze import apply_blowoff_squeeze_context
+
+        market_reading, verdict, conf, reason, action_priority = apply_blowoff_squeeze_context(
+            market_reading,
+            bars=bars,
+            swings=swings,
+            verdict=verdict,
+            conf=conf,
+            reason=reason,
+            action_priority=action_priority,
+            momentum_pct=float(momentum_pct or 0),
+            range_position=float(ms.range_position or 0.5),
+            drawdown_from_high_pct=float(ms.drawdown_from_high_pct or 0),
+            rsi_div=rsi_div,
+            liq_context=liq_context,
+            market_metrics=market_metrics,
+        )
     # PRO: WAIT при смешанном потоке — не рисовать 9/10 как «готовый вход»
     if verdict == "WAIT" and abs(int(flow.continuation) - int(flow.correction)) < 12:
         conf = min(int(conf), 7)
@@ -3030,7 +3215,17 @@ def run_ta_analysis(
         flow=flow,
         compression=candle_compression,
     )
-    if pattern_foresight.active:
+    if market_reading is not None:
+        correction_path, continuation_path = trim_forecast_paths_for_reading(
+            verdict=verdict,
+            reading=market_reading,
+            correction_path=correction_path,
+            continuation_path=continuation_path,
+            action_priority=action_priority,
+        )
+    if pattern_foresight.active and (
+        market_reading is None or market_reading.accept_pattern
+    ):
         pf_bit = (
             f"Фигура {pattern_foresight.horizon_hours:.0f}ч: {pattern_foresight.summary}"
         )
@@ -3068,8 +3263,117 @@ def run_ta_analysis(
         narrative_basis = (
             f"{narrative_basis}<br><b>Участие:</b> {participation_summary}"
         )
+    if market_reading is not None:
+        from .narrative_report import format_reading_block_html
 
-    return TAAnalysisResult(
+        reading_stub = TAAnalysisResult(
+            reading_narrative=market_reading.narrative,
+            reading_present=list(market_reading.present),
+            reading_absent=list(market_reading.absent),
+            reading_live_scenario=market_reading.live_scenario,
+            reading_seek_label=market_reading.seek_label,
+        )
+        reading_block = format_reading_block_html(reading_stub)
+        if reading_block:
+            narrative_basis = f"{reading_block}<br><br>{narrative_basis}" if narrative_basis else reading_block
+            if not narrative_plain:
+                narrative_plain = market_reading.narrative
+
+    from dataclasses import replace as _dc_replace
+    from .scenario_report import build_scenario_report
+    from .wave_structure import FIB_STATUS_READY
+
+    market_state_obj = None
+    if evidence_reading and bars:
+        from .fib_entry_rules import fib_plan_to_dict
+        from .market_state import build_market_state, merge_market_state_into_reading
+
+        _accept_fib_pre = (
+            market_reading.accept_fib if market_reading else True
+        )
+        market_state_obj = build_market_state(
+            symbol=symbol or "",
+            bars=bars,
+            swings=swings,
+            smc=smc,
+            wave=wave if wave.leg else None,
+            weekly_bars=weekly_bars,
+            macro_bars=macro_bars,
+            htf_bars=htf_bars,
+            weekly_swings=weekly_swings if weekly_bars else None,
+            macro_swings=macro_swings if macro_bars else None,
+            htf_swings=htf_swings if htf_bars else None,
+            oi_bars=oi_bars,
+            reading_divergence=(
+                market_reading.divergence if market_reading else None
+            ),
+            channel=channel,
+            breakout_level=breakout,
+            breakdown_level=breakdown,
+            structure_label=structure,
+            post_pump=post_pump,
+            post_dump=ms.phase == "impulse_down" and momentum_pct < -2.0,
+            candle_compression=candle_compression,
+            range_position=ms.range_position,
+            btc_bars=btc_bars,
+            verdict=verdict,
+            reading_accept_fib=_accept_fib_pre,
+            flow_continuation=flow.continuation,
+            flow_correction=flow.correction,
+            accept_pattern=(
+                market_reading.accept_pattern if market_reading else True
+            ),
+        )
+        if market_state_obj.exhaustion.active and market_state_obj.exhaustion.block_continuation:
+            if verdict == "LONG":
+                verdict = "WAIT"
+                reason = (reason + " · exhaustion: слабое участие на хае").strip(" ·")
+        if market_reading is not None:
+            market_reading = merge_market_state_into_reading(
+                market_reading, market_state_obj
+            )
+
+    verdict_scenario_note = ""
+    if market_state_obj is not None:
+        from .human_trade_brief import reconcile_verdict_with_scenario
+
+        verdict, conf, reason, verdict_scenario_note = reconcile_verdict_with_scenario(
+            verdict=verdict,
+            confidence=conf,
+            reason=reason,
+            scenario=market_state_obj.scenario,
+            methodology_grade=market_state_obj.methodology_grade,
+            setup_grade=setup.grade,
+            setup_score=setup.score,
+        )
+
+    _out_absent = list(market_reading.absent) if market_reading else []
+    _fib_ok = (market_reading.accept_fib if market_reading else True) and (
+        not getattr(wave, "fib_status", "") or wave.fib_status == FIB_STATUS_READY
+    )
+    if not _fib_ok:
+        fib_note = (
+            f"Fib: {(getattr(wave, 'fib_reject_reason', '') or getattr(wave, 'fib_status', ''))[:90]}"
+        )
+        if fib_note and fib_note not in " · ".join(_out_absent):
+            _out_absent.append(fib_note)
+
+    if market_state_obj is not None:
+        from .setup_confluence import _grade
+
+        if market_state_obj.smc_checklist.ready:
+            setup.score = min(100, setup.score + 14)
+            setup.factors = list(setup.factors) + ["SMC PDF: свип+BOS/MSS+Fib+OB"]
+        if market_state_obj.entry_quality == "ideal":
+            setup.score = min(100, setup.score + 10)
+        elif market_state_obj.entry_quality == "good":
+            setup.score = min(100, setup.score + 5)
+        if market_state_obj.exhaustion.active:
+            setup.score = max(0, setup.score - 10)
+        setup.grade = _grade(setup.score)
+        setup.label_ru = f"сетап {setup.grade} · {setup.side.upper()} · {setup.score}/100"
+
+    _base = TAAnalysisResult(
         swings=swings,
         levels=levels,
         trend_lines=trend_lines,
@@ -3138,6 +3442,22 @@ def run_ta_analysis(
         narrative_plain=narrative_plain,
         narrative_plan=narrative_plan,
         narrative_basis=narrative_basis,
+        reading_narrative=market_reading.narrative if market_reading else "",
+        reading_present=list(market_reading.present) if market_reading else [],
+        reading_absent=_out_absent[:10],
+        reading_live_scenario=market_reading.live_scenario if market_reading else "",
+        reading_seek_label=market_reading.seek_label if market_reading else "",
+        reading_tf_stack=market_reading.tf_stack if market_reading else "",
+        reading_draw_both_forecasts=(
+            market_reading.draw_both_forecasts if market_reading else False
+        ),
+        reading_accept_pattern=market_reading.accept_pattern if market_reading else True,
+        reading_accept_htf_pattern=(
+            market_reading.accept_htf_pattern if market_reading else True
+        ),
+        reading_accept_channel=market_reading.accept_channel if market_reading else True,
+        reading_accept_fib=_fib_ok,
+        reading_accept_ob=market_reading.accept_ob if market_reading else True,
         liq_cascade_active=liq_cascade.active and verdict == "SHORT",
         liq_cascade_note=liq_cascade.note if liq_cascade.active else "",
         liq_magnet_bias=liq_magnet.bias,
@@ -3166,14 +3486,105 @@ def run_ta_analysis(
             else None
         ),
         market_participation_lines=participation_lines,
-        market_metrics=dict(market_metrics or {}),
-        fib_levels=list(wave.chart_fib_levels),
+        market_metrics={
+            **dict(market_metrics or {}),
+                    **({"symbol": (symbol or "").upper()} if symbol else {}),
+                    **(
+                        _btc_regime_metrics(btc_bars)
+                        if btc_bars
+                        else {}
+                    ),
+            **(
+                {
+                    "pdf_zones": market_state_obj.zones_for_chart(
+                        float(bars[-1].close) if bars else None
+                    ),
+                    "retests": [
+                        {
+                            "kind": r.kind,
+                            "quality": r.quality,
+                            "label": r.label_ru,
+                            "price": r.price,
+                        }
+                        for r in market_state_obj.retests[:4]
+                    ],
+                    "methodology_weights": (
+                        market_state_obj.methodology.to_dict()
+                        if market_state_obj.methodology
+                        else {}
+                    ),
+                    **(
+                        {
+                            "scenario_engine": {
+                                "id": market_state_obj.scenario.scenario_id,
+                                "quality": market_state_obj.scenario.quality,
+                                "title": market_state_obj.scenario.title_ru,
+                                "action": market_state_obj.scenario.action,
+                            },
+                        }
+                        if market_state_obj.scenario
+                        else {}
+                    ),
+                    **(
+                        {"fib_plan": fib_plan_to_dict(market_state_obj.fib)}
+                        if market_state_obj.fib
+                        else {}
+                    ),
+                    **(
+                        {
+                            "touch_compression": {
+                                "active": True,
+                                "touches": market_state_obj.touch_compression.touches,
+                                "level": market_state_obj.touch_compression.level,
+                                "label": market_state_obj.touch_compression.label_ru,
+                            },
+                        }
+                        if market_state_obj.touch_compression
+                        else {}
+                    ),
+                }
+                if market_state_obj
+                else {}
+            ),
+        },
+        scenario_engine_quality=(
+            market_state_obj.scenario.quality
+            if market_state_obj and market_state_obj.scenario
+            else (
+                market_state_obj.methodology_grade
+                if market_state_obj and market_state_obj.methodology_grade
+                else ""
+            )
+        ),
+        entry_quality=market_state_obj.entry_quality if market_state_obj else "",
+        market_state_summary=market_state_obj.summary_ru if market_state_obj else "",
+        scenario_engine_id=(
+            market_state_obj.scenario.scenario_id
+            if market_state_obj and market_state_obj.scenario
+            else ""
+        ),
+        scenario_engine_action=(
+            market_state_obj.scenario.action
+            if market_state_obj and market_state_obj.scenario
+            else ""
+        ),
+        verdict_scenario_note=verdict_scenario_note,
+        bar_replay_label=bar_replay_label,
+        fib_levels=(
+            list(wave.chart_fib_levels)
+            if (market_reading is None or market_reading.accept_fib) and wave.leg
+            else []
+        ),
         wave_phase=wave.wave_phase if wave.leg else "",
         wave_bias=wave.wave_bias or "neutral",
         wave_confidence=wave.confidence if wave.leg else 0,
         wave_leg_start=wave.leg.start_price if wave.leg else None,
         wave_leg_end=wave.leg.end_price if wave.leg else None,
-        wave_has_confluence=bool(wave.has_confluence) if wave.leg else False,
+        wave_has_confluence=(
+            bool(wave.has_confluence)
+            if wave.leg and (market_reading is None or market_reading.accept_fib)
+            else False
+        ),
         wave_confluence_count=int(wave.confluence_count) if wave.leg else 0,
         wave_confluence_sr=bool(wave.confluence_sr) if wave.leg else False,
         wave_confluence_round=bool(wave.confluence_round) if wave.leg else False,
@@ -3207,6 +3618,44 @@ def run_ta_analysis(
         htf_bias=setup.htf_bias,
         forecast_path_prices=[wp.price for wp in setup.forecast_path],
         forecast_path_labels=[wp.label for wp in setup.forecast_path],
+        scenario_entry_mode="",
+        scenario_report_html="",
+    )
+    _report = build_scenario_report(_base, symbol=symbol)
+    from .htf_ltf_entry import attach_htf_ltf_to_scenario_html, build_htf_ltf_entry_plan
+
+    _plan = build_htf_ltf_entry_plan(_base)
+    from .human_trade_brief import build_human_trade_brief, build_human_trade_brief_html
+
+    _brief_ta = _dc_replace(
+        _base,
+        scenario_entry_mode=_report.entry_mode,
+        scenario_report_html="",
+        htf_ltf_plan_html=_plan.to_html(),
+    )
+    _human_plain = build_human_trade_brief(
+        _brief_ta, symbol=symbol, conflict_note=verdict_scenario_note
+    )
+    _human_html = build_human_trade_brief_html(
+        _brief_ta, symbol=symbol, conflict_note=verdict_scenario_note
+    )
+    _report = build_scenario_report(
+        _dc_replace(_brief_ta, human_trade_brief=_human_plain),
+        symbol=symbol,
+    )
+    _scenario_html = attach_htf_ltf_to_scenario_html(_report.to_html_compact(), _plan)
+    _entry_mode = _plan.entry_mode if _plan.entry_mode else _report.entry_mode
+    return _dc_replace(
+        _base,
+        scenario_entry_mode=_entry_mode,
+        scenario_report_html=_scenario_html,
+        htf_ltf_plan_html=_plan.to_html(),
+        volume_poc_label=volume_poc_label,
+        human_trade_brief=_human_plain,
+        human_trade_brief_html=_human_html,
+        reading_narrative=(
+            market_reading.narrative if market_reading else _base.reading_narrative
+        ),
     )
 
 
@@ -4122,6 +4571,9 @@ def ta_signal_compact_block(
     signal_type: str | None = None,
 ) -> str:
     """2 строки максимум: что делать по сигналу — без «LONG + WAIT + ждём подтверждения»."""
+    from .signal_pipeline import professional_reading_snippet
+
+    reading_line = professional_reading_snippet(ta, max_len=260)
     sig = signal_side.lower()
     ready = bool(readiness and readiness[0])
     wait_reason = readiness[1] if readiness else ""
@@ -4152,8 +4604,10 @@ def ta_signal_compact_block(
             signal_type=signal_type,
         )
         if scenario:
-            return f"✅ <b>Готов</b>\n{scenario}"
-        return "✅ <b>Готов к входу</b> по плану TA"
+            body = f"✅ <b>Готов</b>\n{scenario}"
+            return f"{reading_line}\n{body}" if reading_line else body
+        body = "✅ <b>Готов к входу</b> по плану TA"
+        return f"{reading_line}\n{body}" if reading_line else body
 
     if "плохой r:r" in wait_reason.lower() or "вход невыгоден" in (ta.verdict_reason or "").lower():
         if trig:
@@ -4221,7 +4675,10 @@ def ta_signal_compact_block(
         if reason and "рост к" not in reason.lower():
             line2 = f"<i>{reason[:85]}</i>" if len(reason) <= 85 else f"<i>{reason[:82]}…</i>"
 
-    return f"{line1}\n{line2}" if line2 else line1
+    result = f"{line1}\n{line2}" if line2 else line1
+    if reading_line and reading_line not in result:
+        return f"{reading_line}\n{result}"
+    return result
 
 
 def evaluate_entry_readiness(
@@ -4386,6 +4843,12 @@ def ta_hot_analysis_block_html(
     conflict = ta_scanner_conflict_line_html(ta, signal_side)
     if conflict:
         parts.append(conflict)
+
+    from .narrative_report import format_reading_block_html
+
+    reading_block = format_reading_block_html(ta)
+    if reading_block:
+        parts.append(reading_block)
 
     if ta.narrative_plain:
         parts.append(ta.narrative_plain)
@@ -4754,15 +5217,29 @@ def ta_signal_caption_compact_html(
     signal_type: str | None = None,
 ) -> str:
     """1–2 строки: чёткий план без дублирования."""
+    scenario_html = str(getattr(ta, "scenario_report_html", "") or "").strip()
+    rich = bool(
+        scenario_html
+        and ("📖" in scenario_html or "<b>Есть</b>" in scenario_html or "режим" in scenario_html.lower())
+    )
     sig = (signal_side or "").lower()
+    ready = bool(readiness and readiness[0])
+    if rich and not ready:
+        return scenario_html
     if sig not in {"long", "short"}:
-        return ta_signal_scenario_line_html(ta, signal_side=signal_side) or ""
-    return ta_signal_compact_block(
+        fallback = ta_signal_scenario_line_html(ta, signal_side=signal_side) or ""
+        return scenario_html or fallback
+    block = ta_signal_compact_block(
         ta,
         signal_side=sig,
         readiness=readiness,
         signal_type=signal_type,
     )
+    if rich and ready and block and block not in scenario_html:
+        return f"{scenario_html}\n\n{block}"
+    if rich:
+        return scenario_html
+    return block or scenario_html
 
 
 def _ta_signal_caption_verbose(
@@ -4936,62 +5413,18 @@ def _manual_verdict_headline(ta: TAAnalysisResult) -> str:
     return f"📐 <b>TA</b> · <b>{ta.verdict}</b> {score}/10"
 
 
-def ta_manual_detailed_html(ta: TAAnalysisResult) -> str:
-    """Compact manual TA: context, participation, actionable level, invalidation."""
-    lines = [
-        _manual_verdict_headline(ta),
-        f"📍 Цена <b>{fmt_price(ta.current_price)}</b> · {ta.momentum_label or ta.phase_label or 'контекст не выражен'}",
-    ]
-    htf_structure = getattr(getattr(ta, "smc", None), "htf_structure", "")
-    context_text = ""
-    if ta.htf_bias in {"long", "short"} or htf_structure:
-        timeframe = "4ч" if ta.htf_interval_minutes == 240 else f"{ta.htf_interval_minutes}м"
-        htf_context = ta.htf_bias.upper() if ta.htf_bias in {"long", "short"} else htf_structure
-        context_text = f"{timeframe} {htf_context}"
-    if ta.phase_label and ta.phase_label != "Без явной фазы":
-        local_context = f"LTF {ta.phase_label}"
-        context_text = f"{context_text} · {local_context}" if context_text else local_context
-    if context_text:
-        lines.append(f"🧱 <b>Структура:</b> {html.escape(context_text)}")
+def ta_manual_detailed_html(ta: TAAnalysisResult, *, symbol: str = "") -> str:
+    """Manual TA — тот же шаблон, что scenario report (reading → A/B/C → уровни)."""
+    report_html = str(getattr(ta, "scenario_report_html", "") or "").strip()
+    if report_html and ("<b>Есть</b>" in report_html or "📖" in report_html):
+        head = _manual_verdict_headline(ta)
+        if head.split("·", 1)[-1].strip() in report_html:
+            return report_html
+        return f"{head}\n{report_html}"
+    from .scenario_report import build_scenario_report
 
-    breakout, breakdown = _effective_breakout_breakdown(ta)
-    interval = max(1, int(getattr(ta, "analysis_interval_minutes", 5) or 5))
-    if "вход невыгоден" in (ta.verdict_reason or "").lower():
-        lines.append("⛔ <b>Действие:</b> NO TRADE — точка входа невыгодна.")
-    else:
-        side = ta.verdict if ta.verdict in {"LONG", "SHORT"} else ta.action_priority.upper()
-        if side in {"LONG", "SHORT"}:
-            trigger = breakout if side == "LONG" else breakdown
-            scenario = ta.bullish_scenario if side == "LONG" else ta.bearish_scenario
-            if trigger is None and scenario is not None:
-                trigger = scenario.trigger_price
-            relation = "выше" if side == "LONG" else "ниже"
-            trigger_text = f" {relation} <b>{fmt_price(trigger)}</b>" if trigger else ""
-            target = next(
-                (
-                    price for price in ta.target_prices
-                    if (side == "LONG" and price > ta.current_price)
-                    or (side == "SHORT" and price < ta.current_price)
-                ),
-                None,
-            )
-            target_text = f" · цель <b>{fmt_price(target)}</b>" if target else ""
-            lines.append(
-                f"🎯 <b>Действие:</b> {side} по закрытию {interval}m{trigger_text}{target_text}."
-            )
-        else:
-            bounds = (
-                f" <b>{fmt_price(breakdown)}–{fmt_price(breakout)}</b>"
-                if breakout and breakdown else ""
-            )
-            lines.append(
-                f"⏳ <b>Действие:</b> WAIT — нет подтверждённого направления; "
-                f"ждать выхода{bounds}."
-            )
-    invalidation = _display_invalidation(ta)
-    if invalidation:
-        lines.append(f"🚫 <b>Отмена сценария:</b> {fmt_price(invalidation)}.")
-    return "\n".join(lines)
+    report = build_scenario_report(ta, symbol=symbol)
+    return f"{_manual_verdict_headline(ta)}\n{report.to_html_full()}"
 
 
 def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:

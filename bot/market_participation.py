@@ -137,10 +137,23 @@ def market_participation_lines(
         lines.append(volume_participation)
 
     status = str(data.get("coinglass_status") or "")
-    if status and status != "данные получены":
+    provider = str(data.get("flow_provider") or "").lower()
+    if not provider and "perpfinder" in str(data.get("source", "")).lower():
+        provider = "perpfinder"
+    has_core = bool(
+        len(lines) >= 2
+        or data.get("price_change_pct") is not None
+        or data.get("oi_change_pct") is not None
+        or data.get("account_ratio")
+    )
+    if status and status != "данные получены" and not (provider == "perpfinder" and has_core):
         if status == "COINGLASS_API_KEY не настроен":
             status = "API key не настроен"
         missing = data.get("coinglass_missing_metrics")
+        provider_label = {
+            "coinglass": "CoinGlass",
+            "perpfinder": "PerpFinder+Bybit",
+        }.get(provider, "поток")
         if isinstance(missing, list) and missing:
             labels = {
                 "price": "цена",
@@ -152,10 +165,18 @@ def market_participation_lines(
                 "spot_taker_history": "spot taker history",
                 "taker": "taker",
             }
-            absent = ", ".join(labels.get(str(item), str(item)) for item in missing)
-            lines.append(f"CoinGlass: {status} · нет {absent}")
-        else:
-            lines.append(f"CoinGlass: {status}")
+            optional_only = {
+                "liquidations",
+                "futures_taker_history",
+                "spot_taker_history",
+                "taker",
+            }
+            critical = [m for m in missing if str(m) not in optional_only]
+            if critical:
+                absent = ", ".join(labels.get(str(item), str(item)) for item in critical)
+                lines.append(f"{provider_label}: {status} · нет {absent}")
+        elif provider != "perpfinder":
+            lines.append(f"{provider_label}: {status}")
 
     if lines:
         lines.insert(0, f"Деривативы/поток · {source}")
@@ -184,14 +205,28 @@ def coinglass_breakdown_html(
         metrics = getattr(ta, "market_metrics", None)
         if isinstance(metrics, Mapping):
             lines = market_participation_lines(metrics)
+    lines = [
+        line for line in lines
+        if "API key" not in line and "не настроен" not in line.lower()
+    ]
     if not lines:
         return ""
 
-    title = "📊 <b>Coinglass-разбор"
+    title = "📊 <b>Деривативы/поток"
     if symbol:
         title += f" · {escape(str(symbol).upper())}"
     if working_tf:
         title += f" · раб. {escape(str(working_tf))}"
     title += "</b>"
-    body = "\n".join(escape(line) for line in lines[:7])
+    clean: list[str] = []
+    for line in lines[:7]:
+        low = line.lower()
+        if "api key" in low or "не настроен" in low:
+            continue
+        if "coinglass:" in low and "нет " in low:
+            continue
+        clean.append(line)
+    if not clean:
+        return ""
+    body = "\n".join(escape(line) for line in clean)
     return f"{title}\n{body}"

@@ -266,6 +266,51 @@ def serialize_ta(ta: TAAnalysisResult) -> dict[str, Any]:
         "flow_notes": (ta.flow_notes or [])[:6],
         "narrative_plan": (ta.narrative_plan or "")[:280],
         "narrative_basis": (ta.narrative_basis or "")[:280],
+        "market_reading": {
+            "tf_stack": (getattr(ta, "reading_tf_stack", "") or "")[:200],
+            "narrative": (ta.reading_narrative or "")[:320],
+            "present": (ta.reading_present or [])[:8],
+            "absent": (ta.reading_absent or [])[:8],
+            "live_scenario": ta.reading_live_scenario or "",
+            "seek_label": (ta.reading_seek_label or "")[:160],
+            "blowoff_hints": [
+                x
+                for x in (ta.reading_present or [])
+                if any(
+                    k in str(x).lower()
+                    for k in (
+                        "squeeze",
+                        "пиковый объём",
+                        "ликвидации шортов",
+                        "пробой",
+                        "добой",
+                        "ранний шорт",
+                        "кульминация",
+                    )
+                )
+            ][:4],
+            "gates": {
+                "pattern": ta.reading_accept_pattern,
+                "htf_pattern": ta.reading_accept_htf_pattern,
+                "channel": ta.reading_accept_channel,
+                "fib": ta.reading_accept_fib,
+                "ob": ta.reading_accept_ob,
+                "draw_both_forecasts": ta.reading_draw_both_forecasts,
+            },
+            "htf_ltf_plan": (getattr(ta, "htf_ltf_plan_html", "") or "")[:420],
+            "volume_poc": (getattr(ta, "volume_poc_label", "") or "")[:120],
+            "entry_quality": getattr(ta, "entry_quality", "") or "",
+            "scenario_engine": {
+                "id": getattr(ta, "scenario_engine_id", "") or "",
+                "quality": getattr(ta, "scenario_engine_quality", "") or "",
+            },
+            "market_state_summary": (getattr(ta, "market_state_summary", "") or "")[:320],
+            "methodology_weights": (
+                (ta.market_metrics or {}).get("methodology_weights")
+                if isinstance(getattr(ta, "market_metrics", None), dict)
+                else None
+            ),
+        },
         "cvd_source": ta.cvd_source,
         "cvd_delta": _round(ta.cvd_delta, 4),
         "rsi": {

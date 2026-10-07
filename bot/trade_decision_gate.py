@@ -111,6 +111,13 @@ def _is_late_chase(
 
 
 def _fib_location_ok(ta: TAAnalysisResult, side: str) -> bool:
+    if not getattr(ta, "reading_accept_fib", True):
+        return False
+    metrics = getattr(ta, "market_metrics", None) or {}
+    if isinstance(metrics, dict):
+        fp = metrics.get("fib_plan")
+        if isinstance(fp, dict) and not fp.get("checklist_ok") and not fp.get("in_zone"):
+            return False
     if not bool(getattr(ta, "wave_has_confluence", False)):
         return False
     phase = (getattr(ta, "wave_phase", "") or "").lower()
@@ -451,6 +458,40 @@ def decide_trade_action(
 
     if quality_tier == "skip":
         return TradeDecision("skip", "quality skip", setup_score=0)
+
+    from .signal_pipeline import apply_reading_to_trade_decision
+
+    reading_override = apply_reading_to_trade_decision(
+        side,
+        ta,
+        watch_allowed=watch_allowed,
+        min_watch_score=min_watch_score,
+        setup_score=0,
+    )
+    if reading_override is not None:
+        act, why = reading_override
+        if act == "skip":
+            return TradeDecision("skip", why, setup_score=0)
+        return TradeDecision(
+            "watch",
+            why,
+            location=detect_location(ta, side),
+            chase=False,
+            setup_score=min_watch_score,
+        )
+
+    from .fib_entry_rules import fib_blocks_market_entry
+
+    fib_block = fib_blocks_market_entry(ta, side)
+    if fib_block:
+        if watch_allowed:
+            return TradeDecision(
+                "watch",
+                fib_block[:160],
+                location=detect_location(ta, side),
+                setup_score=min_watch_score,
+            )
+        return TradeDecision("skip", fib_block[:120], setup_score=0)
 
     if "вход невыгоден" in (getattr(ta, "verdict_reason", "") or "").lower():
         return TradeDecision("skip", "плохой R:R", setup_score=0)

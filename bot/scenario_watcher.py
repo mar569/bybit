@@ -22,6 +22,21 @@ UpdateKind = Literal[
     "expired",
 ]
 
+def _resolve_allowed_side(signal: Signal, ta: TAAnalysisResult) -> str:
+    """Одна торговая сторона на watch — без flip SHORT↔LONG."""
+    act = str(getattr(ta, "scenario_engine_action", "") or "").upper()
+    if act == "LONG":
+        return "long"
+    if act == "SHORT":
+        return "short"
+    v = (ta.verdict or "WAIT").upper()
+    if v == "LONG":
+        return "long"
+    if v == "SHORT":
+        return "short"
+    return (signal.side or "").lower()
+
+
 IMPULSE_SIGNAL_TYPES = frozenset({
     "impulse_pump",
     "impulse_dump",
@@ -68,6 +83,7 @@ class ScenarioWatch:
     trigger_only: bool = False
     # Ручная подписка: пользователь нажал «Ждать LONG/SHORT»
     user_intent: str = ""  # long | short | ""
+    allowed_entry_side: str = ""  # long | short | "" — одна сторона на слежку
     zone_low: float | None = None
     zone_high: float | None = None
     stop_hint: float | None = None
@@ -155,7 +171,7 @@ class ScenarioWatcher:
         ta: TAAnalysisResult,
         settings: Any,
     ) -> bool:
-        if not getattr(settings, "scenario_watch_enabled", True):
+        if not getattr(settings, "scenario_watch_enabled", False):
             return False
         primary = should_enroll_scenario_watch(signal, ta, enabled=True)
         if primary is None:
@@ -173,12 +189,14 @@ class ScenarioWatcher:
             return False
 
         watch_minutes = int(getattr(settings, "scenario_watch_minutes", 45))
+        bias = _resolve_allowed_side(signal, ta)
         watch = ScenarioWatch(
             exchange=signal.exchange,
             symbol=signal.symbol,
             side=signal.side,
             signal_type=signal.signal_type,
             primary=primary,
+            allowed_entry_side=bias,
             enroll_price=price,
             local_high=price,
             local_low=price,
@@ -215,7 +233,7 @@ class ScenarioWatcher:
         """WATCH-сигнал: следим за пробоем уровня → TRIGGER ENTRY."""
         if quality_tier != "watch":
             return False
-        if not getattr(settings, "scenario_watch_enabled", True):
+        if not getattr(settings, "scenario_watch_enabled", False):
             return False
         side = (signal.side or "").lower()
         if side == "short" and not ta.breakdown_level:
@@ -241,6 +259,7 @@ class ScenarioWatcher:
             side=signal.side,
             signal_type=signal.signal_type,
             primary="correction" if side == "short" else "continuation",
+            allowed_entry_side=side,
             enroll_price=price,
             local_high=price,
             local_low=price,
@@ -297,7 +316,7 @@ class ScenarioWatcher:
         intent = (intent or "").lower()
         if intent not in {"long", "short"}:
             return False, "нужна сторона long/short"
-        if settings is not None and not getattr(settings, "scenario_watch_enabled", True):
+        if settings is not None and not getattr(settings, "scenario_watch_enabled", False):
             return False, "сценарии выключены"
         if price <= 0:
             return False, "нет цены"
@@ -352,6 +371,7 @@ class ScenarioWatcher:
             trigger_only=True,
             correction_fired=True,
             user_intent=intent,
+            allowed_entry_side=intent,
             zone_low=z_lo,
             zone_high=z_hi,
             stop_hint=stop_hint,
@@ -372,7 +392,7 @@ class ScenarioWatcher:
         return True, f"слежу {intent.upper()} ~{watch_minutes} мин"
 
     def tick(self, scanner: Any, settings: Any) -> list[ScenarioUpdate]:
-        if not getattr(settings, "scenario_watch_enabled", True):
+        if not getattr(settings, "scenario_watch_enabled", False):
             return []
         if not self._watches:
             return []
@@ -498,10 +518,16 @@ class ScenarioWatcher:
         if watch.entry_fired:
             return []
 
-        side = (intent_side or watch.user_intent or watch.side or "").lower()
+        side = (
+            intent_side
+            or watch.user_intent
+            or watch.allowed_entry_side
+            or watch.side
+            or ""
+        ).lower()
         buf = max(0.02, float(watch.confirm_buffer_pct)) / 100.0
         out: list[ScenarioUpdate] = []
-        strict = bool(intent_side or watch.is_user_watch)
+        strict = True
 
         def _fire(kind: str, lvl: float) -> list[ScenarioUpdate]:
             watch.entry_fired = True
@@ -511,17 +537,15 @@ class ScenarioWatcher:
                 move_pct=move, reference_price=lvl,
             )]
 
-        # SHORT
-        if (not strict or side == "short") and watch.breakdown_level:
+        if side == "short" and watch.breakdown_level:
             lvl = watch.breakdown_level
-            thresh = lvl * (1.0 - buf) if strict else lvl
+            thresh = lvl * (1.0 - buf)
             if price <= thresh:
                 return _fire("entry_short", lvl)
 
-        # LONG
-        if (not strict or side == "long") and watch.breakout_level:
+        if side == "long" and watch.breakout_level:
             lvl = watch.breakout_level
-            thresh = lvl * (1.0 + buf) if strict else lvl
+            thresh = lvl * (1.0 + buf)
             if price >= thresh:
                 return _fire("entry_long", lvl)
 

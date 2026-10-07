@@ -16,6 +16,7 @@ from .market_structure import FiveMinOiBar, analyze_market_structure, bar_open_t
 from .smc_analysis import analyze_smc, smc_to_dict
 from .probability_engine import PROBABILITY_BYPASS_TYPES, assess_signal_probability
 from .bybit_cvd import get_taker_cvd_cache
+from .scenario_report import PUMP_EVENT_TYPES
 from .signal_quality_gate import assess_signal_quality, attach_cvd_to_signal_details
 from .settings import ExchangeThresholds, ScannerSettings, SettingsManager, clamp_cooldown_seconds
 from .symbol_tiers import TierThresholds, tier_thresholds
@@ -971,6 +972,8 @@ class SignalEngine:
                     **({"liquidations": liquidations_dict} if liquidations_dict else {}),
                 },
             )
+            if (candidate.signal_type or "").lower() in PUMP_EVENT_TYPES:
+                signal.details["scanner_event_only"] = True
             if cvd_snap is not None:
                 attach_cvd_to_signal_details(signal.details, cvd_snap)
 
@@ -1856,9 +1859,11 @@ class SignalEngine:
                             ))
                             break
 
-        pulse_earlier = self._point_at_cutoff(
-            history, current.timestamp - settings.pulse_period_minutes * 60
-        )
+        pulse_earlier = None
+        if getattr(settings, "pulse_scanner_enabled", False):
+            pulse_earlier = self._point_at_cutoff(
+                history, current.timestamp - settings.pulse_period_minutes * 60
+            )
         if pulse_earlier is not None:
             pulse = self._compute_changes(
                 current, pulse_earlier, settings.pulse_period_minutes * 60
