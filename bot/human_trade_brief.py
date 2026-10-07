@@ -179,10 +179,12 @@ def build_human_trade_brief(
 
 def _trigger_sentence(ta: "TAAnalysisResult") -> str:
     plan_html = str(getattr(ta, "htf_ltf_plan_html", "") or "")
-    if "LTF триггер" in plan_html:
+    if "Триггер младшего" in plan_html or "LTF триггер" in plan_html:
         import re
 
-        m = re.search(r"LTF триггер:</b>\s*([^<\n]+)", plan_html)
+        m = re.search(
+            r"(?:Триггер младшего ТФ|LTF триггер):</b>\s*([^<\n]+)", plan_html
+        )
         if m:
             return f"Триггер: {m.group(1).strip()[:140]}."
     if getattr(ta, "setup_trigger", ""):
@@ -235,7 +237,7 @@ def scanner_side_blocked_by_scenario(ta: "TAAnalysisResult", side: str) -> str:
     if isinstance(metrics, dict):
         mw = metrics.get("methodology_weights")
         if isinstance(mw, dict) and str(mw.get("grade") or "").upper() == "F":
-            return "Методология F — ENTRY запрещён, только наблюдение."
+            return "Слабая методология — вход запрещён, только наблюдение."
 
     sq = str(getattr(ta, "scenario_engine_quality", "") or "").upper()
     if sq == "F":
@@ -252,13 +254,13 @@ def scanner_side_blocked_by_scenario(ta: "TAAnalysisResult", side: str) -> str:
                     title = str(se.get("title") or "")
             return (
                 f"Сканер {side.upper()} не совпадает со сценарием ({sc_act}): "
-                f"{title[:100] or 'ждём подтверждение HTF'}."
+                f"{title[:100] or 'ждём подтверждение на старшем ТФ'}."
             )
     if sc_act == "WATCH" and side in {"long", "short"}:
         grade = (getattr(ta, "setup_grade", "") or "").upper()
         score = int(getattr(ta, "setup_score", 0) or 0)
         if grade not in {"A", "B"} or score < 7:
-            return "Сценарий в режиме наблюдения — ENTRY только после триггера A/B."
+            return "Пока только наблюдение — вход после подтверждения на графике."
     return ""
 
 
@@ -272,3 +274,171 @@ def build_human_trade_brief_html(
     if not text:
         return ""
     return f"💬 <b>Разбор</b>\n{escape(text)}"
+
+
+def _dedupe_reading_lines(items: list[str], *, max_items: int = 4) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in items:
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        key = line.split(":", 1)[0].strip().lower() if ":" in line else line[:24].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def preferred_trade_side(ta: "TAAnalysisResult") -> str:
+    sc = str(getattr(ta, "scenario_engine_action", "") or "").upper()
+    if sc in {"LONG", "SHORT"}:
+        return sc.lower()
+    ap = (getattr(ta, "action_priority", "") or "").lower()
+    if ap in {"long", "short"}:
+        return ap
+    v = (ta.verdict or "WAIT").upper()
+    if v in {"LONG", "SHORT"}:
+        return v.lower()
+    return ""
+
+
+def _manual_levels_html(ta: "TAAnalysisResult", *, side: str) -> str:
+    cur = float(getattr(ta, "current_price", 0) or 0)
+    stop = getattr(ta, "invalidation_price", None) or getattr(ta, "setup_stop", None)
+    targets = list(getattr(ta, "target_prices", None) or []) or list(
+        getattr(ta, "setup_tps", None) or []
+    )
+    targets = [float(x) for x in targets[:3] if x]
+    zone = getattr(ta, "entry_zone", None)
+    brk = getattr(ta, "breakout_level", None)
+    brdn = getattr(ta, "breakdown_level", None)
+    ns = getattr(ta, "nearest_support", None)
+    nr = getattr(ta, "nearest_resistance", None)
+    setup_e = getattr(ta, "setup_entry", None)
+    if not zone and setup_e and float(setup_e) > 0:
+        e = float(setup_e)
+        zone = (e * 0.9985, e * 1.0015)
+    if not zone and not stop and not targets and not brk and not brdn and not ns and not nr:
+        return ""
+
+    if side == "long" and targets and cur > 0 and all(t < cur * 0.998 for t in targets):
+        return (
+            "⚠️ <i>Черновые TP ниже цены при уклоне в лонг — "
+            "уровни пересчитаются после триггера; сейчас ориентир только текст «Ждём».</i>"
+        )
+    if side == "short" and targets and cur > 0 and all(t > cur * 1.002 for t in targets):
+        return (
+            "⚠️ <i>Черновые TP выше цены при уклоне в шорт — "
+            "ждём подтверждения структуры.</i>"
+        )
+
+    bits: list[str] = []
+    side_ru = {"long": "лонг", "short": "шорт"}.get(side, "сделка")
+    if brk and cur > 0 and abs(float(brk) - cur) / cur <= 0.15:
+        bits.append(f"пробой лонг ≥ <b>{fmt_price(float(brk))}</b>")
+    if brdn and cur > 0 and abs(float(brdn) - cur) / cur <= 0.15:
+        bits.append(f"пробой шорт ≤ <b>{fmt_price(float(brdn))}</b>")
+    if ns and cur > 0 and abs(float(ns) - cur) / cur <= 0.12:
+        bits.append(f"поддерж. <b>{fmt_price(float(ns))}</b>")
+    if nr and cur > 0 and abs(float(nr) - cur) / cur <= 0.12:
+        bits.append(f"сопр. <b>{fmt_price(float(nr))}</b>")
+    if zone and len(zone) == 2:
+        lo, hi = float(zone[0]), float(zone[1])
+        bits.append(f"вход ({side_ru}): <b>{fmt_price(lo)}–{fmt_price(hi)}</b>")
+    if stop:
+        bits.append(f"стоп: <b>{fmt_price(float(stop))}</b>")
+    if targets:
+        tps = " → ".join(fmt_price(t) for t in targets)
+        bits.append(f"цели: {tps}")
+    if not bits:
+        return ""
+    return "📍 <b>План</b> (не market, только после триггера): " + " · ".join(bits)
+
+
+def format_manual_ta_human_html(
+    ta: "TAAnalysisResult",
+    *,
+    symbol: str = "",
+) -> str:
+    """Подпись manual TA: один вердикт, ждём, план уровней, поток — без A/B/C и setup D."""
+    sym = (symbol or "").strip().upper()
+    v = (ta.verdict or "WAIT").upper()
+    side = preferred_trade_side(ta)
+    conf = int(getattr(ta, "verdict_confidence", 0) or 0)
+
+    if v == "WAIT":
+        if side == "long":
+            head = (
+                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
+                "Уклон в <b>лонг</b> — только после подтверждения (close/ретest), не догонять."
+            )
+        elif side == "short":
+            head = (
+                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
+                "Уклон в <b>шорт</b> — только после подтверждения, не шортить в импульс."
+            )
+        else:
+            head = (
+                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
+                "Старшие ТФ спорят или цена в середине — нет смысла в market."
+            )
+    else:
+        head = f"📌 Вердикт <b>{v}</b> ({conf}/10) — вход только лимит/триггер по плану."
+
+    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
+    stack_line = f"🧭 {escape(stack)}" if stack else ""
+
+    sit_html = str(getattr(ta, "situational_brief_html", "") or "").strip()
+    if sit_html:
+        story = sit_html
+    else:
+        narrative = _clean_reading_narrative(getattr(ta, "reading_narrative", "") or "")
+        if not narrative:
+            from .situational_brief import build_situational_brief_plain
+
+            narrative = build_situational_brief_plain(ta, symbol=sym) or build_human_trade_brief(
+                ta, symbol=sym
+            )
+            for cut in ("Итог:", "Отмена идеи:", "Чего не хватает:"):
+                if cut in narrative:
+                    narrative = narrative.split(cut)[0].strip()
+        story = escape(narrative[:480]) if narrative else ""
+
+    trigger = str(getattr(ta, "setup_trigger", "") or "").strip()
+    seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
+    if trigger:
+        wait_line = f"⏳ <b>Ждём:</b> {escape(trigger[:220])}"
+    elif seek:
+        wait_line = f"⏳ <b>Ждём:</b> {escape(seek[:220])}"
+    else:
+        wait_line = ""
+
+    absent = _dedupe_reading_lines(list(getattr(ta, "reading_absent", None) or []), max_items=2)
+    if absent:
+        miss = " · ".join(escape(x[:80]) for x in absent)
+        wait_line = (wait_line + f"\n<i>Пока нет:</i> {miss}").strip()
+
+    levels = _manual_levels_html(ta, side=side)
+
+    flow_raw = [str(x).strip() for x in (getattr(ta, "market_participation_lines", None) or []) if str(x).strip()]
+    flow_body = flow_raw[1:4] if len(flow_raw) > 1 else flow_raw[:3]
+    flow_block = ""
+    if flow_body:
+        flow_block = "📊 <b>Поток</b>\n" + "\n".join(escape(line[:140]) for line in flow_body)
+
+    btc = (getattr(ta, "btc_context", "") or "").strip()
+    if not btc and getattr(ta, "btc_alt_spread", None) is not None:
+        btc = f"альт vs BTC {ta.btc_alt_spread:+.1f}%"
+    btc_line = f"₿ {escape(btc[:100])}" if btc else ""
+
+    chart_hint = (
+        "<i>На графике:</i> день макс/мин, локальный экстремум, поддержка/сопр., "
+        "диапазон и зона (или «кандидат»), оба триггера пробоя, вход / SL / TP."
+    )
+
+    parts = [head, stack_line, story, wait_line, levels, flow_block, btc_line, chart_hint]
+    return "\n\n".join(p for p in parts if p)

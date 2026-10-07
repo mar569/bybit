@@ -21,6 +21,10 @@ class CachedMarketSnapshot:
     human_brief: str
     verdict_scenario_note: str
     interval_minutes: int = 5
+    situation_kind: str = ""
+    situational_snippet: str = ""
+    current_price: float = 0.0
+    verdict_confidence: int = 0
 
     @property
     def age_seconds(self) -> float:
@@ -49,6 +53,15 @@ class MarketStateStore:
             mw = metrics.get("methodology_weights")
             if isinstance(mw, dict):
                 grade = str(mw.get("grade") or "")
+        kind = str(getattr(ta, "situation_kind", "") or "").strip()
+        if not kind:
+            try:
+                from .situational_brief import classify_situation
+
+                kind = classify_situation(ta)
+            except Exception:
+                kind = "mixed"
+        sit_plain = str(getattr(ta, "situational_brief_plain", "") or "").strip()
         snap = CachedMarketSnapshot(
             symbol=sym,
             updated_at=time.time(),
@@ -60,9 +73,26 @@ class MarketStateStore:
             human_brief=str(getattr(ta, "human_trade_brief", "") or "")[:400],
             verdict_scenario_note=str(getattr(ta, "verdict_scenario_note", "") or "")[:200],
             interval_minutes=int(interval_minutes or 5),
+            situation_kind=kind,
+            situational_snippet=sit_plain[:220],
+            current_price=float(getattr(ta, "current_price", 0) or 0),
+            verdict_confidence=int(getattr(ta, "verdict_confidence", 0) or 0),
         )
         self._data[sym] = snap
         self._ttl = float(ttl_seconds or self._ttl)
+
+    def list_active(self, *, limit: int = 100) -> list[CachedMarketSnapshot]:
+        out: list[CachedMarketSnapshot] = []
+        for sym, snap in list(self._data.items()):
+            if snap.age_seconds > self._ttl:
+                self._data.pop(sym, None)
+                continue
+            out.append(snap)
+        out.sort(key=lambda s: s.updated_at, reverse=True)
+        return out[: max(1, int(limit))]
+
+    def count_active(self) -> int:
+        return len(self.list_active(limit=10_000))
 
     def get(self, symbol: str) -> CachedMarketSnapshot | None:
         sym = (symbol or "").upper().strip()

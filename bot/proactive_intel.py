@@ -19,7 +19,9 @@ def build_proactive_intel_html(
     px = float(signal.price_change_percent or 0)
     side = (signal.side or "long").lower()
 
-    brief = str(getattr(ta, "human_trade_brief", "") or "").strip()
+    brief = str(getattr(ta, "situational_brief_plain", "") or "").strip()
+    if not brief:
+        brief = str(getattr(ta, "human_trade_brief", "") or "").strip()
     if not brief:
         brief = str(getattr(ta, "reading_narrative", "") or "")[:320]
 
@@ -67,11 +69,13 @@ def build_proactive_intel_html(
     if inv:
         plan.append(f"Идея отменяется за {fmt_price(float(inv))}.")
     plan.append(
-        "Когда сформируется вход A/B с подтверждением — отдельный <b>ENTRY</b> в alert-канал."
+        "Когда появится точка входа с подтверждением — отдельное сообщение «можно входить» в канал сигналов."
     )
     lines.append("\n".join(plan))
 
     if quality_reason:
         lines.append(f"<i>{escape(quality_reason[:160])}</i>")
 
-    return "\n\n".join(lines)
+    from .signal_locale import polish_user_copy
+
+    return polish_user_copy("\n\n".join(lines))

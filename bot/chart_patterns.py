@@ -2414,12 +2414,78 @@ def detect_chart_patterns(
     return _suppress_overlaps(strong)[:limit]
 
 
-def pick_primary_pattern(patterns: list[ChartPattern]) -> ChartPattern | None:
+_BULLISH_REVERSAL_KINDS = frozenset(
+    {
+        "double_bottom",
+        "triple_bottom",
+        "inverse_head_shoulders",
+        "rounding_bottom",
+        "cup_handle",
+        "one_two_three",
+    }
+)
+
+
+def pattern_relevant_now(
+    pattern: ChartPattern | None,
+    bars: list[KlineBar],
+    *,
+    current: float | None = None,
+) -> bool:
+    """Фигура ещё про текущую цену, а не «дно три часа назад перед вертикальным пампом»."""
+    if pattern is None or not bars:
+        return False
+    cur = float(current if current is not None else bars[-1].close)
+    if cur <= 0:
+        return False
+    kind = str(pattern.kind or "")
+    points = list(pattern.points or ())
+    if not points:
+        return False
+    last_i = max(int(p.index) for p in points)
+    last_i = max(0, min(last_i, len(bars) - 1))
+    bars_after = (len(bars) - 1) - last_i
+
+    neck = None
+    if pattern.neckline is not None:
+        neck = float(pattern.neckline.end_price)
+    elif pattern.zone_top is not None:
+        neck = float(pattern.zone_top)
+
+    if kind in _BULLISH_REVERSAL_KINDS and neck and neck > 0:
+        if cur >= neck * 1.06 and bars_after >= 24:
+            return False
+        if pattern.target_price and cur >= float(pattern.target_price) * 0.96:
+            return False
+        ref = float(bars[last_i].close)
+        if ref > 0 and bars_after >= 36:
+            move = (cur - ref) / ref * 100.0
+            if move >= 10.0:
+                return False
+
+    if kind in {"double_top", "head_shoulders", "triple_top"}:
+        if neck and neck > 0 and cur <= neck * 0.94 and bars_after >= 24:
+            return False
+
+    return True
+
+
+def pick_primary_pattern(
+    patterns: list[ChartPattern],
+    *,
+    bars: list[KlineBar] | None = None,
+    current: float | None = None,
+) -> ChartPattern | None:
     if not patterns:
         return None
+    pool = patterns
+    if bars:
+        pool = [p for p in patterns if pattern_relevant_now(p, bars, current=current)]
+        if not pool:
+            return None
     # приоритет: confirmed → выше confidence → свежее
     return max(
-        patterns,
+        pool,
         key=lambda p: (
             1 if p.status == "confirmed" else 0,
             p.confidence,

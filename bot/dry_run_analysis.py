@@ -19,7 +19,7 @@ from bot.models import Signal
 from bot.proactive_intel import build_proactive_intel_html
 from bot.settings import SettingsManager
 from bot.signal_quality_gate import assess_signal_quality
-from bot.ta_analysis import run_ta_analysis
+from bot.ta_analysis import evaluate_entry_readiness, run_ta_analysis
 
 
 def _load_stack(symbol: str) -> dict:
@@ -58,8 +58,12 @@ def run_symbol(symbol: str, *, side: str = "long") -> None:
     )
 
     brief = build_human_trade_brief(ta, symbol=symbol)
+    sit = str(getattr(ta, "situational_brief_plain", "") or "")
     print("\n--- Human brief (plain) ---\n")
     print(brief)
+    if sit:
+        print("\n--- Situational ---\n")
+        print(sit)
 
     print("\n--- Поля решения ---")
     print(f"  verdict={ta.verdict}  conf={getattr(ta, 'verdict_confidence', 0)}")
@@ -124,6 +128,24 @@ def run_symbol(symbol: str, *, side: str = "long") -> None:
         print(f"  reason: {q.block_reason}")
     if q.warnings:
         print(f"  warnings: {q.warnings[:3]}")
+
+    s = sm.settings
+    ready, why = evaluate_entry_readiness(
+        ta,
+        sig.side,
+        sig.signal_score,
+        min_ta_score=s.actionable_min_ta_score,
+        max_trigger_dist_pct=s.actionable_max_trigger_dist_pct,
+        min_timing_score=s.actionable_min_signal_score,
+        max_timing_score=s.actionable_max_signal_score,
+        require_smc=s.actionable_require_smc,
+        check_scanner_timing=True,
+        signal_type=sig.signal_type,
+        accept_armed=s.actionable_accept_armed,
+    )
+    print(f"\n--- Actionable filter (как в боте) ---")
+    print(f"  TA порог: {s.actionable_min_ta_score}/10")
+    print(f"  {'PASS' if ready else 'SKIP'}: {why or 'ok'}")
 
     html = build_proactive_intel_html(sig, ta, quality_reason=q.block_reason or "")
     print("\n--- Telegram analysis (HTML, stripped tags preview) ---\n")

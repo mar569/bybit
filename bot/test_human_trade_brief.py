@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .human_trade_brief import (
     build_human_trade_brief,
+    format_manual_ta_human_html,
     reconcile_verdict_with_scenario,
     scanner_side_blocked_by_scenario,
 )
@@ -85,3 +86,30 @@ def test_human_brief_is_sentences_not_bullet_soup() -> None:
     assert "· ·" not in text
     assert "Сценарий C:" not in text
     assert "Итог:" in text
+
+
+def test_manual_html_avoids_abcd_jargon() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        verdict_confidence=7,
+        action_priority="short",
+        current_price=0.08,
+        reading_tf_stack="H4 вниз → H1 вверх",
+        reading_seek_label="середина диапазона",
+        setup_trigger="close 15m ≥ 0.08350",
+        breakout_level=0.0835,
+        breakdown_level=0.076,
+        nearest_support=0.0775,
+        entry_zone=(0.079, 0.0795),
+        invalidation_price=0.084,
+        target_prices=[0.078, 0.077],
+        market_participation_lines=["Поток", "OI -0.8%"],
+    )
+    html = format_manual_ta_human_html(ta, symbol="SANDUSDT")
+    assert "setup D" not in html
+    assert "режим C" not in html.lower()
+    assert "bias SHORT" not in html
+    assert "Сейчас не входим" in html
+    assert "0.08350" in html
+    assert "пробой лонг" in html.lower()
+    assert "поддерж" in html.lower()

@@ -16,10 +16,59 @@ def _bullet_block(title: str, items: Sequence[str], *, limit: int = 5) -> str:
     return f"<b>{escape(title)}</b>\n{body}"
 
 
-def format_reading_block_html(ta: TAAnalysisResult) -> str:
-    """Блок «есть / нет» + одна фраза сценария (Variant B)."""
+def _present_for_signal(present: list[str], narrative: str) -> list[str]:
+    """Без дублей TF из 📖-строки; фигура — только если ещё уместна."""
+    stack = narrative or ""
+    out: list[str] = []
+    for line in present:
+        s = str(line).strip()
+        if not s:
+            continue
+        low = s.lower()
+        if "фигура" in low:
+            out.append(s)
+            continue
+        tf_heads = ("M5", "M10", "M15", "H1", "H4", "W1", "D1")
+        if any(s.startswith(f"{h}:") for h in tf_heads):
+            head = s.split(":", 1)[0]
+            if f"{head}:" in stack or head in stack:
+                continue
+        if s.startswith("HH+HL") or s.startswith("LH+LL") or "диапазон / смесь" in s:
+            if "→" in stack:
+                continue
+        out.append(s)
+    return out[:6]
+
+
+def format_reading_block_html(
+    ta: TAAnalysisResult,
+    *,
+    style: str = "situational",
+) -> str:
+    """Разбор для сигнала: situational (проза) или evidence (списки)."""
+    style = (style or "situational").lower()
+    sit = str(getattr(ta, "situational_brief_html", "") or "").strip()
+    if style in {"situational", "hybrid"} and sit:
+        parts = [sit]
+        if style == "hybrid":
+            narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
+            raw_present = getattr(ta, "reading_present", None) or []
+            present = _present_for_signal(list(raw_present), narrative)
+            absent = getattr(ta, "reading_absent", None) or []
+            yes = _bullet_block("Ещё факты", present, limit=3)
+            if yes:
+                parts.append(yes)
+            if absent:
+                no = _bullet_block("Нет", absent, limit=2)
+                if no:
+                    parts.append(no)
+        return "\n".join(parts)
+
     narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
-    present = getattr(ta, "reading_present", None) or []
+    raw_present = getattr(ta, "reading_present", None) or []
+    present = _present_for_signal(list(raw_present), narrative)
+    if getattr(ta, "reading_accept_pattern", True) is False:
+        present = [p for p in present if "фигура" not in p.lower()]
     absent = getattr(ta, "reading_absent", None) or []
     live = str(getattr(ta, "reading_live_scenario", "") or "").strip()
     seek = str(getattr(ta, "reading_seek_label", "") or "").strip()

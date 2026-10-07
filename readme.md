@@ -13,6 +13,11 @@
 - Кликабельная ссылка CoinGlass в каждом уведомлении для ручной проверки
 - Inline-настройки в Telegram: период OI, пороги, min OI, min volume, Volume spike x, Price pump %, Min signal score, Top N и включение бирж
 - Redis: хранение истории сигналов и дедупликация (docker-compose включает Redis)
+- **Разбор:** по ситуации на каждой монете (импульс, боковик, supply/demand, середина range и т.д.) — не один сценарий на все; HTF-диапазон M15–H4 когда уместно
+- **ИИ:** по умолчанию дописывает situational-разбор к сигналам (нужен `GEMINI_API_KEY` или `GROQ_API_KEY` в `.env`); выключить: `/set ai_reading off`
+- **Локальная проверка:** `python -m bot.dry_run_analysis SYMBOL`, `python -m bot.render_manual_chart_cli SYMBOL 15 out.png`
+- **Пульс рынка:** `/pulse` в Telegram — группировка монет по `situation_kind`; авто в чат анализа раз в час (если ≥2 монет в кэше)
+- **Чат анализа:** по умолчанию **без** legacy «🧠 АНАЛИЗ по liq» (v103) — туда же идут intel/WATCH и `/pulse`; включить старый движок: кнопка «🧠 Анализ» → ON
 
 ## Принцип формирования сигнала (кратко)
 
@@ -68,9 +73,12 @@ sudo usermod -aG docker $USER
 2. Клонировать репозиторий и перейти в папку проекта:
 
 ```bash
-git clone <your-repo-url>
-cd Bybit_bot
+sudo mkdir -p /opt/bybit && sudo chown "$USER:$USER" /opt/bybit
+cd /opt/bybit
+git clone https://github.com/mar569/bybit.git .
 ```
+
+Пошагово для сервера: [DEPLOY-SERVER.md](DEPLOY-SERVER.md)
 
 3. Скопировать `.env.example` в `.env` и заполнить (имена на русском, см. шаблон; латиница тоже работает):
 

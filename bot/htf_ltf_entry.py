@@ -25,18 +25,17 @@ class HtfLtfEntryPlan:
     def to_html(self) -> str:
         parts: list[str] = []
         if self.htf_line:
-            parts.append(f"🗺 <b>HTF план:</b> {escape(self.htf_line)}")
+            parts.append(f"🗺 <b>Старшие ТФ:</b> {escape(self.htf_line)}")
         if self.m15_zone_line:
-            parts.append(f"📍 <b>M15 зона:</b> {escape(self.m15_zone_line)}")
+            parts.append(f"📍 <b>Зона M15:</b> {escape(self.m15_zone_line)}")
         if self.poc_line:
             parts.append(f"📊 {escape(self.poc_line)}")
         if self.ltf_trigger_line:
-            parts.append(f"⚡ <b>LTF триггер:</b> {escape(self.ltf_trigger_line)}")
-        parts.append(
-            f"Режим <b>{escape(self.entry_mode)}</b> — {escape(self.entry_mode_ru)}"
-        )
+            parts.append(f"⚡ <b>Триггер младшего ТФ:</b> {escape(self.ltf_trigger_line)}")
+        if self.entry_mode_ru:
+            parts.append(f"📌 {escape(self.entry_mode_ru)}")
         if self.invalidate is not None:
-            parts.append(f"Отмена HTF/LTF: <b>{fmt_price(self.invalidate)}</b>")
+            parts.append(f"Отмена идеи: <b>{fmt_price(self.invalidate)}</b>")
         return "\n".join(parts)
 
 
@@ -106,24 +105,40 @@ def _m15_zone(ta: TAAnalysisResult, side: str) -> tuple[str, float | None, float
     if side == "short" and ta.nearest_resistance:
         p = float(ta.nearest_resistance)
         return f"supply ≈ {fmt_price(p)}", p * 0.998, p * 1.002
+    cons = getattr(ta, "consolidation", None)
+    cur = float(getattr(ta, "current_price", 0) or 0)
+    if side == "short" and cons is not None and cur > 0:
+        top, bot = float(cons.top), float(cons.bottom)
+        if top > bot and cur >= bot * 0.97:
+            lbl = str(getattr(cons, "label", "") or "")
+            tag = "H4" if "H4" in lbl.upper() else ("H1" if "H1" in lbl.upper() else "HTF")
+            return f"зона сопр. {tag} {fmt_price(bot)}–{fmt_price(top)}", bot, top
     return "ждём зону M15 — OB/Fib/уровень не подтверждён", None, None
 
 
 def _ltf_trigger(ta: TAAnalysisResult, side: str) -> str:
     interval = int(getattr(ta, "analysis_interval_minutes", 5) or 5)
+    mid = int(getattr(ta, "mid_interval_minutes", 15) or 15)
     tag = f"{interval}m"
+    if side == "short":
+        for pat in reversed(list(getattr(ta, "patterns", None) or [])[-8:]):
+            pid = str(getattr(pat, "name", "") or "")
+            label = str(getattr(pat, "label_ru", "") or "")
+            low = f"{pid} {label}".lower()
+            if "bear_engulf" in pid or ("медв" in low and "поглощ" in low):
+                return f"M{mid}: медв. поглощение у сопротивления · M{interval} — контекст"
     trigger = getattr(ta, "setup_trigger", "") or ""
     if side == "long" and ta.breakout_level:
-        return f"close {tag} ≥ {fmt_price(ta.breakout_level)}" + (
+        return f"закреп {tag} ≥ {fmt_price(ta.breakout_level)}" + (
             f" · {trigger[:60]}" if trigger else ""
         )
     if side == "short" and ta.breakdown_level:
-        return f"close {tag} ≤ {fmt_price(ta.breakdown_level)}" + (
+        return f"закреп {tag} ≤ {fmt_price(ta.breakdown_level)}" + (
             f" · {trigger[:60]}" if trigger else ""
         )
     if trigger:
         return f"{tag}: {trigger[:100]}"
-    return f"нет триггера на {tag} — не market"
+    return f"нет триггера на {tag} — не по рынку"
 
 
 def _resolve_mode(
@@ -137,16 +152,16 @@ def _resolve_mode(
 
     if side == "wait" or verdict == "WAIT":
         if ideal and grade in {"A", "B"} and zone_lo:
-            return ENTRY_A, "лимит в M15-зоне при HTF bias"
-        return ENTRY_C, "HTF/M15 без точки — ждать триггер LTF"
+            return ENTRY_A, "лимит в зоне M15 по старшему ТФ"
+        return ENTRY_C, "нет точки на M15 — ждать сигнал на младшем ТФ"
 
     if ideal and grade in {"A", "B"} and zone_lo:
-        return ENTRY_A, "лимит в M15-зоне (HTF + confluence)"
+        return ENTRY_A, "лимит в зоне M15 (старший ТФ + уровни)"
     if verdict in {"LONG", "SHORT"} or getattr(ta, "setup_trigger", ""):
-        return ENTRY_B, "вход после close LTF за уровнем"
+        return ENTRY_B, "вход после закрепа на младшем ТФ"
     if zone_lo:
-        return ENTRY_A, "лимит в зоне, триггер LTF опционален"
-    return ENTRY_C, "наблюдение — дождаться M15 зоны"
+        return ENTRY_A, "лимит в зоне, триггер на младшем ТФ по желанию"
+    return ENTRY_C, "наблюдение — дождаться зоны M15"
 
 
 def build_htf_ltf_entry_plan(ta: TAAnalysisResult) -> HtfLtfEntryPlan:

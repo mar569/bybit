@@ -231,6 +231,9 @@ class TAAnalysisResult:
     verdict_scenario_note: str = ""
     human_trade_brief: str = ""
     human_trade_brief_html: str = ""
+    situational_brief_plain: str = ""
+    situational_brief_html: str = ""
+    situation_kind: str = ""
     bar_replay_label: str = ""
     liq_cascade_active: bool = False
     liq_cascade_note: str = ""
@@ -2381,7 +2384,10 @@ def run_ta_analysis(
         enabled=pattern_detection_enabled,
         min_confidence=pattern_min_confidence,
     )
-    primary_chart_pattern = pick_primary_pattern(chart_patterns)
+    _cur_px = float(bars[-1].close) if bars else 0.0
+    primary_chart_pattern = pick_primary_pattern(
+        chart_patterns, bars=bars, current=_cur_px or None
+    )
 
     # HTF (1h) фигуры — приоритет старшего ТФ по BuyHold
     htf_chart_patterns: list[ChartPattern] = []
@@ -2397,7 +2403,11 @@ def run_ta_analysis(
             max_patterns=2,
         )
         htf_chart_patterns = tag_patterns_timeframe(raw_htf, "htf")
-        primary_htf_chart_pattern = pick_primary_pattern(htf_chart_patterns)
+        primary_htf_chart_pattern = pick_primary_pattern(
+            htf_chart_patterns,
+            bars=list(htf_bars) if htf_bars else None,
+            current=_cur_px or None,
+        )
         chart_patterns = tag_patterns_timeframe(chart_patterns, "ltf")
         if primary_chart_pattern is not None:
             from dataclasses import replace as _dc_replace
@@ -2473,6 +2483,31 @@ def run_ta_analysis(
         local = detect_local_consolidation(bars, lookback=40, max_range_pct=6.5)
         if local:
             consolidation = local
+    cur_px = float(bars[-1].close) if bars else 0.0
+    if cur_px > 0 and (mid_bars or htf_bars or macro_bars):
+        from .consolidation_multi_tf import (
+            apply_consolidation_trigger_levels,
+            resolve_multi_tf_consolidation,
+        )
+
+        merged = resolve_multi_tf_consolidation(
+            cur_px,
+            ltf=consolidation,
+            mid_bars=mid_bars,
+            htf_bars=htf_bars,
+            macro_bars=macro_bars,
+            mid_interval_minutes=mid_interval_minutes,
+            htf_interval_minutes=htf_interval_minutes,
+            macro_interval_minutes=macro_interval_minutes,
+        )
+        if merged is not None:
+            consolidation = merged
+        breakdown, breakout = apply_consolidation_trigger_levels(
+            consolidation,
+            breakdown=breakdown,
+            breakout=breakout,
+            current=cur_px,
+        )
     candle_compression = bool(post_pump and detect_candle_compression(bars))
     green_bias = bool(candle_compression and recent_green_candle_bias(bars))
     nearest_resistance, nearest_support = detect_local_swing_levels(
@@ -3639,6 +3674,15 @@ def run_ta_analysis(
     _human_html = build_human_trade_brief_html(
         _brief_ta, symbol=symbol, conflict_note=verdict_scenario_note
     )
+    from .situational_brief import (
+        build_situational_brief_html,
+        build_situational_brief_plain,
+        classify_situation,
+    )
+
+    _sit_plain = build_situational_brief_plain(_brief_ta, symbol=symbol)
+    _sit_html = build_situational_brief_html(_brief_ta, symbol=symbol)
+    _sit_kind = classify_situation(_brief_ta)
     _report = build_scenario_report(
         _dc_replace(_brief_ta, human_trade_brief=_human_plain),
         symbol=symbol,
@@ -3653,6 +3697,9 @@ def run_ta_analysis(
         volume_poc_label=volume_poc_label,
         human_trade_brief=_human_plain,
         human_trade_brief_html=_human_html,
+        situational_brief_plain=_sit_plain,
+        situational_brief_html=_sit_html,
+        situation_kind=_sit_kind,
         reading_narrative=(
             market_reading.narrative if market_reading else _base.reading_narrative
         ),
@@ -4641,7 +4688,10 @@ def ta_signal_compact_block(
         )
         if scenario:
             return scenario
-        return f"🔶 <b>{ta.verdict}</b> · {wait_reason}" if wait_reason else f"🔶 <b>{ta.verdict}</b> по плану"
+        from .signal_locale import verdict_ru
+
+        vr = verdict_ru(ta.verdict)
+        return f"🔶 <b>{vr}</b> · {wait_reason}" if wait_reason else f"🔶 <b>{vr}</b> по плану"
 
     ctx_bits: list[str] = []
     if ta.post_pump and sig == "long":
@@ -4715,14 +4765,14 @@ def evaluate_entry_readiness(
     sig = (signal_side or "").lower()
     if cvd_ratio is not None:
         if sig == "short" and cvd_ratio >= cvd_long_min:
-            return False, f"CVD {cvd_ratio:.0%} buy — поток против SHORT"
+            return False, f"покупок {cvd_ratio:.0%} — поток против шорта"
         if sig == "long" and cvd_ratio <= cvd_short_max:
-            return False, f"CVD {cvd_ratio:.0%} buy — поток против LONG"
+            return False, f"покупок {cvd_ratio:.0%} — поток против лонга"
 
     if ta.smc and ta.smc.liquidity_sweep:
         if sig == "short" and ta.smc.sweep_direction == "long":
             if ta.smc.reversal_ready and ta.smc.reversal_direction == "long":
-                return False, "sweep лоев + reversal LONG"
+                return False, "смыв лоев — возможен отскок вверх"
             if signal_type in {"reversal_dump", "impulse_dump", "trend_dump", "vertical_dump"}:
                 return False, "sweep лоев — short после снятия ликвидности рано"
 
@@ -4802,8 +4852,8 @@ def evaluate_entry_readiness(
         if require_smc and ta.smc:
             smc_ok = ta.smc.structure_expansion or ta.smc.liquidity_sweep
             if not smc_ok:
-                return False, "SMC не готов (нет expansion/sweep)"
-        return True, "триггер SHORT подтверждён"
+                return False, "структура не готова (нет импульса или смыва)"
+        return True, "триггер шорта подтверждён"
     return False, "нет направления TA"
 
 
@@ -4826,10 +4876,10 @@ def format_flow_direction_label(ta: TAAnalysisResult) -> str:
         return ""
     diff = cont - corr
     if diff >= 15:
-        return f"факторы склоняются к <b>продолжению</b> (cont {cont} / corr {corr})"
+        return f"факторы склоняются к <b>продолжению</b> ({cont} vs {corr})"
     if diff <= -15:
-        return f"факторы склоняются к <b>коррекции</b> (cont {cont} / corr {corr})"
-    return f"факторы <b>смешаны</b> — нужен пробой уровня (cont {cont} / corr {corr})"
+        return f"факторы склоняются к <b>коррекции</b> ({cont} vs {corr})"
+    return f"факторы <b>смешаны</b> — нужен пробой уровня ({cont} vs {corr})"
 
 
 def ta_hot_analysis_block_html(
@@ -5414,17 +5464,10 @@ def _manual_verdict_headline(ta: TAAnalysisResult) -> str:
 
 
 def ta_manual_detailed_html(ta: TAAnalysisResult, *, symbol: str = "") -> str:
-    """Manual TA — тот же шаблон, что scenario report (reading → A/B/C → уровни)."""
-    report_html = str(getattr(ta, "scenario_report_html", "") or "").strip()
-    if report_html and ("<b>Есть</b>" in report_html or "📖" in report_html):
-        head = _manual_verdict_headline(ta)
-        if head.split("·", 1)[-1].strip() in report_html:
-            return report_html
-        return f"{head}\n{report_html}"
-    from .scenario_report import build_scenario_report
+    """Manual TA — короткий человеческий разбор (без режима C / setup D)."""
+    from .human_trade_brief import format_manual_ta_human_html
 
-    report = build_scenario_report(ta, symbol=symbol)
-    return f"{_manual_verdict_headline(ta)}\n{report.to_html_full()}"
+    return format_manual_ta_human_html(ta, symbol=symbol)
 
 
 def ta_telegram_caption_html(ta: TAAnalysisResult) -> str:

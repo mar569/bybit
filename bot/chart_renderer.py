@@ -28,7 +28,12 @@ from .chart_pro_layers import (
     draw_buy_flat_sell_zones,
     draw_pro_chart_layers,
 )
-from .manual_ta import pattern_chart_hours, chart_display_hours, structure_aware_display_hours
+from .manual_ta import (
+    chart_display_hours,
+    manual_chart_zoom_hours,
+    pattern_chart_hours,
+    structure_aware_display_hours,
+)
 from .market_structure import FiveMinOiBar
 from .ta_analysis import (
     TAAnalysisResult,
@@ -214,21 +219,31 @@ def _collect_right_labels(ta: TAAnalysisResult) -> list[_RightLabel]:
         or not _price_near(ta.breakdown_level, ta.breakout_level, ref)
     ):
         add(ta.breakdown_level, f"SHORT≤{fmt_price(ta.breakdown_level)}", CHART_STYLE["accent_short"], "top")
-    # STOP/TP справа — только при направленном вердикте (на WAIT дублируют foresight/path)
-    if not is_wait:
+    plan_side = ""
+    if is_wait:
+        from .human_trade_brief import preferred_trade_side
+
+        plan_side = preferred_trade_side(ta)
+    show_plan = not is_wait or plan_side in {"long", "short"}
+    if show_plan:
         if ta.invalidation_price:
-            add(ta.invalidation_price, f"STOP {fmt_price(ta.invalidation_price)}", CHART_STYLE["inv"])
-        for j, tp in enumerate(ta.target_prices[:2]):
+            tag = f"SL {plan_side[:1].upper()}" if plan_side else "SL"
+            add(
+                ta.invalidation_price,
+                f"{tag} {fmt_price(ta.invalidation_price)}",
+                CHART_STYLE["inv"],
+            )
+        for j, tp in enumerate(ta.target_prices[:3]):
             add(tp, f"TP{j + 1} {fmt_price(tp)}", CHART_STYLE["target"])
+        if ta.entry_zone and len(ta.entry_zone) == 2:
+            lo, hi = ta.entry_zone
+            add(hi, f"вход {fmt_price(lo)}–{fmt_price(hi)}", CHART_STYLE["accent_long"], "bottom")
     for fl in getattr(ta, "fib_levels", None) or []:
         if fl.ratio in {0.5, 0.618}:
             add(fl.price, fl.label, CHART_STYLE["fib_key"])
     for lv in ta.levels[:2]:
         color = CHART_STYLE["level_support"] if lv.kind == "support" else CHART_STYLE["level_resistance"]
         add(lv.price, fmt_price(lv.price), color)
-    if ta.entry_zone and not is_wait:
-        lo, hi = ta.entry_zone
-        add(hi, "зона входа", CHART_STYLE["accent_long"], "bottom")
     return out
 
 
@@ -1568,42 +1583,21 @@ def _draw_ta_annotations(
 
 
 def _chart_reading_overlay_lines(ta: TAAnalysisResult) -> list[str]:
-    """Текст на графике — как в manual/JPG: ТФ + есть/нет + режим, без простыни метрик."""
+    """Короткая подсказка на графике — детали в подписи Telegram."""
     lines: list[str] = []
     stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
     if stack:
         lines.append(stack)
-    elif getattr(ta, "smc", None) is not None:
-        smc = ta.smc
-        if getattr(smc, "macro_structure_label", ""):
-            lines.append(f"W/H4: {smc.macro_structure_label}")
-        if getattr(smc, "htf_structure_label", ""):
-            h = ta.htf_interval_minutes
-            tag = f"{h // 60}H" if h >= 60 else f"{h}m"
-            lines.append(f"{tag}: {smc.htf_structure_label}")
-        if getattr(smc, "mid_structure_label", ""):
-            lines.append(f"15m: {smc.mid_structure_label}")
-        if getattr(smc, "ltf_structure_label", ""):
-            lines.append(f"{ta.analysis_interval_minutes}m: {smc.ltf_structure_label}")
-    narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
-    if narrative:
-        lines.append(narrative[:140])
     seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
-    if seek and seek not in narrative:
-        lines.append(f"→ {seek[:100]}")
-    present = [str(x).strip() for x in (getattr(ta, "reading_present", None) or []) if str(x).strip()]
-    absent = [str(x).strip() for x in (getattr(ta, "reading_absent", None) or []) if str(x).strip()]
-    if present:
-        lines.append("Есть: " + "; ".join(present[:3]))
-    if absent:
-        lines.append("Нет: " + "; ".join(absent[:2]))
-    mode = str(getattr(ta, "scenario_entry_mode", "") or "").strip()
-    if mode:
-        lines.append(f"Режим входа: {mode}")
-    live = str(getattr(ta, "reading_live_scenario", "") or "").strip()
-    if live and live not in {"range"}:
-        lines.append(f"Сценарий: {live[:80]}")
-    return lines[:9]
+    trigger = str(getattr(ta, "setup_trigger", "") or "").strip()
+    if trigger:
+        lines.append(f"Триггер: {trigger[:90]}")
+    elif seek:
+        lines.append(f"Ждём: {seek[:90]}")
+    v = (getattr(ta, "verdict", "") or "WAIT").upper()
+    if v == "WAIT":
+        lines.append("Не входим сейчас · SL/TP справа = черновик")
+    return lines[:3]
 
 
 _PDF_ZONE_COLORS: dict[str, str] = {
@@ -1919,32 +1913,41 @@ def _draw_clean_market_annotations(
             alpha=0.85,
             zorder=3,
         )
-    if ta.verdict in {"LONG", "SHORT"}:
+    from .human_trade_brief import preferred_trade_side
+
+    plan_side = preferred_trade_side(ta)
+    draw_plan = ta.verdict in {"LONG", "SHORT"} or (
+        ta.verdict == "WAIT" and plan_side in {"long", "short"}
+    )
+    if draw_plan:
         if ta.invalidation_price:
             ax.axhline(
                 ta.invalidation_price,
                 color=CHART_STYLE["inv"],
                 linestyle="--",
-                linewidth=0.9,
-                alpha=0.8,
+                linewidth=1.05,
+                alpha=0.88,
                 zorder=3,
             )
-        if ta.target_prices:
+        for tp in (ta.target_prices or [])[:3]:
             ax.axhline(
-                ta.target_prices[0],
+                tp,
                 color=CHART_STYLE["target"],
                 linestyle=":",
-                linewidth=0.9,
-                alpha=0.8,
+                linewidth=0.95,
+                alpha=0.82,
                 zorder=3,
             )
+        if ta.entry_zone and len(ta.entry_zone) == 2:
+            lo, hi = ta.entry_zone
+            ax.axhspan(lo, hi, color=CHART_STYLE["accent_long"], alpha=0.12, zorder=2)
 
     context = _chart_reading_overlay_lines(ta)
     if context:
         ax.text(
             0.012,
             0.985,
-            "\n".join(context[:8]),
+            "\n".join(context[:4]),
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -2499,6 +2502,7 @@ def _render_chart_figure(
     ut_overlay: Any | None = None,
     clean_chart: bool = False,
     signal_chart: bool = False,
+    manual_ta_chart: bool = False,
 ) -> bytes:
     """Рисует единый график без RSI/volume-панелей и боковых информационных колонок."""
     fig_size, _ = _chart_figure_layout(
@@ -2513,30 +2517,25 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
-    if clean_chart and not signal_chart:
+    if manual_ta_chart or signal_chart:
+        try:
+            from .chart_manual_layers import draw_manual_ta_layers
+
+            draw_manual_ta_layers(ax, bars, ta)
+        except Exception:
+            logger.exception("Manual TA chart layers failed")
+    elif clean_chart:
         try:
             _draw_essential_oil_overlays(ax, bars, ta)
         except Exception:
             logger.debug("Essential oil overlays failed", exc_info=True)
     else:
-        _draw_clean_market_annotations(ax, bars, ta, signal_chart=signal_chart)
-        if signal_chart and (getattr(ta, "setup_grade", "") or "").upper() in {"A", "B"}:
-            try:
-                prices = list(getattr(ta, "forecast_path_prices", None) or [])
-                if len(prices) >= 2:
-                    last_t = _idx_to_date(bars, len(bars) - 1)
-                    t1 = mdates.num2date(mdates.date2num(last_t) + 0.022, tz=timezone.utc)
-                    p0 = bars[-1].close
-                    ax.plot(
-                        [last_t, t1],
-                        [p0, prices[0]],
-                        color=CHART_STYLE["accent_long"] if ta.verdict == "LONG" else CHART_STYLE["accent_short"],
-                        linestyle="--",
-                        linewidth=1.2,
-                        alpha=0.75,
-                    )
-            except Exception:
-                logger.debug("signal forecast path skipped", exc_info=True)
+        _draw_clean_market_annotations(ax, bars, ta, signal_chart=False)
+    if not manual_ta_chart and not signal_chart:
+        try:
+            _draw_right_price_labels(ax, bars, ta)
+        except Exception:
+            logger.debug("right price labels skipped", exc_info=True)
     if ut_overlay is not None:
         try:
             _draw_ut_bot_overlay(
@@ -2559,8 +2558,9 @@ def _render_chart_figure(
     else:
         mode_suffix = " · PRO" if pro_mode else ""
         ut_sfx = " · UT" if ut_overlay is not None else ""
+        wait_tag = " · наблюдение" if manual_ta_chart and (ta.verdict or "").upper() == "WAIT" else ""
         ax.set_title(
-            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{ut_sfx}",
+            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{wait_tag}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
         )
     _style_axes(ax, bars)
@@ -3199,12 +3199,15 @@ async def render_annotated_chart(
     display_hours: int | None = None,
     height_scale: float | None = None,
     signal_chart: bool = False,
+    manual_ta_chart: bool = False,
     as_of_bar_index: int | None = None,
     as_of_open_time_ms: int | float | None = None,
     as_of_price: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
     # Analyze enough history for patterns, then zoom the display window.
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
+    if manual_ta_chart:
+        analysis_hours = max(analysis_hours, hours)
     zoom_hours = chart_display_hours(interval_minutes, configured=display_hours)
     zoom_hours = min(zoom_hours, analysis_hours)
     bars = await _fetch_bars(symbol, analysis_hours, interval_minutes=interval_minutes)
@@ -3369,19 +3372,26 @@ async def render_annotated_chart(
         )
     if verdict_override:
         ta.verdict = verdict_override
-    zoom_hours = structure_aware_display_hours(
-        interval_minutes=interval_minutes,
-        analysis_hours=analysis_hours,
-        configured=display_hours,
-        drawdown_pct=float(getattr(ta, "drawdown_from_high_pct", 0) or 0),
-        structure_span_bars=0,
-        fib_span_bars=0,
-    )
-
-    source = "annotated"
+    if manual_ta_chart or signal_chart:
+        zoom_hours = manual_chart_zoom_hours(
+            ta,
+            bars,
+            interval_minutes=interval_minutes,
+            analysis_hours=analysis_hours,
+            configured=display_hours,
+        )
+    else:
+        zoom_hours = structure_aware_display_hours(
+            interval_minutes=interval_minutes,
+            analysis_hours=analysis_hours,
+            configured=display_hours,
+            drawdown_pct=float(getattr(ta, "drawdown_from_high_pct", 0) or 0),
+            structure_span_bars=0,
+            fib_span_bars=0,
+        )
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
-    pro_mode = source == "annotated_pro"
+    pro_mode = False if (manual_ta_chart or signal_chart) else chart_source == "annotated_pro"
     title = f"Bybit {interval_minutes}m · вид {zoom_hours}ч"
     if analysis_hours > zoom_hours:
         title = f"{title} (анализ {analysis_hours}ч)"
@@ -3395,6 +3405,7 @@ async def render_annotated_chart(
         display_hours=zoom_hours,
         height_scale=height_scale,
         signal_chart=signal_chart,
+        manual_ta_chart=manual_ta_chart,
     )
     return png, ta
 

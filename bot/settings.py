@@ -9,10 +9,114 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 97
+SETTINGS_VERSION = 103
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
-# Тихий режим Ed: сигналы с Binance, 1–2 алерта/ч, WATCH → канал анализа (foresight).
+# Активный рынок: пампы/дампы на Binance, WATCH в analysis, без спама ENTRY.
+ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
+    "enabled_binance": True,
+    "enabled_bybit": False,
+    "signals_enabled": True,
+    "oi_period_minutes": 10,
+    "long_period_minutes": 10,
+    "short_period_minutes": 10,
+    "oi_rise_percent": 2.8,
+    "oi_drop_percent": 2.8,
+    "price_rise_percent": 1.35,
+    "price_drop_percent": 1.35,
+    "require_both_oi_and_price": True,
+    "min_oi_change_usd": 28_000.0,
+    "min_probability_percent": 66.0,
+    "alt_min_probability_percent": 68.0,
+    "min_signal_score": 2.0,
+    "standard_min_signal_score": 2.0,
+    "alt_min_signal_score": 2.5,
+    "signal_cooldown_seconds": 900,
+    "mega_cooldown_seconds": 120,
+    "impulse_cooldown_seconds": 600,
+    "breakout_cooldown_seconds": 900,
+    "reversal_cooldown_seconds": 900,
+    "liq_cascade_cooldown_seconds": 600,
+    "trend_seed_cooldown_seconds": 1200,
+    "pulse_scanner_enabled": True,
+    "flash_enabled": False,
+    "impulse_enabled": True,
+    "trend_seed_enabled": True,
+    "breakout_enabled": True,
+    "reversal_enabled": True,
+    "liq_cascade_enabled": True,
+    "trend_exhaustion_enabled": True,
+    "telegram_max_per_minute": 2,
+    "telegram_max_per_hour": 10,
+    "telegram_min_interval_seconds": 25.0,
+    "priority_score_max": 3,
+    "actionable_signals_only": True,
+    "actionable_min_ta_score": 7,
+    "actionable_min_signal_score": 3,
+    "signal_watch_mode_enabled": True,
+    "signal_intel_watch_enabled": True,
+    "signal_intel_main_channel": False,
+    "scenario_watch_enabled": False,
+    "scenario_watch_push_enabled": False,
+    "scenario_watch_mode": "off",
+    "signal_skip_noise": True,
+    "signal_message_compact": True,
+    "signal_ta_compact": True,
+    "signal_chart_on_watch": True,
+    "signal_playbook_enabled": False,
+    "signal_pro_to_analysis_chat": False,
+    "signal_coinglass_breakdown_enabled": False,
+    "signal_alert_reading_snippet_enabled": True,
+    "signal_alert_llm_validate_enabled": False,
+    "target_watcher_enabled": False,
+    "anomaly_enabled": False,
+    "liquidation_alerts_enabled": False,
+    "analysis_enabled": True,
+    "analysis_max_per_hour": 8,
+    "pattern_min_confidence": 0.68,
+    "trade_decision_gate_enabled": True,
+    "trade_decision_block_chase_watch": True,
+    "manual_ta_alerts_enabled": False,
+    "top_n_symbols": 160,
+}
+
+# Дефолт продукта (v102+): situational + intel + авто ИИ; без playbook/scenario/quiet.
+SITUATIONAL_SCANNER_PRESET: dict[str, Any] = {
+    **ACTIVE_PUMP_SCANNER_PRESET,
+    "enabled_binance": True,
+    "enabled_bybit": True,
+    "long_period_minutes": 5,
+    "short_period_minutes": 5,
+    "min_open_interest": 80_000.0,
+    "reading_display_style": "situational",
+    "ai_situational_reading_enabled": True,
+    "ai_situational_on_manual": True,
+    "ai_situational_on_signal": True,
+    "situation_overview_enabled": True,
+    "situation_overview_interval_seconds": 3600,
+    "situation_overview_min_symbols": 2,
+    "signal_chart_on_watch": True,
+    "pattern_min_confidence": 0.68,
+    "analysis_max_per_hour": 8,
+    "flash_enabled": False,
+    "signal_playbook_enabled": False,
+    "signal_pro_to_analysis_chat": False,
+    "signal_coinglass_breakdown_enabled": False,
+    "signal_alert_llm_validate_enabled": False,
+    "scenario_watch_enabled": False,
+    "scenario_watch_push_enabled": False,
+    "scenario_watch_mode": "off",
+    "scenario_watch_chart_enabled": False,
+    "target_watcher_enabled": False,
+    "anomaly_enabled": False,
+    "manual_ta_alerts_enabled": False,
+    "liquidation_alerts_enabled": False,
+    # Legacy «🧠 АНАЛИЗ» (probability engine по liq-кластеру) — дублирует situational+ИИ в сигналах
+    "analysis_enabled": False,
+    "analysis_signal_trigger_enabled": False,
+}
+
+# Legacy quiet (v95–98): слишком редко на живом рынке.
 QUIET_FORESIGHT_BINANCE_PRESET: dict[str, Any] = {
     "enabled_binance": True,
     "enabled_bybit": False,
@@ -47,7 +151,7 @@ QUIET_FORESIGHT_BINANCE_PRESET: dict[str, Any] = {
     "liq_cascade_enabled": True,
     "trend_exhaustion_enabled": True,
     "telegram_max_per_minute": 1,
-    "telegram_max_per_hour": 2,
+    "telegram_max_per_hour": 4,
     "telegram_min_interval_seconds": 45.0,
     "priority_score_max": 2,
     "actionable_signals_only": True,
@@ -253,14 +357,14 @@ class ExchangeThresholds:
 class ScannerSettings:
     settings_version: int = SETTINGS_VERSION
 
-    # Основной LONG/SHORT-профиль (Balanced PRO: 10м, OI 3.5%, цена 1.8%)
+    # Основной LONG/SHORT (v102 situational: OI 2.8%, цена 1.35%, LONG/SHORT окно 5м)
     oi_period_minutes: int = 10
-    long_period_minutes: int = 10
-    short_period_minutes: int = 10
-    oi_rise_percent: float = 4.0
-    oi_drop_percent: float = 4.0
-    price_rise_percent: float = 2.0
-    price_drop_percent: float = 2.0
+    long_period_minutes: int = 5
+    short_period_minutes: int = 5
+    oi_rise_percent: float = 2.8
+    oi_drop_percent: float = 2.8
+    price_rise_percent: float = 1.35
+    price_drop_percent: float = 1.35
 
     # Ранний пульс — чувствительнее основного (respect_global_floors=False)
     pulse_period_minutes: int = 5
@@ -268,7 +372,7 @@ class ScannerSettings:
     pulse_oi_drop_percent: float = 1.0
     pulse_price_rise_percent: float = 0.45
     pulse_price_drop_percent: float = 0.45
-    pulse_scanner_enabled: bool = False
+    pulse_scanner_enabled: bool = True
 
     # Мега-пампы: 3–30% за 3–10 минут
     flash_enabled: bool = False
@@ -279,7 +383,7 @@ class ScannerSettings:
     flash_bypass_oi_tier_pct: float = 10.0
 
     # Качество сигнала: деньги в OI, не просто цена
-    min_oi_change_usd: float = 50_000.0
+    min_oi_change_usd: float = 28_000.0
     min_oi_change_soft_usd: float = 25_000.0
     min_oi_change_strong_price_mult: float = 1.35
     short_squeeze_min_price: float = 3.5
@@ -287,7 +391,7 @@ class ScannerSettings:
     require_oi_for_price_only: bool = True
     require_both_oi_and_price: bool = True
     respect_global_floors: bool = False
-    mega_cooldown_seconds: int = 45
+    mega_cooldown_seconds: int = 120
 
     # Вертикальный памп/слив: флет → импульс (tier снижает % для BTC/ETH)
     breakout_enabled: bool = True
@@ -299,7 +403,7 @@ class ScannerSettings:
     breakout_min_dump_percent: float = 1.0
     breakout_velocity_multiplier: float = 2.8
     breakout_min_liquidity_oi_usd: float = 280_000.0
-    breakout_cooldown_seconds: int = 150
+    breakout_cooldown_seconds: int = 900
 
     # Резкий разворот: памп → слив (или дамп → отскок)
     reversal_enabled: bool = True
@@ -310,18 +414,18 @@ class ScannerSettings:
     reversal_min_prior_move_pct: float = 1.2
     reversal_min_reversal_pct: float = 0.85
     reversal_min_liquidity_oi_usd: float = 220_000.0
-    reversal_cooldown_seconds: int = 120
+    reversal_cooldown_seconds: int = 900
     reversal_block_long_after_dump: bool = True
     reversal_block_dump_window_minutes: int = 30
     reversal_block_min_dump_pct: float = 5.0
 
     # Импульс: кумулятивное движение за 15–30 мин (ловит затяжные pump/dump как DBR)
-    impulse_enabled: bool = False
+    impulse_enabled: bool = True
     impulse_bypass_top_n: bool = True
     impulse_window_minutes: tuple[int, ...] = (15, 30)
     impulse_price_tiers: tuple[float, ...] = (5.0, 8.0, 12.0)
     impulse_min_liquidity_oi_usd: float = 140_000.0
-    impulse_cooldown_seconds: int = 120
+    impulse_cooldown_seconds: int = 600
     major_impulse_price_multiplier: float = 0.6
     alt_impulse_price_multiplier: float = 1.05
 
@@ -345,7 +449,7 @@ class ScannerSettings:
     alt_oi_multiplier: float = 1.1
     alt_min_open_interest: float = 180_000.0
     alt_min_oi_change_usd: float = 40_000.0
-    alt_min_probability_percent: float = 74.0
+    alt_min_probability_percent: float = 68.0
     alt_min_signal_score: float = 3.0
     standard_min_signal_score: float = 2.0
 
@@ -357,7 +461,7 @@ class ScannerSettings:
     liq_cascade_imbalance_min: float = 0.60
     major_liq_cascade_min_usd: float = 120_000.0
     major_liq_cascade_min_price_percent: float = 0.35
-    liq_cascade_cooldown_seconds: int = 120
+    liq_cascade_cooldown_seconds: int = 600
 
     # Тренд → перегрев → слив (VELVET-паттерн на альтах)
     trend_exhaustion_enabled: bool = True
@@ -378,7 +482,7 @@ class ScannerSettings:
     trend_exhaustion_risk_cooldown_seconds: int = 600
 
     # Потенциал тренда (AKE): флет → пробой + OI↑ + CVD↑, early WATCH
-    trend_seed_enabled: bool = False
+    trend_seed_enabled: bool = True
     trend_seed_bypass_top_n: bool = True
     trend_seed_base_minutes: int = 25
     trend_seed_break_minutes: int = 5
@@ -397,31 +501,31 @@ class ScannerSettings:
     min_open_interest: float = 80_000.0
     min_volume: float = 0.0
     enabled_binance: bool = True
-    enabled_bybit: bool = False
+    enabled_bybit: bool = True
     scan_interval_seconds: int = 2
-    signal_cooldown_seconds: int = 2400
+    signal_cooldown_seconds: int = 900
     volume_spike_multiplier: float = 4.0
     price_pump_threshold_pct: float = 8.0
     price_pump_window_minutes: int = 5
     cvd_divergence_threshold: float = -0.1
     min_signal_score: float = 2.0
     top_n_symbols: int | None = 150
-    priority_score_max: int = 2
-    signals_enabled: bool = False
+    priority_score_max: int = 3
+    signals_enabled: bool = True
     bot_paused: bool = False
     price_only_min_percent: float = 3.0
-    telegram_max_per_minute: int = 1
-    telegram_max_per_hour: int = 2
-    telegram_min_interval_seconds: float = 45.0
+    telegram_max_per_minute: int = 2
+    telegram_max_per_hour: int = 10
+    telegram_min_interval_seconds: float = 25.0
 
-    min_probability_percent: float = 74.0
+    min_probability_percent: float = 66.0
     probability_filter_enabled: bool = True
 
     # Только ENTRY без WATCH — Balanced PRO
     actionable_signals_only: bool = True
-    actionable_min_ta_score: int = 8
+    actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 2.5
-    actionable_min_signal_score: int = 4
+    actionable_min_signal_score: int = 3
     actionable_max_signal_score: int = 8
     actionable_require_smc: bool = False
     actionable_show_readiness_badge: bool = True
@@ -489,10 +593,12 @@ class ScannerSettings:
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
     pattern_detection_enabled: bool = True
-    pattern_min_confidence: float = 0.72
+    pattern_min_confidence: float = 0.68
 
     # Ручной TA использует единый чистый график без внешних боковых панелей.
     manual_ta_chart_source: str = "annotated"
+    # 0 = авто-зум под структуру; иначе фикс. часов на графике ручного TA (4…72)
+    manual_ta_chart_display_hours: int = 0
 
     # Компактное уведомление (для фото+caption ≤1024 символов)
     signal_message_compact: bool = True
@@ -503,9 +609,19 @@ class ScannerSettings:
     # Отдельным сообщением сразу после сигнала: разбор деривативов/потока Coinglass
     signal_coinglass_breakdown_enabled: bool = False
     # График в alert только на ENTRY B+; WATCH — текст (reading + план)
-    signal_chart_on_watch: bool = False
+    signal_chart_on_watch: bool = True
     signal_alert_reading_snippet_enabled: bool = True
     signal_alert_llm_validate_enabled: bool = False
+    # situational = проза под фазу; evidence = списки «Есть/Нет»; hybrid = оба
+    reading_display_style: str = "situational"
+    # Авто ИИ-разбор после сигнала / ручного TA (нужен GEMINI или GROQ в .env)
+    ai_situational_reading_enabled: bool = True
+    ai_situational_on_manual: bool = True
+    ai_situational_on_signal: bool = True
+    # Периодический «пульс»: сводка situation_kind по кэшу TA → чат анализа
+    situation_overview_enabled: bool = True
+    situation_overview_interval_seconds: int = 3600
+    situation_overview_min_symbols: int = 2
     target_watcher_enabled: bool = False
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
@@ -687,7 +803,7 @@ class ScannerSettings:
     analysis_require_trend: bool = False
     analysis_force_liq_usd: float = 25_000.0
     analysis_max_per_hour: int = 5
-    analysis_signal_trigger_enabled: bool = True
+    analysis_signal_trigger_enabled: bool = False
     analysis_signal_min_liq_usd: float = 10_000.0
     analysis_delay_seconds: int = 90
     analysis_min_confidence: float = 48.0
@@ -1075,6 +1191,7 @@ class ScannerSettings:
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
             manual_ta_chart_source="annotated",
+            manual_ta_chart_display_hours=int(base.get("manual_ta_chart_display_hours", 0) or 0),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", False)),
             signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", False)),
@@ -1088,6 +1205,17 @@ class ScannerSettings:
             signal_alert_llm_validate_enabled=bool(
                 base.get("signal_alert_llm_validate_enabled", False)
             ),
+            reading_display_style=str(base.get("reading_display_style", "situational")),
+            ai_situational_reading_enabled=bool(
+                base.get("ai_situational_reading_enabled", True)
+            ),
+            ai_situational_on_manual=bool(base.get("ai_situational_on_manual", True)),
+            ai_situational_on_signal=bool(base.get("ai_situational_on_signal", True)),
+            situation_overview_enabled=bool(base.get("situation_overview_enabled", True)),
+            situation_overview_interval_seconds=int(
+                base.get("situation_overview_interval_seconds", 3600)
+            ),
+            situation_overview_min_symbols=int(base.get("situation_overview_min_symbols", 2)),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
             signal_quality_scanner_skip_enabled=bool(
@@ -2075,6 +2203,26 @@ class SettingsManager:
                 merged["scenario_watch_chart_enabled"] = False
             if version < 97:
                 merged["signal_chart_on_watch"] = True
+            if version < 98:
+                merged["telegram_max_per_hour"] = max(
+                    int(merged.get("telegram_max_per_hour", 2) or 2), 4
+                )
+            if version < 99:
+                merged.update(ACTIVE_PUMP_SCANNER_PRESET)
+            if version < 100:
+                merged.setdefault("reading_display_style", "situational")
+                merged.setdefault("ai_situational_reading_enabled", False)
+                merged.setdefault("ai_situational_on_manual", True)
+                merged.setdefault("ai_situational_on_signal", True)
+            if version < 101:
+                merged.setdefault("situation_overview_enabled", True)
+                merged.setdefault("situation_overview_interval_seconds", 3600)
+                merged.setdefault("situation_overview_min_symbols", 2)
+            if version < 102:
+                merged.update(SITUATIONAL_SCANNER_PRESET)
+            if version < 103:
+                merged["analysis_enabled"] = False
+                merged["analysis_signal_trigger_enabled"] = False
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

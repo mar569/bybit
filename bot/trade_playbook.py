@@ -240,6 +240,7 @@ def build_hot_caption(
     quality_html: str = "",
     quality_tier: str | None = None,
     decision: TradeDecision | None = None,
+    reading_style: str = "situational",
 ) -> str:
     """Alert caption: reading/scenario (как manual) + тезис только на ENTRY."""
     from .signal_pipeline import build_signal_alert_caption
@@ -262,6 +263,7 @@ def build_hot_caption(
         quality_html=quality_html,
         action_line=action.strip(),
         compact=True,
+        reading_style=reading_style,
     )
 
 

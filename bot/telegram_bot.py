@@ -51,6 +51,7 @@ from .manual_ta import (
     MTW_CALLBACK_PREFIX,
     MTW_CANCEL_CALLBACK,
     build_mta_callback,
+    build_mtai_callback,
     build_mta_alert_callback,
     build_mta_intent_callback,
     build_mta_mute_callback,
@@ -63,6 +64,7 @@ from .manual_ta import (
     parse_manual_ta_input,
     parse_user_trade_intent,
     parse_mta_callback,
+    parse_mtai_callback,
     parse_mta_alert_callback,
     parse_mta_intent_callback,
     parse_mta_mute_callback,
@@ -205,6 +207,8 @@ class TelegramBot:
         self._minute_send_times: dict[int, list[float]] = {}
         self._hour_send_times: dict[int, list[float]] = {}
         self._last_proactive_intel_time: dict[str, float] = {}
+        self._situation_overview_task: asyncio.Task | None = None
+        self._last_situation_overview_post: float = 0.0
         self._unreachable_chats: set[int] = set()
         self._send_lock = asyncio.Lock()
         self._last_symbol_signal_time: dict[str, float] = {}
@@ -240,6 +244,8 @@ class TelegramBot:
         # История диалога «Спросить ИИ» (user_id → [{role, text}, ...])
         self._oil_ai_history: dict[int, list[dict[str, str]]] = {}
         self._OIL_AI_HISTORY_MAX = 10
+        self._manual_ta_ta_cache: dict[tuple[int, str, int], tuple[Any, float]] = {}
+        self._MANUAL_TA_TA_TTL_SEC = 45 * 60
 
     _BOT_PAUSE_KEYS: tuple[str, ...] = (
         "signals_enabled",
@@ -482,6 +488,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("ai_stop", self.on_ai_stop))
         self.application.add_handler(CommandHandler("pause", self.on_pause))
         self.application.add_handler(CommandHandler("cancel", self.on_cancel))
+        self.application.add_handler(CommandHandler("pulse", self.on_pulse))
+        self.application.add_handler(CommandHandler("overview", self.on_pulse))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
         self.application.add_handler(MessageHandler(filters.PHOTO, self.on_manual_ta_photo))
         self.application.add_handler(
@@ -610,6 +618,10 @@ class TelegramBot:
             self._manual_ta_alert_task = asyncio.create_task(self._manual_ta_alert_loop())
         if self._scenario_watch_task is None or self._scenario_watch_task.done():
             self._scenario_watch_task = asyncio.create_task(self._scenario_watch_loop())
+        if self._situation_overview_task is None or self._situation_overview_task.done():
+            self._situation_overview_task = asyncio.create_task(
+                self._situation_overview_loop()
+            )
 
     async def stop(self) -> None:
         if self.application is None:
@@ -631,6 +643,13 @@ class TelegramBot:
             except asyncio.CancelledError:
                 pass
             self._scenario_watch_task = None
+        if self._situation_overview_task is not None:
+            self._situation_overview_task.cancel()
+            try:
+                await self._situation_overview_task
+            except asyncio.CancelledError:
+                pass
+            self._situation_overview_task = None
         if self.redis is not None:
             try:
                 await self.redis.close()
@@ -1337,6 +1356,15 @@ class TelegramBot:
         stale = [k for k, v in self._signal_watch_ctx.items() if float(v.get("ts", 0)) < cutoff]
         for k in stale:
             self._signal_watch_ctx.pop(k, None)
+        try:
+            from .market_state_store import get_market_state_store
+
+            iv = int(getattr(ta, "analysis_interval_minutes", 5) or 5)
+            get_market_state_store().put_from_ta(
+                signal.symbol, ta, interval_minutes=iv
+            )
+        except Exception:
+            logger.debug("market state cache skip %s", signal.symbol, exc_info=True)
 
     async def _store_signal_pro(self, text: str) -> str:
         token = uuid.uuid4().hex[:10]
@@ -1941,11 +1969,9 @@ class TelegramBot:
 
             quality_html = format_quality_warnings_html(quality) if quality else ""
             hot_quality_html = format_quality_hot_html(quality) if quality else ""
-            tier_prefix = ""
-            if quality and quality.tier == "entry":
-                tier_prefix = "🎯 <b>ENTRY</b> · "
-            elif quality and quality.tier == "watch":
-                tier_prefix = "👀 <b>WATCH</b> · "
+            from .signal_locale import quality_tier_prefix
+
+            tier_prefix = quality_tier_prefix(quality.tier if quality else None)
             signal_header = f"{tier_prefix}{message}"
 
             attach_chart = should_attach_signal_chart(
@@ -1975,6 +2001,9 @@ class TelegramBot:
             pro_text = ""
             pro_token = ""
             if ta_result is not None and settings.signal_playbook_enabled:
+                _reading_style = str(
+                    getattr(settings, "reading_display_style", "situational") or "situational"
+                )
                 chart_caption = build_hot_caption(
                     signal,
                     ta_result,
@@ -1983,6 +2012,7 @@ class TelegramBot:
                     quality_html=hot_quality_html,
                     quality_tier=quality.tier if quality else None,
                     decision=trade_decision,
+                    reading_style=_reading_style,
                 )
                 pro_text = build_pro_detail_html(
                     signal,
@@ -2018,6 +2048,9 @@ class TelegramBot:
                     quality_html=hot_quality_html if quality else "",
                     action_line=ta_caption if (quality and quality.tier == "entry") else "",
                     compact=settings.signal_message_compact,
+                    reading_style=str(
+                        getattr(settings, "reading_display_style", "situational") or "situational"
+                    ),
                 )
                 keyboard = self._signal_keyboard(
                     signal,
@@ -2097,6 +2130,16 @@ class TelegramBot:
                 logger.debug(
                     "Alert LLM validate failed for %s", signal.symbol, exc_info=True,
                 )
+
+        if sent_any and ta_result is not None and not skip_dedupe:
+            await self._maybe_send_situational_ai(
+                notify_chat_id,
+                ta_result,
+                symbol=signal.symbol,
+                manual=False,
+                signal_side=signal.side or "",
+                signal_type=signal.signal_type or "",
+            )
 
         if (
             sent_any
@@ -2538,10 +2581,10 @@ class TelegramBot:
         sym = symbol.upper()
         link = coinglass_url(sym, exchange)
         if risk.kind == "dump_risk":
-            title = "⚠️ WATCH · риск слива"
+            title = "⚠️ Наблюдение · риск слива"
             hint = "Не лонг у хая. Ждите trend_dump или пробой вниз."
         else:
-            title = "⚠️ WATCH · риск отскока"
+            title = "⚠️ Наблюдение · риск отскока"
             hint = "Не шорт у дна. Ждите trend_pump или пробой вверх."
 
         score = int(risk.meta.get("risk_score", 0))
@@ -2931,9 +2974,87 @@ class TelegramBot:
         *,
         chat_id: int | None = None,
     ) -> InlineKeyboardMarkup:
-        return self._manual_ta_tf_keyboard(
-            symbol, wizard=False, interval_minutes=interval_minutes,
+        ai_row = self._coinglass_link_buttons(
+            symbol, "bybit", include_ai=True, interval_minutes=interval_minutes,
         )
+        ai_row.insert(
+            0,
+            InlineKeyboardButton(
+                "🧠 ИИ-разбор",
+                callback_data=build_mtai_callback(symbol, interval_minutes),
+            ),
+        )
+        rows = [
+            self._manual_ta_tf_keyboard(
+                symbol, wizard=False, interval_minutes=interval_minutes,
+            ).inline_keyboard[0],
+            ai_row,
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    def _cache_manual_ta_result(
+        self,
+        chat_id: int,
+        symbol: str,
+        interval_minutes: int,
+        ta: Any,
+    ) -> None:
+        self._manual_ta_ta_cache[(chat_id, symbol.upper(), interval_minutes)] = (
+            ta,
+            time.time(),
+        )
+
+    def _get_cached_manual_ta(
+        self,
+        chat_id: int,
+        symbol: str,
+        interval_minutes: int,
+    ) -> Any | None:
+        key = (chat_id, symbol.upper(), interval_minutes)
+        row = self._manual_ta_ta_cache.get(key)
+        if not row:
+            return None
+        ta, ts = row
+        if time.time() - ts > self._MANUAL_TA_TA_TTL_SEC:
+            self._manual_ta_ta_cache.pop(key, None)
+            return None
+        return ta
+
+    async def _maybe_send_situational_ai(
+        self,
+        chat_id: int,
+        ta: Any,
+        *,
+        symbol: str,
+        manual: bool,
+        signal_side: str = "",
+        signal_type: str = "",
+        force: bool = False,
+    ) -> None:
+        settings = self.settings_manager.settings
+        if not force and not getattr(settings, "ai_situational_reading_enabled", False):
+            return
+        if not force and manual and not getattr(settings, "ai_situational_on_manual", True):
+            return
+        if not force and not manual and not getattr(settings, "ai_situational_on_signal", True):
+            return
+        if not self.config.ai_configured:
+            return
+        try:
+            from .ai_situational import run_situational_ai_reading
+
+            html = await run_situational_ai_reading(
+                api_key=self.config.gemini_api_key,
+                model=self.config.gemini_model,
+                ta=ta,
+                symbol=symbol,
+                signal_side=signal_side,
+                signal_type=signal_type,
+            )
+            if html and len(html) > 40:
+                await self._send_to_chat(chat_id, html, None, is_priority=False)
+        except Exception:
+            logger.debug("Situational AI skip for %s", symbol, exc_info=True)
 
     def _is_manual_ta_muted(self, chat_id: int, symbol: str) -> bool:
         key = (chat_id, symbol.upper())
@@ -3056,6 +3177,62 @@ class TelegramBot:
                 raise
             except Exception:
                 logger.exception("Manual TA alert loop error")
+
+    async def _situation_overview_loop(self) -> None:
+        """Периодическая сводка situation_kind в чат анализа."""
+        while True:
+            try:
+                await asyncio.sleep(90.0)
+                settings = self.settings_manager.settings
+                if (
+                    not getattr(settings, "situation_overview_enabled", True)
+                    or settings.bot_paused
+                    or self.application is None
+                ):
+                    continue
+                chat_id = self.config.effective_analysis_chat_id
+                if chat_id is None:
+                    continue
+                interval = max(
+                    600,
+                    int(getattr(settings, "situation_overview_interval_seconds", 3600) or 3600),
+                )
+                now = time.time()
+                if now - self._last_situation_overview_post < interval:
+                    continue
+                from .market_situation_overview import build_situation_overview_from_store
+                from .market_state_store import get_market_state_store
+
+                store = get_market_state_store()
+                min_sym = max(
+                    1, int(getattr(settings, "situation_overview_min_symbols", 2) or 2)
+                )
+                if store.count_active() < min_sym:
+                    continue
+                body = build_situation_overview_from_store(store)
+                await self._send_to_chat(chat_id, body, None, is_priority=False)
+                self._last_situation_overview_post = now
+                logger.info(
+                    "Situation overview → analysis chat (%d symbols)",
+                    store.count_active(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Situation overview loop error")
+
+    async def on_pulse(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            await update.message.reply_text("Нет доступа.")
+            return
+        from .market_situation_overview import build_situation_overview_from_store
+
+        text = build_situation_overview_from_store()
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._reply_keyboard(),
+        )
 
     async def _scenario_watch_loop(self) -> None:
         while True:
@@ -3658,6 +3835,9 @@ class TelegramBot:
                 liq_context = None
 
         chart_source = chart_source or self.settings_manager.settings.manual_ta_chart_source
+        s = self.settings_manager.settings
+        manual_display_h = int(getattr(s, "manual_ta_chart_display_hours", 0) or 0)
+        manual_display = manual_display_h if manual_display_h > 0 else None
 
         try:
             png, ta = await asyncio.wait_for(
@@ -3672,6 +3852,8 @@ class TelegramBot:
                     exchange="bybit",
                     liq_context=liq_context,
                     market_metrics=await self._fetch_manual_ta_market_details(symbol),
+                    display_hours=manual_display,
+                    manual_ta_chart=True,
                     as_of_bar_index=as_of_bar_index,
                     as_of_open_time_ms=as_of_open_time_ms,
                     as_of_price=as_of_price,
@@ -3704,7 +3886,7 @@ class TelegramBot:
 
         from .scenario_report import enrich_ta_scenario_fields
 
-        ta = enrich_ta_scenario_fields(ta, symbol=symbol, full_html=True)
+        ta = enrich_ta_scenario_fields(ta, symbol=symbol, full_html=False)
 
         if photo_file_id and self.application is not None:
             ref_caption = f"📷 Референс · <b>{symbol}</b> · {interval_minutes}m"
@@ -3767,6 +3949,13 @@ class TelegramBot:
             caption,
             is_priority=False,
             keyboard=keyboard,
+        )
+        self._cache_manual_ta_result(target_chat_id, symbol, interval_minutes, ta)
+        await self._maybe_send_situational_ai(
+            target_chat_id,
+            ta,
+            symbol=symbol,
+            manual=True,
         )
 
         if from_wizard and notify_chat_id is not None and notify_chat_id != target_chat_id:
@@ -3941,6 +4130,7 @@ class TelegramBot:
             is_priority=False,
             keyboard=keyboard,
         )
+        self._cache_manual_ta_result(target_chat_id, symbol, interval_minutes, ta)
 
     async def on_manual_ta_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -4594,6 +4784,7 @@ class TelegramBot:
             "🌱 <b>Тренды</b> — снимок потенциальных трендов (флет→пробой+OI)\n"
             "Hot: <b>ENTRY</b> + early WATCH (<code>trend_seed</code>/impulse), pulse у хая молчит\n"
             "/scan — диагностика сканера\n"
+            "/pulse (overview) — сводка ситуаций по кэшу TA (импульс, боковик, supply…)\n"
             "/pause — остановить все каналы\n"
             "/resume — восстановить каналы\n"
             "🎛 <b>Каналы</b> — выборочно вкл/выкл каждое направление\n"
@@ -5007,9 +5198,13 @@ class TelegramBot:
                 f"отправлено <b>{ad['sent']}</b> · "
                 f"отсечено conf <b>{ad['skipped_confidence']}</b>"
             )
+        intel = getattr(s, "signal_intel_watch_enabled", False)
         return (
-            "<b>🧠 Анализ ликвидаций</b> (отдельный чат)\n"
-            f"Статус: <b>{'ON' if s.analysis_enabled and chat_ok else 'OFF'}</b> ({chat_line})\n\n"
+            "<b>🧠 Разбор по liq-кластеру</b> (legacy, отдельный движок)\n"
+            "<i>Основной разбор — в сигналах (situational + ИИ) и ручном TA. "
+            "Этот режим — старые карточки «АНАЛИЗ · факторы %» по всплеску ликвидаций.</i>\n"
+            f"Legacy-разбор: <b>{'ON' if s.analysis_enabled and chat_ok else 'OFF'}</b> ({chat_line})\n"
+            f"В тот же чат без legacy: наблюдения сканера <b>{'ON' if intel else 'OFF'}</b> · /pulse\n\n"
             f"Liq: альт <b>${s.analysis_alt_min_liq_usd:,.0f}</b> · "
             f"стандарт <b>${s.analysis_min_liq_usd:,.0f}</b> · "
             f"мейджор <b>${s.analysis_major_min_liq_usd:,.0f}</b>\n"
@@ -5120,8 +5315,14 @@ class TelegramBot:
             f"🛡 Quality gate: <b>{'ON' if s.signal_quality_gate_enabled else 'OFF'}</b> · "
             f"CVD: <b>{'ON' if s.signal_cvd_gate_enabled else 'OFF'}</b> · "
             f"HTF: <b>{'ON' if s.signal_htf_gate_enabled else 'OFF'}</b> · "
-            f"WATCH→TRIGGER: <b>{'ON' if s.scenario_watch_enabled else 'OFF'}</b>\n"
-            f"🧠 Чат анализов: <b>{'ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'OFF'}</b> "
+            f"Сценарии авто-push: <b>{'ON' if s.scenario_watch_enabled else 'OFF'}</b>\n"
+            f"💬 Разбор: <b>{getattr(s, 'reading_display_style', 'situational') or 'situational'}</b> · "
+            f"ИИ к сигналу: <b>{'ON' if getattr(s, 'ai_situational_reading_enabled', False) else 'OFF'}</b> "
+            f"(кнопка <b>🧠 ИИ-разбор</b> ниже)\n"
+            f"🌐 Пульс ситуаций: <b>{'ON' if getattr(s, 'situation_overview_enabled', True) else 'OFF'}</b> "
+            f"· /pulse\n"
+            f"🧠 Чат анализов: <b>{'legacy ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'legacy OFF'}</b> "
+            f"· intel <b>{'ON' if getattr(s, 'signal_intel_watch_enabled', False) else 'OFF'}</b> "
             f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "
             f"макс <b>{getattr(s, 'analysis_max_per_hour', 4)}</b>/ч · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
@@ -5341,6 +5542,35 @@ class TelegramBot:
                             wizard=False,
                         ),
                     )
+            return
+
+        from .manual_ta import MTAI_CALLBACK_PREFIX
+
+        if payload.startswith(MTAI_CALLBACK_PREFIX):
+            if not self._can_use_manual_ta(update):
+                await query.answer("Нет доступа.", show_alert=True)
+                return
+            parsed = parse_mtai_callback(payload)
+            if parsed is None:
+                await query.answer("Некорректный запрос.", show_alert=True)
+                return
+            symbol, interval = parsed
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            ta_cached = self._get_cached_manual_ta(chat_id, symbol, interval)
+            if ta_cached is None:
+                await query.answer("Сначала построй разбор по этому TF.", show_alert=True)
+                return
+            if not self.config.ai_configured:
+                await query.answer("Нужен GEMINI или GROQ в .env", show_alert=True)
+                return
+            await query.answer("ИИ-разбор…")
+            await self._maybe_send_situational_ai(
+                chat_id,
+                ta_cached,
+                symbol=symbol,
+                manual=True,
+                force=True,
+            )
             return
 
         if payload.startswith(MTA_INTENT_CALLBACK_PREFIX):
@@ -5597,6 +5827,19 @@ class TelegramBot:
             self.settings_manager.update(actionable_signals_only=not current)
             state = "ON" if not current else "OFF"
             await query.answer(f"✅ Готовый вход → {state}", show_alert=False)
+            await self._safe_edit_message_text(
+                query,
+                self._build_settings_panel_text(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_keyboard(),
+            )
+        elif payload == "toggle_ai_reading":
+            current = bool(
+                getattr(self.settings_manager.settings, "ai_situational_reading_enabled", False)
+            )
+            self.settings_manager.update(ai_situational_reading_enabled=not current)
+            state = "ON" if not current else "OFF"
+            await query.answer(f"🧠 ИИ-разбор → {state}", show_alert=False)
             await self._safe_edit_message_text(
                 query,
                 self._build_settings_panel_text(),
@@ -6227,6 +6470,13 @@ class TelegramBot:
                 ),
                 callback_data="toggle_actionable",
             )],
+            [InlineKeyboardButton(
+                self._mark(
+                    f"🧠 ИИ-разбор {'ON' if s.ai_situational_reading_enabled else 'OFF'}",
+                    s.ai_situational_reading_enabled,
+                ),
+                callback_data="toggle_ai_reading",
+            )],
             [InlineKeyboardButton(signals_btn, callback_data="toggle_signals")],
             [
                 InlineKeyboardButton(self._mark("1м", s.oi_period_minutes == 1), callback_data="set_period:1"),
@@ -6570,15 +6820,15 @@ class TelegramBot:
         labels = {
             "vertical_pump": "🚨 ВЕРТИКАЛЬНЫЙ ПАМП",
             "vertical_dump": "🚨 ВЕРТИКАЛЬНЫЙ СЛИВ",
-            "liq_cascade_pump": "💧 LIQ-CASCADE LONG",
-            "liq_cascade_dump": "💧 LIQ-CASCADE SHORT",
+            "liq_cascade_pump": "💧 Каскад ликвидаций · лонг",
+            "liq_cascade_dump": "💧 Каскад ликвидаций · шорт",
             "reversal_pump": "↩️ РАЗВОРОТ ВВЕРХ",
             "reversal_dump": "↩️ РАЗВОРОТ ВНИЗ",
             "impulse_pump": "📈 ИМПУЛЬС ВВЕРХ",
             "impulse_dump": "📉 ИМПУЛЬС ВНИЗ",
             "trend_pump": "📈 ТРЕНД → ОТСКОК",
             "trend_dump": "📉 ТРЕНД → СЛИВ",
-            "trend_seed": "🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH",
+            "trend_seed": "🌱 ПОТЕНЦИАЛ ТРЕНДА · наблюдение",
             "mega_pump": "🚀 МЕГА-ПАМП",
             "mega_dump": "💥 МЕГА-ДАМП",
             "pulse_pump": "⚡ РАННИЙ ПУЛЬС",
@@ -6633,15 +6883,15 @@ class TelegramBot:
         )
         if compact:
             return (
-                f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH</b> · {exchange_emoji} {exchange_name}\n"
+                f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · наблюдение</b> · {exchange_emoji} {exchange_name}\n"
                 f"{self._symbol_link_and_copy(signal, copy_only=True)}\n"
                 f"база→пробой {break_txt} · OI +{oi_pct:.2f}% ({oi_usd}) · CVD {cvd_txt}\n"
             )
         base_min = int(float(signal.details.get("seed_base_minutes", 25) or 25))
         return (
-            f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · WATCH</b>\n"
+            f"<b>🌱 ПОТЕНЦИАЛ ТРЕНДА · наблюдение</b>\n"
             f"{exchange_emoji} <b>{exchange_name}</b> · выход из базы {base_min}м\n"
-            f"🟢 <b>LONG</b> (ранний режим, не market)\n"
+            f"🟢 <b>Лонг</b> (ранний сигнал, не по рынку)\n"
             f"{self._symbol_link_and_copy(signal)}\n"
             f"📊 Флет: <b>{flat_pct}%</b> → пробой <b>{break_txt}</b>\n"
             f"📈 OI: <b>+{oi_pct:.2f}%</b> (<b>{oi_usd}</b>) · CVD: <b>{cvd_txt}</b>\n\n"
@@ -6676,7 +6926,7 @@ class TelegramBot:
         exchange_emoji, exchange_name = EXCHANGE_LABEL[exchange_key]
         is_long = signal.side == "long"
         side_emoji = "🟢" if is_long else "🔴"
-        side_label = "LONG" if is_long else "SHORT"
+        side_label = "Лонг" if is_long else "Шорт"
 
         flat_pct = signal.details.get("flat_range_percent", "—")
         spike_pct = signal.details.get("spike_percent", signal.price_change_percent)
@@ -6737,7 +6987,7 @@ class TelegramBot:
 
         is_long = signal.side == "long"
         side_emoji = "🟢" if is_long else "🔴"
-        side_label = "LONG" if is_long else "SHORT"
+        side_label = "Лонг" if is_long else "Шорт"
 
         if signal.oi_direction == "up":
             oi_verb = "вырос"

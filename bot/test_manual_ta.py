@@ -41,8 +41,39 @@ def test_mtw_callback_roundtrip() -> None:
 
 
 def test_manual_ta_hours() -> None:
-    assert manual_ta_hours(5) == 18
-    assert manual_ta_hours(15) == 24
+    assert manual_ta_hours(5) == 22
+    assert manual_ta_hours(15) == 36
+
+
+def test_manual_chart_zoom_expands_for_wide_structure() -> None:
+    from bot.manual_ta import manual_chart_zoom_hours
+
+    class _Bar:
+        def __init__(self, h: float, l: float) -> None:
+            self.high = h
+            self.low = l
+            self.close = (h + l) / 2
+            self.open = self.close
+            self.open_time = 0
+
+    class _Ta:
+        drawdown_from_high_pct = 12.0
+        phase = "impulse_up"
+        trend_lines = []
+        consolidation = None
+        swings = []
+        smc = None
+
+    bars = [_Bar(1.0 + i * 0.001, 0.99 + i * 0.001) for i in range(120)]
+    bars[0] = _Bar(0.5, 0.48)
+    zoom = manual_chart_zoom_hours(
+        _Ta(),
+        bars,
+        interval_minutes=15,
+        analysis_hours=36,
+        configured=None,
+    )
+    assert zoom >= 22
 
 
 def test_chart_display_default_12h() -> None:

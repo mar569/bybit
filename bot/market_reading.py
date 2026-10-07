@@ -210,7 +210,12 @@ def detect_participation_divergence(
     return _scan("low")
 
 
-def _pattern_ok(pattern: Any | None) -> bool:
+def _pattern_ok(
+    pattern: Any | None,
+    *,
+    bars: Sequence[KlineBar] | None = None,
+    current: float | None = None,
+) -> bool:
     if pattern is None:
         return False
     conf = float(getattr(pattern, "confidence", 0) or 0)
@@ -219,6 +224,11 @@ def _pattern_ok(pattern: Any | None) -> bool:
         return False
     if status == "invalidated":
         return False
+    if bars:
+        from .chart_patterns import pattern_relevant_now
+
+        if not pattern_relevant_now(pattern, list(bars), current=current):
+            return False
     return True
 
 
@@ -359,14 +369,14 @@ def analyze_market_reading(
     elif weekly_bars:
         absent.append("недельный контекст слабый")
 
-    accept_pattern = _pattern_ok(pattern)
+    accept_pattern = _pattern_ok(pattern, bars=bars, current=price)
     if accept_pattern:
         present.append(f"фигура {getattr(pattern, 'label_ru', '')}")
     else:
         absent.append("подтверждённой фигуры нет")
         accept_pattern = False
 
-    accept_htf_pattern = _pattern_ok(htf_pattern)
+    accept_htf_pattern = _pattern_ok(htf_pattern, bars=htf_bars or bars, current=price)
     if accept_htf_pattern:
         present.append(f"HTF {getattr(htf_pattern, 'label_ru', '')}")
     else:
@@ -426,8 +436,15 @@ def analyze_market_reading(
         live = "exhaustion"
         seek_label = "слабость продаж на новом лое"
     elif htf_struct == "bullish" and working.structure != "bearish":
-        live = "continuation"
-        seek_label = "стремится продолжить вверх по старшему ТФ"
+        impulse_pct = _pct_change(bars, min(36, max(12, len(bars) - 1))) if bars else 0.0
+        if impulse_pct >= 8.0:
+            live = "exhaustion"
+            seek_label = (
+                f"импульс +{impulse_pct:.0f}% — не догонять, ждать откат или новую базу"
+            )
+        else:
+            live = "continuation"
+            seek_label = "стремится продолжить вверх по старшему ТФ"
     elif htf_struct == "bearish" and working.structure != "bullish":
         live = "continuation"
         seek_label = "стремится продолжить вниз по старшему ТФ"

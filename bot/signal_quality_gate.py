@@ -407,10 +407,14 @@ def format_quality_hot_html(result: SignalQualityResult) -> str:
     """Минимум для Hot: поток + CVD в одну строку, одно предупреждение."""
     bits: list[str] = []
     if result.flow_label:
+        from .signal_locale import flow_matrix_label_ru
+
         icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
-        bits.append(f"{icon} {result.flow_label}")
+        bits.append(f"{icon} {flow_matrix_label_ru(result.flow_label)}")
     if result.cvd_ratio is not None:
-        bits.append(f"CVD {result.cvd_ratio:.0%} buy")
+        from .signal_locale import cvd_taker_line
+
+        bits.append(cvd_taker_line(result.cvd_ratio))
     lines: list[str] = []
     if bits:
         lines.append(" · ".join(bits))
@@ -418,29 +422,39 @@ def format_quality_hot_html(result: SignalQualityResult) -> str:
         lines.insert(0, f"🚫 <b>Блок:</b> {result.block_reason}")
     elif result.warnings:
         lines.append(f"⚠️ {result.warnings[0]}")
-    return "\n".join(lines)
+    from .signal_locale import polish_user_copy
+
+    return polish_user_copy("\n".join(lines))
 
 
 def _format_quality_lines(result: SignalQualityResult, *, hot: bool) -> str:
     if hot:
         return format_quality_hot_html(result)
     lines: list[str] = []
+    from .signal_locale import cvd_taker_line, flow_matrix_label_ru, quality_tier_html
+
     if result.flow_label:
         icon = "✅" if "aligned" in result.flow_label.lower() else "💧"
-        lines.append(f"{icon} <b>Поток OI+цена:</b> {result.flow_label}")
+        lines.append(
+            f"{icon} <b>Поток OI+цена:</b> {flow_matrix_label_ru(result.flow_label)}"
+        )
     if result.cvd_detail:
         lines.append(f"📈 {result.cvd_detail}")
     elif result.cvd_ratio is not None:
-        lines.append(f"📈 CVD: {result.cvd_ratio:.0%} buy")
+        cv = cvd_taker_line(result.cvd_ratio)
+        if cv:
+            lines.append(f"📈 {cv}")
     for w in result.warnings[:3]:
         lines.append(f"⚠️ {w}")
     if result.tier == "skip" and result.block_reason:
         lines.insert(0, f"🚫 <b>Блок:</b> {result.block_reason}")
     elif result.tier == "watch" and result.block_reason:
-        lines.insert(0, f"👀 <b>WATCH</b> · {result.block_reason}")
+        lines.insert(0, f"{quality_tier_html('watch')} · {result.block_reason}")
     elif result.tier == "entry":
-        lines.insert(0, "🎯 <b>ENTRY</b> · триггер по плану")
-    return "\n".join(lines)
+        lines.insert(0, f"{quality_tier_html('entry')} · триггер по плану")
+    from .signal_locale import polish_user_copy
+
+    return polish_user_copy("\n".join(lines))
 
 
 def attach_cvd_to_signal_details(details: dict[str, Any], snap: Any) -> None:

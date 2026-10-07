@@ -4,7 +4,13 @@ from __future__ import annotations
 import re
 
 MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 60)
-MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("tv_annotated", "annotated", "annotated_pro")
+# Все варианты ведут на один PNG (manual layers); legacy-имена для callback-кнопок.
+MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("annotated", "tv_annotated", "annotated_pro")
+
+
+def manual_ta_use_simple_chart(_chart_source: str | None) -> bool:
+    """Ручной TA всегда рисуется minimal-chart, без PRO/TV-панелей на PNG."""
+    return True
 MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
 MTC_CALLBACK_PREFIX = "mtc|"
@@ -12,6 +18,7 @@ MTCW_CALLBACK_PREFIX = "mtcw|"
 MTA_ALERT_CALLBACK_PREFIX = "mtaa|"
 MTA_INTENT_CALLBACK_PREFIX = "mtai|"
 MTA_MUTE_CALLBACK_PREFIX = "mtam|"
+MTAI_CALLBACK_PREFIX = "mtai|"
 MTW_CANCEL_CALLBACK = "mtw|cancel|0"
 MTA_WIZARD_KEY = "mta_wizard"
 
@@ -77,25 +84,159 @@ def structure_aware_display_hours(
     drawdown_pct: float = 0.0,
     structure_span_bars: int = 0,
     fib_span_bars: int = 0,
+    max_display_hours: int | None = None,
 ) -> int:
     """Расширяет зум, чтобы на экране был весь импульс/дамп (как DEXE с 9 утра)."""
+    cap = int(max_display_hours if max_display_hours is not None else analysis_hours)
+    cap = max(4, min(cap, analysis_hours))
     base = chart_display_hours(interval_minutes, configured=configured)
+    if configured is not None and configured > 0:
+        return max(4, min(int(configured), cap))
     need = base
     # Крупный дамп/памп — показать больше истории
     if drawdown_pct >= 40.0:
         need = max(need, 14 if interval_minutes <= 5 else 16)
     elif drawdown_pct >= 20.0:
         need = max(need, 12)
-    # Покрыть импульсную ногу Fib (+ запас ~1ч)
+    elif drawdown_pct >= 8.0:
+        need = max(need, base + 4)
+    # Покрыть импульсную ногу Fib (+ запас ~2ч)
     span = max(structure_span_bars, fib_span_bars)
     if span > 0 and interval_minutes > 0:
         span_h = int(span * interval_minutes / 60.0) + 2
-        need = max(need, min(span_h, analysis_hours))
-    return max(4, min(need, analysis_hours))
+        need = max(need, min(span_h, cap))
+    return max(4, min(need, cap))
 
 
 def manual_ta_hours(interval_minutes: int) -> int:
-    return pattern_chart_hours(interval_minutes)
+    """Сколько часов свечей грузим для ручного разбора (больше, чем зум по умолчанию)."""
+    return {5: 22, 10: 30, 15: 36, 60: 72}.get(interval_minutes, 22)
+
+
+def compute_structure_bar_span(ta: object, bars: list) -> int:
+    """Самая ранняя точка структуры на загруженных барах → сколько баров назад от «сейчас»."""
+    if not bars:
+        return 0
+    n = len(bars)
+    earliest = n - 1
+
+    def touch(idx: int) -> None:
+        nonlocal earliest
+        if 0 <= idx < n:
+            earliest = min(earliest, idx)
+
+    for tl in list(getattr(ta, "trend_lines", None) or []):
+        touch(int(getattr(tl, "start_idx", n - 1)))
+
+    cons = getattr(ta, "consolidation", None)
+    if cons is not None:
+        touch(int(getattr(cons, "start_idx", n - 24)))
+
+    for sw in list(getattr(ta, "swings", None) or [])[-12:]:
+        touch(int(getattr(sw, "index", n - 1)))
+
+    smc = getattr(ta, "smc", None)
+    if smc is not None:
+        for m in list(getattr(smc, "markers", None) or []):
+            touch(int(getattr(m, "index", n - 1)))
+
+    for attr in ("breakout_level", "breakdown_level"):
+        _ = getattr(ta, attr, None)
+
+    try:
+        from .chart_reference_levels import session_reference_levels
+
+        refs = {r.kind: float(r.price) for r in session_reference_levels(bars)}
+        for kind, price in refs.items():
+            if price <= 0:
+                continue
+            for i, bar in enumerate(bars):
+                if kind == "daily_high" and float(bar.high) >= price * 0.999:
+                    touch(i)
+                    break
+                if kind == "daily_low" and float(bar.low) <= price * 1.001:
+                    touch(i)
+                    break
+    except Exception:
+        pass
+
+    seg = bars[-min(n, max(36, n // 2)) :]
+    if seg:
+        loc_hi = max(float(b.high) for b in seg)
+        loc_lo = min(float(b.low) for b in seg)
+        for i, bar in enumerate(bars):
+            if float(bar.high) >= loc_hi * 0.9995:
+                touch(i)
+            if float(bar.low) <= loc_lo * 1.0005:
+                touch(i)
+
+    return max(0, (n - 1) - earliest)
+
+
+def _fib_span_bars(ta: object, bars: list) -> int:
+    if not bars:
+        return 0
+    indices: list[int] = []
+    for bucket in (
+        getattr(ta, "elliott_draw_points", None),
+        getattr(ta, "elliott_global_draw_points", None),
+        getattr(ta, "elliott_local_draw_points", None),
+    ):
+        for p in list(bucket or []):
+            i = int(getattr(p, "index", -1))
+            if i >= 0:
+                indices.append(i)
+    if len(indices) < 2:
+        return 0
+    return max(indices) - min(indices)
+
+
+def manual_chart_zoom_hours(
+    ta: object,
+    bars: list,
+    *,
+    interval_minutes: int,
+    analysis_hours: int,
+    configured: int | None,
+) -> int:
+    """Зум для ручного TA: расширяется под импульс/день мин-макс, но не шире загруженной истории."""
+    span = compute_structure_bar_span(ta, bars)
+    fib_span = _fib_span_bars(ta, bars)
+    drawdown = float(getattr(ta, "drawdown_from_high_pct", 0) or 0)
+    phase = str(getattr(ta, "phase", "") or "")
+
+    zoom = structure_aware_display_hours(
+        interval_minutes=interval_minutes,
+        analysis_hours=analysis_hours,
+        configured=configured,
+        drawdown_pct=drawdown,
+        structure_span_bars=span,
+        fib_span_bars=fib_span,
+        max_display_hours=analysis_hours,
+    )
+
+    if configured is not None and configured > 0:
+        return zoom
+
+    base = chart_display_hours(interval_minutes, configured=None)
+    per_hour = max(1, 60 // max(1, interval_minutes))
+    base_bars = base * per_hour
+    # Структура занимает большую часть окна — показываем всю загруженную историю
+    if span >= int(base_bars * 0.72):
+        zoom = max(zoom, analysis_hours)
+    if phase in {
+        "impulse_up",
+        "impulse_down",
+        "correction_down",
+        "correction_up",
+        "breakout_setup",
+        "consolidation",
+    }:
+        zoom = max(zoom, min(analysis_hours, base + 8))
+    if drawdown >= 5.0:
+        zoom = max(zoom, min(analysis_hours, base + 6))
+
+    return max(6, min(int(zoom), analysis_hours))
 
 
 def bars_per_hour(interval_minutes: int) -> int:
@@ -116,6 +257,14 @@ def build_mtc_callback(symbol: str, interval_minutes: int, chart_source: str) ->
 
 def build_mtcw_callback(symbol: str, interval_minutes: int, chart_source: str) -> str:
     return f"{MTCW_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}|{chart_source}"
+
+
+def build_mtai_callback(symbol: str, interval_minutes: int) -> str:
+    return f"{MTAI_CALLBACK_PREFIX}{symbol.upper()}|{interval_minutes}"
+
+
+def parse_mtai_callback(data: str) -> tuple[str, int] | None:
+    return _parse_mta_style_callback(data, MTAI_CALLBACK_PREFIX)
 
 
 def _parse_mta_style_callback(data: str, prefix: str) -> tuple[str, int] | None:

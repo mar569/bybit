@@ -24,6 +24,12 @@ ENTRY_B = "B"  # после реакции свечи / пробой close
 ENTRY_C = "C"  # только наблюдение
 
 
+def _dedupe_present(items: list[str] | Any) -> list[str]:
+    from .human_trade_brief import _dedupe_reading_lines
+
+    return _dedupe_reading_lines(list(items or []), max_items=6)
+
+
 @dataclass
 class ScenarioReport:
     symbol: str = ""
@@ -64,9 +70,12 @@ class ScenarioReport:
             if self.seek_label and self.seek_label not in self.narrative:
                 parts.append(f"🎯 {escape(self.seek_label[:180])}")
 
-        mode = f"<b>{escape(self.verdict)}</b> {self.confidence}/10 · режим <b>{self.entry_mode}</b> ({escape(self.entry_mode_ru)})"
-        if self.grade:
-            mode += f" · setup {escape(self.grade)} {self.setup_score}"
+        from .signal_locale import verdict_ru
+
+        v = verdict_ru(self.verdict) or self.verdict
+        mode = f"<b>{escape(v)}</b> {self.confidence}/10"
+        if self.entry_mode_ru:
+            mode += f" · {escape(self.entry_mode_ru)}"
         parts.append(mode)
 
         yes = self._list_block("Есть", self.present[:4])
@@ -85,7 +94,9 @@ class ScenarioReport:
         levels = self._levels_block()
         if levels:
             parts.append(levels)
-        return "\n\n".join(parts)
+        from .signal_locale import polish_user_copy
+
+        return polish_user_copy("\n\n".join(parts))
 
     def to_html_full(self) -> str:
         base = self.to_html_compact()
@@ -93,7 +104,10 @@ class ScenarioReport:
         if self.live_scenario:
             extra.append(f"<i>Сценарий:</i> {escape(self.live_scenario)}")
         if self.quality_tier:
-            extra.append(f"Качество сигнала: <b>{escape(self.quality_tier.upper())}</b>")
+            from .signal_locale import quality_tier_html
+
+            tier = quality_tier_html(self.quality_tier) or escape(self.quality_tier)
+            extra.append(f"Качество: {tier}")
         if extra:
             return base + "\n\n" + "\n".join(extra)
         return base
@@ -109,15 +123,15 @@ class ScenarioReport:
         bits: list[str] = []
         if self.entry_lo is not None and self.entry_hi is not None:
             bits.append(
-                f"Вход ({self.entry_mode}): <b>{fmt_price(self.entry_lo)}–{fmt_price(self.entry_hi)}</b>"
+                f"Вход: <b>{fmt_price(self.entry_lo)}–{fmt_price(self.entry_hi)}</b>"
             )
         elif self.entry_lo is not None:
             bits.append(f"Вход: <b>{fmt_price(self.entry_lo)}</b>")
         if self.stop is not None:
-            bits.append(f"SL: <b>{fmt_price(self.stop)}</b>")
+            bits.append(f"Стоп: <b>{fmt_price(self.stop)}</b>")
         if self.targets:
             tps = " → ".join(fmt_price(t) for t in self.targets[:3])
-            bits.append(f"TP: {tps}")
+            bits.append(f"Цели: {tps}")
         if self.invalidate is not None:
             bits.append(f"Отмена: <b>{fmt_price(self.invalidate)}</b>")
         if not bits:
@@ -132,14 +146,14 @@ def _resolve_entry_mode(ta: TAAnalysisResult, *, signal_side: str | None, ready:
     verdict = (ta.verdict or "WAIT").upper()
 
     if verdict == "WAIT" and not ready:
-        return ENTRY_C, "ждём структуру/уровень — без market-входа"
+        return ENTRY_C, "ждём структуру и уровень — не лезть по рынку"
     if ideal and grade in {"A", "B"} and getattr(ta, "setup_entry", None):
-        return ENTRY_A, "лимит в зоне confluence / OB / Fib"
+        return ENTRY_A, "лимит в зоне — Фибо или блок ордеров"
     if ready or verdict in {"LONG", "SHORT"}:
-        return ENTRY_B, "вход после реакции / close за уровнем"
+        return ENTRY_B, "вход после реакции свечи или закрепа за уровнем"
     if getattr(ta, "setup_trigger", ""):
-        return ENTRY_B, "ждать триггер по свече"
-    return ENTRY_C, "наблюдение — сценарий без точки"
+        return ENTRY_B, "ждать подтверждение свечой"
+    return ENTRY_C, "только наблюдение — точки входа пока нет"
 
 
 def build_scenario_report(
@@ -222,8 +236,8 @@ def build_scenario_report(
         tf_stack=str(getattr(ta, "reading_tf_stack", "") or ""),
         narrative=narrative,
         seek_label=getattr(ta, "reading_seek_label", "") or "",
-        present=list(getattr(ta, "reading_present", None) or []),
-        absent=list(getattr(ta, "reading_absent", None) or []),
+        present=_dedupe_present(getattr(ta, "reading_present", None) or []),
+        absent=_dedupe_present(getattr(ta, "reading_absent", None) or []),
         entry_lo=entry_lo,
         entry_hi=entry_hi,
         stop=float(stop) if stop else None,

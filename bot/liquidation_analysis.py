@@ -884,7 +884,7 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
     lines.extend([
         f"⏱ Окно наблюдения: {result.window_min}–{result.window_max} мин",
         "",
-        "<b>Факторы (OI / CVD / liq):</b>",
+        "<b>Факторы (OI / поток / ликвидации):</b>",
     ])
 
     sorted_factors = sorted(result.factors, key=lambda f: f.score * f.weight, reverse=True)
@@ -900,11 +900,13 @@ def format_liquidation_analysis(result: LiquidationAnalysisResult) -> str:
         if result.post_dump_late:
             lines.append("⏸ <i>Жди отскок или новый пробой — сейчас не входи</i>")
         else:
-            lines.append("⏸ <i>Нет чёткого edge — не входи по этому разбору</i>")
+            lines.append("⏸ <i>Нет явного преимущества — не входи только по этому сообщению</i>")
     elif result.continuation_risk:
         lines.append("⚠️ <i>Риск ложного сценария — только с подтверждением на графике</i>")
 
     lines.append(
         f'\n<a href="{ex_url}">Торговать</a> · <a href="{cg_url}">CoinGlass</a>'
     )
-    return "\n".join(lines)
+    from .signal_locale import polish_user_copy
+
+    return polish_user_copy("\n".join(lines))

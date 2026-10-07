@@ -58,12 +58,9 @@ def setup_grade_ok_for_entry(ta: TAAnalysisResult, *, min_grade: str = "B") -> b
 
 
 def quality_tier_label(tier: str | None) -> str:
-    t = (tier or "").lower()
-    if t == "entry":
-        return "🎯 <b>ENTRY</b>"
-    if t == "watch":
-        return "👀 <b>WATCH</b>"
-    return ""
+    from .signal_locale import quality_tier_html
+
+    return quality_tier_html(tier)
 
 
 def should_attach_signal_chart(
@@ -116,10 +113,15 @@ def should_route_pro_analysis(
     )
 
 
-def professional_reading_snippet(ta: TAAnalysisResult, *, max_len: int = 380) -> str:
+def professional_reading_snippet(
+    ta: TAAnalysisResult,
+    *,
+    max_len: int = 380,
+    reading_style: str = "situational",
+) -> str:
     from .narrative_report import format_reading_block_html
 
-    block = format_reading_block_html(ta)
+    block = format_reading_block_html(ta, style=reading_style)
     if not block:
         narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
         if narrative:
@@ -130,10 +132,31 @@ def professional_reading_snippet(ta: TAAnalysisResult, *, max_len: int = 380) ->
     return block
 
 
-def scenario_body_html(ta: TAAnalysisResult | None, *, symbol: str = "") -> str:
-    """Единый HTML разбора для alert / manual / pro."""
+def scenario_body_html(
+    ta: TAAnalysisResult | None,
+    *,
+    symbol: str = "",
+    reading_style: str = "situational",
+) -> str:
+    """Разбор в alert: situational (проза) или legacy scenario report."""
     if ta is None:
         return ""
+    style = (reading_style or "situational").lower()
+    if style == "hybrid":
+        from .narrative_report import format_reading_block_html
+
+        block = format_reading_block_html(ta, style="hybrid")
+        if block:
+            return block
+    sit = str(getattr(ta, "situational_brief_html", "") or "").strip()
+    if style != "evidence" and sit:
+        return sit
+    if style == "situational" and not sit:
+        from .situational_brief import build_situational_brief_html
+
+        sit = build_situational_brief_html(ta, symbol=symbol)
+        if sit:
+            return sit
     html = str(getattr(ta, "scenario_report_html", "") or "").strip()
     rich = bool(
         html and ("📖" in html or "<b>Есть</b>" in html or "режим" in html.lower() or "Вход" in html)
@@ -154,6 +177,7 @@ def build_signal_alert_caption(
     quality_html: str = "",
     action_line: str = "",
     compact: bool = True,
+    reading_style: str = "situational",
 ) -> str:
     """Alert: шапка сканера → reading/scenario → поток → одна строка действия."""
     parts: list[str] = []
@@ -161,7 +185,7 @@ def build_signal_alert_caption(
     if tier and tier not in header:
         parts.append(tier)
     parts.append(header.strip())
-    body = scenario_body_html(ta, symbol=symbol)
+    body = scenario_body_html(ta, symbol=symbol, reading_style=reading_style)
     if body and body not in header:
         parts.append(body)
     if quality_html.strip() and quality_html.strip() not in "\n\n".join(parts):
@@ -177,7 +201,9 @@ def build_signal_alert_caption(
     text = "\n\n".join(p for p in parts if p)
     if len(text) > 980:
         text = text[:977] + "…"
-    return text
+    from .signal_locale import polish_user_copy
+
+    return polish_user_copy(text)
 
 
 def merge_alert_caption(
@@ -187,10 +213,11 @@ def merge_alert_caption(
     ta_caption: str = "",
     quality_tier: str | None = None,
     compact: bool = True,
+    reading_style: str = "situational",
 ) -> str:
     action = ""
     if ta_caption:
-        scenario = scenario_body_html(ta)
+        scenario = scenario_body_html(ta, reading_style=reading_style)
         cap = ta_caption.strip()
         if scenario and cap in scenario:
             action = ""
@@ -202,6 +229,7 @@ def merge_alert_caption(
         quality_tier=quality_tier,
         action_line=action,
         compact=compact,
+        reading_style=reading_style,
     )
 
 
