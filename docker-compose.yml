@@ -20,6 +20,11 @@ services:
     dns:
       - 8.8.8.8
       - 1.1.1.1
+    # Код из образа (см. .dockerignore: без read.txt, docs/ и т.д.).
+    # Локальная разработка с hot-reload: создайте docker-compose.override.yml:
+    #   services:
+    #     bot:
+    #       volumes: ["./:/app:rw"]
     volumes:
-      - ./:/app:rw
+      - ./bot/settings.json:/app/bot/settings.json
     command: python -m bot.main

@@ -1,0 +1,30 @@
+# Локальные заметки и документация — не нужны в образе на сервере
+read.txt
+read.txtt
+read.md
+readme.md
+docs/
+docs/**
+
+# Dev / мусор
+.git/
+.gitignore
+.cursor/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+# Секреты и локальные настройки (на сервере — env_file / volume точечно)
+.env
+.env.*
+!.env.example
+
+# IDE / артефакты
+*.log
+.DS_Store
+Thumbs.db
+ungate/
