@@ -232,11 +232,37 @@ def _draw_impulse_trendline(ax: plt.Axes, bars: list[KlineBar]) -> None:
     ax.plot([x0, x1], [p0, p1], color="#e6edf3", linewidth=1.75, alpha=0.92, zorder=4)
 
 
+def _draw_flow_strip(ax: plt.Axes, ta: TAAnalysisResult) -> None:
+    from .human_trade_brief import flow_strip_lines_for_chart
+
+    lines = flow_strip_lines_for_chart(ta, max_lines=2)
+    if not lines:
+        return
+    body = "\n".join(lines)
+    ax.text(
+        0.015,
+        0.015,
+        body,
+        transform=ax.transAxes,
+        va="bottom",
+        ha="left",
+        color="#8b949e",
+        fontsize=6.8,
+        linespacing=1.25,
+        zorder=11,
+        bbox=dict(boxstyle="round,pad=0.28", facecolor="#0d1117dd", edgecolor="#30363d", alpha=0.92),
+    )
+
+
 def _draw_story_caption(ax: plt.Axes, ta: TAAnalysisResult, rbr: dict) -> None:
     phase = str(rbr.get("phase") or "")
-    hist = " · аналог на истории" if phase in {"fade_top", "await_break"} else ""
-    if phase in {"fade_top", "await_break"}:
-        line = f"Вынос ликвидности у сопр. → отказ → шорт{hist}"
+    floor = fmt_price(float(rbr.get("range_bottom") or 0))
+    ceil = fmt_price(float(rbr.get("range_top") or 0))
+    hist = " · аналог на истории" if phase == "fade_top" else ""
+    if phase == "fade_top":
+        line = f"Вынос ликвидности у {ceil} → отказ → шорт{hist}"
+    elif phase == "await_break":
+        line = f"Ждём закреп под {floor} → retest → шорт (не в импульс)"
     elif phase == "retest":
         line = "Retest пола — шорт после подтверждения, не в импульс вверх"
     else:
@@ -306,7 +332,7 @@ def draw_ed_story_layers(
     _draw_impulse_trendline(ax, bars)
 
     resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
-    if phase in {"fade_top", "await_break"} and resistance > 0:
+    if phase == "fade_top" and resistance > 0:
         _draw_resistance_corridor(ax, bars, rbr, ceil=resistance)
         template = resolve_sweep_template(
             bars, resistance=resistance, floor=floor or resistance * 0.92, tp=tp or resistance * 0.9,
@@ -318,6 +344,19 @@ def draw_ed_story_layers(
             interval_minutes=interval_minutes,
             resistance=float(rbr.get("entry_hi") or resistance),
             tp=tp if tp > 0 else resistance * 0.88,
+        )
+    elif phase == "await_break" and floor > 0:
+        _draw_resistance_corridor(ax, bars, rbr, ceil=resistance if resistance > 0 else floor * 1.03)
+        template = resolve_sweep_template(
+            bars, resistance=floor * 1.002, floor=floor, tp=tp or floor * 0.92,
+        )
+        draw_ghost_bars_forward(
+            ax,
+            bars,
+            template,
+            interval_minutes=interval_minutes,
+            resistance=floor * 1.004,
+            tp=tp if tp > 0 else floor * 0.9,
         )
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
@@ -334,4 +373,5 @@ def draw_ed_story_layers(
         )
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
+    _draw_flow_strip(ax, ta)
     _draw_story_caption(ax, ta, rbr)

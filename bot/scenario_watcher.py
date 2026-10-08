@@ -80,6 +80,7 @@ class ScenarioWatch:
     correction_fired: bool = False
     continuation_fired: bool = False
     entry_fired: bool = False
+    zone_reached_notified: bool = False
     enroll_high: float = 0.0
     trigger_only: bool = False
     # Ручная подписка: пользователь нажал «Ждать LONG/SHORT»
@@ -519,15 +520,17 @@ class ScenarioWatcher:
                 if age < min_age:
                     continue
                 if getattr(watch, "watch_kind", "") == "rbr_reaction":
-                    batch = self._check_rbr_zone_reached(watch, price)
+                    batch = self._check_rbr_reaction(watch, price)
                 elif watch.is_user_watch:
                     batch = self._check_user_intent(watch, price)
                 else:
                     batch = self._check_entry_ready(watch, price)
                 updates.extend(batch)
                 for upd in batch:
+                    if upd.kind == "zone_reached":
+                        continue
                     if upd.kind in {
-                        "entry_short", "entry_long", "zone_reached",
+                        "entry_short", "entry_long",
                         "cancelled_late", "cancelled_opposite",
                     }:
                         self._watches.pop(key, None)
@@ -594,17 +597,29 @@ class ScenarioWatcher:
 
         return self._check_entry_ready(watch, price, intent_side=intent)
 
+    def _check_rbr_reaction(
+        self,
+        watch: ScenarioWatch,
+        price: float,
+    ) -> list[ScenarioUpdate]:
+        out: list[ScenarioUpdate] = []
+        if not watch.zone_reached_notified:
+            out.extend(self._check_rbr_zone_reached(watch, price))
+        if watch.zone_reached_notified:
+            out.extend(self._check_user_intent(watch, price))
+        return out
+
     def _check_rbr_zone_reached(
         self,
         watch: ScenarioWatch,
         price: float,
     ) -> list[ScenarioUpdate]:
-        if watch.entry_fired or watch.zone_low is None or watch.zone_high is None:
+        if watch.zone_reached_notified or watch.zone_low is None or watch.zone_high is None:
             return []
         lo, hi = float(watch.zone_low), float(watch.zone_high)
         if not (lo * 0.998 <= price <= hi * 1.004):
             return []
-        watch.entry_fired = True
+        watch.zone_reached_notified = True
         mid = (lo + hi) / 2.0
         move = (price - watch.enroll_price) / watch.enroll_price * 100.0
         return [

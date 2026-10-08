@@ -82,7 +82,10 @@ def draw_education_overlays(
     from .chart_pattern_draw import draw_chart_patterns, draw_pattern_foresight_path
     from .pattern_specs import MIN_DRAW_CONFIDENCE
 
-    accept_pat = getattr(ta, "reading_accept_pattern", True)
+    from .range_breakdown_retest import rbr_alert_eligible
+
+    rbr_mode = rbr_alert_eligible(ta)
+    accept_pat = getattr(ta, "reading_accept_pattern", True) and not rbr_mode
     primary = getattr(ta, "primary_chart_pattern", None)
     patterns = list(getattr(ta, "chart_patterns", None) or [])
     if accept_pat and (primary or patterns):

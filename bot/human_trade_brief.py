@@ -397,12 +397,83 @@ def _manual_levels_html(ta: "TAAnalysisResult", *, side: str) -> str:
     return "📍 <b>План</b> (не market, только после триггера): " + " · ".join(bits)
 
 
+def flow_strip_lines_for_chart(ta: object, *, max_lines: int = 2) -> list[str]:
+    """Коротко для PNG — без дубля в Telegram."""
+    raw = [str(x).strip() for x in (getattr(ta, "market_participation_lines", None) or []) if str(x).strip()]
+    picked: list[str] = []
+    for line in raw[1:] if len(raw) > 1 else raw:
+        low = line.lower()
+        if any(k in low for k in ("funding", "cvd", "l/s", "oi ", "поток", "taker")):
+            picked.append(line[:95])
+        if len(picked) >= max_lines:
+            break
+    if len(picked) < max_lines:
+        btc = (getattr(ta, "btc_context", "") or "").strip()
+        if btc:
+            picked.append(btc[:90])
+    return picked[:max_lines]
+
+
+def format_rbr_alert_caption_html(
+    ta: "TAAnalysisResult",
+    *,
+    symbol: str = "",
+) -> str:
+    """WATCH/alert при RBR: текст минимальный — уровни и поток на PNG."""
+    from .range_breakdown_retest import get_rbr_from_ta
+
+    rbr = get_rbr_from_ta(ta)
+    if not rbr:
+        return ""
+    sym = (symbol or getattr(ta, "symbol", "") or "").strip().upper()
+    conf = int(getattr(ta, "verdict_confidence", 0) or 0)
+    phase = str(rbr.get("phase") or "")
+    floor = fmt_price(float(rbr.get("range_bottom") or 0))
+    ceil = fmt_price(float(rbr.get("range_top") or 0))
+    label = escape(str(rbr.get("label_ru") or "сценарий")[:120])
+    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
+    stack_short = ""
+    if stack:
+        parts = [p.strip() for p in stack.replace("→", "·").split("·") if p.strip()]
+        if len(parts) > 3:
+            stack_short = f"🧭 {escape(parts[0])} … {escape(parts[-1])}"
+        else:
+            stack_short = f"🧭 {escape(stack[:100])}"
+
+    if phase in {"fade_top", "await_break"}:
+        head = (
+            f"📌 <b>{escape(sym)}</b> · не market ({conf}/10) · "
+            f"боковик <b>{floor}–{ceil}</b>"
+        )
+        if phase == "await_break":
+            action = f"⏳ <b>{label}</b> — триггер: закреп <b>под {floor}</b>, не шорт в импульс."
+        else:
+            action = f"⏳ <b>{label}</b> — реакция у <b>{ceil}</b>, не в зелёный импульс."
+    elif phase == "retest":
+        head = f"📌 <b>{escape(sym)}</b> · не market ({conf}/10) · retest пола <b>{floor}</b>"
+        action = f"⏳ <b>{label}</b> — вход только после подтверждения."
+    else:
+        head = f"📌 <b>{escape(sym)}</b> · наблюдение ({conf}/10)"
+        action = f"⏳ {label}"
+
+    note = "<i>Уровни, SL/TP и поток — на графике.</i>"
+    parts = [head, stack_short, action, note]
+    return "\n".join(p for p in parts if p)
+
+
 def format_manual_ta_human_html(
     ta: "TAAnalysisResult",
     *,
     symbol: str = "",
 ) -> str:
     """Подпись manual TA: один вердикт, ждём, план уровней, поток — без A/B/C и setup D."""
+    from .range_breakdown_retest import get_rbr_from_ta
+
+    if get_rbr_from_ta(ta):
+        compact = format_rbr_alert_caption_html(ta, symbol=symbol)
+        if compact:
+            return compact
+
     sym = (symbol or "").strip().upper()
     v = (ta.verdict or "WAIT").upper()
     side = preferred_trade_side(ta)

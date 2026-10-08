@@ -2078,7 +2078,16 @@ class TelegramBot:
                     return
 
                 cvd_ratio = quality.cvd_ratio
-                if settings.signal_skip_noise and not skip_dedupe:
+                from .range_breakdown_retest import rbr_alert_eligible
+
+                rbr_alert_watch = bool(
+                    ta_result is not None
+                    and rbr_alert_eligible(ta_result)
+                    and quality is not None
+                    and quality.tier == "watch"
+                    and getattr(settings, "signal_rbr_watch_to_alert_channel", True)
+                )
+                if settings.signal_skip_noise and not skip_dedupe and not rbr_alert_watch:
                     skip, noise_reason = should_skip_noise_signal(
                         ta_result,
                         signal.side,
@@ -3500,11 +3509,19 @@ class TelegramBot:
                 ta=ta_fresh,
             )
             notify_chat_id = self.config.effective_analysis_chat_id or notify_chat_id
-        elif upd.kind in {"entry_short", "entry_long"} and mode != "legacy":
+        elif upd.kind in {"entry_short", "entry_long"} and mode != "legacy" and not is_rbr:
             return
         elif upd.kind in {"entry_short", "entry_long"}:
             label = "SHORT" if upd.kind == "entry_short" else "LONG"
+            if is_rbr:
+                notify_chat_id = (
+                    self.config.notification_chat_id
+                    or watch.chat_id
+                    or notify_chat_id
+                )
             prefix = "🎯 <b>ГОТОВО · ENTRY</b>" if watch.is_user_watch else "🎯 <b>TRIGGER · ENTRY</b>"
+            if is_rbr:
+                prefix = "🎯 <b>RBR · ENTRY</b>"
             message = f"{prefix} · <b>{watch.symbol}</b> · {label}\n{message}"
         elif upd.kind == "cancelled_late":
             message = f"⏰ <b>Опоздали</b> · <b>{watch.symbol}</b>\n{message}"

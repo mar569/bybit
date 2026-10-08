@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 
 _kline_cache = BybitKlineCache(ttl_seconds=60.0)
 
+# Signal/manual PNG: один DPI на create+save; ~2560px ширина — норм для Telegram без «мыла»
+SIGNAL_CHART_DPI = 160
+SIGNAL_CHART_FIG_SIZE = (16.0, 8.8)
+
 CHART_STYLE = {
     "bg": "#0d1117",
     "panel": "#161b22",
@@ -349,16 +353,25 @@ def _extend_channel_line(
     )
 
 
-def _draw_candles(ax: plt.Axes, bars: list[KlineBar], *, interval_minutes: int = 5) -> None:
+def _draw_candles(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    *,
+    interval_minutes: int = 5,
+    crisp: bool = False,
+) -> None:
     if not bars:
         return
     # Чуть шире тело — иначе на широком Y/дырах выглядят как точки
-    width_minutes = max(interval_minutes * 0.88, 2.5)
+    body_frac = 0.94 if crisp else 0.88
+    width_minutes = max(interval_minutes * body_frac, 2.5)
     width_days = width_minutes / (24 * 60)
+    wick_lw = 1.45 if crisp else 1.15
+    edge_lw = 0.72 if crisp else 0.55
     for bar in bars:
         ts = datetime.fromtimestamp(bar.open_time, tz=timezone.utc)
         color = CHART_STYLE["up"] if bar.close >= bar.open else CHART_STYLE["down"]
-        ax.plot([ts, ts], [bar.low, bar.high], color=color, linewidth=1.15, solid_capstyle="round")
+        ax.plot([ts, ts], [bar.low, bar.high], color=color, linewidth=wick_lw, solid_capstyle="round")
         body_low = min(bar.open, bar.close)
         body_high = max(bar.open, bar.close)
         wick = (bar.high - bar.low) if bar.high > bar.low else 0.0
@@ -372,7 +385,7 @@ def _draw_candles(ax: plt.Axes, bars: list[KlineBar], *, interval_minutes: int =
             height,
             facecolor=color,
             edgecolor=color,
-            linewidth=0.55,
+            linewidth=edge_lw,
         )
         ax.add_patch(rect)
 
@@ -2336,7 +2349,8 @@ def _chart_figure_layout(
 ) -> tuple[tuple[float, float], list[float] | None]:
     scale = _resolve_chart_height_scale(height_scale)
     if wide_chart:
-        return (24.0, 9.2 * scale), None
+        w, h = SIGNAL_CHART_FIG_SIZE
+        return (w, h * scale), None
     if enhanced:
         candle_ratio = 4.0 + (scale - 1.0) * 3.0
         return (19.2, 10.8 * scale), [candle_ratio, 0.95, 1.15]
@@ -2515,7 +2529,8 @@ def _render_chart_figure(
         height_scale=height_scale,
         wide_chart=wide,
     )
-    fig, ax = plt.subplots(figsize=fig_size, dpi=120)
+    export_dpi = SIGNAL_CHART_DPI if wide else 120
+    fig, ax = plt.subplots(figsize=fig_size, dpi=export_dpi)
     fig.patch.set_facecolor(CHART_STYLE["bg"])
     ax.set_facecolor(CHART_STYLE["bg"])
     if wide:
@@ -2524,7 +2539,7 @@ def _render_chart_figure(
         fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
-    _draw_candles(ax, bars, interval_minutes=interval_minutes)
+    _draw_candles(ax, bars, interval_minutes=interval_minutes, crisp=wide)
     ed_story = False
     if manual_ta_chart or signal_chart:
         try:
@@ -2631,13 +2646,14 @@ def _render_chart_figure(
 
     # НЕ bbox_inches="tight": при зуме артисты вне осей раздувают PNG до миллионов px
     buffer = io.BytesIO()
+    save_dpi = SIGNAL_CHART_DPI if wide else 120
     try:
         fig.savefig(
             buffer,
             format="png",
             facecolor=fig.get_facecolor(),
-            dpi=120,
-            pad_inches=0.08,
+            dpi=save_dpi,
+            pad_inches=0.06,
         )
     except ValueError as exc:
         logger.warning("Chart save failed (%s), retry without zoom ylim", exc)

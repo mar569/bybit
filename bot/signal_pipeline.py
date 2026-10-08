@@ -147,6 +147,14 @@ def scenario_body_html(
         return ""
     style = (reading_style or "situational").lower()
     if style == "human":
+        from .range_breakdown_retest import rbr_alert_eligible
+
+        if rbr_alert_eligible(ta):
+            from .human_trade_brief import format_rbr_alert_caption_html
+
+            rbr_cap = format_rbr_alert_caption_html(ta, symbol=symbol)
+            if rbr_cap:
+                return rbr_cap
         html = str(getattr(ta, "human_trade_brief_html", "") or "").strip()
         if html:
             return html

@@ -88,6 +88,16 @@ def test_quality_tier_watch_when_watch_mode_off():
     assert q.tier == "watch"
 
 
+def test_rbr_compact_caption_no_plan_wall():
+    from bot.human_trade_brief import format_rbr_alert_caption_html
+
+    ta = _ta_rbr_fade_top()
+    html = format_rbr_alert_caption_html(ta, symbol="ALGOUSDT")
+    assert "План" not in html
+    assert "📊" not in html
+    assert "на графике" in html
+
+
 def test_watch_allowed_for_rbr_without_global_watch():
     ta = _ta_rbr_fade_top()
     sig = Signal(
