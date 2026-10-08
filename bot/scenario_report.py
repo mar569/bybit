@@ -177,7 +177,15 @@ def build_scenario_report(
         entry_lo, entry_hi = e * 0.998, e * 1.002
 
     stop = ta.invalidation_price or getattr(ta, "setup_stop", None)
+    from .chart_position_boxes import chart_plan_targets
+    from .trade_plan_quality import validate_trade_plan
+
     targets = list(ta.target_prices[:3] or getattr(ta, "setup_tps", []) or [])
+    planned = chart_plan_targets(ta, entry_lo=entry_lo, entry_hi=entry_hi)
+    if planned:
+        targets = planned[:3]
+    plan_q = validate_trade_plan(ta)
+    plan_warn = "" if plan_q.ok else plan_q.reason_ru
 
     btc = (ta.btc_context or "").strip()
     if not btc and ta.btc_alt_spread is not None:
@@ -205,6 +213,9 @@ def build_scenario_report(
         plan = readiness[1][:200]
 
     human_brief = str(getattr(ta, "human_trade_brief", "") or "").strip()
+    absent = _dedupe_present(getattr(ta, "reading_absent", None) or [])
+    if plan_warn and plan_warn not in absent:
+        absent = [plan_warn, *absent][:6]
 
     import re
 
@@ -237,7 +248,7 @@ def build_scenario_report(
         narrative=narrative,
         seek_label=getattr(ta, "reading_seek_label", "") or "",
         present=_dedupe_present(getattr(ta, "reading_present", None) or []),
-        absent=_dedupe_present(getattr(ta, "reading_absent", None) or []),
+        absent=absent,
         entry_lo=entry_lo,
         entry_hi=entry_hi,
         stop=float(stop) if stop else None,

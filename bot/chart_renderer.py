@@ -2332,8 +2332,11 @@ def _chart_figure_layout(
     enhanced: bool,
     pro_mode: bool,
     height_scale: float | None = None,
+    wide_chart: bool = False,
 ) -> tuple[tuple[float, float], list[float] | None]:
     scale = _resolve_chart_height_scale(height_scale)
+    if wide_chart:
+        return (24.0, 9.2 * scale), None
     if enhanced:
         candle_ratio = 4.0 + (scale - 1.0) * 3.0
         return (19.2, 10.8 * scale), [candle_ratio, 0.95, 1.15]
@@ -2505,23 +2508,29 @@ def _render_chart_figure(
     manual_ta_chart: bool = False,
 ) -> bytes:
     """Рисует единый график без RSI/volume-панелей и боковых информационных колонок."""
+    wide = manual_ta_chart or signal_chart
     fig_size, _ = _chart_figure_layout(
         enhanced=False,
         pro_mode=pro_mode,
         height_scale=height_scale,
+        wide_chart=wide,
     )
     fig, ax = plt.subplots(figsize=fig_size, dpi=120)
     fig.patch.set_facecolor(CHART_STYLE["bg"])
     ax.set_facecolor(CHART_STYLE["bg"])
-    fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.10)
+    if wide:
+        fig.subplots_adjust(left=0.025, right=0.995, top=0.90, bottom=0.08)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.10)
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
     if manual_ta_chart or signal_chart:
         try:
-            from .chart_manual_layers import draw_manual_ta_layers
+            from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
 
             draw_manual_ta_layers(ax, bars, ta)
+            draw_education_overlays(ax, bars, ta)
         except Exception:
             logger.exception("Manual TA chart layers failed")
     elif clean_chart:
@@ -2559,8 +2568,11 @@ def _render_chart_figure(
         mode_suffix = " · PRO" if pro_mode else ""
         ut_sfx = " · UT" if ut_overlay is not None else ""
         wait_tag = " · наблюдение" if manual_ta_chart and (ta.verdict or "").upper() == "WAIT" else ""
+        from .signal_locale import verdict_ru
+
+        v_lbl = verdict_ru(ta.verdict) or (ta.verdict or "ожидание")
         ax.set_title(
-            f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{wait_tag}{ut_sfx}",
+            f"{symbol}  ·  {v_lbl} {ta_display_score(ta)}/10  ·  {title_suffix}{mode_suffix}{wait_tag}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=12 if pro_mode else 11, pad=14,
         )
     _style_axes(ax, bars)
@@ -3372,12 +3384,59 @@ async def render_annotated_chart(
         )
     if verdict_override:
         ta.verdict = verdict_override
+
+    bars_chart = bars
+    ta_chart = ta
+    iv_chart = interval_minutes
+    ah_chart = analysis_hours
+    if ta and (manual_ta_chart or signal_chart):
+        from .chart_setup_interval import pick_setup_chart_interval, setup_chart_analysis_hours
+
+        setup_iv = pick_setup_chart_interval(ta, interval_minutes)
+        if setup_iv != interval_minutes:
+            ah_setup = max(analysis_hours, setup_chart_analysis_hours(setup_iv))
+            bars_setup = await _fetch_bars(symbol, ah_setup, interval_minutes=setup_iv)
+            if bars_setup and len(bars_setup) >= 20:
+                ta_setup = run_ta_analysis(
+                    bars_setup,
+                    is_long=is_long,
+                    oi_bars=oi_bars,
+                    btc_bars=btc_bars,
+                    mid_bars=mid_bars,
+                    htf_bars=htf_bars,
+                    macro_bars=macro_bars,
+                    weekly_bars=weekly_bars,
+                    symbol=symbol,
+                    hours=ah_setup,
+                    invalidation_price=invalidation_price,
+                    neutral=neutral,
+                    liq_context=liq_context,
+                    interval_minutes=setup_iv,
+                    htf_interval_minutes=htf_interval_minutes,
+                    mid_interval_minutes=mid_interval_minutes,
+                    macro_interval_minutes=macro_interval_minutes,
+                    history_bars=bars_setup,
+                    taker_cvd=taker_cvd,
+                    market_metrics=market_metrics,
+                    pattern_detection_enabled=pattern_detection_enabled,
+                    pattern_min_confidence=pattern_min_confidence,
+                    as_of_bar_index=as_of_bar_index,
+                    as_of_open_time_ms=as_of_open_time_ms,
+                    as_of_price=as_of_price,
+                )
+                if verdict_override:
+                    ta_setup.verdict = verdict_override
+                bars_chart = bars_setup
+                ta_chart = ta_setup
+                iv_chart = setup_iv
+                ah_chart = ah_setup
+
     if manual_ta_chart or signal_chart:
         zoom_hours = manual_chart_zoom_hours(
-            ta,
-            bars,
-            interval_minutes=interval_minutes,
-            analysis_hours=analysis_hours,
+            ta_chart,
+            bars_chart,
+            interval_minutes=iv_chart,
+            analysis_hours=ah_chart,
             configured=display_hours,
         )
     else:
@@ -3392,22 +3451,39 @@ async def render_annotated_chart(
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
     pro_mode = False if (manual_ta_chart or signal_chart) else chart_source == "annotated_pro"
-    title = f"Bybit {interval_minutes}m · вид {zoom_hours}ч"
-    if analysis_hours > zoom_hours:
-        title = f"{title} (анализ {analysis_hours}ч)"
+    title = f"Bybit {iv_chart}m · вид {zoom_hours}ч"
+    if ah_chart > zoom_hours:
+        title = f"{title} (история {ah_chart}ч)"
+    if iv_chart != interval_minutes:
+        title = f"{title} · сетап {iv_chart}m (сканер {interval_minutes}m)"
     png = _render_chart_figure(
-        bars, ta,
+        bars_chart, ta_chart,
         symbol=symbol,
         title_suffix=title,
         accent_color=accent,
-        interval_minutes=interval_minutes,
+        interval_minutes=iv_chart,
         pro_mode=pro_mode,
         display_hours=zoom_hours,
         height_scale=height_scale,
         signal_chart=signal_chart,
         manual_ta_chart=manual_ta_chart,
     )
-    return png, ta
+    out_ta = ta_chart if ta_chart is not None else ta
+    if out_ta is not None and iv_chart != interval_minutes:
+        mm = dict(getattr(out_ta, "market_metrics", None) or {})
+        mm["chart_setup_interval"] = iv_chart
+        mm["chart_scanner_interval"] = interval_minutes
+        try:
+            from dataclasses import replace
+
+            out_ta = replace(
+                out_ta,
+                market_metrics=mm,
+                analysis_interval_minutes=iv_chart,
+            )
+        except Exception:
+            pass
+    return png, out_ta
 
 
 def render_oil_chart(

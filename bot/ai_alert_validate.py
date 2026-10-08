@@ -5,7 +5,8 @@ import json
 import logging
 from html import escape
 
-from .ai_analyst import AiAskResult, ask_gemini, gemini_in_cooldown
+from .ai_analyst import AiAskResult, ask_gemini
+from .ai_providers import text_ai_available
 from .ai_context import serialize_ta
 from .ta_analysis import TAAnalysisResult
 
@@ -71,7 +72,7 @@ async def run_alert_llm_validate(
     signal_side: str = "",
     signal_type: str = "",
 ) -> str:
-    if gemini_in_cooldown() and not api_key:
+    if not text_ai_available(api_key):
         return ""
     ctx = build_alert_validate_context(
         ta,

@@ -142,6 +142,13 @@ def scenario_body_html(
     if ta is None:
         return ""
     style = (reading_style or "situational").lower()
+    if style == "human":
+        html = str(getattr(ta, "human_trade_brief_html", "") or "").strip()
+        if html:
+            return html
+        from .human_trade_brief import build_human_trade_brief_html
+
+        return build_human_trade_brief_html(ta, symbol=symbol) or ""
     if style == "hybrid":
         from .narrative_report import format_reading_block_html
 

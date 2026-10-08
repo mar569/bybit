@@ -58,10 +58,11 @@ Chat id: добавьте бота в группу → сообщение в г�
 
 `https://api.telegram.org/bot<ТОКЕН>/getUpdates` → `"chat":{"id":-100…}`
 
-**ИИ (опционально):**
+**ИИ (опционально, цепочка Gemini → Groq → Relay):**
 
 - Gemini: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → `КЛЮЧ_GEMINI`
 - Groq: [console.groq.com/keys](https://console.groq.com/keys) → `КЛЮЧ_GROQ`
+- RelayModels: [relaymodels.com](https://relaymodels.com) → `КЛЮЧ_RELAY` (модель `МОДЕЛЬ_RELAY`, напр. `gemini-3.6-flash`)
 
 **Redis в Docker** — оставьте:
 

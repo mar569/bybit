@@ -209,6 +209,30 @@ def _draw_double(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, 
         )
         ax.add_patch(rect)
     _draw_points(ax, bars, pattern.points, color=color)
+    if pattern.kind == "double_bottom" and len(pattern.points) >= 2:
+        for i, pt in enumerate(pattern.points[:2], start=1):
+            ax.annotate(
+                f"  {i}-е дно",
+                xy=(_x_at(bars, pt.index), pt.price),
+                xytext=(_x_at(bars, pt.index), pt.price * 0.996),
+                color=color,
+                fontsize=7,
+                fontweight="bold",
+                arrowprops=dict(arrowstyle="->", color=color, lw=0.85),
+            )
+        if pattern.neckline:
+            _draw_line(ax, bars, pattern.neckline, color=color, label="сопр./шея", linestyle="-")
+    elif pattern.kind == "double_top" and len(pattern.points) >= 2:
+        for i, pt in enumerate(pattern.points[:2], start=1):
+            ax.annotate(
+                f"  {i}-я вершина",
+                xy=(_x_at(bars, pt.index), pt.price),
+                xytext=(_x_at(bars, pt.index), pt.price * 1.004),
+                color=color,
+                fontsize=7,
+                fontweight="bold",
+                arrowprops=dict(arrowstyle="->", color=color, lw=0.85),
+            )
 
 
 def _draw_flag_pennant(ax: "maxes.Axes", bars: list[KlineBar], pattern: ChartPattern, *, color: str) -> None:

@@ -594,12 +594,11 @@ async def enrich_oil_forecast_with_gemini(
     model: str = "gemini-3.6-flash",
 ) -> OilForecast:
     """Добавляет короткий AI-комментарий; при ошибке возвращает исходный прогноз."""
-    if not api_key:
-        return fc
     try:
-        from .ai_analyst import ask_gemini, gemini_in_cooldown, sanitize_ai_reply_for_telegram
+        from .ai_analyst import ask_gemini, sanitize_ai_reply_for_telegram
+        from .ai_providers import text_ai_available
 
-        if gemini_in_cooldown():
+        if not text_ai_available(api_key):
             return fc
         ctx = _forecast_context_for_gemini(fc, snap, news_items)
         user = (

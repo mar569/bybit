@@ -3451,12 +3451,12 @@ async def enrich_oil_news_blurb(
 ) -> str:
     """Живой разбор Gemini/Groq для новостей (не шаблон)."""
     try:
-        from .ai_analyst import gemini_in_cooldown, groq_configured
+        from .ai_analyst import fallback_llm_configured, gemini_in_cooldown
 
-        if not api_key and not groq_configured():
+        if not api_key and not fallback_llm_configured():
             return ""
-        # Gemini на паузе — всё равно пробуем Groq
-        if not api_key and gemini_in_cooldown() and not groq_configured():
+        # Gemini на паузе — всё равно пробуем Groq / Relay
+        if not api_key and gemini_in_cooldown() and not fallback_llm_configured():
             return ""
     except Exception:
         if not api_key:
@@ -5902,7 +5902,7 @@ class OilMonitorEngine:
                 )
 
             key = self._resolve_gemini_key()
-            from .ai_analyst import groq_configured
+            from .ai_analyst import fallback_llm_configured
 
             recent = list(self._recent_news)
             matched_local = match_oil_news_for_question(q, recent, limit=8)
@@ -5944,7 +5944,7 @@ class OilMonitorEngine:
                 return True, _fallback2(rate_limited=False)
 
             # Без ключей — сводка/поиск
-            if not key and not groq_configured():
+            if not key and not fallback_llm_configured():
                 return True, _fallback2(rate_limited=False)
 
             def _fmt_list(items: list[OilNewsItem], *, limit: int = 12) -> str:

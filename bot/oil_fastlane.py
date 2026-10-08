@@ -510,11 +510,16 @@ async def enrich_fastlane_with_gemini(
 ) -> tuple[str, str | None]:
     """Живой ИИ-разбор flash: Gemini → Groq. Без шаблонов."""
     try:
-        from .ai_analyst import ask_gemini, gemini_in_cooldown, groq_configured, sanitize_ai_reply_for_telegram
+        from .ai_analyst import (
+            ask_gemini,
+            fallback_llm_configured,
+            gemini_in_cooldown,
+            sanitize_ai_reply_for_telegram,
+        )
 
-        if not api_key and not groq_configured():
+        if not api_key and not fallback_llm_configured():
             return "", None
-        if gemini_in_cooldown() and not groq_configured() and not api_key:
+        if gemini_in_cooldown() and not fallback_llm_configured() and not api_key:
             return "", None
         from .oil_monitor import _is_hormuz_deal_condition
 

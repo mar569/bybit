@@ -2227,6 +2227,7 @@ def _trade_quality_guard(
     current: float,
     stop: float | None,
     targets: list[float],
+    entry_zone: tuple[float, float] | None = None,
 ) -> tuple[bool, str]:
     """
     Возвращает (is_bad, reason), если вход статистически невыгоден.
@@ -2234,6 +2235,10 @@ def _trade_quality_guard(
     """
     if verdict not in {"LONG", "SHORT"} or current <= 0 or not stop or not targets:
         return False, ""
+    from .pro_invariants import entry_reference_price
+
+    side = "long" if verdict == "LONG" else "short"
+    ref = entry_reference_price(entry_zone, current, side)
     tp1 = targets[0]
     if verdict == "LONG":
         if stop >= current * 0.999:
@@ -2245,8 +2250,8 @@ def _trade_quality_guard(
             return True, "стоп ниже цены — SHORT некорректен"
         if tp1 >= current * 1.001:
             return True, "цель выше цены — SHORT некорректен"
-    risk_pct = abs(current - stop) / current * 100.0
-    reward_pct = abs(tp1 - current) / current * 100.0
+    risk_pct = abs(ref - stop) / ref * 100.0
+    reward_pct = abs(tp1 - ref) / ref * 100.0
     if risk_pct <= 0:
         return False, ""
     rr = reward_pct / risk_pct
@@ -2681,6 +2686,16 @@ def run_ta_analysis(
         channel=channel,
         factors=factors,
     )
+    from .range_breakdown_retest import evaluate_range_breakdown_retest
+
+    rbr_setup = evaluate_range_breakdown_retest(
+        bars,
+        consolidation=consolidation,
+        breakdown=breakdown,
+        breakout=breakout,
+        post_pump=post_pump,
+        current=current,
+    )
 
     if neutral:
         verdict, conf, reason = _resolve_neutral_verdict(
@@ -2917,6 +2932,22 @@ def run_ta_analysis(
         inv = range_trade.stop_price
         entry = (range_trade.entry_price * 0.999, range_trade.entry_price * 1.001)
         targets = list(range_trade.targets)
+    elif (
+        rbr_setup
+        and rbr_setup.direction == "short"
+        and (action_priority == "short" or verdict in {"SHORT", "WAIT"})
+    ):
+        inv = rbr_setup.stop
+        entry = (rbr_setup.entry_lo, rbr_setup.entry_hi)
+        targets = list(rbr_setup.targets)
+        if rbr_setup.story_ru:
+            reason = (
+                f"{reason} · {rbr_setup.label_ru}"
+                if reason
+                else rbr_setup.story_ru[:200]
+            )
+        if verdict == "WAIT" and action_priority != "short":
+            action_priority = "short"
     elif liq_cascade.active and verdict == "SHORT" and cascade_tight_stop is not None:
         inv = cascade_tight_stop
         entry = (current * 0.999, current * 1.001)
@@ -2948,6 +2979,8 @@ def run_ta_analysis(
     _plan_side = bias_side(verdict, action_priority)
     _trig = breakdown if _plan_side == "short" else breakout if _plan_side == "long" else None
     if _plan_side in {"long", "short"}:
+        from .pro_invariants import ensure_minimum_targets
+
         targets = sanitize_targets(_plan_side, current, targets, trigger=_trig)
         if inv is not None and not stop_matches_side(_plan_side, current, float(inv)):
             inv = None
@@ -2958,6 +2991,13 @@ def run_ta_analysis(
                 targets = sanitize_targets(
                     _plan_side, current, sc.target_prices, trigger=sc.trigger_price,
                 )
+        targets = ensure_minimum_targets(
+            _plan_side,
+            current,
+            targets,
+            entry_zone=entry,
+            trigger=float(_trig) if _trig else None,
+        )
     if (
         wave.valid
         and wave.has_confluence
@@ -2993,6 +3033,7 @@ def run_ta_analysis(
         current=current,
         stop=inv,
         targets=targets,
+        entry_zone=entry,
     )
     if is_bad_trade and not cascade_override_rr:
         verdict = "WAIT"
@@ -3481,7 +3522,10 @@ def run_ta_analysis(
         reading_present=list(market_reading.present) if market_reading else [],
         reading_absent=_out_absent[:10],
         reading_live_scenario=market_reading.live_scenario if market_reading else "",
-        reading_seek_label=market_reading.seek_label if market_reading else "",
+        reading_seek_label=(
+            (rbr_setup.story_ru[:220] if rbr_setup else "")
+            or (market_reading.seek_label if market_reading else "")
+        ),
         reading_tf_stack=market_reading.tf_stack if market_reading else "",
         reading_draw_both_forecasts=(
             market_reading.draw_both_forecasts if market_reading else False
@@ -3523,6 +3567,11 @@ def run_ta_analysis(
         market_participation_lines=participation_lines,
         market_metrics={
             **dict(market_metrics or {}),
+            **(
+                {"range_breakdown_retest": rbr_setup.to_dict()}
+                if rbr_setup is not None
+                else {}
+            ),
                     **({"symbol": (symbol or "").upper()} if symbol else {}),
                     **(
                         _btc_regime_metrics(btc_bars)

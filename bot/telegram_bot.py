@@ -207,6 +207,7 @@ class TelegramBot:
         self._minute_send_times: dict[int, list[float]] = {}
         self._hour_send_times: dict[int, list[float]] = {}
         self._last_proactive_intel_time: dict[str, float] = {}
+        self._last_trader_deep_analysis_time: dict[str, float] = {}
         self._situation_overview_task: asyncio.Task | None = None
         self._last_situation_overview_post: float = 0.0
         self._unreachable_chats: set[int] = set()
@@ -1007,7 +1008,7 @@ class TelegramBot:
             return True
         if not self.config.ai_configured:
             await query.answer(
-                "Добавь GEMINI_API_KEY или GROQ_API_KEY в .env "
+                "Добавь GEMINI, GROQ или RELAY (RelayModels) ключ в .env "
                 "(aistudio.google.com / console.groq.com)",
                 show_alert=True,
             )
@@ -1512,6 +1513,69 @@ class TelegramBot:
             self._last_signal_analysis_time[sym_key] = now
             logger.info("Signal pro analysis %s %s → chat %s", signal.exchange, sym_key, chat_id)
 
+    async def _dispatch_trader_deep_analysis(
+        self,
+        signal: Signal,
+        ta_result: Any,
+        png: bytes | None,
+        *,
+        skip_dedupe: bool = False,
+    ) -> None:
+        if skip_dedupe or ta_result is None:
+            return
+        settings = self.settings_manager.settings
+        chat_id = self.config.effective_analysis_chat_id
+        if chat_id is None:
+            return
+        if not getattr(settings, "trader_deep_analysis_enabled", True):
+            return
+        from .trader_deep_analysis import (
+            build_trader_deep_analysis_html,
+            should_push_trader_deep_analysis_for_settings,
+        )
+
+        if not should_push_trader_deep_analysis_for_settings(
+            ta_result,
+            enabled=True,
+        ):
+            return
+        sym_key = (signal.symbol or "").upper()
+        cd = max(
+            300,
+            int(getattr(settings, "trader_deep_analysis_cooldown_seconds", 3600) or 3600),
+        )
+        now = time.time()
+        if now - self._last_trader_deep_analysis_time.get(sym_key, 0.0) < cd:
+            return
+        body = build_trader_deep_analysis_html(signal, ta_result)
+        if not body.strip():
+            return
+        caption = body
+        if len(caption) > 1020:
+            caption = caption[:1017] + "…"
+        keyboard = InlineKeyboardMarkup([
+            self._coinglass_link_buttons(
+                signal.symbol,
+                signal.exchange or "bybit",
+                chart_url=signal.link,
+            ),
+        ])
+        sent = False
+        if png:
+            sent = await self._send_chart(
+                chat_id, png, caption, is_priority=False, keyboard=keyboard,
+            )
+        if not sent:
+            sent = await self._send_to_chat(chat_id, caption, keyboard, is_priority=False)
+        if sent:
+            self._last_trader_deep_analysis_time[sym_key] = now
+            logger.info(
+                "Trader deep analysis %s %s → chat %s",
+                signal.exchange,
+                sym_key,
+                chat_id,
+            )
+
     def _get_symbol_dispatch_lock(self, symbol: str) -> asyncio.Lock:
         key = symbol.upper()
         lock = self._symbol_dispatch_locks.get(key)
@@ -1861,6 +1925,21 @@ class TelegramBot:
                             trade_decision.reason,
                             extra,
                         )
+                        if ta_result is not None and not skip_dedupe:
+                            from .scenario_report import enrich_ta_scenario_fields
+
+                            ta_result = enrich_ta_scenario_fields(
+                                ta_result,
+                                symbol=signal.symbol,
+                                signal=signal,
+                                signal_side=signal.side,
+                                readiness=readiness,
+                                quality_tier=quality.tier,
+                            )
+                            self._store_signal_watch_ctx(signal, ta_result)
+                            await self._dispatch_trader_deep_analysis(
+                                signal, ta_result, png, skip_dedupe=skip_dedupe,
+                            )
                         return
 
                 signal.details["quality_tier"] = quality.tier
@@ -1877,6 +1956,28 @@ class TelegramBot:
                         readiness=readiness,
                         quality_tier=quality.tier,
                     )
+                    if not skip_dedupe:
+                        self._store_signal_watch_ctx(signal, ta_result)
+                    await self._dispatch_trader_deep_analysis(
+                        signal, ta_result, png, skip_dedupe=skip_dedupe,
+                    )
+
+                if (
+                    getattr(settings, "signal_telegram_entry_only", False)
+                    and not skip_dedupe
+                    and quality is not None
+                ):
+                    td_act = (trade_decision.action if trade_decision else "") or ""
+                    is_entry = quality.tier == "entry" and td_act in ("", "entry")
+                    if not is_entry:
+                        logger.info(
+                            "Telegram skip %s %s: entry-only (tier=%s decision=%s)",
+                            signal.exchange,
+                            signal.symbol,
+                            quality.tier,
+                            td_act or "-",
+                        )
+                        return
 
                 intel_only = (
                     quality.tier == "watch"
@@ -5045,10 +5146,7 @@ class TelegramBot:
             f"Key <b>{getattr(s, 'oil_ut_bot_key_value', 1):g}</b> ATR <b>{getattr(s, 'oil_ut_bot_atr_period', 10)}</b>\n"
             f"Прогноз: <b>{'ON' if getattr(s, 'oil_forecast_enabled', True) else 'OFF'}</b> · "
             f"Gemini <b>{'ON' if getattr(s, 'oil_forecast_gemini', False) else 'OFF'}</b> · "
-            f"ключи: <b>{'Gemini' if self.config.gemini_configured else ''}"
-            f"{'+' if self.config.gemini_configured and self.config.groq_configured else ''}"
-            f"{'Groq' if self.config.groq_configured else ''}"
-            f"{'нет' if not self.config.ai_configured else ''}</b>\n"
+            f"ключи: <b>{self.config.ai_keys_label}</b>\n"
             f"Setup→ручной TA: <b>{'ON' if getattr(s, 'oil_setup_enabled', True) else 'OFF'}</b> · "
             f"quality≥<b>{getattr(s, 'oil_setup_min_quality', 8)}</b> · "
             f"CD <b>{int(getattr(s, 'oil_setup_cooldown_seconds', 10800) / 3600)}ч</b> · "
@@ -5323,10 +5421,12 @@ class TelegramBot:
             f"💬 Разбор: <b>{getattr(s, 'reading_display_style', 'situational') or 'situational'}</b> · "
             f"ИИ к сигналу: <b>{'ON' if getattr(s, 'ai_situational_reading_enabled', False) else 'OFF'}</b> "
             f"(кнопка <b>🧠 ИИ-разбор</b> ниже)\n"
-            f"🌐 Пульс ситуаций: <b>{'ON' if getattr(s, 'situation_overview_enabled', True) else 'OFF'}</b> "
-            f"· /pulse\n"
+            f"📬 В канал только ENTRY: <b>{'ON' if getattr(s, 'signal_telegram_entry_only', False) else 'OFF'}</b> "
+            f"· наблюдения push <b>{'ON' if getattr(s, 'signal_intel_watch_enabled', False) else 'OFF'}</b> "
+            f"· разбор Ed→анализ: <b>{'ON' if getattr(s, 'trader_deep_analysis_enabled', True) else 'OFF'}</b>\n"
+            f"🌐 Пульс / обзор: <b>{'ON' if getattr(s, 'situation_overview_enabled', False) else 'OFF'}</b> "
+            f"(/pulse вручную)\n"
             f"🧠 Чат анализов: <b>{'legacy ON' if s.analysis_enabled and self.config.analysis_chat_configured else 'legacy OFF'}</b> "
-            f"· intel <b>{'ON' if getattr(s, 'signal_intel_watch_enabled', False) else 'OFF'}</b> "
             f"(тренд+liq+OI/CVD · liq ≥<b>${s.analysis_alt_min_liq_usd:,.0f}</b>–<b>${s.analysis_major_min_liq_usd:,.0f}</b> · "
             f"тренд≥<b>{getattr(s, 'analysis_min_trend_pct', 2.0):.0f}%</b> · "
             f"макс <b>{getattr(s, 'analysis_max_per_hour', 4)}</b>/ч · conf≥<b>{s.analysis_min_confidence:.0f}%</b> · "
@@ -5565,7 +5665,7 @@ class TelegramBot:
                 await query.answer("Сначала построй разбор по этому TF.", show_alert=True)
                 return
             if not self.config.ai_configured:
-                await query.answer("Нужен GEMINI или GROQ в .env", show_alert=True)
+                await query.answer("Нужен GEMINI, GROQ или RELAY в .env", show_alert=True)
                 return
             await query.answer("ИИ-разбор…")
             await self._maybe_send_situational_ai(

@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 103
+SETTINGS_VERSION = 106
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Активный рынок: пампы/дампы на Binance, WATCH в analysis, без спама ENTRY.
@@ -26,8 +26,8 @@ ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
     "price_drop_percent": 1.35,
     "require_both_oi_and_price": True,
     "min_oi_change_usd": 28_000.0,
-    "min_probability_percent": 66.0,
-    "alt_min_probability_percent": 68.0,
+    "min_probability_percent": 58.0,
+    "alt_min_probability_percent": 60.0,
     "min_signal_score": 2.0,
     "standard_min_signal_score": 2.0,
     "alt_min_signal_score": 2.5,
@@ -51,8 +51,8 @@ ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
     "telegram_min_interval_seconds": 25.0,
     "priority_score_max": 3,
     "actionable_signals_only": True,
-    "actionable_min_ta_score": 7,
-    "actionable_min_signal_score": 3,
+    "actionable_min_ta_score": 6,
+    "actionable_min_signal_score": 2,
     "signal_watch_mode_enabled": True,
     "signal_intel_watch_enabled": True,
     "signal_intel_main_channel": False,
@@ -88,19 +88,29 @@ SITUATIONAL_SCANNER_PRESET: dict[str, Any] = {
     "long_period_minutes": 5,
     "short_period_minutes": 5,
     "min_open_interest": 80_000.0,
-    "reading_display_style": "situational",
+    "reading_display_style": "human",
     "ai_situational_reading_enabled": True,
     "ai_situational_on_manual": True,
     "ai_situational_on_signal": True,
-    "situation_overview_enabled": True,
+    "situation_overview_enabled": False,
     "situation_overview_interval_seconds": 3600,
     "situation_overview_min_symbols": 2,
-    "signal_chart_on_watch": True,
-    "pattern_min_confidence": 0.68,
+    "signal_chart_on_watch": False,
+    "signal_intel_watch_enabled": False,
+    "signal_watch_mode_enabled": False,
+    "signal_telegram_entry_only": True,
+    "signal_alert_reading_snippet_enabled": False,
+    "pattern_min_confidence": 0.62,
+    "trade_decision_min_entry_score": 52,
+    "trade_decision_min_watch_score": 32,
+    "signal_chart_display_hours": 14,
+    "signal_chart_height_scale": 1.18,
     "analysis_max_per_hour": 8,
     "flash_enabled": False,
     "signal_playbook_enabled": False,
     "signal_pro_to_analysis_chat": False,
+    "trader_deep_analysis_enabled": True,
+    "trader_deep_analysis_cooldown_seconds": 3600,
     "signal_coinglass_breakdown_enabled": False,
     "signal_alert_llm_validate_enabled": False,
     "scenario_watch_enabled": False,
@@ -533,8 +543,8 @@ class ScannerSettings:
 
     # v36: единый арбитр ENTRY — локация (Fib/ПС/ретест) обязательна; импульс → WATCH
     trade_decision_gate_enabled: bool = True
-    trade_decision_min_entry_score: int = 62
-    trade_decision_min_watch_score: int = 36
+    trade_decision_min_entry_score: int = 52
+    trade_decision_min_watch_score: int = 32
     trade_chase_range_block_pct: float = 82.0
     trade_chase_range_mid_pct: float = 78.0
     trade_decision_block_chase_watch: bool = True
@@ -586,10 +596,10 @@ class ScannerSettings:
     signal_chart_enabled: bool = True
     signal_chart_source: str = "annotated"
     signal_chart_hours: int = 18
-    signal_chart_display_hours: int = 12
+    signal_chart_display_hours: int = 14
     signal_chart_interval_minutes: int = 5
     # Множитель высоты PNG (1.0 = стандарт, 1.3 = свечи выше на ~30%)
-    signal_chart_height_scale: float = 1.0
+    signal_chart_height_scale: float = 1.18
 
     # Графические фигуры (ГиП, флаг, треугольник и т.д.)
     pattern_detection_enabled: bool = True
@@ -606,6 +616,9 @@ class ScannerSettings:
     # Hot playbook + Pro в чат анализов / кнопка «Подробнее»
     signal_playbook_enabled: bool = False
     signal_pro_to_analysis_chat: bool = False
+    # «Разбор как у Ed» (RBR / post-pump+боковик) → TELEGRAM_ANALYSIS_CHAT, независимо от entry_only
+    trader_deep_analysis_enabled: bool = True
+    trader_deep_analysis_cooldown_seconds: int = 3600
     # Отдельным сообщением сразу после сигнала: разбор деривативов/потока Coinglass
     signal_coinglass_breakdown_enabled: bool = False
     # График в alert только на ENTRY B+; WATCH — текст (reading + план)
@@ -614,7 +627,7 @@ class ScannerSettings:
     signal_alert_llm_validate_enabled: bool = False
     # situational = проза под фазу; evidence = списки «Есть/Нет»; hybrid = оба
     reading_display_style: str = "situational"
-    # Авто ИИ-разбор после сигнала / ручного TA (нужен GEMINI или GROQ в .env)
+    # Авто ИИ-разбор после сигнала / ручного TA (GEMINI / GROQ / RELAY в .env)
     ai_situational_reading_enabled: bool = True
     ai_situational_on_manual: bool = True
     ai_situational_on_signal: bool = True
@@ -622,6 +635,8 @@ class ScannerSettings:
     situation_overview_enabled: bool = True
     situation_overview_interval_seconds: int = 3600
     situation_overview_min_symbols: int = 2
+    # В Telegram — только ENTRY; WATCH/intel/обзор не слать (кэш TA остаётся)
+    signal_telegram_entry_only: bool = False
     target_watcher_enabled: bool = False
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
@@ -1195,6 +1210,10 @@ class ScannerSettings:
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", False)),
             signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", False)),
+            trader_deep_analysis_enabled=bool(base.get("trader_deep_analysis_enabled", True)),
+            trader_deep_analysis_cooldown_seconds=int(
+                base.get("trader_deep_analysis_cooldown_seconds", 3600) or 3600
+            ),
             signal_coinglass_breakdown_enabled=bool(
                 base.get("signal_coinglass_breakdown_enabled", True)
             ),
@@ -1216,6 +1235,7 @@ class ScannerSettings:
                 base.get("situation_overview_interval_seconds", 3600)
             ),
             situation_overview_min_symbols=int(base.get("situation_overview_min_symbols", 2)),
+            signal_telegram_entry_only=bool(base.get("signal_telegram_entry_only", False)),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
             signal_quality_scanner_skip_enabled=bool(
@@ -2223,6 +2243,45 @@ class SettingsManager:
             if version < 103:
                 merged["analysis_enabled"] = False
                 merged["analysis_signal_trigger_enabled"] = False
+            if version < 104:
+                merged["situation_overview_enabled"] = False
+                merged["signal_intel_watch_enabled"] = False
+                merged["signal_watch_mode_enabled"] = False
+                merged["signal_telegram_entry_only"] = True
+                merged["signal_chart_on_watch"] = False
+                merged["reading_display_style"] = "human"
+                merged["signal_alert_reading_snippet_enabled"] = False
+            if version < 105:
+                merged["trade_decision_min_entry_score"] = min(
+                    int(merged.get("trade_decision_min_entry_score", 62) or 62), 52
+                )
+                merged["trade_decision_min_watch_score"] = min(
+                    int(merged.get("trade_decision_min_watch_score", 36) or 36), 32
+                )
+                merged["min_probability_percent"] = min(
+                    float(merged.get("min_probability_percent", 66) or 66), 58.0
+                )
+                merged["alt_min_probability_percent"] = min(
+                    float(merged.get("alt_min_probability_percent", 68) or 68), 60.0
+                )
+                merged["actionable_min_ta_score"] = min(
+                    int(merged.get("actionable_min_ta_score", 7) or 7), 6
+                )
+                merged["actionable_min_signal_score"] = min(
+                    float(merged.get("actionable_min_signal_score", 3) or 3), 2.0
+                )
+                merged["pattern_min_confidence"] = min(
+                    float(merged.get("pattern_min_confidence", 0.68) or 0.68), 0.62
+                )
+                merged["signal_chart_display_hours"] = max(
+                    int(merged.get("signal_chart_display_hours", 12) or 12), 14
+                )
+                merged["signal_chart_height_scale"] = max(
+                    float(merged.get("signal_chart_height_scale", 1.0) or 1.0), 1.18
+                )
+            if version < 106:
+                merged.setdefault("trader_deep_analysis_enabled", True)
+                merged.setdefault("trader_deep_analysis_cooldown_seconds", 3600)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

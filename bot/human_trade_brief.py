@@ -127,6 +127,12 @@ def build_human_trade_brief(
     else:
         parts.append(f"{head}.")
 
+    from .mtf_trader_context import build_trader_macro_paragraph
+
+    macro = build_trader_macro_paragraph(ta, chart_interval=int(getattr(ta, "analysis_interval_minutes", 5) or 5))
+    if macro:
+        parts.append(macro)
+
     if stack:
         parts.append(f"Старшие ТФ: {stack}.")
     elif narrative:
@@ -264,16 +270,49 @@ def scanner_side_blocked_by_scenario(ta: "TAAnalysisResult", side: str) -> str:
     return ""
 
 
+def build_trade_analysis_html(ta: "TAAnalysisResult") -> str:
+    """Причина + подтверждения + качество плана (как на учебном PNG)."""
+    from .chart_analysis_text import collect_reason_and_confirmations
+    from .mtf_trader_context import build_trader_macro_lines
+    from .trade_plan_quality import validate_trade_plan
+
+    iv = int(getattr(ta, "analysis_interval_minutes", 5) or 5)
+    macro = build_trader_macro_lines(ta, chart_interval=iv)
+    reason, confirms = collect_reason_and_confirmations(ta)
+    absent = _dedupe_reading_lines(list(getattr(ta, "reading_absent", None) or []), max_items=2)
+    lines: list[str] = []
+    if macro:
+        lines.append(f"<b>Контекст:</b> {escape(' '.join(macro[:3]))}")
+    if reason:
+        lines.append(f"<b>Причина:</b> {escape(reason)}")
+    if confirms:
+        lines.append("✓ " + " · ".join(escape(c) for c in confirms[:4]))
+    if absent:
+        lines.append("<i>Не хватает:</i> " + " · ".join(escape(x[:90]) for x in absent))
+    pq = validate_trade_plan(ta)
+    if pq.ok and pq.rr > 0:
+        lines.append(
+            f"План: риск ~{pq.risk_pct:.1f}% · цель ~{pq.reward_pct:.1f}% · ≈1:{pq.rr:.1f}"
+        )
+    elif not pq.ok and pq.reason_ru:
+        lines.append(f"⚠️ План: {escape(pq.reason_ru)}")
+    return "\n".join(lines)
+
+
 def build_human_trade_brief_html(
     ta: "TAAnalysisResult",
     *,
     symbol: str = "",
     conflict_note: str = "",
 ) -> str:
+    parts: list[str] = []
+    analysis = build_trade_analysis_html(ta)
+    if analysis:
+        parts.append(f"📋 {analysis}")
     text = build_human_trade_brief(ta, symbol=symbol, conflict_note=conflict_note)
-    if not text:
-        return ""
-    return f"💬 <b>Разбор</b>\n{escape(text)}"
+    if text:
+        parts.append(f"💬 <b>Разбор</b>\n{escape(text)}")
+    return "\n\n".join(parts)
 
 
 def _dedupe_reading_lines(items: list[str], *, max_items: int = 4) -> list[str]:

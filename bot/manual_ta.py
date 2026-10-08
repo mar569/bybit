@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 60)
+MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 30, 60)
 # Все варианты ведут на один PNG (manual layers); legacy-имена для callback-кнопок.
 MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("annotated", "tv_annotated", "annotated_pro")
 
@@ -46,7 +46,7 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
     cleaned = text.strip()
     interval: int | None = None
     tf_match = re.search(
-        r"\b(5|10|15|60)\s*m(?:in(?:ute)?s?)?\b|(?:^|\s)(1)\s*h(?:our)?s?\b",
+        r"\b(5|10|15|30|60)\s*m(?:in(?:ute)?s?)?\b|(?:^|\s)(1)\s*h(?:our)?s?\b",
         cleaned,
         flags=re.IGNORECASE,
     )
@@ -64,12 +64,12 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 def pattern_chart_hours(interval_minutes: int) -> int:
     """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
-    return {5: 18, 10: 14, 15: 24, 60: 72}.get(interval_minutes, 18)
+    return {5: 18, 10: 14, 15: 24, 30: 48, 60: 72}.get(interval_minutes, 18)
 
 
 def chart_display_hours(interval_minutes: int, *, configured: int | None = None) -> int:
     """Сколько часов показывать на графике по умолчанию (~12ч на 5m — весь дневной дамп)."""
-    defaults = {5: 12, 10: 12, 15: 14, 60: 36}
+    defaults = {5: 14, 10: 13, 15: 15, 30: 48, 60: 36}
     base = defaults.get(interval_minutes, 12)
     if configured is None:
         return base
@@ -110,7 +110,7 @@ def structure_aware_display_hours(
 
 def manual_ta_hours(interval_minutes: int) -> int:
     """Сколько часов свечей грузим для ручного разбора (больше, чем зум по умолчанию)."""
-    return {5: 22, 10: 30, 15: 36, 60: 72}.get(interval_minutes, 22)
+    return {5: 22, 10: 30, 15: 36, 30: 48, 60: 72}.get(interval_minutes, 22)
 
 
 def compute_structure_bar_span(ta: object, bars: list) -> int:

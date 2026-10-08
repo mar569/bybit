@@ -25,6 +25,13 @@ class Config(BaseSettings):
     gemini_model: str = Field("gemini-3.6-flash", env="GEMINI_MODEL")
     groq_api_key: str | None = Field(None, env="GROQ_API_KEY")
     groq_model: str = Field("llama-3.3-70b-versatile", env="GROQ_MODEL")
+    relay_api_key: str | None = Field(None, env="RELAY_API_KEY")
+    relay_model: str = Field("gemini-3.6-flash", env="RELAY_MODEL")
+    relay_base_url: str = Field(
+        "https://api.relaymodels.com/v1",
+        env="RELAY_BASE_URL",
+    )
+    ai_provider_order: str = Field("gemini,relay,groq", env="AI_PROVIDER_ORDER")
     # X API Bearer (console.x.com). Если пусто — RSSHub fallback для oil X-ленты.
     x_bearer_token: str | None = Field(None, env="X_BEARER_TOKEN")
 
@@ -62,6 +69,12 @@ class Config(BaseSettings):
             return None
         return value
 
+    @validator("relay_api_key", pre=True)
+    def empty_relay_api_key(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
     @validator("x_bearer_token", pre=True)
     def empty_x_bearer_token(cls, value: object) -> object:
         if value is None or value == "":
@@ -77,12 +90,29 @@ class Config(BaseSettings):
         return bool(self.groq_api_key)
 
     @property
+    def relay_configured(self) -> bool:
+        return bool(self.relay_api_key)
+
+    @property
     def x_configured(self) -> bool:
         return bool(self.x_bearer_token)
 
     @property
     def ai_configured(self) -> bool:
-        return bool(self.gemini_api_key or self.groq_api_key)
+        return bool(
+            self.gemini_api_key or self.groq_api_key or self.relay_api_key
+        )
+
+    @property
+    def ai_keys_label(self) -> str:
+        parts: list[str] = []
+        if self.gemini_configured:
+            parts.append("Gemini")
+        if self.groq_configured:
+            parts.append("Groq")
+        if self.relay_configured:
+            parts.append("Relay")
+        return "+".join(parts) if parts else "нет"
 
     @property
     def notification_chat_id(self) -> int:

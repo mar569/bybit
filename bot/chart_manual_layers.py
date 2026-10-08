@@ -7,6 +7,9 @@ from matplotlib.patches import Rectangle
 
 from .bybit_klines import KlineBar
 from .chart_reference_levels import session_reference_levels
+from .chart_analysis_text import collect_reason_and_confirmations, pick_chart_zone, structure_break_label_ru
+from .chart_position_boxes import chart_plan_targets, draw_position_risk_boxes
+from .chart_story_labels import draw_story_frame
 from .human_trade_brief import preferred_trade_side
 from .ta_analysis import TAAnalysisResult, fmt_price
 
@@ -65,33 +68,101 @@ def _hline_label(
     )
 
 
-def _pick_zone(ta: TAAnalysisResult, current: float) -> dict | None:
-    metrics = getattr(ta, "market_metrics", None) or {}
-    raw = metrics.get("pdf_zones") if isinstance(metrics, dict) else None
-    if not raw:
-        return None
-    best: dict | None = None
-    best_score = -1.0
-    for z in raw:
-        if not isinstance(z, dict):
-            continue
-        top, bot = float(z.get("top", 0)), float(z.get("bottom", 0))
-        if top <= bot:
-            continue
-        mid = (top + bot) / 2
-        if abs(mid - current) / current > 0.14:
-            continue
-        valid = bool(z.get("valid"))
-        tf = str(z.get("tf", "LTF"))
-        score = 20.0 - abs(mid - current) / current * 100.0
-        if valid:
-            score += 25.0
-        if tf in {"H4", "H1", "W1"}:
-            score += 6.0
-        if score > best_score:
-            best_score = score
-            best = z
-    return best
+def draw_education_overlays(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    """Фигуры, стрелки сценария, подписи «поддержка/манипуляция» поверх manual layers."""
+    if not bars:
+        return
+    from .chart_pattern_draw import draw_chart_patterns, draw_pattern_foresight_path
+    from .pattern_specs import MIN_DRAW_CONFIDENCE
+
+    accept_pat = getattr(ta, "reading_accept_pattern", True)
+    primary = getattr(ta, "primary_chart_pattern", None)
+    patterns = list(getattr(ta, "chart_patterns", None) or [])
+    if accept_pat and (primary or patterns):
+        draw_chart_patterns(
+            ax,
+            bars,
+            patterns,
+            max_patterns=1,
+            min_confidence=max(0.58, MIN_DRAW_CONFIDENCE - 0.08),
+            force_primary=primary,
+            draw_target_labels=False,
+        )
+    is_wait = (getattr(ta, "verdict", "") or "").upper() == "WAIT"
+    setup_path = getattr(ta, "forecast_path_prices", None) or []
+    setup_grade = getattr(ta, "setup_grade", "") or ""
+    has_setup_path = len(setup_path) >= 2 and setup_grade in {"A", "B", "C"}
+    if (
+        not has_setup_path
+        and getattr(ta, "pattern_foresight_summary", "")
+        and getattr(ta, "reading_accept_pattern", True)
+    ):
+        draw_pattern_foresight_path(
+            ax,
+            bars,
+            current_price=float(getattr(ta, "current_price", 0) or bars[-1].close),
+            pattern=primary,
+            horizon_hours=float(getattr(ta, "pattern_foresight_horizon", 0) or 0),
+            bias=str(getattr(ta, "pattern_foresight_bias", "neutral") or "neutral"),
+            watch_only=bool(getattr(ta, "pattern_foresight_watch_only", False)) or is_wait,
+            status=str(getattr(ta, "pattern_foresight_status", "") or ""),
+            quiet_labels=False,
+        )
+
+    smc = getattr(ta, "smc", None)
+    if smc:
+        for ob in list(getattr(smc, "order_blocks", None) or [])[-2:]:
+            try:
+                top, bot = float(ob.top), float(ob.bottom)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if top <= bot:
+                continue
+            x0, x1 = _x_span(bars, tail=min(120, len(bars)))
+            col = "#3fb950" if getattr(ob, "direction", "") == "bullish" else "#f85149"
+            tag = "бычий ордер-блок" if col == "#3fb950" else "медвежий ордер-блок"
+            ax.add_patch(
+                Rectangle(
+                    (x0, bot), x1 - x0, top - bot,
+                    facecolor=col, edgecolor=col, alpha=0.14, linewidth=0.9, zorder=2,
+                )
+            )
+            ax.text(x0, top, f"  {tag}  ", color=col, fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=3)
+
+    side = preferred_trade_side(ta)
+    if side == "long" and ta.nearest_support:
+        p = float(ta.nearest_support)
+        ax.text(
+            _x_span(bars)[0], p, "  Поддержка  ",
+            color="#3fb950", fontsize=7, fontweight="bold", va="top", ha="left", zorder=8,
+            bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#3fb950", alpha=0.9),
+        )
+    elif side == "short" and ta.nearest_resistance:
+        p = float(ta.nearest_resistance)
+        ax.text(
+            _x_span(bars)[0], p, "  Сопротивление  ",
+            color="#f85149", fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=8,
+            bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#f85149", alpha=0.9),
+        )
+
+    reason, confirms = collect_reason_and_confirmations(ta)
+    conf_txt = " · ".join(f"✓ {c}" for c in confirms[:3]) if confirms else ""
+    body = f"Причина: {reason}" if reason else "Причина: структура и уровни на графике"
+    if conf_txt:
+        body = f"{body}\n{conf_txt}"
+    ax.text(
+        0.5, 0.98, body,
+        transform=ax.transAxes, va="top", ha="center", color=CHART_TEXT, fontsize=7.2, zorder=11,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
+    )
+    draw_story_frame(ax, bars, ta)
+    try:
+        from .chart_range_breakdown_draw import draw_range_breakdown_retest_path
+
+        draw_range_breakdown_retest_path(ax, bars, ta)
+    except Exception:
+        pass
+    draw_position_risk_boxes(ax, bars, ta)
 
 
 def _draw_consolidation(ax, bars, ta, x0: float, x1: float) -> None:
@@ -155,7 +226,7 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             continue
         col = "#58a6ff" if ref.kind == "daily_high" else "#3fb950"
         ax.hlines(ref.price, x0, x1, colors=col, linewidth=1.35, alpha=0.85, zorder=2)
-        lbl = "День MAX" if ref.kind == "daily_high" else "День MIN"
+        lbl = "день макс." if ref.kind == "daily_high" else "день мин."
         _hline_label(ax, x1, ref.price, f"{lbl} {fmt_price(ref.price)}", color=col, fontweight="bold")
         _mark(ref.price)
 
@@ -164,13 +235,13 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     loc_lo = min(b.low for b in seg)
     if not _near(loc_hi):
         _hline_label(
-            ax, x1, loc_hi, f"Лок.MAX {fmt_price(loc_hi)}",
+            ax, x1, loc_hi, f"лок. макс. {fmt_price(loc_hi)}",
             color="#79c0ff", lw=1.0, ls=":", fontweight="bold",
         )
         _mark(loc_hi)
     if not _near(loc_lo):
         _hline_label(
-            ax, x1, loc_lo, f"Лок.MIN {fmt_price(loc_lo)}",
+            ax, x1, loc_lo, f"лок. мин. {fmt_price(loc_lo)}",
             color="#56d364", lw=1.0, ls=":", fontweight="bold",
         )
         _mark(loc_lo)
@@ -197,7 +268,7 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     _draw_consolidation(ax, bars, ta, x0, x1)
 
     # 3) Зона (valid или кандидат)
-    zone = _pick_zone(ta, current)
+    zone = pick_chart_zone(ta, current)
     if zone:
         top, bot = float(zone["top"]), float(zone["bottom"])
         kind = str(zone.get("kind", "demand"))
@@ -211,9 +282,10 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
                 linewidth=1.0, zorder=1,
             )
         )
-        tag = "зона" if valid else "кандидат"
+        tf = str(zone.get("tf", "младший ТФ"))
+        tag = "зона" if valid else "кандидат зоны"
         ax.text(
-            x0, top, f"  {tag} {zone.get('tf', 'LTF')}  ",
+            x0, top, f"  {tag} · {tf}  ",
             color=col, fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=3,
             bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor=col, alpha=0.85),
         )
@@ -223,7 +295,7 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         p = float(ta.breakout_level)
         if not _near(p):
             _hline_label(
-                ax, x1, p, f"Пробой LONG ≥ {fmt_price(p)}",
+                ax, x1, p, f"пробой лонг ≥ {fmt_price(p)}",
                 color="#3fb950", lw=1.6, fontweight="bold",
             )
             _mark(p)
@@ -231,7 +303,7 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         p = float(ta.breakdown_level)
         if not _near(p):
             _hline_label(
-                ax, x1, p, f"Пробой SHORT ≤ {fmt_price(p)}",
+                ax, x1, p, f"пробой шорт ≤ {fmt_price(p)}",
                 color="#f85149", lw=1.6, fontweight="bold",
             )
             _mark(p)
@@ -240,7 +312,8 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     if smc and getattr(smc, "structure_break_level", None):
         p = float(smc.structure_break_level)
         if p > 0 and abs(p - current) / current <= 0.12 and not _near(p):
-            _hline_label(ax, x1, p, f"BOS {fmt_price(p)}", color="#d29922", lw=1.2, ls="-.")
+            bk = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"))
+            _hline_label(ax, x1, p, f"{bk} {fmt_price(p)}", color="#d29922", lw=1.2, ls="-.")
             _mark(p)
 
     # 5) План входа / SL / TP (setup + ta fields)
@@ -260,24 +333,17 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             )
         )
         _hline_label(
-            ax, x1, entry_hi, f"ВХОД {fmt_price(entry_lo)}–{fmt_price(entry_hi)}",
+            ax, x1, entry_hi, f"вход {fmt_price(entry_lo)}–{fmt_price(entry_hi)}",
             color=col, lw=0, draw_line=False,
         )
 
-    inv = getattr(ta, "invalidation_price", None) or getattr(ta, "setup_stop", None)
-    if inv and float(inv) > 0:
-        _hline_label(
-            ax, x1, float(inv), f"SL {fmt_price(float(inv))}",
-            color="#ff7b72", lw=1.8, ls="--", fontweight="bold",
-        )
-
-    tps = list(getattr(ta, "target_prices", None) or []) or list(getattr(ta, "setup_tps", None) or [])
-    for i, tp in enumerate(tps[:3]):
+    tps = chart_plan_targets(ta, entry_lo=entry_lo, entry_hi=entry_hi)
+    for i, tp in enumerate(tps[1:3], start=2):
         if not tp:
             continue
         _hline_label(
-            ax, x1, float(tp), f"TP{i + 1} {fmt_price(float(tp))}",
-            color="#d29922", lw=1.3, ls=":", fontweight="bold" if i == 0 else "normal",
+            ax, x1, float(tp), f"цель {i} {fmt_price(float(tp))}",
+            color="#d29922", lw=1.0, ls=":", fontweight="normal",
         )
 
     # 6) Тренд
@@ -302,19 +368,18 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         if marker is not None and 0 <= marker.index < len(bars):
             when = _idx_to_date(bars, marker.index)
             ax.annotate(
-                "сняли ликвидность",
+                "манипуляция",
                 xy=(when, marker.price),
-                xytext=(when, marker.price * (1.006 if getattr(marker, "direction", "") == "long" else 0.994)),
+                xytext=(when, marker.price * (1.008 if getattr(marker, "direction", "") == "long" else 0.992)),
                 color="#3fb950" if getattr(marker, "direction", "") == "long" else "#f85149",
-                fontsize=7, fontweight="bold",
-                arrowprops=dict(arrowstyle="->", lw=0.9), zorder=8,
+                fontsize=8, fontweight="bold",
+                arrowprops=dict(arrowstyle="->", lw=1.0), zorder=8,
             )
 
-    trigger = str(getattr(ta, "setup_trigger", "") or "")[:100]
     stack = str(getattr(ta, "reading_tf_stack", "") or "")[:100]
-    ax.text(
-        0.015, 0.02,
-        " · ".join(x for x in (stack, trigger, "ручной разбор — уровни на графике") if x),
-        transform=ax.transAxes, va="bottom", ha="left", color=CHART_TEXT, fontsize=6.8, zorder=10,
-        bbox=dict(boxstyle="round,pad=0.25", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.95),
-    )
+    if stack:
+        ax.text(
+            0.015, 0.02, stack,
+            transform=ax.transAxes, va="bottom", ha="left", color=CHART_TEXT, fontsize=6.5, zorder=10,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="#161b22cc", edgecolor="#484f58", alpha=0.9),
+        )

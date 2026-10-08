@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 
 from .ai_alert_validate import build_alert_validate_context
-from .ai_analyst import AiAskResult, ask_gemini, gemini_in_cooldown, sanitize_ai_reply_for_telegram
+from .ai_analyst import AiAskResult, ask_gemini, sanitize_ai_reply_for_telegram
+from .ai_providers import text_ai_available
 from .situational_brief import ai_situation_hint, classify_situation
 from .ta_analysis import TAAnalysisResult
 
@@ -37,7 +38,7 @@ async def run_situational_ai_reading(
     signal_side: str = "",
     signal_type: str = "",
 ) -> str:
-    if gemini_in_cooldown() and not api_key:
+    if not text_ai_available(api_key):
         return ""
     ctx = build_alert_validate_context(
         ta,

@@ -143,6 +143,80 @@ def pattern_target_ok(
     return target_matches_side(side, current, float(target), min_pct=0.001)
 
 
+def entry_reference_price(
+    entry_zone: tuple[float, float] | None,
+    current: float,
+    side: str,
+) -> float:
+    """Цена для проверки R:R: верх зоны для long, низ для short."""
+    if entry_zone and len(entry_zone) == 2:
+        lo, hi = float(entry_zone[0]), float(entry_zone[1])
+        if hi > lo > 0:
+            if side == "long":
+                return hi
+            if side == "short":
+                return lo
+            return (lo + hi) / 2.0
+    return current
+
+
+def ensure_minimum_targets(
+    side: str,
+    current: float,
+    targets: Sequence[float],
+    *,
+    entry_zone: tuple[float, float] | None = None,
+    trigger: float | None = None,
+    min_reward_pct: float = 0.008,
+    min_pct: float = 0.001,
+) -> list[float]:
+    """
+    TP1 не внутри зоны входа и не «0.2%» от референса — минимум ~0.8% движения.
+    """
+    cleaned = sanitize_targets(side, current, targets, trigger=trigger, min_pct=min_pct)
+    if side not in {"long", "short"}:
+        return cleaned
+    ref = entry_reference_price(entry_zone, current, side)
+    if ref <= 0:
+        ref = current
+
+    def _ok(tp: float) -> bool:
+        if not target_matches_side(side, current, tp, min_pct=min_pct):
+            return False
+        move = abs(tp - ref) / ref
+        if move < min_reward_pct:
+            return False
+        if entry_zone and len(entry_zone) == 2:
+            lo, hi = float(entry_zone[0]), float(entry_zone[1])
+            if lo < hi:
+                if side == "long" and tp <= hi * (1.0 + min_pct):
+                    return False
+                if side == "short" and tp >= lo * (1.0 - min_pct):
+                    return False
+        return True
+
+    out = [tp for tp in cleaned if _ok(tp)]
+    if out:
+        return out
+
+    if side == "long":
+        synthetic = ref * (1.0 + min_reward_pct)
+        if trigger and trigger > 0:
+            synthetic = max(synthetic, trigger * (1.0 + min_reward_pct))
+        synthetic = max(synthetic, current * (1.0 + min_reward_pct))
+    else:
+        synthetic = ref * (1.0 - min_reward_pct)
+        if trigger and trigger > 0:
+            synthetic = min(synthetic, trigger * (1.0 - min_reward_pct))
+        synthetic = min(synthetic, current * (1.0 - min_reward_pct))
+
+    merged = sanitize_targets(side, current, [synthetic], trigger=trigger, min_pct=min_pct)
+    final = [tp for tp in merged if _ok(tp)]
+    if final:
+        return final
+    return merged if merged else [synthetic]
+
+
 def resolve_wait_plan_levels(ta: Any) -> tuple[float | None, float | None, float | None]:
     """Для WAIT: (stop/отмена, TP1, trigger) в сторону action_priority."""
     current = float(getattr(ta, "current_price", 0) or 0)

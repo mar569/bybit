@@ -5,6 +5,7 @@ from bot.chart_pattern_models import ChartPattern, PatternLine, PatternPoint
 from bot.pattern_foresight import build_pattern_foresight, foresight_enriches_scenario
 from bot.pro_invariants import (
     bias_side,
+    ensure_minimum_targets,
     pattern_target_ok,
     pick_directional_tp,
     resolve_wait_plan_levels,
@@ -12,6 +13,22 @@ from bot.pro_invariants import (
     sanitize_targets,
     target_matches_side,
 )
+
+
+def test_ensure_minimum_targets_not_inside_entry_zone() -> None:
+    """MINA-подобный кейс: TP1 не внутри зоны входа и не 0.2%."""
+    entry = (0.09077, 0.09101)
+    current = 0.0909
+    bad = [0.09080, 0.0880]
+    out = ensure_minimum_targets(
+        "short",
+        current,
+        bad,
+        entry_zone=entry,
+        min_reward_pct=0.008,
+    )
+    assert out
+    assert out[0] < entry[0] * (1.0 - 0.008)
 
 
 def test_sanitize_targets_short_drops_above() -> None:
