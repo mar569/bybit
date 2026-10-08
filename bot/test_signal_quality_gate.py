@@ -69,15 +69,27 @@ def test_classify_squeeze_risk() -> None:
     assert "squeeze" in label.lower()
 
 
-def test_cvd_blocks_short() -> None:
+def test_cvd_blocks_short_watch_by_default() -> None:
     signal = _short_dump_signal()
     result = assess_signal_quality(
         signal,
         settings=_settings(),
         readiness=(False, "ждать пробой"),
     )
-    assert result.tier == "skip"
+    assert result.tier == "watch"
     assert "CVD" in result.block_reason or "sweep" in result.block_reason.lower()
+
+
+def test_cvd_blocks_short_skip_when_watch_off() -> None:
+    signal = _short_dump_signal()
+    settings = _settings()
+    settings.signal_watch_mode_enabled = False
+    result = assess_signal_quality(
+        signal,
+        settings=settings,
+        readiness=(False, "ждать пробой"),
+    )
+    assert result.tier == "skip"
 
 
 def test_capitulation_blocks_fade_short() -> None:
@@ -86,7 +98,9 @@ def test_capitulation_blocks_fade_short() -> None:
     signal.details["smc"] = {}
     signal.oi_change_percent = -2.0
     signal.price_change_percent = -2.5
-    result = assess_signal_quality(signal, settings=_settings())
+    settings = _settings()
+    settings.signal_watch_mode_enabled = False
+    result = assess_signal_quality(signal, settings=settings)
     assert result.tier == "skip"
 
 
@@ -98,8 +112,9 @@ def test_htf_blocks_short_against_bullish() -> None:
     signal.details["smc"] = {"htf_structure": "bullish", "liquidity_sweep": False}
     signal.details["market_structure"] = {}
     result = assess_signal_quality(signal, settings=_settings())
-    assert result.tier == "skip"
-    assert "HTF" in result.block_reason or any("HTF" in w for w in result.warnings)
+    assert result.tier == "watch"
+    joined = result.block_reason + " " + " ".join(result.warnings)
+    assert "HTF" in joined
 
 
 def test_outcome_feedback_blocks_weak_type() -> None:
@@ -114,7 +129,7 @@ def test_outcome_feedback_blocks_weak_type() -> None:
         settings=_settings(),
         outcome_stats=(20, 28.0),
     )
-    assert result.tier == "skip"
+    assert result.tier == "watch"
     joined = result.block_reason + " " + " ".join(result.warnings)
     assert "winrate" in joined or "edge" in joined
 
@@ -222,5 +237,5 @@ def test_reversal_pump_weak_cvd_skipped() -> None:
         details={"cvd_ratio": 0.55},
     )
     result = assess_signal_quality(signal, settings=_settings())
-    assert result.tier == "skip"
+    assert result.tier == "watch"
     assert "CVD" in (result.block_reason or "")

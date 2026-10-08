@@ -354,8 +354,10 @@ def assess_signal_quality(
             hard_blocks.append(om)
 
     if hard_blocks:
+        watch_ok = bool(getattr(settings, "signal_watch_mode_enabled", False))
+        tier = "watch" if watch_ok else "skip"
         return SignalQualityResult(
-            tier="skip",
+            tier=tier,
             block_reason=hard_blocks[0],
             warnings=tuple(dict.fromkeys(hard_blocks[1:] + warnings)),
             flow_label=flow_label,

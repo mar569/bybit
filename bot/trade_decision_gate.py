@@ -438,6 +438,33 @@ def _cvd_confirms_side(side: str, cvd_ratio: float | None, *, long_min: float = 
     return False
 
 
+def _skip_or_watch(
+    reason: str,
+    *,
+    watch_allowed: bool,
+    quality_tier: str | None,
+    location: str = "none",
+    chase: bool = False,
+    setup_score: int = 0,
+) -> TradeDecision:
+    qt = (quality_tier or "").lower()
+    if watch_allowed and qt == "watch":
+        return TradeDecision(
+            "watch",
+            reason,
+            location=location,
+            chase=chase,
+            setup_score=max(setup_score, DEFAULT_MIN_WATCH_SCORE),
+        )
+    return TradeDecision(
+        "skip",
+        reason,
+        location=location,
+        chase=chase,
+        setup_score=setup_score,
+    )
+
+
 def decide_trade_action(
     signal: Signal,
     ta: TAAnalysisResult,
@@ -455,8 +482,9 @@ def decide_trade_action(
     side = (signal.side or "").lower()
     ready = bool(readiness and readiness[0])
     ready_reason = (readiness[1] if readiness else "") or ""
+    qt = (quality_tier or "").lower()
 
-    if quality_tier == "skip":
+    if qt == "skip":
         return TradeDecision("skip", "quality skip", setup_score=0)
 
     from .signal_pipeline import apply_reading_to_trade_decision
@@ -471,7 +499,9 @@ def decide_trade_action(
     if reading_override is not None:
         act, why = reading_override
         if act == "skip":
-            return TradeDecision("skip", why, setup_score=0)
+            return _skip_or_watch(
+                why, watch_allowed=watch_allowed, quality_tier=quality_tier,
+            )
         return TradeDecision(
             "watch",
             why,
@@ -491,10 +521,14 @@ def decide_trade_action(
                 location=detect_location(ta, side),
                 setup_score=min_watch_score,
             )
-        return TradeDecision("skip", fib_block[:120], setup_score=0)
+        return _skip_or_watch(
+            fib_block[:120], watch_allowed=watch_allowed, quality_tier=quality_tier,
+        )
 
     if "вход невыгоден" in (getattr(ta, "verdict_reason", "") or "").lower():
-        return TradeDecision("skip", "плохой R:R", setup_score=0)
+        return _skip_or_watch(
+            "плохой R:R", watch_allowed=watch_allowed, quality_tier=quality_tier,
+        )
 
     setup = score_trade_setup(signal, ta, side=side, readiness=readiness)
     chase, chase_reason = _is_late_chase(
@@ -588,7 +622,13 @@ def decide_trade_action(
         )
 
     if not aligned and setup.total < min_watch_score:
-        return TradeDecision("skip", align_reason or "конфликт TA", setup_score=setup.total)
+        return _skip_or_watch(
+            align_reason or "конфликт TA",
+            watch_allowed=watch_allowed,
+            quality_tier=quality_tier,
+            location=location,
+            setup_score=setup.total,
+        )
 
     # Reversal: ENTRY только при CVD confirm + локация; иначе WATCH/skip
     if st in _REVERSAL_TYPES:
@@ -676,9 +716,10 @@ def decide_trade_action(
             setup_score=setup.total,
         )
 
-    return TradeDecision(
-        "skip",
+    return _skip_or_watch(
         align_reason or f"слабый сетап {setup.total}/100",
+        watch_allowed=watch_allowed,
+        quality_tier=quality_tier,
         location=location,
         chase=chase,
         setup_score=setup.total,
@@ -691,9 +732,9 @@ def apply_decision_to_quality_tier(
 ) -> str:
     q = (quality_tier or "watch").lower()
     if decision.action == "skip":
-        return "skip"
+        return "watch" if q == "watch" else "skip"
     if decision.action == "watch":
-        return "watch" if q != "skip" else "skip"
+        return "watch"
     if q == "skip":
         return "skip"
     return "entry"

@@ -1852,10 +1852,14 @@ class TelegramBot:
                             cvd_ratio=quality.cvd_ratio,
                             cvd_detail=quality.cvd_detail,
                         )
-                    if trade_decision.action == "skip":
+                    if trade_decision.action == "skip" and quality.tier != "watch":
+                        extra = f" · {quality.block_reason}" if quality.block_reason else ""
                         logger.info(
-                            "Telegram skip %s %s: trade gate — %s",
-                            signal.exchange, signal.symbol, trade_decision.reason,
+                            "Telegram skip %s %s: trade gate — %s%s",
+                            signal.exchange,
+                            signal.symbol,
+                            trade_decision.reason,
+                            extra,
                         )
                         return
 
