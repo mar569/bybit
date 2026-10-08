@@ -140,10 +140,11 @@ def draw_label_board(
     board: LabelBoard,
     *,
     current: float,
+    max_labels: int = 4,
 ) -> None:
     if not bars or not board.items:
         return
-    labels = board.compact(current=current, max_labels=4)
+    labels = board.compact(current=current, max_labels=max(4, max_labels))
     if not labels:
         return
     x0, x1 = ax.get_xlim()

@@ -85,9 +85,16 @@ def build_minimal_ed_voice_plain(
     *,
     symbol: str = "",
 ) -> str:
+    from .plan_staleness import plan_staleness_plain
+
     sym = _symbol_short(symbol or getattr(ta, "symbol", "") or "") or "Монета"
+    stale = plan_staleness_plain(ta)
     sit = _situation_phrase(ta).rstrip(".")
     exp = _expect_phrase(ta).rstrip(".")
+    if stale:
+        exp = stale
+    elif exp and "опоздал" not in exp.lower():
+        pass
     if sit and exp:
         return f"{sym} — {sit}. {exp.capitalize()}."
     if sit:
@@ -100,8 +107,16 @@ def build_minimal_ed_voice_html(
     *,
     symbol: str = "",
 ) -> str:
+    from .plan_staleness import plan_staleness_line_html
+
+    stale = plan_staleness_line_html(ta)
     plain = build_minimal_ed_voice_plain(ta, symbol=symbol)
+    body = ""
     if " — " in plain:
         sym, rest = plain.split(" — ", 1)
-        return f"<b>{escape(sym)}</b> — {escape(rest)}"
-    return escape(plain)
+        body = f"<b>{escape(sym)}</b> — {escape(rest)}"
+    else:
+        body = escape(plain)
+    if stale:
+        return f"{stale}\n\n{body}"
+    return body

@@ -38,57 +38,13 @@ def build_trader_deep_analysis_html(
     link = (signal.link or "").strip()
     link_html = f'\n<a href="{escape(link)}">CoinGlass</a>' if link else ""
 
-    rbr = get_rbr_from_ta(ta)
-    if rbr:
-        label = escape(str(rbr.get("label_ru", "") or "сценарий"))
-        phase = str(rbr.get("phase") or "")
-        floor = fmt_price(float(rbr.get("range_bottom") or 0))
-        ceil = fmt_price(float(rbr.get("range_top") or 0))
-        stop = fmt_price(float(rbr["stop"])) if rbr.get("stop") else "—"
-        el, eh = rbr.get("entry_lo"), rbr.get("entry_hi")
-        entry = (
-            f"{fmt_price(float(el))}–{fmt_price(float(eh))}"
-            if el and eh
-            else "—"
-        )
-        tgs = " → ".join(
-            fmt_price(float(t)) for t in (rbr.get("targets") or [])[:2] if t
-        )
-        conf = int(getattr(ta, "verdict_confidence", 0) or 0)
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_html
 
-        lines = [
-            f"📐 <b>{escape(sym)}</b> · {ex} · {escape(tf_line)}",
-            f"<b>{label}</b>",
-        ]
-        if phase in {"fade_top", "await_break"}:
-            lines.append(
-                f"Зона <b>{floor}–{ceil}</b> · смотрим <b>реакцию у {ceil}</b> — "
-                f"шорт только после отказа, <b>не в зелёный импульс</b>."
-            )
-            lines.append(f"Черновик: вход {entry} · стоп {stop}" + (f" · цели {tgs}" if tgs else ""))
-        elif phase == "retest":
-            lines.append(
-                f"Под полом <b>{floor}</b> · retest · вход {entry} · стоп {stop}"
-                + (f" · цели {tgs}" if tgs else "")
-            )
-        else:
-            lines.append(f"Вход {entry} · стоп {stop}" + (f" · цели {tgs}" if tgs else ""))
-
-        if float(getattr(ta, "drawdown_from_high_pct", 0) or 0) >= 6.0 or bool(
-            getattr(ta, "post_pump", False)
-        ):
-            lines.append("<i>На истории был сильный импульс/слив — без догонялок.</i>")
-
-        mtf = _compact_mtf_hint(ta)
-        if mtf:
-            lines.append(f"🧭 {escape(mtf)}")
-
-        lines.append(f"⏸ Не market сейчас ({conf}/10) — ориентир на график.")
-        if phase in {"fade_top", "await_break"}:
-            lines.append(
-                "<i>👁 Если цена дойдёт до зоны — отдельное сообщение «в нашей зоне».</i>"
-            )
-        return "\n".join(lines) + link_html
+    if ed_minimal_voice_enabled():
+        head = f"📐 <b>{escape(sym)}</b> · {ex} · {escape(tf_line)}"
+        body = build_minimal_ed_voice_html(ta, symbol=sym)
+        return f"{head}\n\n{body}{link_html}"
 
     from .living_analysis import build_living_analysis_html
 
@@ -109,6 +65,10 @@ def build_trader_deep_analysis_html(
 
 def should_push_trader_deep_analysis_for_settings(ta: object, *, enabled: bool) -> bool:
     if not enabled or not should_push_trader_deep_analysis(ta):
+        return False
+    from .plan_staleness import plan_staleness_plain
+
+    if plan_staleness_plain(ta):  # type: ignore[arg-type]
         return False
     if get_rbr_from_ta(ta):
         from .trade_plan_quality import validate_trade_plan

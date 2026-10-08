@@ -99,9 +99,13 @@ def draw_pro_layers(
 
         if not ed_chart_visual_only():
             add_minimal_context_labels(board, bars, ta, mode="ed_story")
+    from .chart_display_policy import chart_teaching_tags_enabled, ed_chart_visual_only
     from .chart_ed_minimal import draw_pro_teaching_layers
+    from .chart_teaching_tags import enrich_teaching_label_board
 
     draw_pro_teaching_layers(ax, bars, ta, mode=mode)
+    if chart_teaching_tags_enabled() or not ed_chart_visual_only():
+        enrich_teaching_label_board(board, bars, ta, mode=mode)
     return board
 
 

@@ -2636,10 +2636,13 @@ def _render_chart_figure(
             )
             finalize_pro_viewport(ax, bars, ta, pro_mode_chart)  # type: ignore[arg-type]
             if label_board is not None:
+                from .chart_display_policy import chart_teaching_tags_enabled, ed_chart_visual_only
                 from .chart_label_layout import draw_label_board
 
-                cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
-                draw_label_board(ax, bars, label_board, current=cur)
+                if not ed_chart_visual_only() or chart_teaching_tags_enabled():
+                    cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+                    max_l = 6 if chart_teaching_tags_enabled() else 4
+                    draw_label_board(ax, bars, label_board, current=cur, max_labels=max_l)
         except Exception:
             logger.exception("Pro chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:

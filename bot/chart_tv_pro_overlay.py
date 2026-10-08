@@ -8,7 +8,12 @@ from matplotlib.patches import Ellipse, Polygon, Rectangle
 
 from .bybit_klines import KlineBar
 from .chart_breakout_markers import collect_breakout_retest_events
-from .chart_display_policy import chart_breakout_marker_labels_enabled, ed_chart_visual_only
+from .chart_display_policy import (
+    chart_anno_text_enabled,
+    chart_breakout_marker_labels_enabled,
+    chart_teaching_tags_enabled,
+    ed_chart_visual_only,
+)
 from .chart_tv_coords import bar_x_norm, price_to_tv_y
 from .range_breakdown_retest import get_rbr_from_ta
 from .ta_analysis import TAAnalysisResult
@@ -73,6 +78,37 @@ class TvCoordMapper:
                 zorder=2,
             )
         )
+
+
+def draw_primary_pattern_tv_layer(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
+    from .pattern_specs import MIN_DRAW_CONFIDENCE
+
+    primary = getattr(ta, "primary_chart_pattern", None)
+    if not primary or not getattr(ta, "reading_accept_pattern", True):
+        return
+    style = getattr(primary, "kind", "") or "double_top"
+    from .chart_pattern_draw import PATTERN_STYLE
+
+    color = str(PATTERN_STYLE.get(style, {}).get("color", "#58a6ff"))
+    _draw_primary_pattern_tv(ax, mapper, primary, color=color)
+    if chart_teaching_tags_enabled():
+        from .chart_teaching_tags import primary_pattern_tag
+
+        tag = primary_pattern_tag(ta)
+        if tag:
+            ax.text(
+                0.5,
+                0.965,
+                tag,
+                transform=ax.transAxes,
+                ha="center",
+                va="top",
+                color=color,
+                fontsize=7.2,
+                fontweight="bold",
+                zorder=12,
+                bbox=dict(boxstyle="round,pad=0.28", facecolor="#161b22ee", edgecolor=color, alpha=0.94),
+            )
 
 
 def _draw_primary_pattern_tv(ax: plt.Axes, mapper: TvCoordMapper, pattern, *, color: str) -> None:
@@ -160,18 +196,19 @@ def _draw_breakout_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult)
             zorder=8,
         )
         if show_labels:
+            lbl = ev.label[:24]
+            if chart_teaching_tags_enabled() and ed_chart_visual_only():
+                lbl = {"breakout": "ПРОБОЙ", "retest": "RETEST", "false_break": "ЛОЖН."}.get(ev.kind, lbl[:8])
             ax.text(
                 mapper.x(ev.bar_idx),
                 mapper.y(ev.price),
-                ev.label[:24],
+                lbl,
                 color=color,
                 fontsize=6,
                 ha="center",
                 va="bottom",
                 zorder=9,
             )
-
-
 def _draw_context_zone_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
     cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
     metrics = getattr(ta, "market_metrics", None) or {}
@@ -205,6 +242,8 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
 
     if floor > 0:
         mapper.hline(ax, floor, color="#8b949e", lw=1.0, alpha=0.65, ls="--")
+        if chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(floor), " ПОЛ", color="#8b949e", fontsize=6.5, va="top", zorder=8)
 
     if phase in {"fade_top", "await_break"} and resistance > 0:
         el = float(rbr.get("entry_lo") or resistance * 0.985)
@@ -214,6 +253,8 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
         mapper.rect(ax, i0, len(mapper.bars) - 1, z_lo, z_hi, color="#f0c040", alpha=0.11)
         mapper.hline(ax, z_hi, color="#f0c040", lw=1.5, alpha=0.9)
         mapper.hline(ax, z_lo, color="#f0c040", lw=1.5, alpha=0.9)
+        if chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(z_hi), " ВХОД", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
     elif phase == "retest" and floor > 0:
         el = float(rbr.get("entry_lo") or floor * 0.996)
         eh = float(rbr.get("entry_hi") or floor * 1.01)
@@ -246,11 +287,48 @@ def _draw_forward_boxes_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisRe
         ax.add_patch(Rectangle((x_box, min(y_ent_hi, y_stop)), width, abs(y_stop - y_ent_hi), facecolor="#f85149", alpha=0.32, zorder=9))
         ax.add_patch(Rectangle((x_box, min(y_ent_lo, y_ent_hi)), width, abs(y_ent_hi - y_ent_lo), facecolor="#e3b341", alpha=0.22, zorder=9))
         ax.add_patch(Rectangle((x_box, min(y_tp, y_ent_lo)), width, abs(y_ent_lo - y_tp), facecolor="#3fb950", alpha=0.30, zorder=9))
+        _tv_plan_glyphs(ax, x_box, width, y_tp, y_ent_lo, y_ent_hi, y_stop, side="short")
     elif side == "long" and stop < entry_lo and tp > entry_hi:
         y_stop, y_ent_lo, y_ent_hi, y_tp = mapper.y(stop), mapper.y(entry_lo), mapper.y(entry_hi), mapper.y(tp)
         ax.add_patch(Rectangle((x_box, min(y_stop, y_ent_lo)), width, abs(y_ent_lo - y_stop), facecolor="#f85149", alpha=0.32, zorder=9))
         ax.add_patch(Rectangle((x_box, min(y_ent_lo, y_ent_hi)), width, abs(y_ent_hi - y_ent_lo), facecolor="#e3b341", alpha=0.22, zorder=9))
         ax.add_patch(Rectangle((x_box, min(y_ent_hi, y_tp)), width, abs(y_tp - y_ent_hi), facecolor="#3fb950", alpha=0.30, zorder=9))
+        _tv_plan_glyphs(ax, x_box, width, y_tp, y_ent_lo, y_ent_hi, y_stop, side="long")
+
+
+def _tv_plan_glyphs(
+    ax: plt.Axes,
+    x_box: float,
+    width: float,
+    y_tp: float,
+    y_ent_lo: float,
+    y_ent_hi: float,
+    y_stop: float,
+    *,
+    side: str,
+) -> None:
+    from .chart_display_policy import chart_plan_glyphs_enabled
+
+    if not chart_plan_glyphs_enabled():
+        return
+    cx = x_box + width * 0.52
+    for y, glyph, color in (
+        ((y_ent_lo + y_tp) / 2, "TP", "#3fb950"),
+        ((y_ent_lo + y_ent_hi) / 2, "IN", "#e6edf3"),
+        ((y_ent_hi + y_stop) / 2 if side == "short" else (y_stop + y_ent_lo) / 2, "SL", "#f85149"),
+    ):
+        ax.text(
+            cx,
+            y,
+            glyph,
+            color=color,
+            fontsize=8.5,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            zorder=10,
+            bbox=dict(boxstyle="circle,pad=0.25", facecolor="#0d1117cc", edgecolor=color, linewidth=0.7),
+        )
 
 
 def _draw_probable_path_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
@@ -269,6 +347,44 @@ def _draw_probable_path_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisRe
         arrowprops=dict(arrowstyle="-|>", color="#58a6ff", lw=1.2, linestyle=(0, (4, 3)), alpha=0.82),
         zorder=5,
     )
+
+
+def _draw_tv_story_banner(ax: plt.Axes, ta: TAAnalysisResult, *, mode: str) -> None:
+    if not chart_anno_text_enabled():
+        return
+    from .chart_teaching_tags import story_banner_line
+
+    line = story_banner_line(ta, mode=mode)
+    if not line:
+        return
+    ax.text(
+        0.5,
+        0.03,
+        line,
+        transform=ax.transAxes,
+        va="bottom",
+        ha="center",
+        color="#e6edf3",
+        fontsize=7.0,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.32", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
+    )
+
+
+def _draw_range_wait_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    if brk <= 0 or brdn <= 0 or brk <= brdn:
+        return
+    i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 56))
+    mapper.rect(ax, i0, len(mapper.bars) - 1, brdn, brk, color="#8b949e", alpha=0.12)
+    mapper.hline(ax, brk, color="#f0c040", lw=1.35, alpha=0.85)
+    mapper.hline(ax, brdn, color="#3fb950", lw=1.35, alpha=0.85)
+    if chart_teaching_tags_enabled():
+        ax.text(mapper.x_start + 0.008, mapper.y(brk), " СОПР", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+        ax.text(mapper.x_start + 0.008, mapper.y(brdn), " ПОДД", color="#3fb950", fontsize=6.5, va="top", zorder=8)
+    _draw_forward_boxes_tv(ax, mapper, ta, get_rbr_from_ta(ta))
+    _draw_probable_path_tv(ax, mapper, ta)
 
 
 def compose_tradingview_pro_png(
@@ -294,10 +410,8 @@ def compose_tradingview_pro_png(
         return None
 
     img = mpimg.imread(io.BytesIO(prepared))
-    img_h, img_w = img.shape[:2]
-    if img_w < 100:
-        img_w, img_h = TV_EXPORT_WIDTH, TV_EXPORT_HEIGHT
-    fig, ax = plt.subplots(figsize=(img_w / dpi, img_h / dpi), dpi=dpi)
+    fig_w, fig_h = TV_EXPORT_WIDTH / dpi, TV_EXPORT_HEIGHT / dpi
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
     fig.subplots_adjust(0, 0, 1, 1)
     fig.patch.set_facecolor("#0d1117")
     ax.set_position([0, 0, 1, 1])
@@ -308,7 +422,11 @@ def compose_tradingview_pro_png(
     ax.axis("off")
     ax.set_anchor("C")
     y_min, y_max = tv_visible_price_range(bars, ta)
-    draw_tv_pro_layers(ax, bars, ta, y_min=y_min, y_max=y_max, interval_minutes=interval_minutes)
+    drew = draw_tv_pro_layers(ax, bars, ta, y_min=y_min, y_max=y_max, interval_minutes=interval_minutes)
+    if drew < 2:
+        plt.close(fig)
+        logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
+        return None
     buffer = io.BytesIO()
     fig.savefig(
         buffer,
@@ -331,9 +449,11 @@ def draw_tv_pro_layers(
     y_min: float,
     y_max: float,
     interval_minutes: int = 15,
-) -> None:
+) -> int:
+    """Число ключевых слоёв (для проверки «пустого» TV PNG)."""
     if not bars:
-        return
+        return 0
+    layers = 0
     try:
         from .chart_story_router import enrich_ta_for_chart_story
 
@@ -349,18 +469,37 @@ def draw_tv_pro_layers(
 
     if mode == "ed_story":
         _draw_rbr_story_tv(ax, mapper, ta)
-    elif mode in {"range_wait", "observation"}:
+        layers += 2
+    elif mode == "range_wait":
+        _draw_range_wait_tv(ax, mapper, ta)
+        layers += 2
+    elif mode == "observation":
         brk = float(getattr(ta, "breakout_level", 0) or 0)
         brdn = float(getattr(ta, "breakdown_level", 0) or 0)
         if brk > 0:
             mapper.hline(ax, brk, color="#f0c040", lw=1.2, alpha=0.75)
+            layers += 1
         if brdn > 0:
             mapper.hline(ax, brdn, color="#3fb950", lw=1.2, alpha=0.75)
+            layers += 1
         _draw_forward_boxes_tv(ax, mapper, ta, get_rbr_from_ta(ta))
         _draw_probable_path_tv(ax, mapper, ta)
+        layers += 1
+
+    draw_primary_pattern_tv_layer(ax, mapper, ta)
+    if getattr(ta, "primary_chart_pattern", None):
+        layers += 1
+    _draw_sweep_tv(ax, mapper, ta)
+    if getattr(getattr(ta, "smc", None), "markers", None):
+        layers += 1
 
     from .chart_education_visual import draw_education_visuals_tv
 
     draw_education_visuals_tv(mapper, ax, ta)
+    layers += 1
     _draw_context_zone_tv(ax, mapper, ta)
     _draw_breakout_tv(ax, mapper, ta)
+    if collect_breakout_retest_events(mapper.bars, ta, max_events=1):
+        layers += 1
+    _draw_tv_story_banner(ax, ta, mode=mode)
+    return layers

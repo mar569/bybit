@@ -1,26 +1,16 @@
-"""Единый PRO-график: сигналы, manual TA, разбор — один matplotlib pipeline."""
+"""Единый PRO: одни слои разметки; подложка TV (качество) или matplotlib fallback."""
 from __future__ import annotations
 
 import os
 
-# Единственный пользовательский режим (TV/legacy — только явный override).
 UNIFIED_CHART_SOURCE = "annotated"
+TV_CHART_SOURCE = "tv_annotated"
 
 
 def normalize_chart_source(chart_source: str | None) -> str:
-    """Любой старый alias → annotated."""
     src = (chart_source or UNIFIED_CHART_SOURCE).strip().lower()
-    if src in {
-        "annotated",
-        "tv",
-        "tv_annotated",
-        "tradingview",
-        "annotated_pro",
-        "pro",
-        "matplotlib",
-        "mpl",
-    }:
-        return UNIFIED_CHART_SOURCE
+    if src in {"tv", "tv_annotated", "tradingview"}:
+        return TV_CHART_SOURCE
     return UNIFIED_CHART_SOURCE
 
 
@@ -28,21 +18,28 @@ def unified_pro_chart(*, signal_chart: bool = False, manual_ta_chart: bool = Fal
     return bool(signal_chart or manual_ta_chart)
 
 
-def tradingview_experimental_enabled() -> bool:
-    """TV-подложка выключена по умолчанию — один стабильный PRO."""
-    return os.environ.get("ED_CHART_TV", "0").strip().lower() in {"1", "true", "yes", "on"}
+def matplotlib_only_for_pro() -> bool:
+    return os.environ.get("ED_CHART_MPL", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def use_tradingview_experimental(
+def tradingview_base_enabled() -> bool:
+    """TV-свечи + те же PRO-слои (crop 1280×704)."""
+    return os.environ.get("ED_CHART_TV", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def prefer_tradingview_for_pro(
     chart_source: str | None,
     *,
     signal_chart: bool = False,
     manual_ta_chart: bool = False,
 ) -> bool:
-    if not tradingview_experimental_enabled():
+    if not unified_pro_chart(signal_chart=signal_chart, manual_ta_chart=manual_ta_chart):
         return False
-    src = (chart_source or "").strip().lower()
-    return src in {"tv", "tv_annotated", "tradingview"}
+    if matplotlib_only_for_pro():
+        return False
+    if not tradingview_base_enabled():
+        return False
+    return True
 
 
 def legacy_manual_chart_enabled() -> bool:
@@ -52,3 +49,21 @@ def legacy_manual_chart_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+# back-compat aliases
+def tradingview_experimental_enabled() -> bool:
+    return tradingview_base_enabled()
+
+
+def use_tradingview_experimental(
+    chart_source: str | None,
+    *,
+    signal_chart: bool = False,
+    manual_ta_chart: bool = False,
+) -> bool:
+    return prefer_tradingview_for_pro(
+        chart_source,
+        signal_chart=signal_chart,
+        manual_ta_chart=manual_ta_chart,
+    )

@@ -18,20 +18,36 @@ def ed_chart_visual_only() -> bool:
     return _env_on("ED_CHART_VISUAL_ONLY", default="1")
 
 
+def chart_teaching_tags_enabled() -> bool:
+    """Короткие метки на PNG: ПОЛ, TP/IN/SL, BOS, паттерн — без цифр."""
+    return _env_on("ED_CHART_TEACHING_TAGS", default="1")
+
+
 def chart_box_labels_enabled() -> bool:
     if ed_chart_visual_only():
         return False
     return _env_on("ED_CHART_BOX_LABELS", default="0")
 
 
+def chart_plan_glyphs_enabled() -> bool:
+    """TP / SL / IN на блоке плана — без цен."""
+    if not ed_chart_visual_only():
+        return chart_box_labels_enabled()
+    return _env_on("ED_CHART_PLAN_GLYPHS", default="1")
+
+
 def chart_anno_text_enabled() -> bool:
     """Коридор «пол/сопр», story caption, «ход ↓» на PNG."""
+    if chart_teaching_tags_enabled():
+        return True
     if ed_chart_visual_only():
         return False
     return _env_on("ED_CHART_ANNO_TEXT", default="0")
 
 
 def chart_breakout_marker_labels_enabled() -> bool:
+    if chart_teaching_tags_enabled():
+        return True
     if ed_chart_visual_only():
         return False
     return _env_on("ED_CHART_BREAKOUT_LABELS", default="0")

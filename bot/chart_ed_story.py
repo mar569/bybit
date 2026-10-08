@@ -432,10 +432,26 @@ def draw_ed_story_layers_pro(
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
-    from .chart_display_policy import chart_anno_text_enabled
+    from .chart_display_policy import chart_anno_text_enabled, chart_teaching_tags_enabled
 
-    if chart_anno_text_enabled():
+    if chart_anno_text_enabled() and not chart_teaching_tags_enabled():
         _draw_story_caption(ax, ta, rbr)
+    elif chart_teaching_tags_enabled():
+        from .chart_teaching_tags import story_banner_line
+
+        line = story_banner_line(ta, mode="ed_story")
+        ax.text(
+            0.5,
+            0.03,
+            line,
+            transform=ax.transAxes,
+            va="bottom",
+            ha="center",
+            color=CHART_TEXT,
+            fontsize=7.0,
+            zorder=12,
+            bbox=dict(boxstyle="round,pad=0.32", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
+        )
 
 
 def draw_ed_story_layers(

@@ -55,6 +55,17 @@ def forward_box_slot(
     return x_last + span * 0.06, span * 0.22
 
 
+def _glyph_from_label(text: str) -> str:
+    low = (text or "").lower()
+    if "тейк" in low or low.startswith("tp"):
+        return "TP"
+    if "стоп" in low or low.startswith("sl"):
+        return "SL"
+    if "вход" in low or "entry" in low:
+        return "IN"
+    return ""
+
+
 def _label_inside_box(
     ax: plt.Axes,
     x_box: float,
@@ -63,21 +74,39 @@ def _label_inside_box(
     text: str,
     color: str,
 ) -> None:
-    from .chart_display_policy import chart_box_labels_enabled
+    from .chart_display_policy import chart_box_labels_enabled, chart_plan_glyphs_enabled
 
-    if not chart_box_labels_enabled():
+    if chart_box_labels_enabled():
+        ax.text(
+            x_box + width * 0.06,
+            y,
+            text,
+            color=color,
+            fontsize=7.2,
+            fontweight="bold",
+            va="center",
+            ha="left",
+            zorder=10,
+            clip_on=True,
+        )
+        return
+    if not chart_plan_glyphs_enabled():
+        return
+    glyph = _glyph_from_label(text)
+    if not glyph:
         return
     ax.text(
-        x_box + width * 0.06,
+        x_box + width * 0.52,
         y,
-        text,
+        glyph,
         color=color,
-        fontsize=7.2,
+        fontsize=8.5,
         fontweight="bold",
         va="center",
-        ha="left",
+        ha="center",
         zorder=10,
         clip_on=True,
+        bbox=dict(boxstyle="circle,pad=0.28", facecolor="#0d1117cc", edgecolor=color, linewidth=0.8),
     )
 
 

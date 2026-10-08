@@ -10,7 +10,7 @@ from matplotlib.patches import Rectangle
 
 from .bybit_klines import KlineBar
 from .chart_analysis_text import structure_break_label_ru
-from .chart_display_policy import ed_chart_visual_only
+from .chart_display_policy import chart_teaching_tags_enabled, ed_chart_visual_only
 from .ta_analysis import TAAnalysisResult, fmt_price
 
 
@@ -35,7 +35,7 @@ def draw_smc_visuals_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
     smc = getattr(ta, "smc", None)
     if smc is None or not bars:
         return
-    show_text = not ed_chart_visual_only()
+    show_text = chart_teaching_tags_enabled() or not ed_chart_visual_only()
     x0, x1 = _x_span(bars, tail=min(80, len(bars)))
     width = max(x1 - x0, 0.001)
 
@@ -104,7 +104,7 @@ def draw_order_blocks_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     smc = getattr(ta, "smc", None)
     if smc is None or not bars:
         return
-    show_text = not ed_chart_visual_only()
+    show_text = chart_teaching_tags_enabled() or not ed_chart_visual_only()
     x0, x1 = _x_span(bars, tail=min(100, len(bars)))
     for ob in list(getattr(smc, "order_blocks", None) or [])[-2:]:
         try:
@@ -145,6 +145,7 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
     smc = getattr(ta, "smc", None)
     if smc is None:
         return
+    show_tags = chart_teaching_tags_enabled()
     i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 80))
 
     for gap in list(getattr(smc, "fvgs", None) or [])[-2:]:
@@ -167,7 +168,13 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
         mapper.rect(ax, i0, len(mapper.bars) - 1, lo, hi, color="#f85149", alpha=0.10)
 
     if getattr(smc, "structure_break_level", None):
-        mapper.hline(ax, float(smc.structure_break_level), color="#f0c040", lw=1.1, alpha=0.88, ls="-.")
+        lv = float(smc.structure_break_level)
+        mapper.hline(ax, lv, color="#f0c040", lw=1.1, alpha=0.88, ls="-.")
+        if show_tags:
+            from .chart_analysis_text import structure_break_label_ru
+
+            kind = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"))
+            ax.text(mapper.x_start + 0.01, mapper.y(lv), f" {kind[:10]}", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
 
     for lv in list(getattr(smc, "liquidity_levels", None) or [])[:5]:
         mapper.hline(ax, float(lv.price), color="#8899aa", lw=0.7, alpha=0.5, ls=":")
@@ -179,9 +186,13 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
         x, y = mapper.x(marker.index), mapper.y(marker.price)
         if kind == "sweep":
             ax.plot(x, y, marker="o", mfc="none", mec="#ffd33d", ms=9, mew=2.0, zorder=7)
+            if show_tags:
+                ax.text(x + 0.012, y, "SWEEP", color="#ffd33d", fontsize=6.5, va="center", zorder=8)
         elif kind in {"bos", "expansion", "mss"}:
             col = "#58a6ff" if getattr(marker, "direction", "") == "long" else "#ff7b72"
             ax.plot(x, y, marker="*", color=col, ms=8, linestyle="None", zorder=7)
+            if show_tags:
+                ax.text(x + 0.012, y, "BOS", color=col, fontsize=6.5, va="center", zorder=8)
         elif kind in {"equal_highs", "equal_lows"}:
             mapper.hline(ax, float(marker.price), color="#d2a8ff", lw=0.8, alpha=0.65, ls=":")
 
@@ -253,4 +264,3 @@ def draw_education_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> Non
     draw_consolidation_tv(mapper, ax, ta)
     draw_smc_visuals_tv(mapper, ax, ta)
     draw_order_blocks_tv(mapper, ax, ta)
-    draw_patterns_tv_full(ax, mapper, mapper.bars, ta)
