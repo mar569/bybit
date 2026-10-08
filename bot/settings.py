@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 106
+SETTINGS_VERSION = 107
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Активный рынок: пампы/дампы на Binance, WATCH в analysis, без спама ENTRY.
@@ -639,6 +639,8 @@ class ScannerSettings:
     situation_overview_min_symbols: int = 2
     # В Telegram — только ENTRY; WATCH/intel/обзор не слать (кэш TA остаётся)
     signal_telegram_entry_only: bool = False
+    # RBR WATCH (зона/реакция) — в канал «Ликвидация и Сигналы», даже при entry_only
+    signal_rbr_watch_to_alert_channel: bool = True
     target_watcher_enabled: bool = False
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
@@ -1242,6 +1244,9 @@ class ScannerSettings:
             ),
             situation_overview_min_symbols=int(base.get("situation_overview_min_symbols", 2)),
             signal_telegram_entry_only=bool(base.get("signal_telegram_entry_only", False)),
+            signal_rbr_watch_to_alert_channel=bool(
+                base.get("signal_rbr_watch_to_alert_channel", True)
+            ),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
             signal_quality_scanner_skip_enabled=bool(
@@ -2290,6 +2295,8 @@ class SettingsManager:
                 merged.setdefault("trader_deep_analysis_cooldown_seconds", 7200)
                 merged.setdefault("trader_deep_zone_watch_enabled", True)
                 merged.setdefault("trader_deep_zone_watch_minutes", 360)
+            if version < 107:
+                merged["signal_rbr_watch_to_alert_channel"] = True
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

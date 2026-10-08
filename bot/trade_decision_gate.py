@@ -484,8 +484,12 @@ def decide_trade_action(
     ready_reason = (readiness[1] if readiness else "") or ""
     qt = (quality_tier or "").lower()
 
-    if qt == "skip":
+    from .range_breakdown_retest import rbr_alert_eligible
+
+    if qt == "skip" and not rbr_alert_eligible(ta):
         return TradeDecision("skip", "quality skip", setup_score=0)
+    if qt == "skip":
+        qt = "watch"
 
     from .signal_pipeline import apply_reading_to_trade_decision
 

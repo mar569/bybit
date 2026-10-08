@@ -53,7 +53,7 @@ def test_ed_story_trailing_fits_forward_box():
     floor, ceil = 0.0032, 0.0042
     bars = _consolidation_bars(floor=floor, ceil=ceil, n=48)
     fig, ax = plt.subplots(figsize=(10, 5))
-    _apply_display_zoom(ax, bars, display_hours=12, interval_minutes=15, trailing=ED_STORY_TRAILING)
+    _apply_display_zoom(ax, bars, display_hours=30, interval_minutes=15, trailing=ED_STORY_TRAILING)
     draw_ed_story_layers(ax, bars, ta)
     x0, x1 = ax.get_xlim()
     assert x1 > x0

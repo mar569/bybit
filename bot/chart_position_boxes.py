@@ -113,6 +113,8 @@ def draw_forward_short_projection(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
+    *,
+    use_xlim: bool = False,
 ) -> bool:
     """TV-стиль: блок SL/вход/TP вправо «вперёд» (ожидаемый шорт от зоны)."""
     rbr = get_rbr_from_ta(ta)
@@ -126,49 +128,56 @@ def draw_forward_short_projection(
     if side != "short" or stop <= entry or tp >= entry:
         return False
 
-    i0 = max(0, len(bars) - min(len(bars), 72))
-    i1 = len(bars) - 1
-    x0 = mdates.date2num(_idx_to_date(bars, i0))
-    x1 = mdates.date2num(_idx_to_date(bars, i1))
-    span = max(x1 - x0, 0.001)
-    x_box = x1 + span * 0.06
-    width = span * 0.28
+    x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    if use_xlim:
+        x0lim, x1lim = ax.get_xlim()
+        span = max(x1lim - x0lim, 0.001)
+        width = span * 0.14
+        x_box = x1 + span * 0.03
+        if x_box + width > x1lim * 0.995:
+            x_box = x1lim - width * 1.02
+    else:
+        i0 = max(0, len(bars) - min(len(bars), 72))
+        x0 = mdates.date2num(_idx_to_date(bars, i0))
+        span = max(x1 - x0, 0.001)
+        x_box = x1 + span * 0.06
+        width = span * 0.28
 
     entry_lo = float(rbr.get("entry_lo") or entry)
     entry_hi = float(rbr.get("entry_hi") or entry)
     ax.add_patch(
         Rectangle(
             (x_box, stop), width, max(stop - entry_hi, (entry_hi - entry_lo) * 0.5),
-            facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.26, zorder=2,
+            facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.32, linewidth=1.1, zorder=9,
         )
     )
     ax.add_patch(
         Rectangle(
             (x_box, entry_lo), width, entry_hi - entry_lo,
-            facecolor="#e3b341", edgecolor="#e3b341", alpha=0.18, zorder=2,
+            facecolor="#e3b341", edgecolor="#e3b341", alpha=0.22, linewidth=1.0, zorder=9,
         )
     )
     ax.add_patch(
         Rectangle(
             (x_box, tp), width, max(entry_lo - tp, entry * 0.003),
-            facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.24, zorder=2,
+            facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.30, linewidth=1.0, zorder=9,
         )
     )
-    ax.axhline(tp, xmin=0.55, xmax=0.98, color="#e3b341", linewidth=1.4, alpha=0.9, zorder=3)
+    ax.axhline(tp, color="#3fb950", linewidth=1.35, linestyle="-", alpha=0.85, zorder=8)
     ax.text(
-        x_box + width * 0.04, tp,
-        f"  TP ~ {fmt_price(tp)}  ",
-        color="#e3b341", fontsize=7, fontweight="bold", va="center", zorder=6,
+        x_box + width * 1.02, tp,
+        fmt_price(tp),
+        color="#3fb950", fontsize=8, fontweight="bold", va="center", ha="left", zorder=10,
     )
     ax.text(
-        x_box + width * 0.04, (entry_lo + entry_hi) / 2,
-        f"  вход  ",
-        color="#e6edf3", fontsize=7, fontweight="bold", va="center", zorder=6,
+        x_box + width * 0.06, (entry_lo + entry_hi) / 2,
+        "вход",
+        color="#e6edf3", fontsize=7.5, fontweight="bold", va="center", zorder=10,
     )
     ax.text(
-        x_box + width * 0.04, stop - (stop - entry_hi) * 0.35,
-        f"  SL {fmt_price(stop)}  ",
-        color=_BOX_RED, fontsize=7, fontweight="bold", va="center", zorder=6,
+        x_box + width * 1.02, stop,
+        fmt_price(stop),
+        color=_BOX_RED, fontsize=8, fontweight="bold", va="center", ha="left", zorder=10,
     )
     return True
 

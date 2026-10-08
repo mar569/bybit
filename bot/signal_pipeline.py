@@ -76,6 +76,10 @@ def should_attach_signal_chart(
         return False
     tier = (quality_tier or "").lower()
     if tier == "watch":
+        from .range_breakdown_retest import rbr_alert_eligible
+
+        if rbr_alert_eligible(ta):
+            return bool(getattr(settings, "signal_chart_enabled", True))
         return bool(getattr(settings, "signal_chart_on_watch", False))
     if tier != "entry":
         return False

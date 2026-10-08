@@ -354,6 +354,21 @@ def assess_signal_quality(
             hard_blocks.append(om)
 
     if hard_blocks:
+        from .range_breakdown_retest import rbr_alert_eligible
+
+        if ta is not None and rbr_alert_eligible(ta):
+            tier, cap_reason = _cap_tier_for_signal("watch", signal, ta)
+            reason = hard_blocks[0]
+            if cap_reason and tier != "entry":
+                reason = f"{reason} · {cap_reason}"
+            return SignalQualityResult(
+                tier=tier,
+                block_reason=reason,
+                warnings=tuple(dict.fromkeys(hard_blocks[1:] + warnings)),
+                flow_label=flow_label,
+                cvd_ratio=cvd_ratio,
+                cvd_detail=cvd_detail,
+            )
         watch_ok = bool(getattr(settings, "signal_watch_mode_enabled", False))
         tier = "watch" if watch_ok else "skip"
         return SignalQualityResult(
@@ -394,6 +409,12 @@ def assess_signal_quality(
             "watch",
             block_reason=readiness[1] if readiness and not readiness[0] else "ждать подтверждение",
         )
+
+    from .range_breakdown_retest import rbr_alert_eligible
+
+    if ta is not None and rbr_alert_eligible(ta):
+        why = readiness[1] if readiness and not readiness[0] else "RBR — ждём зону или реакцию"
+        return _finish("watch", block_reason=why)
 
     return _finish(
         "skip",

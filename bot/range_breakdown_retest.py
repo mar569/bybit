@@ -187,6 +187,14 @@ def get_rbr_from_ta(ta: object) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
+def rbr_alert_eligible(ta: object) -> bool:
+    """Сетап RBR с планом — в алерт-канал WATCH (не только deep в анализах)."""
+    rbr = get_rbr_from_ta(ta)
+    if not rbr:
+        return False
+    return str(rbr.get("phase") or "") in {"fade_top", "await_break", "retest"}
+
+
 def should_push_trader_deep_analysis(ta: object) -> bool:
     rbr = get_rbr_from_ta(ta)
     if rbr:

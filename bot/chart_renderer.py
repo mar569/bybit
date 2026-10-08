@@ -2608,7 +2608,10 @@ def _render_chart_figure(
         try:
             from .chart_ed_story import draw_ed_story_layers
 
-            draw_ed_story_layers(ax, bars, ta)
+            draw_ed_story_layers(ax, bars, ta, interval_minutes=interval_minutes)
+            from .chart_ed_story import expand_ed_story_ylim
+
+            expand_ed_story_ylim(ax, ta)
         except Exception:
             logger.exception("Ed story chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:
@@ -3461,14 +3464,69 @@ async def render_annotated_chart(
                 iv_chart = setup_iv
                 ah_chart = ah_setup
 
+    if (manual_ta_chart or signal_chart) and ta_chart and symbol:
+        try:
+            from .chart_ed_story import ed_story_min_analysis_hours, use_ed_story_chart
+
+            if use_ed_story_chart(ta_chart):
+                need_h = ed_story_min_analysis_hours(iv_chart)
+                if need_h > ah_chart:
+                    bars_deep = await _fetch_bars(symbol, need_h, interval_minutes=iv_chart)
+                    if bars_deep and len(bars_deep) >= len(bars_chart or []):
+                        ta_deep = run_ta_analysis(
+                            bars_deep,
+                            is_long=is_long,
+                            oi_bars=oi_bars,
+                            btc_bars=btc_bars,
+                            mid_bars=mid_bars,
+                            htf_bars=htf_bars,
+                            macro_bars=macro_bars,
+                            weekly_bars=weekly_bars,
+                            symbol=symbol,
+                            hours=need_h,
+                            invalidation_price=invalidation_price,
+                            neutral=neutral,
+                            liq_context=liq_context,
+                            interval_minutes=iv_chart,
+                            htf_interval_minutes=htf_interval_minutes,
+                            mid_interval_minutes=mid_interval_minutes,
+                            macro_interval_minutes=macro_interval_minutes,
+                            history_bars=bars_deep,
+                            taker_cvd=taker_cvd,
+                            market_metrics=market_metrics,
+                            pattern_detection_enabled=pattern_detection_enabled,
+                            pattern_min_confidence=pattern_min_confidence,
+                            as_of_bar_index=as_of_bar_index,
+                            as_of_open_time_ms=as_of_open_time_ms,
+                            as_of_price=as_of_price,
+                        )
+                        if verdict_override:
+                            ta_deep.verdict = verdict_override
+                        bars_chart = bars_deep
+                        ta_chart = ta_deep
+                        ah_chart = need_h
+        except Exception:
+            logger.debug("Ed story deep history fetch skipped", exc_info=True)
+
     if manual_ta_chart or signal_chart:
-        zoom_hours = manual_chart_zoom_hours(
-            ta_chart,
-            bars_chart,
-            interval_minutes=iv_chart,
-            analysis_hours=ah_chart,
-            configured=display_hours,
-        )
+        from .chart_ed_story import ed_story_chart_zoom_hours, use_ed_story_chart
+
+        if ta_chart and use_ed_story_chart(ta_chart):
+            zoom_hours = ed_story_chart_zoom_hours(
+                ta_chart,
+                bars_chart,
+                interval_minutes=iv_chart,
+                analysis_hours=ah_chart,
+                configured=display_hours,
+            )
+        else:
+            zoom_hours = manual_chart_zoom_hours(
+                ta_chart,
+                bars_chart,
+                interval_minutes=iv_chart,
+                analysis_hours=ah_chart,
+                configured=display_hours,
+            )
     else:
         zoom_hours = structure_aware_display_hours(
             interval_minutes=interval_minutes,

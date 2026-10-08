@@ -157,8 +157,17 @@ def _signal_cooldown_seconds(signal: Signal, settings) -> int:
     return clamp_cooldown_seconds(settings.signal_cooldown_seconds, default=120)
 
 
-def _watch_allowed_for_signal(signal: Signal, settings) -> bool:
+def _watch_allowed_for_signal(
+    signal: Signal,
+    settings,
+    ta: object | None = None,
+) -> bool:
     """Общий WATCH-режим ИЛИ тип в allowlist (ранние тренды/импульс без спама pulse)."""
+    if ta is not None and getattr(settings, "signal_rbr_watch_to_alert_channel", True):
+        from .range_breakdown_retest import rbr_alert_eligible
+
+        if rbr_alert_eligible(ta):
+            return True
     if bool(getattr(settings, "signal_watch_mode_enabled", False)):
         return True
     allow = getattr(settings, "signal_watch_allow_types", ()) or ()
@@ -1902,7 +1911,7 @@ class TelegramBot:
                 )
 
                 if getattr(settings, "trade_decision_gate_enabled", True) and not skip_dedupe:
-                    watch_ok = _watch_allowed_for_signal(signal, settings)
+                    watch_ok = _watch_allowed_for_signal(signal, settings, ta_result)
                     trade_decision = decide_trade_action(
                         signal,
                         ta_result,
@@ -1937,7 +1946,16 @@ class TelegramBot:
                             cvd_ratio=quality.cvd_ratio,
                             cvd_detail=quality.cvd_detail,
                         )
-                    if trade_decision.action == "skip" and quality.tier != "watch":
+                    from .range_breakdown_retest import rbr_alert_eligible
+
+                    rbr_watch = bool(
+                        ta_result is not None and rbr_alert_eligible(ta_result)
+                    )
+                    if (
+                        trade_decision.action == "skip"
+                        and quality.tier != "watch"
+                        and not rbr_watch
+                    ):
                         extra = f" · {quality.block_reason}" if quality.block_reason else ""
                         logger.info(
                             "Telegram skip %s %s: trade gate — %s%s",
@@ -1962,6 +1980,23 @@ class TelegramBot:
                                 signal, ta_result, png, skip_dedupe=skip_dedupe,
                             )
                         return
+                    if rbr_watch and trade_decision.action == "skip":
+                        from .trade_decision_gate import TradeDecision
+
+                        trade_decision = TradeDecision(
+                            "watch",
+                            trade_decision.reason or "RBR — ждём реакцию",
+                            location=trade_decision.location,
+                            setup_score=max(trade_decision.setup_score, 32),
+                        )
+                        quality = SignalQualityResult(
+                            tier="watch",
+                            block_reason=quality.block_reason or trade_decision.reason,
+                            warnings=quality.warnings,
+                            flow_label=quality.flow_label,
+                            cvd_ratio=quality.cvd_ratio,
+                            cvd_detail=quality.cvd_detail,
+                        )
 
                 signal.details["quality_tier"] = quality.tier
                 signal.details["quality_block"] = quality.block_reason
@@ -1988,9 +2023,17 @@ class TelegramBot:
                     and not skip_dedupe
                     and quality is not None
                 ):
+                    from .range_breakdown_retest import rbr_alert_eligible
+
                     td_act = (trade_decision.action if trade_decision else "") or ""
                     is_entry = quality.tier == "entry" and td_act in ("", "entry")
-                    if not is_entry:
+                    is_rbr_watch = (
+                        quality.tier == "watch"
+                        and ta_result is not None
+                        and rbr_alert_eligible(ta_result)
+                        and getattr(settings, "signal_rbr_watch_to_alert_channel", True)
+                    )
+                    if not is_entry and not is_rbr_watch:
                         logger.info(
                             "Telegram skip %s %s: entry-only (tier=%s decision=%s)",
                             signal.exchange,
@@ -2056,7 +2099,7 @@ class TelegramBot:
                 # ENTRY всегда; WATCH — если общий режим или тип в allowlist
                 gate_on = getattr(settings, "trade_decision_gate_enabled", True)
                 enforce_actionable = settings.actionable_signals_only or gate_on
-                watch_ok = _watch_allowed_for_signal(signal, settings)
+                watch_ok = _watch_allowed_for_signal(signal, settings, ta_result)
                 if enforce_actionable and not skip_dedupe:
                     if quality.tier == "watch" and not watch_ok:
                         logger.info(
@@ -3405,7 +3448,8 @@ class TelegramBot:
         notify_chat_id = self.config.notification_chat_id
         if is_rbr and upd.kind == "zone_reached":
             notify_chat_id = (
-                watch.chat_id
+                self.config.notification_chat_id
+                or watch.chat_id
                 or self.config.effective_analysis_chat_id
                 or notify_chat_id
             )
