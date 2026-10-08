@@ -2550,27 +2550,34 @@ def _render_chart_figure(
     pro_mode_chart: str | None = None
     if manual_ta_chart or signal_chart:
         try:
-            from .chart_pro import resolve_pro_chart_mode
+            from .chart_pro import resolve_pro_chart_mode, signal_chart_legacy_enabled
 
             pro_mode_chart = resolve_pro_chart_mode(
-                ta, allow_legacy=manual_ta_chart and not signal_chart,
+                ta,
+                allow_legacy=(
+                    manual_ta_chart
+                    and not signal_chart
+                    and signal_chart_legacy_enabled()
+                ),
             )
         except Exception:
             pro_mode_chart = "observation"
     story_minimal = pro_mode_chart is not None and pro_mode_chart != "legacy_manual"
-    if clean_chart:
+    if story_minimal:
+        pass
+    elif clean_chart:
         try:
             _draw_essential_oil_overlays(ax, bars, ta)
         except Exception:
             logger.debug("Essential oil overlays failed", exc_info=True)
     else:
-        _draw_clean_market_annotations(ax, bars, ta, signal_chart=False)
+        _draw_clean_market_annotations(ax, bars, ta, signal_chart=signal_chart)
     if not manual_ta_chart and not signal_chart:
         try:
             _draw_right_price_labels(ax, bars, ta)
         except Exception:
             logger.debug("right price labels skipped", exc_info=True)
-    if ut_overlay is not None:
+    if ut_overlay is not None and not story_minimal:
         try:
             _draw_ut_bot_overlay(
                 ax, bars, ut_overlay, interval_minutes=interval_minutes
@@ -2591,8 +2598,8 @@ def _render_chart_figure(
             color=CHART_STYLE["text"], fontsize=11, pad=14,
         )
     else:
-        mode_suffix = " · PRO" if pro_mode else ""
-        ut_sfx = " · UT" if ut_overlay is not None else ""
+        mode_suffix = " · PRO" if (pro_mode or story_minimal) else ""
+        ut_sfx = " · UT" if (ut_overlay is not None and not story_minimal) else ""
         wait_tag = " · наблюдение" if manual_ta_chart and (ta.verdict or "").upper() == "WAIT" else ""
         from .signal_locale import verdict_ru
 
@@ -3661,17 +3668,20 @@ def render_oil_chart(
     title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
 
     ut_overlay = None
-    try:
-        from .oil_ut_bot import compute_oil_ut_bot
+    import os
 
-        ut_overlay = compute_oil_ut_bot(
-            bars,
-            key_value=1.0,
-            atr_period=10,
-            exclude_forming=True,
-        )
-    except Exception:
-        logger.debug("Oil UT overlay compute failed", exc_info=True)
+    if os.environ.get("OIL_CHART_UT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from .oil_ut_bot import compute_oil_ut_bot
+
+            ut_overlay = compute_oil_ut_bot(
+                bars,
+                key_value=1.0,
+                atr_period=10,
+                exclude_forming=True,
+            )
+        except Exception:
+            logger.debug("Oil UT overlay compute failed", exc_info=True)
 
     return _render_chart_figure(
         bars,
@@ -3680,13 +3690,14 @@ def render_oil_chart(
         title_suffix=title,
         accent_color=accent,
         interval_minutes=im,
-        pro_mode=False,
+        pro_mode=True,
         display_hours=zoom,
         height_scale=max(1.35, float(height_scale or 1.45)),
         urals_price=None,
         urals_change_pct=None,
         ut_overlay=ut_overlay,
-        clean_chart=True,  # лёгкий анализ + UT + треугольник Vataga; без боковых панелей
+        clean_chart=False,
+        signal_chart=True,
     )
 
 

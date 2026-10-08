@@ -253,6 +253,53 @@ def _draw_flow_strip(ax: plt.Axes, ta: TAAnalysisResult) -> None:
     )
 
 
+def _draw_probable_path_arrow(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    tp_display: float,
+) -> None:
+    """Один пунктир «куда вероятнее» — без дублирования подписей пробоя/поддержки."""
+    if not bars or tp_display <= 0:
+        return
+    cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+    if cur <= 0:
+        return
+    x0 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    x1lim = ax.get_xlim()[1]
+    span = max(x1lim - x0, 0.001)
+    x1 = min(x0 + span * 0.38, x1lim - span * 0.02)
+    ax.annotate(
+        "",
+        xy=(x1, tp_display),
+        xytext=(x0, cur),
+        arrowprops=dict(
+            arrowstyle="-|>",
+            color="#58a6ff",
+            lw=1.35,
+            linestyle=(0, (4, 3)),
+            alpha=0.82,
+            shrinkA=2,
+            shrinkB=2,
+        ),
+        zorder=6,
+    )
+    mid_y = (cur + tp_display) / 2.0
+    ax.text(
+        x0 + span * 0.12,
+        mid_y,
+        "  вероятный ход ↓  ",
+        color="#58a6ff",
+        fontsize=7.0,
+        fontweight="bold",
+        va="center",
+        ha="left",
+        zorder=7,
+        bbox=dict(boxstyle="round,pad=0.2", facecolor=CHART_BG, edgecolor="#30363d", alpha=0.9),
+    )
+
+
 def _draw_story_caption(ax: plt.Axes, ta: TAAnalysisResult, rbr: dict) -> None:
     phase = str(rbr.get("phase") or "")
     floor = fmt_price(float(rbr.get("range_bottom") or 0))
@@ -347,6 +394,20 @@ def draw_ed_story_layers_pro(
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
+    try:
+        from .chart_plan_display import build_display_plan
+        from .chart_position_boxes import plan_for_display
+
+        raw = plan_for_display(ta)
+        if raw and str(rbr.get("direction") or "") == "short":
+            _side, entry, el, eh, stop, tp = raw
+            disp = build_display_plan(
+                side="short", entry=entry, entry_lo=el, entry_hi=eh, stop=stop, tp=tp,
+            )
+            if phase in {"fade_top", "await_break", "retest"} and disp.tp < entry:
+                _draw_probable_path_arrow(ax, bars, ta, tp_display=disp.tp)
+    except Exception:
+        pass
     _draw_flow_strip(ax, ta)
     _draw_story_caption(ax, ta, rbr)
 

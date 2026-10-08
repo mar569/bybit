@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal
 
 import matplotlib.pyplot as plt
@@ -12,6 +13,16 @@ from .ta_analysis import TAAnalysisResult
 logger = logging.getLogger(__name__)
 
 ProMode = Literal["ed_story", "range_wait", "observation", "legacy_manual"]
+
+
+def signal_chart_legacy_enabled() -> bool:
+    """Полный manual-chart только если явно включён (SIGNAL_CHART_LEGACY=1)."""
+    return os.environ.get("SIGNAL_CHART_LEGACY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def resolve_pro_chart_mode(ta: TAAnalysisResult, *, allow_legacy: bool = False) -> ProMode:

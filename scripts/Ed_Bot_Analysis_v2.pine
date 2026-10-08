@@ -1,11 +1,12 @@
 //@version=6
 // Ed Bot — разметка Bybit_bot (НЕ EdStory). Стратегия отдельно: Ed_Bot_Strategy_v1.pine
 // Первая строка в TV должна быть: indicator("Ed Bot Analysis v2" ... shorttitle="EdBot")
-indicator("Ed Bot Analysis v2.1", shorttitle="EdBot", overlay=true, max_boxes_count=120, max_lines_count=120, max_labels_count=120)
+indicator("Ed Bot Analysis v2.4", shorttitle="EdBot", overlay=true, max_boxes_count=80, max_lines_count=80, max_labels_count=48)
 
 grpMode = "Режим графика"
-i_edBreakdown = input.bool(true, "Разметка Ed (как docs)", group=grpMode, tooltip="Трендовая по HL/LH, значимая зона, пробой/ретest у свечи — как в презентации.")
-i_showPatLayer = input.bool(false, "Доп. слой: SMC / RBR / старый паттерн", group=grpMode, tooltip="Не выключает «Разметку Ed». Дополнительно: RBR-подписи, SMC-боксы. Для чистого графика — ВЫКЛ.")
+i_edBreakdown = input.bool(true, "Разметка Ed (как docs)", group=grpMode, tooltip="Рисует блок «Разметка Ed». Галочки SMC/Fib/боксы — только если «Строгий Ed» ВЫКЛ и «Доп. слой» ВКЛ.")
+i_edStrict = input.bool(true, "Строгий Ed (игнор верхних галочек)", group=grpMode, tooltip="ВКЛ = верхняя группа не рисуется; только «Разметка Ed» + «Паттерны».")
+i_showPatLayer = input.bool(false, "Доп. слой: SMC / RBR / старый паттерн", group=grpMode, tooltip="Имеет смысл только при «Строгий Ed» ВЫКЛ.")
 i_storyFirst  = input.bool(true, "Один слой (chart_story_router)", group=grpMode)
 i_showPattern = input.bool(false, "Primary pattern (max 1)", group=grpMode)
 i_showSmc     = input.bool(false, "SMC: свип / BOS / OB / FVG", group=grpMode)
@@ -20,10 +21,13 @@ i_edPatGeom   = input.bool(true, "Фигура на графике (2× верш
 i_edTrend     = input.bool(true, "Трендовая (по 2 свингам)", group=grpEd)
 i_edSigZone   = input.bool(true, "Значимая зона (HL/HH)", group=grpEd)
 i_edEvents    = input.bool(true, "Метки: пробой / ретest", group=grpEd)
-i_edOb        = input.bool(true, "OB после пробоя", group=grpEd)
+i_edOb        = input.bool(false, "OB после пробоя (эксп.)", group=grpEd)
 i_edTriggers  = input.bool(false, "Триггеры лонг≥ / шорт≤", group=grpEd)
-i_edShowBos   = input.bool(false, "BOS пунктир", group=grpEd)
-i_edShowLiq   = input.bool(false, "Ликвидность пунктир", group=grpEd)
+i_edFib       = input.bool(true, "Fib откат 38.2–88.6 (импульс 48 бар)", group=grpEd, tooltip="Горизонтали + зона 78.6–88.6 как на слайдах.")
+i_edFvgOb     = input.bool(true, "FVG + OB + свип (SMC lite)", group=grpEd)
+i_edShowBos   = input.bool(true, "BOS пунктир", group=grpEd)
+i_edShowLiq   = input.bool(true, "Ликвидность (EQH/EQL)", group=grpEd)
+i_edPatMinConf = input.float(0.56, "MIN conf для фигуры на графике", minval=0.5, maxval=0.85, step=0.01, group=grpEd, tooltip="Ниже «MIN pattern confidence» — рисуем forming-паттерны.")
 
 grpPat = "Паттерны"
 i_swingWin     = input.int(3, "Swing window", minval=2, maxval=5, group=grpPat)
@@ -78,6 +82,9 @@ float rngLoRect = ta.lowest(low, i_consLb)
 
 f_pct(a, b) => math.abs(a - b) / math.max(math.abs(a), 1e-10) * 100.0
 
+f_fib_from_top(float top, float bot, float r) =>
+    top - (top - bot) * r
+
 f_prior(int swingIx, int lb) =>
     int ago = bar_index - swingIx
     bool ok = ago >= lb and ago + lb <= bar_index and ago >= 0
@@ -131,7 +138,7 @@ var int patNeckIxL = na
 var int patNeckIxR = na
 
 // Скан на последнем баре (нужен и для «Фигура на графике», не только i_showPattern)
-bool runPatScan = barstate.islast and i_heavyPatterns and (i_showPattern or (i_edBreakdown and i_edPatGeom))
+bool runPatScan = barstate.islast and i_heavyPatterns and ((i_edBreakdown and i_edPatGeom) or (i_showPattern and not i_edStrict))
 if runPatScan
     string cKind = ""
     string cStatus = ""
@@ -579,6 +586,14 @@ if runPatScan
                         cNeck := dir == "bullish" ? upNow : loNow
                         cTarget := tgt
                         cStop := dir == "bullish" ? loNow - atr * 0.2 : upNow + atr * 0.2
+                        cI1 := aIx
+                        cP1 := aH
+                        cI2 := bIx
+                        cP2 := bL
+                        cI3 := cIx
+                        cP3 := cH
+                        cNeckIxL := dIx
+                        cNeckL := dL
 
     // ── False breakout ──
     if array.size(slPx) >= 2
@@ -993,7 +1008,7 @@ string layerLegend = chartLayer == "ed_rbr" ? "Серый=пол · Жёлтый
 
 // Разбор Ed = ТОЛЬКО этот слой. Старый RBR/боковик/TP — только «Доп. слой».
 bool edDraw = i_edBreakdown
-bool legacyDraw = i_showPatLayer
+bool legacyDraw = i_showPatLayer and not i_edStrict
 bool legacyPatDraw = legacyDraw and drawPat and not (edDraw and i_edPatGeom)
 bool legacyRbrDraw = legacyDraw and i_showRbr and not edDraw
 
@@ -1040,6 +1055,19 @@ var label edEvStruct = na
 var line edPatLeg1 = na
 var line edPatLeg2 = na
 var line edPatLeg3 = na
+var line edTriHi = na
+var line edTriLo = na
+var line edFib382 = na
+var line edFib618 = na
+var line edFib786 = na
+var line edFib886 = na
+var box edFibZone = na
+var box edFvgBox = na
+var box edObBoxEd = na
+var label edPatLbl = na
+var label edSweepEd = na
+var label edFibLbl786 = na
+var label edBosLbl = na
 
 if barstate.islast
     if not na(neckLn)
@@ -1122,6 +1150,32 @@ if barstate.islast
         line.delete(edPatLeg2)
     if not na(edPatLeg3)
         line.delete(edPatLeg3)
+    if not na(edTriHi)
+        line.delete(edTriHi)
+    if not na(edTriLo)
+        line.delete(edTriLo)
+    if not na(edFib382)
+        line.delete(edFib382)
+    if not na(edFib618)
+        line.delete(edFib618)
+    if not na(edFib786)
+        line.delete(edFib786)
+    if not na(edFib886)
+        line.delete(edFib886)
+    if not na(edFibZone)
+        box.delete(edFibZone)
+    if not na(edFvgBox)
+        box.delete(edFvgBox)
+    if not na(edObBoxEd)
+        box.delete(edObBoxEd)
+    if not na(edPatLbl)
+        label.delete(edPatLbl)
+    if not na(edSweepEd)
+        label.delete(edSweepEd)
+    if not na(edFibLbl786)
+        label.delete(edFibLbl786)
+    if not na(edBosLbl)
+        label.delete(edBosLbl)
     neckLn := na
     hsL1 := na
     hsL2 := na
@@ -1157,15 +1211,57 @@ if barstate.islast
     edPatLeg1 := na
     edPatLeg2 := na
     edPatLeg3 := na
+    edTriHi := na
+    edTriLo := na
+    edFib382 := na
+    edFib618 := na
+    edFib786 := na
+    edFib886 := na
+    edFibZone := na
+    edFvgBox := na
+    edObBoxEd := na
+    edPatLbl := na
+    edSweepEd := na
+    edFibLbl786 := na
+    edBosLbl := na
     int xL = bar_index - i_consLb
     int xR = bar_index + 14
     int xVis = bar_index - math.max(i_consLb, 90)
     int xEnd = bar_index + 56
     float edZ = math.max(atr * 0.34, syminfo.mintick * 6)
 
-    // ── 1) Фигура (как на слайдах): шея на всю ширину, 2 вершины, зона сопр. ──
-    if edDraw and i_edPatGeom and patKind != "" and patConf >= i_minPatConf and not na(patNeck)
-        if patKind == "double_top" or patKind == "double_bottom" or patKind == "triple_top" or patKind == "triple_bottom"
+    bool isTri = patKind == "triangle_symmetric" or patKind == "triangle_ascending" or patKind == "triangle_descending" or patKind == "wedge_rising" or patKind == "wedge_falling"
+    bool edPatOk = patKind != "" and patConf >= i_edPatMinConf
+
+    // ── Направляющие треугольника (4 свинга) — видно даже без «лучшего» паттерна ──
+    if edDraw and i_edPatGeom and array.size(shPx) >= 2 and array.size(slPx) >= 2
+        float triAH = array.get(shPx, array.size(shPx) - 2)
+        float triCH = array.get(shPx, array.size(shPx) - 1)
+        float triBL = array.get(slPx, array.size(slPx) - 2)
+        float triDL = array.get(slPx, array.size(slPx) - 1)
+        int triAI = array.get(shIx, array.size(shPx) - 2)
+        int triCI = array.get(shIx, array.size(shPx) - 1)
+        int triBI = array.get(slIx, array.size(slPx) - 2)
+        int triDI = array.get(slIx, array.size(slPx) - 1)
+        int triSpan = math.max(triCI, triDI) - math.min(triAI, triBI)
+        bool triConv = triSpan >= 8 and (triCH < triAH * 0.998 or triCH > triAH * 1.002 or triDL < triBL * 0.998 or triDL > triBL * 1.002)
+        if triConv
+            edTriHi := line.new(triAI, triAH, triCI, triCH, color=color.new(#ffa657, 25), width=2, extend=extend.right, xloc=xloc.bar_index)
+            edTriLo := line.new(triBI, triBL, triDI, triDL, color=color.new(#58a6ff, 25), width=2, extend=extend.right, xloc=xloc.bar_index)
+
+    // ── 1) Фигура (как на слайдах): шея, 2× вершина, △ / ГиП ──
+    if edDraw and i_edPatGeom and edPatOk
+        if isTri and not na(patI1) and not na(patI2) and not na(patI3) and not na(patNeckIxL)
+            edTriHi := line.new(patI1, patP1, patI3, patP3, color=#ffa657, width=2, extend=extend.right, xloc=xloc.bar_index)
+            edTriLo := line.new(patI2, patP2, patNeckIxL, patNeckL, color=#58a6ff, width=2, extend=extend.right, xloc=xloc.bar_index)
+            edPatLbl := label.new(patI3, patP3, patLabelRu + " " + str.tostring(patConf, "#.##"), style=label.style_label_down, color=color.new(#161b22, 20), textcolor=#ffa657, size=size.small)
+        else if patKind == "head_shoulders" or patKind == "inverse_head_shoulders"
+            if not na(patNeckIxL)
+                hsL1 := line.new(patI1, patP1, patI2, patP2, color=#ffa657, width=2, xloc=xloc.bar_index)
+                hsL2 := line.new(patI2, patP2, patI3, patP3, color=#ffa657, width=2, xloc=xloc.bar_index)
+                hsNeckLn := line.new(patNeckIxL, patNeckL, patNeckIxR, patNeckR, color=#58a6ff, width=2, xloc=xloc.bar_index)
+                edPatLbl := label.new(patI2, patP2, patLabelRu, style=label.style_label_down, color=color.new(#161b22, 20), textcolor=#ffa657, size=size.small)
+        else if not na(patNeck) and (patKind == "double_top" or patKind == "double_bottom" or patKind == "triple_top" or patKind == "triple_bottom")
             int xPatL = not na(patI1) ? math.min(patI1, patI2) : xVis
             neckLn := line.new(xPatL, patNeck, xEnd, patNeck, color=#58a6ff, width=2, extend=extend.right)
             if not na(patI1) and not na(patI2)
@@ -1173,11 +1269,53 @@ if barstate.islast
                 edPatLeg1 := line.new(patI1, patP1, patI1, patNeck, color=#8b949e, width=1, style=line.style_dashed, xloc=xloc.bar_index)
                 edPatLeg2 := line.new(patI2, patP2, patI2, patNeck, color=#8b949e, width=1, style=line.style_dashed, xloc=xloc.bar_index)
                 float peakZ = patKind == "double_bottom" or patKind == "triple_bottom" ? math.min(patP1, patP2) : math.max(patP1, patP2)
-                if i_edSigZone
-                    edSigBox := box.new(xVis, peakZ + edZ, xEnd, peakZ - edZ, bgcolor=color.new(#8b949e, 84), border_color=color.new(#484f58, 50), border_width=1)
                 edEvStruct := label.new(patI2, peakZ, patKind == "double_bottom" ? "2× дно" : "2× верш", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f0c040, size=size.small)
             if not na(patI3)
                 edPatLeg3 := line.new(patI2, patP2, patI3, patP3, color=#e6edf3, width=2, xloc=xloc.bar_index)
+            edPatLbl := label.new(not na(patI2) ? patI2 : bar_index - 5, not na(patP2) ? patP2 : patNeck, patLabelRu + " " + str.tostring(patConf, "#.##"), style=label.style_label_down, color=color.new(#161b22, 20), textcolor=#f0c040, size=size.small)
+        else if not na(patNeck)
+            neckLn := line.new(xVis, patNeck, xEnd, patNeck, color=#58a6ff, width=1, style=line.style_dashed, extend=extend.right)
+            edPatLbl := label.new(bar_index - 8, patNeck, patLabelRu, style=label.style_label_left, color=color.new(color.black, 100), textcolor=#e6edf3, size=size.small)
+
+    // ── Fib (docs-style) ──
+    if edDraw and i_edFib
+        int fibLb = 48
+        float fibTop = ta.highest(high, fibLb)
+        float fibBot = ta.lowest(low, fibLb)
+        float fibRng = fibTop - fibBot
+        if fibRng > atr * 0.35
+            float l382 = f_fib_from_top(fibTop, fibBot, 0.382)
+            float l618 = f_fib_from_top(fibTop, fibBot, 0.618)
+            float l786 = f_fib_from_top(fibTop, fibBot, 0.786)
+            float l886 = f_fib_from_top(fibTop, fibBot, 0.886)
+            edFib382 := line.new(xVis, l382, xEnd, l382, color=color.new(#8b949e, 55), width=1, style=line.style_dotted, extend=extend.right)
+            edFib618 := line.new(xVis, l618, xEnd, l618, color=color.new(#a371f7, 35), width=1, style=line.style_dashed, extend=extend.right)
+            edFib786 := line.new(xVis, l786, xEnd, l786, color=color.new(#f0883e, 20), width=2, style=line.style_dashed, extend=extend.right)
+            edFib886 := line.new(xVis, l886, xEnd, l886, color=color.new(#3fb950, 35), width=1, style=line.style_dashed, extend=extend.right)
+            edFibZone := box.new(xVis, l886, xEnd, l786, bgcolor=color.new(#f85149, 88), border_color=color.new(#f85149, 70), border_width=1)
+            edFibLbl786 := label.new(xEnd - 4, l786, "78.6%", style=label.style_label_left, color=color.new(color.black, 100), textcolor=#f0883e, size=size.tiny)
+
+    // ── SMC lite (FVG / OB / свип) ──
+    if edDraw and i_edFvgOb
+        int fvgFound = -1
+        for fi = 2 to 45
+            if fvgFound < 0
+                bool fu = low[fi] > high[fi + 2]
+                bool fd = high[fi] < low[fi + 2]
+                if fu or fd
+                    fvgFound := fi
+        if fvgFound > 0
+            bool fuL = low[fvgFound] > high[fvgFound + 2]
+            float fTop = fuL ? low[fvgFound] : low[fvgFound + 2]
+            float fBot = fuL ? high[fvgFound + 2] : high[fvgFound]
+            edFvgBox := box.new(bar_index - fvgFound - 2, fTop, bar_index + 12, fBot, bgcolor=color.new(#58a6ff, 86), border_color=#58a6ff, border_width=1)
+        if i_edOb
+            if not na(zDemBot)
+                edObBoxEd := box.new(bar_index - 12, zDemTop, bar_index + 14, zDemBot, bgcolor=color.new(#3fb950, 84), border_color=#3fb950)
+            else if not na(zSupTop)
+                edObBoxEd := box.new(bar_index - 12, zSupTop, bar_index + 14, zSupBot, bgcolor=color.new(#f85149, 84), border_color=#f85149)
+        if sweep and not na(sweepPx)
+            edSweepEd := label.new(bar_index, sweepPx, sweepDir == "long" ? "снятие ликв. ↓" : "снятие ликв. ↑", style=sweepDir == "long" ? label.style_label_up : label.style_label_down, color=color.new(#e3b341, 15), textcolor=#1a1a1a, size=size.small)
 
     // ── 2) TL → зона → пробой/ретest → OB ──
     if edDraw and i_edTrend and array.size(slPx) >= 2 and array.size(slIx) >= 2 and array.size(shPx) >= 2
@@ -1190,9 +1328,8 @@ if barstate.islast
         bool bearRev = array.get(shPx, array.size(shPx) - 1) < array.get(shPx, array.size(shPx) - 2)
         if bullTls and not bearRev
             edTrendLn := line.new(xa, ya, xb, yb, color=#e6edf3, width=2, extend=extend.right)
-            if i_edSigZone
-                edSigBox := box.new(xVis, ya + edZ, xEnd, ya - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
-                edEvStruct := label.new(xa, ya + edZ, "HL", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#58a6ff, size=size.small)
+            if patKind == "" or patConf < i_minPatConf
+                edEvStruct := label.new(xa, ya, "TL ↑", style=label.style_label_right, color=color.new(color.black, 100), textcolor=#e6edf3, size=size.small)
             int brOff = -1
             int rtOff = -1
             if i_edEvents
@@ -1213,13 +1350,6 @@ if barstate.islast
                                 rtOff := j
                     if rtOff > 0
                         edEvRetest := label.new(bar_index - rtOff, high[rtOff], "ретest", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f0c040, size=size.normal)
-            if i_edOb and brOff > 0
-                int obOff = -1
-                for k = brOff to brOff + 12
-                    if obOff < 0 and close[k] > open[k]
-                        obOff := k
-                if obOff > 0
-                    edObBox := box.new(bar_index - obOff, high[obOff], xEnd, low[obOff], bgcolor=color.new(#f85149, 84), border_color=#da3633, border_width=1)
         else if bearRev and array.size(shIx) >= 2
             int m = array.size(shPx)
             int xh1 = array.get(shIx, m - 2)
@@ -1227,9 +1357,8 @@ if barstate.islast
             float yh1 = array.get(shPx, m - 2)
             float yh2 = array.get(shPx, m - 1)
             edTrendLn := line.new(xh1, yh1, xh2, yh2, color=#e6edf3, width=2, extend=extend.right)
-            if i_edSigZone
-                edSigBox := box.new(xVis, yh1 + edZ, xEnd, yh1 - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
-                edEvStruct := label.new(xh1, yh1 + edZ, "HH", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#58a6ff, size=size.small)
+            if patKind == "" or patConf < i_minPatConf
+                edEvStruct := label.new(xh1, yh1, "TL ↓", style=label.style_label_right, color=color.new(color.black, 100), textcolor=#e6edf3, size=size.small)
             int brOffH = -1
             if i_edEvents
                 for i = 1 to 26
@@ -1241,13 +1370,6 @@ if barstate.islast
                             brOffH := i
                 if brOffH > 0
                     edEvBreak := label.new(bar_index - brOffH, high[brOffH], "пробой", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f85149, size=size.normal)
-            if i_edOb and brOffH > 0
-                int obOffB = -1
-                for k = brOffH to brOffH + 12
-                    if obOffB < 0 and close[k] < open[k]
-                        obOffB := k
-                if obOffB > 0
-                    edObBox := box.new(bar_index - obOffB, high[obOffB], xEnd, low[obOffB], bgcolor=color.new(#f85149, 84), border_color=#da3633, border_width=1)
         else if array.size(shPx) >= 2 and array.size(shIx) >= 2
             int mH = array.size(shPx)
             int xh1f = array.get(shIx, mH - 2)
@@ -1255,36 +1377,30 @@ if barstate.islast
             float yh1f = array.get(shPx, mH - 2)
             float yh2f = array.get(shPx, mH - 1)
             edTrendLn := line.new(xh1f, yh1f, xh2f, yh2f, color=#e6edf3, width=2, extend=extend.right)
-            if i_edSigZone
-                edSigBox := box.new(xVis, yh1f + edZ, xEnd, yh1f - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
-
-    if edDraw and i_edTriggers and rangeOk and i_showRbr
-        float ceilPx = rngHi
-        float floorPx = rngLo
-        edRangeBox := box.new(xL, ceilPx, bar_index + 1, floorPx, bgcolor=color.new(#8b949e, 97), border_color=color.new(#484f58, 60), border_width=1)
-        edCeilLn := line.new(xVis, ceilPx, bar_index, ceilPx, color=#f0c040, width=2, extend=extend.right)
-        edFloorLn := line.new(xVis, floorPx, bar_index, floorPx, color=#8b949e, width=2, extend=extend.right)
-        edCeilTag := label.new(bar_index + 6, ceilPx, "лонг ≥ " + str.tostring(ceilPx, format.mintick), style=label.style_label_left, color=color.new(color.black, 100), textcolor=#3fb950, size=size.normal)
-        edFloorTag := label.new(bar_index + 6, floorPx, "шорт ≤ " + str.tostring(floorPx, format.mintick), style=label.style_label_left, color=color.new(color.black, 100), textcolor=#f85149, size=size.normal)
+            if patKind == "" or patConf < i_minPatConf
+                edEvStruct := label.new(xh1f, yh1f, "TL", style=label.style_label_right, color=color.new(color.black, 100), textcolor=#e6edf3, size=size.small)
 
     if edDraw and i_edShowBos and bos and not na(bosLvl)
         edBosLn := line.new(xVis, bosLvl, bar_index, bosLvl, color=#58a6ff, width=1, style=line.style_dashed, extend=extend.right)
+        edBosLbl := label.new(bar_index - 6, bosLvl, "BOS", style=label.style_label_left, color=color.new(color.black, 100), textcolor=#58a6ff, size=size.tiny)
     if edDraw and i_edShowLiq and array.size(shPx) >= 2
         edLiqHi := line.new(xVis, array.get(shPx, array.size(shPx) - 2), bar_index, array.get(shPx, array.size(shPx) - 2), color=#c297ff, style=line.style_dotted, width=1, extend=extend.right)
     if edDraw and i_edShowLiq and array.size(slPx) >= 2
         edLiqLo := line.new(xVis, array.get(slPx, array.size(slPx) - 2), bar_index, array.get(slPx, array.size(slPx) - 2), color=#c297ff, style=line.style_dotted, width=1, extend=extend.right)
 
-    // ── 3) Базовые уровни (ВСЕГДА при «Разметка Ed»): сплошные линии + зоны ──
+    // ── 3) Один слой: сопр. / подд. (как в docs) — без дубля зон ──
     if edDraw
         float baseHi = rangeOk ? rngHi : ta.highest(high, i_consLb)
         float baseLo = rangeOk ? rngLo : ta.lowest(low, i_consLb)
-        edCeilLn := line.new(xVis, baseHi, bar_index, baseHi, color=#f0c040, width=3, extend=extend.right)
-        edFloorLn := line.new(xVis, baseLo, bar_index, baseLo, color=#8b949e, width=3, extend=extend.right)
-        edCeilTag := label.new(bar_index + 4, baseHi, str.tostring(baseHi, format.mintick), style=label.style_label_left, color=color.new(#161b22, 10), textcolor=#f0c040, size=size.normal)
-        edFloorTag := label.new(bar_index + 4, baseLo, str.tostring(baseLo, format.mintick), style=label.style_label_left, color=color.new(#161b22, 10), textcolor=#8b949e, size=size.normal)
+        edCeilLn := line.new(xVis, baseHi, bar_index, baseHi, color=#f0c040, width=2, extend=extend.right)
+        edFloorLn := line.new(xVis, baseLo, bar_index, baseLo, color=#58a6ff, width=2, extend=extend.right)
         if i_edSigZone
-            edSigBox := box.new(xVis, baseHi + edZ, xEnd, baseHi - edZ, bgcolor=color.new(#f85149, 72), border_color=#da3633, border_width=2)
-            edSupBox := box.new(xVis, baseLo + edZ, xEnd, baseLo - edZ, bgcolor=color.new(#58a6ff, 72), border_color=#388bfd, border_width=2)
+            edSigBox := box.new(xVis, baseHi + edZ, xEnd, baseHi - edZ, bgcolor=color.new(#f85149, 78), border_color=#da3633, border_width=2)
+            edSupBox := box.new(xVis, baseLo + edZ, xEnd, baseLo - edZ, bgcolor=color.new(#58a6ff, 78), border_color=#388bfd, border_width=2)
+        string hiLbl = "Сопр. " + str.tostring(baseHi, format.mintick) + (i_edTriggers ? " · лонг если >" : "")
+        string loLbl = "Подд. " + str.tostring(baseLo, format.mintick) + (i_edTriggers ? " · шорт если <" : "")
+        edCeilTag := label.new(xVis + 4, baseHi, hiLbl, style=label.style_label_left, color=color.new(#161b22, 15), textcolor=#f0c040, size=size.normal)
+        edFloorTag := label.new(xVis + 4, baseLo, loLbl, style=label.style_label_left, color=color.new(#161b22, 15), textcolor=#58a6ff, size=size.normal)
 
     // ── Слой ed_rbr / паттерны (только если включён доп. слой) ──
     if legacyDraw and drawStory and not edDraw
@@ -1322,7 +1438,7 @@ if barstate.islast
         fibL1 := line.new(xf, f50, xt, f50, color=color.new(#a371f7, 40), width=1, style=line.style_dashed)
         fibL2 := line.new(xf, f618, xt, f618, color=color.new(#a371f7, 20), width=1, style=line.style_dashed)
 
-    if legacyDraw and drawSmc
+    if legacyDraw and drawSmc and not edDraw
         if obBull
             obBox := box.new(bar_index - 1, high[1], bar_index + 10, low[1], bgcolor=color.new(#3fb950, 85), border_color=#3fb950)
         if obBear
@@ -1334,7 +1450,7 @@ if barstate.islast
         if (fvgUp or fvgDn) and not na(fvgTop)
             fvgBox := box.new(bar_index - 2, fvgTop, bar_index + 8, fvgBot, bgcolor=color.new(#58a6ff, 88), border_color=#58a6ff)
 
-    if legacyDraw and i_showZone and chartLayer == "full" and not na(zDemBot)
+    if legacyDraw and i_showZone and chartLayer == "full" and not edDraw and not na(zDemBot)
         zBox := box.new(bar_index - 15, zDemTop, bar_index + 6, zDemBot, bgcolor=color.new(#3fb950, 90), border_color=#3fb950)
 
     float eLo = na
@@ -1401,7 +1517,7 @@ if barstate.islast
         string legTxt = layerLegend + (rbrLock and patKind != "" ? " · lock: RBR > " + patLabelRu : "")
         table.cell(hud, 1, 8, legTxt, text_color=#8b949e, text_size=size.tiny)
         table.cell(hud, 0, 9, "На графике", text_color=#8b949e, text_size=size.tiny)
-        string onChart = i_edBreakdown ? "S/R + триггеры" : chartLayer == "ed_rbr" ? "боковик" : chartLayer == "pattern" ? "фигура" : "—"
+        string onChart = i_edBreakdown ? "Ed: S/R·TL·Fib·△·SMC" : chartLayer == "ed_rbr" ? "боковик" : chartLayer == "pattern" ? "фигура" : "—"
         table.cell(hud, 1, 9, onChart, text_color=#e6edf3, text_size=size.tiny)
 
 // Day H/L — только line на последнем баре (без plot)
