@@ -193,7 +193,16 @@ def rbr_alert_eligible(ta: object) -> bool:
     rbr = get_rbr_from_ta(ta)
     if not rbr:
         return False
-    return str(rbr.get("phase") or "") in {"fade_top", "await_break", "retest"}
+    if str(rbr.get("phase") or "") not in {"fade_top", "await_break", "retest"}:
+        return False
+    try:
+        from .plan_staleness import plan_is_stale
+
+        if plan_is_stale(ta):  # type: ignore[arg-type]
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def should_push_trader_deep_analysis(ta: object) -> bool:

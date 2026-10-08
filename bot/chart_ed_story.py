@@ -422,12 +422,18 @@ def draw_ed_story_layers_pro(
             max_x=x_box,
         )
     elif phase == "await_break" and floor > 0:
-        res = resistance if resistance > 0 else floor * 1.03
-        el = float(rbr.get("entry_lo") or res * 0.985)
-        eh = float(rbr.get("entry_hi") or res * 1.006)
-        from .chart_ed_minimal import draw_narrow_resistance_corridor
+        cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+        if cur < floor * 0.996:
+            _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
+        else:
+            res = resistance if resistance > 0 else floor * 1.03
+            el = float(rbr.get("entry_lo") or res * 0.985)
+            eh = float(rbr.get("entry_hi") or res * 1.006)
+            from .chart_ed_minimal import draw_narrow_resistance_corridor
 
-        draw_narrow_resistance_corridor(ax, bars, z_lo=min(el, res * 0.998), z_hi=max(eh, res * 1.002), board=board)
+            draw_narrow_resistance_corridor(
+                ax, bars, z_lo=min(el, res * 0.998), z_hi=max(eh, res * 1.002), board=board,
+            )
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 

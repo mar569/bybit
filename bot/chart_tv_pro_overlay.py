@@ -14,7 +14,15 @@ from .chart_display_policy import (
     chart_teaching_tags_enabled,
     ed_chart_visual_only,
 )
-from .chart_tv_coords import bar_x_norm, price_to_tv_y
+from .chart_tv_coords import (
+    bar_index_on_tv_screen,
+    bar_x_norm,
+    interpolate_bar_price,
+    price_on_tv_screen,
+    price_to_tv_y,
+    tv_vis_start,
+    tv_visible_bar_count,
+)
 from .range_breakdown_retest import get_rbr_from_ta
 from .ta_analysis import TAAnalysisResult
 
@@ -28,19 +36,39 @@ COL_FALSE = "#ffa657"
 class TvCoordMapper:
     """Bar index + price → норм. область свечей на скрине TV."""
 
-    def __init__(self, bars: list[KlineBar], y_min: float, y_max: float) -> None:
+    def __init__(
+        self,
+        bars: list[KlineBar],
+        y_min: float,
+        y_max: float,
+        *,
+        interval_minutes: int = 5,
+        display_hours: int | None = None,
+    ) -> None:
         self.bars = bars
         self.n = len(bars)
         self.y_min = y_min
         self.y_max = y_max
-        vis_count = max(24, min(self.n, int(self.n * 0.58))) if self.n else 24
-        self.vis_start = max(0, self.n - vis_count)
+        self.interval_minutes = interval_minutes
+        self.display_hours = display_hours
+        vis_count = tv_visible_bar_count(
+            self.n, interval_minutes=interval_minutes, display_hours=display_hours,
+        )
+        self.vis_start = tv_vis_start(
+            self.n, interval_minutes=interval_minutes, display_hours=display_hours,
+        )
         self.vis_n = max(1, self.n - self.vis_start)
-        self.x_start = 0.02
-        self.x_end = 0.96
+        self.x_start = 0.055
+        self.x_end = 0.915
 
     def y(self, price: float) -> float:
         return price_to_tv_y(float(price), self.y_min, self.y_max)
+
+    def price_visible(self, price: float) -> bool:
+        return price_on_tv_screen(price, self.y_min, self.y_max)
+
+    def bar_visible(self, bar_idx: int) -> bool:
+        return bar_index_on_tv_screen(bar_idx, vis_start=self.vis_start, n=self.n)
 
     def x(self, bar_idx: int) -> float:
         if self.n <= 0:
@@ -81,10 +109,16 @@ class TvCoordMapper:
 
 
 def draw_primary_pattern_tv_layer(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
-    from .pattern_specs import MIN_DRAW_CONFIDENCE
+    from .chart_patterns import pattern_relevant_now
 
     primary = getattr(ta, "primary_chart_pattern", None)
     if not primary or not getattr(ta, "reading_accept_pattern", True):
+        return
+    cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
+    if not pattern_relevant_now(primary, mapper.bars, current=cur):
+        return
+    pts = list(getattr(primary, "points", None) or [])
+    if pts and max(int(p.index) for p in pts) < mapper.vis_start - 4:
         return
     style = getattr(primary, "kind", "") or "double_top"
     from .chart_pattern_draw import PATTERN_STYLE
@@ -115,22 +149,39 @@ def _draw_primary_pattern_tv(ax: plt.Axes, mapper: TvCoordMapper, pattern, *, co
     bars = mapper.bars
     if not pattern or not bars:
         return
+    vis = mapper.vis_start
     for line in getattr(pattern, "lines", None) or []:
         end_idx = min(len(bars) - 1, max(line.end_idx, line.start_idx))
+        if end_idx < vis:
+            continue
+        start_idx = int(line.start_idx)
+        start_price = float(line.start_price)
+        if start_idx < vis:
+            start_idx = vis
+            start_price = interpolate_bar_price(
+                bars,
+                vis,
+                price_a=line.start_price,
+                price_b=line.end_price,
+                idx_a=line.start_idx,
+                idx_b=line.end_idx,
+            )
         if end_idx == line.start_idx:
             y1 = line.start_price
         else:
             slope = (line.end_price - line.start_price) / (line.end_idx - line.start_idx)
             y1 = line.start_price + slope * (end_idx - line.start_idx)
+        if not mapper.price_visible(start_price) and not mapper.price_visible(y1):
+            continue
         ax.plot(
-            [mapper.x(line.start_idx), mapper.x(end_idx)],
-            [mapper.y(line.start_price), mapper.y(y1)],
+            [mapper.x(start_idx), mapper.x(end_idx)],
+            [mapper.y(start_price), mapper.y(y1)],
             color=color,
             linewidth=1.25,
             alpha=0.92,
             zorder=5,
         )
-    pts = list(getattr(pattern, "points", None) or [])
+    pts = [p for p in (getattr(pattern, "points", None) or []) if mapper.bar_visible(p.index)]
     if len(pts) >= 3:
         xs = [mapper.x(p.index) for p in pts[:8]]
         ys = [mapper.y(p.price) for p in pts[:8]]
@@ -149,6 +200,8 @@ def _draw_primary_pattern_tv(ax: plt.Axes, mapper: TvCoordMapper, pattern, *, co
     for p in pts:
         if getattr(p, "role", "") in {"neck_left", "neck_right", "pole_start", "pole_end"}:
             continue
+        if not mapper.price_visible(p.price):
+            continue
         ax.plot(mapper.x(p.index), mapper.y(p.price), marker="o", color=color, markersize=3.5, linestyle="None", zorder=6)
 
 
@@ -159,6 +212,8 @@ def _draw_sweep_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) ->
     w, h = 0.018, 0.012
     for marker in getattr(smc, "markers", []) or []:
         if getattr(marker, "kind", "") != "sweep" or marker.index >= len(mapper.bars):
+            continue
+        if not mapper.bar_visible(marker.index):
             continue
         color = "#ffd33d" if getattr(marker, "direction", "") == "long" else "#ff7b72"
         ax.add_patch(
@@ -175,9 +230,11 @@ def _draw_sweep_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) ->
 
 
 def _draw_breakout_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
-    events = collect_breakout_retest_events(mapper.bars, ta, max_events=2)
+    events = collect_breakout_retest_events(mapper.bars, ta, max_events=3)
     show_labels = chart_breakout_marker_labels_enabled()
     for ev in events:
+        if not mapper.bar_visible(ev.bar_idx):
+            continue
         if ev.kind == "breakout":
             color = COL_BREAK
         elif ev.kind == "retest":
@@ -226,8 +283,10 @@ def _draw_context_zone_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisRes
     if picked is None:
         return
     bot, top, kind = picked
+    if not mapper.price_visible(bot) and not mapper.price_visible(top):
+        return
     color = "#3fb950" if any(k in kind for k in ("demand", "bull", "support")) else "#f85149"
-    i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 56))
+    i0 = mapper.vis_start
     mapper.rect(ax, i0, len(mapper.bars) - 1, bot, top, color=color, alpha=0.14)
 
 
@@ -240,12 +299,20 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
     phase = str(rbr.get("phase") or "")
     resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
 
-    if floor > 0:
+    if floor > 0 and mapper.price_visible(floor):
         mapper.hline(ax, floor, color="#8b949e", lw=1.0, alpha=0.65, ls="--")
         if chart_teaching_tags_enabled():
             ax.text(mapper.x_start + 0.008, mapper.y(floor), " ПОЛ", color="#8b949e", fontsize=6.5, va="top", zorder=8)
 
-    if phase in {"fade_top", "await_break"} and resistance > 0:
+    cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
+    if phase == "await_break" and floor > 0 and cur < floor * 0.996:
+        el = float(rbr.get("entry_lo") or floor * 0.996)
+        eh = float(rbr.get("entry_hi") or floor * 1.01)
+        mapper.hline(ax, eh, color="#58a6ff", lw=1.5, alpha=0.9)
+        mapper.hline(ax, el, color="#58a6ff", lw=1.5, alpha=0.9)
+        if chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(eh), " RETEST", color="#58a6ff", fontsize=6.5, va="bottom", zorder=8)
+    elif phase in {"fade_top", "await_break"} and resistance > 0:
         el = float(rbr.get("entry_lo") or resistance * 0.985)
         eh = float(rbr.get("entry_hi") or resistance * 1.006)
         z_lo, z_hi = min(el, resistance * 0.998), max(eh, resistance * 1.002)
@@ -254,7 +321,10 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
         mapper.hline(ax, z_hi, color="#f0c040", lw=1.5, alpha=0.9)
         mapper.hline(ax, z_lo, color="#f0c040", lw=1.5, alpha=0.9)
         if chart_teaching_tags_enabled():
-            ax.text(mapper.x_start + 0.008, mapper.y(z_hi), " ВХОД", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+            from .plan_staleness import plan_is_stale
+
+            if not plan_is_stale(ta):
+                ax.text(mapper.x_start + 0.008, mapper.y(z_hi), " ВХОД", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
     elif phase == "retest" and floor > 0:
         el = float(rbr.get("entry_lo") or floor * 0.996)
         eh = float(rbr.get("entry_hi") or floor * 1.01)
@@ -267,7 +337,10 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
 def _draw_forward_boxes_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult, rbr: dict | None) -> None:
     from .chart_plan_display import build_display_plan
     from .chart_position_boxes import plan_for_display
+    from .plan_staleness import plan_is_stale
 
+    if plan_is_stale(ta):
+        return
     raw = plan_for_display(ta)
     if raw is None:
         return
@@ -332,12 +405,24 @@ def _tv_plan_glyphs(
 
 
 def _draw_probable_path_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
+    from .plan_staleness import plan_is_stale
+    from .pro_invariants import target_matches_side
+
+    if plan_is_stale(ta):
+        return
     side = str(getattr(ta, "action_priority", "") or "").lower()
+    rbr = get_rbr_from_ta(ta)
+    if rbr and str(rbr.get("direction") or "") in {"long", "short"}:
+        side = str(rbr["direction"])
     tps = [float(x) for x in (getattr(ta, "target_prices", None) or []) if x]
-    if not tps or not mapper.bars:
+    if rbr:
+        tps = tps or [float(x) for x in (rbr.get("targets") or []) if x]
+    if not tps or not mapper.bars or side not in {"long", "short"}:
         return
     tp = tps[0]
     cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
+    if not target_matches_side(side, cur, tp):
+        return
     x0 = mapper.x(len(mapper.bars) - 1)
     x1 = min(x0 + 0.12, 0.86)
     ax.annotate(
@@ -393,6 +478,7 @@ def compose_tradingview_pro_png(
     ta: TAAnalysisResult,
     *,
     interval_minutes: int = 15,
+    display_hours: int | None = None,
 ) -> bytes | None:
     import io
 
@@ -421,8 +507,18 @@ def compose_tradingview_pro_png(
     ax.set_ylim(0, 1)
     ax.axis("off")
     ax.set_anchor("C")
-    y_min, y_max = tv_visible_price_range(bars, ta)
-    drew = draw_tv_pro_layers(ax, bars, ta, y_min=y_min, y_max=y_max, interval_minutes=interval_minutes)
+    y_min, y_max = tv_visible_price_range(
+        bars, ta, interval_minutes=interval_minutes, display_hours=display_hours,
+    )
+    drew = draw_tv_pro_layers(
+        ax,
+        bars,
+        ta,
+        y_min=y_min,
+        y_max=y_max,
+        interval_minutes=interval_minutes,
+        display_hours=display_hours,
+    )
     if drew < 2:
         plt.close(fig)
         logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
@@ -449,6 +545,7 @@ def draw_tv_pro_layers(
     y_min: float,
     y_max: float,
     interval_minutes: int = 15,
+    display_hours: int | None = None,
 ) -> int:
     """Число ключевых слоёв (для проверки «пустого» TV PNG)."""
     if not bars:
@@ -461,7 +558,13 @@ def draw_tv_pro_layers(
     except Exception:
         logger.debug("TV overlay enrich skipped", exc_info=True)
 
-    mapper = TvCoordMapper(bars, y_min, y_max)
+    mapper = TvCoordMapper(
+        bars,
+        y_min,
+        y_max,
+        interval_minutes=interval_minutes,
+        display_hours=display_hours,
+    )
 
     from .chart_pro import resolve_pro_chart_mode
 

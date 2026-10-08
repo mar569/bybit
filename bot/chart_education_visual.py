@@ -146,14 +146,19 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
     if smc is None:
         return
     show_tags = chart_teaching_tags_enabled()
-    i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 80))
+    i0 = getattr(mapper, "vis_start", max(0, len(mapper.bars) - min(len(mapper.bars), 80)))
+    i1 = len(mapper.bars) - 1
 
     for gap in list(getattr(smc, "fvgs", None) or [])[-2:]:
+        if int(gap.end_idx) < i0:
+            continue
+        if not mapper.price_visible(gap.bottom) and not mapper.price_visible(gap.top):
+            continue
         color = "#3ddc84" if getattr(gap, "direction", "") == "bullish" else "#ff6b6b"
         mapper.rect(
             ax,
-            max(0, gap.start_idx),
-            min(len(mapper.bars) - 1, gap.end_idx),
+            max(i0, gap.start_idx),
+            min(i1, gap.end_idx),
             gap.bottom,
             gap.top,
             color=color,
@@ -162,25 +167,44 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
 
     if getattr(smc, "discount_zone", None):
         lo, hi = smc.discount_zone
-        mapper.rect(ax, i0, len(mapper.bars) - 1, lo, hi, color="#3fb950", alpha=0.10)
+        if mapper.price_visible(lo) or mapper.price_visible(hi):
+            mapper.rect(ax, i0, i1, lo, hi, color="#3fb950", alpha=0.10)
     if getattr(smc, "premium_zone", None):
         lo, hi = smc.premium_zone
-        mapper.rect(ax, i0, len(mapper.bars) - 1, lo, hi, color="#f85149", alpha=0.10)
+        if mapper.price_visible(lo) or mapper.price_visible(hi):
+            mapper.rect(ax, i0, i1, lo, hi, color="#f85149", alpha=0.10)
 
     if getattr(smc, "structure_break_level", None):
         lv = float(smc.structure_break_level)
-        mapper.hline(ax, lv, color="#f0c040", lw=1.1, alpha=0.88, ls="-.")
-        if show_tags:
-            from .chart_analysis_text import structure_break_label_ru
+        if not mapper.price_visible(lv):
+            lv = 0.0
+        if lv > 0:
+            mapper.hline(ax, lv, color="#f0c040", lw=1.1, alpha=0.88, ls="-.")
+            if show_tags:
+                from .chart_analysis_text import structure_break_label_ru
 
-            kind = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"))
-            ax.text(mapper.x_start + 0.01, mapper.y(lv), f" {kind[:10]}", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+                kind = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"))
+                ax.text(
+                    mapper.x_start + 0.01,
+                    mapper.y(lv),
+                    f" {kind[:10]}",
+                    color="#f0c040",
+                    fontsize=6.5,
+                    va="bottom",
+                    zorder=8,
+                )
 
-    for lv in list(getattr(smc, "liquidity_levels", None) or [])[:5]:
-        mapper.hline(ax, float(lv.price), color="#8899aa", lw=0.7, alpha=0.5, ls=":")
+    for lv in list(getattr(smc, "liquidity_levels", None) or [])[:4]:
+        px = float(lv.price)
+        if mapper.price_visible(px):
+            mapper.hline(ax, px, color="#8899aa", lw=0.7, alpha=0.5, ls=":")
 
-    for marker in list(getattr(smc, "markers", None) or [])[:6]:
+    for marker in list(getattr(smc, "markers", None) or [])[:5]:
         if marker.index >= len(mapper.bars):
+            continue
+        if not mapper.bar_visible(marker.index):
+            continue
+        if not mapper.price_visible(marker.price):
             continue
         kind = str(getattr(marker, "kind", "") or "")
         x, y = mapper.x(marker.index), mapper.y(marker.price)
@@ -201,13 +225,15 @@ def draw_order_blocks_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
     smc = getattr(ta, "smc", None)
     if smc is None:
         return
-    i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 100))
-    for ob in list(getattr(smc, "order_blocks", None) or [])[-2:]:
+    i0 = getattr(mapper, "vis_start", max(0, len(mapper.bars) - min(len(mapper.bars), 100)))
+    for ob in list(getattr(smc, "order_blocks", None) or [])[-1:]:
         try:
             top, bot = float(ob.top), float(ob.bottom)
         except (TypeError, ValueError, AttributeError):
             continue
         if top <= bot:
+            continue
+        if not mapper.price_visible(bot) and not mapper.price_visible(top):
             continue
         col = "#3fb950" if getattr(ob, "direction", "") == "bullish" else "#f85149"
         mapper.rect(ax, i0, len(mapper.bars) - 1, bot, top, color=col, alpha=0.13)
@@ -220,8 +246,9 @@ def draw_consolidation_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
     top, bot = float(cons.top), float(cons.bottom)
     if top <= bot:
         return
-    i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 120))
-    mapper.rect(ax, i0, len(mapper.bars) - 1, bot, top, color="#8b949e", alpha=0.11)
+    i0 = getattr(mapper, "vis_start", max(0, len(mapper.bars) - min(len(mapper.bars), 120)))
+    if mapper.price_visible(bot) or mapper.price_visible(top):
+        mapper.rect(ax, i0, len(mapper.bars) - 1, bot, top, color="#8b949e", alpha=0.11)
 
 
 @contextlib.contextmanager

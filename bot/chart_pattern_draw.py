@@ -491,7 +491,9 @@ def draw_chart_patterns(
     primary = force_primary
     if primary is None:
         primary = pick_primary_pattern(
-            [p for p in patterns if p.confidence >= min_confidence]
+            [p for p in patterns if p.confidence >= min_confidence],
+            bars=bars,
+            current=bars[-1].close,
         )
     if primary is None:
         return

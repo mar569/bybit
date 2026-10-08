@@ -19,18 +19,25 @@ def enrich_teaching_label_board(
     if not bars:
         return
     cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+    from .plan_staleness import plan_is_stale
+
     rbr = get_rbr_from_ta(ta)
     if rbr:
         floor = float(rbr.get("range_bottom") or 0)
         ceil = float(rbr.get("range_top") or 0)
+        phase = str(rbr.get("phase") or "")
         if floor > 0:
             board.add(floor, "ПОЛ", "#8b949e", side="right", priority=95, ref=cur, skip_if_reserved=False)
-        if ceil > 0:
+        if ceil > 0 and phase not in {"broken", "retest"}:
             board.add(ceil, "ПОТОЛОК", "#f0c040", side="right", priority=94, ref=cur, skip_if_reserved=False)
         el, eh = float(rbr.get("entry_lo") or 0), float(rbr.get("entry_hi") or 0)
-        if el > 0 and eh > el:
+        show_entry = el > 0 and eh > el and not plan_is_stale(ta)
+        if show_entry and phase == "await_break" and floor > 0 and cur < floor * 0.996:
+            show_entry = False
+        if show_entry:
             mid = (el + eh) / 2.0
-            board.add(mid, "ВХОД", "#e3b341", side="right", priority=93, ref=cur, skip_if_reserved=False)
+            if abs(cur - mid) / max(mid, 1e-12) <= 0.045:
+                board.add(mid, "ВХОД", "#e3b341", side="right", priority=93, ref=cur, skip_if_reserved=False)
 
     brk = float(getattr(ta, "breakout_level", 0) or 0)
     brdn = float(getattr(ta, "breakdown_level", 0) or 0)

@@ -2716,7 +2716,8 @@ def _price_to_axis_y(price: float, y_min: float, y_max: float) -> float:
         return (TV_CHART_Y_BOTTOM + TV_CHART_Y_TOP) / 2
     ratio = (price - y_min) / (y_max - y_min)
     ratio = max(0.0, min(1.0, ratio))
-    return TV_CHART_Y_BOTTOM + (1.0 - ratio) * (TV_CHART_Y_TOP - TV_CHART_Y_BOTTOM)
+    # y=0 низ кадра. Раньше ось была зеркальной — уровни ложились не на свечи.
+    return TV_CHART_Y_BOTTOM + ratio * (TV_CHART_Y_TOP - TV_CHART_Y_BOTTOM)
 
 
 def _tv_nearby_levels(ta: TAAnalysisResult) -> list[float]:
@@ -3626,6 +3627,7 @@ async def render_annotated_chart(
                     bars_chart,
                     ta_chart,
                     interval_minutes=iv_chart,
+                    display_hours=zoom_hours,
                 )
                 if composed:
                     out_ta = ta_chart if ta_chart is not None else ta

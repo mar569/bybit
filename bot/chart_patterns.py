@@ -2463,8 +2463,15 @@ def pattern_relevant_now(
             if move >= 10.0:
                 return False
 
-    if kind in {"double_top", "head_shoulders", "triple_top"}:
+    if kind in {"double_top", "head_shoulders", "triple_top", "rounded_top", "inverse_cup_handle"}:
         if neck and neck > 0 and cur <= neck * 0.94 and bars_after >= 24:
+            return False
+        ref = float(bars[last_i].close)
+        if ref > 0 and bars_after >= 28:
+            move = (cur - ref) / ref * 100.0
+            if move <= -12.0:
+                return False
+        if pattern.target_price and cur <= float(pattern.target_price) * 1.04:
             return False
 
     return True

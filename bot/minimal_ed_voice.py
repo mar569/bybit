@@ -119,4 +119,6 @@ def build_minimal_ed_voice_html(
         body = escape(plain)
     if stale:
         return f"{stale}\n\n{body}"
+    if get_rbr_from_ta(ta) and "график" not in plain.lower():
+        body = f"{body}\n<i>Уровни и SL/TP — на графике.</i>"
     return body

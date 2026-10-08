@@ -19,7 +19,10 @@ def chart_plan_targets(
     entry_hi: float | None,
 ) -> list[float]:
     current = float(getattr(ta, "current_price", 0) or 0)
+    rbr_side = get_rbr_from_ta(ta)
     side = bias_side(getattr(ta, "verdict", ""), getattr(ta, "action_priority", ""))
+    if rbr_side and str(rbr_side.get("direction") or "") in {"long", "short"}:
+        side = str(rbr_side["direction"])
     if side not in {"long", "short"}:
         side = preferred_trade_side(ta) or "long"
     entry = None
@@ -162,6 +165,8 @@ def _entry_stop_tp(ta: TAAnalysisResult) -> tuple[str, float, float, float] | No
                         return "short", entry, stop_f, tp
 
     side = preferred_trade_side(ta)
+    if rbr and str(rbr.get("direction") or "") == "short":
+        side = "short"
     if side not in {"long", "short"}:
         v = (getattr(ta, "verdict", "") or "").upper()
         if v == "LONG":
@@ -339,6 +344,10 @@ def draw_forward_plan_boxes(
     use_xlim: bool = True,
 ) -> bool:
     """TP/SL/вход справа для любого плана — short или long."""
+    from .plan_staleness import plan_is_stale
+
+    if plan_is_stale(ta):
+        return False
     if draw_forward_short_projection(ax, bars, ta, use_xlim=use_xlim):
         return True
     if draw_forward_long_projection(ax, bars, ta, use_xlim=use_xlim):
