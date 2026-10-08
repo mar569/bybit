@@ -2525,12 +2525,22 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes)
+    ed_story = False
     if manual_ta_chart or signal_chart:
+        try:
+            from .chart_ed_story import use_ed_story_chart
+
+            ed_story = use_ed_story_chart(ta)
+        except Exception:
+            ed_story = False
+    if (manual_ta_chart or signal_chart) and not ed_story:
         try:
             from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
 
             draw_manual_ta_layers(ax, bars, ta)
-            draw_education_overlays(ax, bars, ta)
+            draw_education_overlays(
+                ax, bars, ta, manual_compact=(manual_ta_chart or signal_chart),
+            )
         except Exception:
             logger.exception("Manual TA chart layers failed")
     elif clean_chart:
@@ -2553,11 +2563,12 @@ def _render_chart_figure(
         except Exception:
             logger.debug("UT overlay draw failed", exc_info=True)
     current = bars[-1].close
-    ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
-    ax.text(
-        _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
-        color=accent_color, fontsize=7, va="center", ha="left",
-    )
+    if not ed_story:
+        ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
+        ax.text(
+            _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
+            color=accent_color, fontsize=7, va="center", ha="left",
+        )
     if clean_chart:
         ut_sfx = " · UT" if ut_overlay is not None else ""
         ax.set_title(
@@ -2580,7 +2591,26 @@ def _render_chart_figure(
     from .manual_ta import chart_display_hours
 
     zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
-    _apply_display_zoom(ax, bars, display_hours=zoom_h, interval_minutes=interval_minutes, set_ylim=True)
+    trail = 0.22
+    if ed_story:
+        from .chart_ed_story import ED_STORY_TRAILING
+
+        trail = ED_STORY_TRAILING
+    _apply_display_zoom(
+        ax,
+        bars,
+        display_hours=zoom_h,
+        interval_minutes=interval_minutes,
+        trailing=trail,
+        set_ylim=True,
+    )
+    if ed_story:
+        try:
+            from .chart_ed_story import draw_ed_story_layers
+
+            draw_ed_story_layers(ax, bars, ta)
+        except Exception:
+            logger.exception("Ed story chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:
         try:
             _draw_urals_inset(

@@ -11,6 +11,7 @@ from .chart_analysis_text import collect_reason_and_confirmations, pick_chart_zo
 from .chart_position_boxes import chart_plan_targets, draw_position_risk_boxes
 from .chart_story_labels import draw_story_frame
 from .human_trade_brief import preferred_trade_side
+from .range_breakdown_retest import get_rbr_from_ta
 from .ta_analysis import TAAnalysisResult, fmt_price
 
 CHART_BG = "#0d1117"
@@ -68,7 +69,13 @@ def _hline_label(
     )
 
 
-def draw_education_overlays(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+def draw_education_overlays(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    manual_compact: bool = False,
+) -> None:
     """Фигуры, стрелки сценария, подписи «поддержка/манипуляция» поверх manual layers."""
     if not bars:
         return
@@ -129,32 +136,33 @@ def draw_education_overlays(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
             )
             ax.text(x0, top, f"  {tag}  ", color=col, fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=3)
 
-    side = preferred_trade_side(ta)
-    if side == "long" and ta.nearest_support:
-        p = float(ta.nearest_support)
-        ax.text(
-            _x_span(bars)[0], p, "  Поддержка  ",
-            color="#3fb950", fontsize=7, fontweight="bold", va="top", ha="left", zorder=8,
-            bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#3fb950", alpha=0.9),
-        )
-    elif side == "short" and ta.nearest_resistance:
-        p = float(ta.nearest_resistance)
-        ax.text(
-            _x_span(bars)[0], p, "  Сопротивление  ",
-            color="#f85149", fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=8,
-            bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#f85149", alpha=0.9),
-        )
+    if not manual_compact:
+        side = preferred_trade_side(ta)
+        if side == "long" and ta.nearest_support:
+            p = float(ta.nearest_support)
+            ax.text(
+                _x_span(bars)[0], p, "  Поддержка  ",
+                color="#3fb950", fontsize=7, fontweight="bold", va="top", ha="left", zorder=8,
+                bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#3fb950", alpha=0.9),
+            )
+        elif side == "short" and ta.nearest_resistance:
+            p = float(ta.nearest_resistance)
+            ax.text(
+                _x_span(bars)[0], p, "  Сопротивление  ",
+                color="#f85149", fontsize=7, fontweight="bold", va="bottom", ha="left", zorder=8,
+                bbox=dict(boxstyle="round,pad=0.12", facecolor=CHART_BG, edgecolor="#f85149", alpha=0.9),
+            )
 
-    reason, confirms = collect_reason_and_confirmations(ta)
-    conf_txt = " · ".join(f"✓ {c}" for c in confirms[:3]) if confirms else ""
-    body = f"Причина: {reason}" if reason else "Причина: структура и уровни на графике"
-    if conf_txt:
-        body = f"{body}\n{conf_txt}"
-    ax.text(
-        0.5, 0.98, body,
-        transform=ax.transAxes, va="top", ha="center", color=CHART_TEXT, fontsize=7.2, zorder=11,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
-    )
+        reason, confirms = collect_reason_and_confirmations(ta)
+        conf_txt = " · ".join(f"✓ {c}" for c in confirms[:3]) if confirms else ""
+        body = f"Причина: {reason}" if reason else "Причина: структура и уровни на графике"
+        if conf_txt:
+            body = f"{body}\n{conf_txt}"
+        ax.text(
+            0.5, 0.98, body,
+            transform=ax.transAxes, va="top", ha="center", color=CHART_TEXT, fontsize=7.2, zorder=11,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
+        )
     draw_story_frame(ax, bars, ta)
     try:
         from .chart_range_breakdown_draw import draw_range_breakdown_retest_path
@@ -210,6 +218,9 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     current = float(getattr(ta, "current_price", 0) or bars[-1].close)
     x0, x1 = _x_span(bars)
     side = preferred_trade_side(ta)
+    rbr = get_rbr_from_ta(ta)
+    story_focus = bool(rbr and str(rbr.get("phase") or "") in {"fade_top", "await_break"})
+    near_pct = 0.06 if story_focus else 0.12
     drawn_prices: list[float] = []
 
     def _near(p: float) -> bool:
@@ -233,13 +244,22 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
     seg = bars[-min(96, len(bars)) :]
     loc_hi = max(b.high for b in seg)
     loc_lo = min(b.low for b in seg)
-    if not _near(loc_hi):
+    def _too_close(a: float, b: float) -> bool:
+        return abs(a - b) / max(a, 1e-9) < 0.0025
+
+    day_hi = next((r.price for r in session_reference_levels(bars) if r.kind == "daily_high"), None)
+    day_lo = next((r.price for r in session_reference_levels(bars) if r.kind == "daily_low"), None)
+    if not _near(loc_hi) and not (day_hi and _too_close(loc_hi, day_hi)):
         _hline_label(
             ax, x1, loc_hi, f"лок. макс. {fmt_price(loc_hi)}",
             color="#79c0ff", lw=1.0, ls=":", fontweight="bold",
         )
         _mark(loc_hi)
-    if not _near(loc_lo):
+    if (
+        not story_focus
+        and not _near(loc_lo)
+        and not (day_lo and _too_close(loc_lo, day_lo))
+    ):
         _hline_label(
             ax, x1, loc_lo, f"лок. мин. {fmt_price(loc_lo)}",
             color="#56d364", lw=1.0, ls=":", fontweight="bold",
@@ -251,24 +271,33 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         (getattr(ta, "nearest_resistance", None), "Сопр.", "#f85149"),
         (getattr(ta, "nearest_support", None), "Поддерж.", "#3fb950"),
     ):
-        if price and float(price) > 0 and abs(float(price) - current) / current <= 0.12:
+        if price and float(price) > 0 and abs(float(price) - current) / current <= near_pct:
             p = float(price)
             if not _near(p):
                 _hline_label(ax, x1, p, f"{label} {fmt_price(p)}", color=col, lw=1.15)
                 _mark(p)
 
-    for lv in (getattr(ta, "levels", None) or [])[:3]:
-        p = float(lv.price)
-        if p <= 0 or abs(p - current) / current > 0.12 or _near(p):
-            continue
-        col = "#3fb950" if getattr(lv, "kind", "") == "support" else "#f85149"
-        _hline_label(ax, x1, p, fmt_price(p), color=col, lw=0.9, ls=":")
-        _mark(p)
+    if len(drawn_prices) < 5:
+        for lv in (getattr(ta, "levels", None) or [])[:2]:
+            p = float(lv.price)
+            if p <= 0 or abs(p - current) / current > 0.12 or _near(p):
+                continue
+            col = "#3fb950" if getattr(lv, "kind", "") == "support" else "#f85149"
+            _hline_label(ax, x1, p, fmt_price(p), color=col, lw=0.9, ls=":")
+            _mark(p)
 
     _draw_consolidation(ax, bars, ta, x0, x1)
 
-    # 3) Зона (valid или кандидат)
+    # 3) Зона (valid или кандидат) — не дублируем уже нарисованный боковик
     zone = pick_chart_zone(ta, current)
+    cons = getattr(ta, "consolidation", None)
+    if zone and cons is not None:
+        c_top, c_bot = float(cons.top), float(cons.bottom)
+        z_top, z_bot = float(zone["top"]), float(zone["bottom"])
+        overlap = max(0.0, min(c_top, z_top) - max(c_bot, z_bot))
+        span = max(c_top - c_bot, z_top - z_bot, 1e-9)
+        if overlap / span >= 0.55:
+            zone = None
     if zone:
         top, bot = float(zone["top"]), float(zone["bottom"])
         kind = str(zone.get("kind", "demand"))
@@ -291,7 +320,8 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
         )
 
     # 4) Триггеры — оба направления (ручной разбор)
-    if ta.breakout_level and abs(float(ta.breakout_level) - current) / current <= 0.15:
+    br_dist = 0.08 if story_focus else 0.15
+    if ta.breakout_level and abs(float(ta.breakout_level) - current) / current <= br_dist:
         p = float(ta.breakout_level)
         if not _near(p):
             _hline_label(
@@ -299,7 +329,7 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
                 color="#3fb950", lw=1.6, fontweight="bold",
             )
             _mark(p)
-    if ta.breakdown_level and abs(float(ta.breakdown_level) - current) / current <= 0.15:
+    if ta.breakdown_level and abs(float(ta.breakdown_level) - current) / current <= br_dist:
         p = float(ta.breakdown_level)
         if not _near(p):
             _hline_label(
@@ -337,14 +367,16 @@ def draw_manual_ta_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             color=col, lw=0, draw_line=False,
         )
 
-    tps = chart_plan_targets(ta, entry_lo=entry_lo, entry_hi=entry_hi)
-    for i, tp in enumerate(tps[1:3], start=2):
-        if not tp:
-            continue
-        _hline_label(
-            ax, x1, float(tp), f"цель {i} {fmt_price(float(tp))}",
-            color="#d29922", lw=1.0, ls=":", fontweight="normal",
-        )
+    if len(drawn_prices) < 7:
+        tps = chart_plan_targets(ta, entry_lo=entry_lo, entry_hi=entry_hi)
+        for i, tp in enumerate(tps[1:2], start=2):
+            if not tp or _near(float(tp)):
+                continue
+            _hline_label(
+                ax, x1, float(tp), f"цель {i} {fmt_price(float(tp))}",
+                color="#d29922", lw=1.0, ls=":", fontweight="normal",
+            )
+            _mark(float(tp))
 
     # 6) Тренд
     tls = list(getattr(ta, "trend_lines", None) or [])

@@ -123,6 +123,15 @@ def resolve_multi_tf_consolidation(
             s += 4.0
         return s
 
+    def _width_pct(zone: ConsolidationZone | None) -> float:
+        if zone is None:
+            return 999.0
+        top, bot = float(zone.top), float(zone.bottom)
+        mid_p = (top + bot) / 2.0
+        if mid_p <= 0 or top <= bot:
+            return 999.0
+        return (top - bot) / mid_p * 100.0
+
     candidates = [
         (ltf, _score(ltf, 1)),
         (mid, _score(mid, 2)),
@@ -132,4 +141,18 @@ def resolve_multi_tf_consolidation(
     best_zone, best_score = max(candidates, key=lambda x: x[1])
     if best_score < 20.0:
         return ltf or mid or htf or h4
+
+    # На рабочем ТF не подменяем узкий боковик широким H4/H1 (162–188 vs 169–180).
+    macro = h4 or htf
+    if macro is not None and best_zone is macro and _width_pct(macro) > 10.5:
+        tight_inside: list[ConsolidationZone] = []
+        for z in (ltf, mid, htf):
+            if z is None:
+                continue
+            bot, top = float(z.bottom), float(z.top)
+            if bot <= current <= top and _width_pct(z) <= 9.0:
+                tight_inside.append(z)
+        if tight_inside:
+            return min(tight_inside, key=lambda z: float(z.top) - float(z.bottom))
+
     return best_zone

@@ -311,7 +311,9 @@ def fmt_price(price: float) -> str:
         return f"{price:.4f}"
     if price >= 0.01:
         return f"{price:.5f}"
-    return f"{price:.7g}"
+    if price >= 0.0001:
+        return f"{price:.5f}".rstrip("0").rstrip(".")
+    return f"{price:.4g}"
 
 
 def _verdict_to_side(verdict: str) -> str | None:
@@ -2695,6 +2697,7 @@ def run_ta_analysis(
         breakout=breakout,
         post_pump=post_pump,
         current=current,
+        repeat_spike_dump_risk=repeat_spike_dump_risk,
     )
 
     if neutral:
@@ -5044,6 +5047,16 @@ def format_scenario_update_html(
         )
         if breakout_level:
             body += f"\n▶️ LONG при ≥<b>{fmt_price(breakout_level)}</b>."
+    elif update_kind == "zone_reached":
+        body = (
+            f"📍 <b>Цена в нашей зоне</b> (~<b>{fmt_price(reference_price)}</b>, "
+            f"сейчас <b>{fmt_price(price)}</b>).\n"
+            "Смотрим <b>реакцию</b> — шорт только после отказа, <b>не в зелёный импульс</b>."
+        )
+        if stop_hint:
+            body += f"\n🛑 стоп ~<b>{fmt_price(stop_hint)}</b>"
+        if target_hints:
+            body += f"\n🎯 тейк ориентир: <b>{' → '.join(fmt_price(t) for t in target_hints[:2])}</b>"
     elif update_kind == "entry_short":
         body = (
             f"🔻 <b>Можно смотреть SHORT</b> — цена ≤<b>{fmt_price(reference_price)}</b> "

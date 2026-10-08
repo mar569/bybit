@@ -8,6 +8,7 @@ from matplotlib.patches import Rectangle
 from .bybit_klines import KlineBar
 from .human_trade_brief import preferred_trade_side
 from .pro_invariants import bias_side, ensure_minimum_targets, resolve_wait_plan_levels
+from .range_breakdown_retest import get_rbr_from_ta
 from .ta_analysis import TAAnalysisResult, fmt_price
 
 
@@ -40,6 +41,21 @@ def _idx_to_date(bars: list[KlineBar], idx: int):
 
 
 def _entry_stop_tp(ta: TAAnalysisResult) -> tuple[str, float, float, float] | None:
+    rbr = get_rbr_from_ta(ta)
+    if rbr and str(rbr.get("direction") or "") == "short":
+        el, eh = rbr.get("entry_lo"), rbr.get("entry_hi")
+        stop = rbr.get("stop")
+        if el and eh and stop:
+            entry_lo, entry_hi = float(el), float(eh)
+            if entry_hi > entry_lo and float(stop) > 0:
+                tps = [float(t) for t in (rbr.get("targets") or []) if t]
+                if tps:
+                    entry = (entry_lo + entry_hi) / 2.0
+                    stop_f = float(stop)
+                    tp = float(tps[0])
+                    if stop_f > entry and tp < entry:
+                        return "short", entry, stop_f, tp
+
     side = preferred_trade_side(ta)
     if side not in {"long", "short"}:
         v = (getattr(ta, "verdict", "") or "").upper()
@@ -82,7 +98,84 @@ def _entry_stop_tp(ta: TAAnalysisResult) -> tuple[str, float, float, float] | No
     return side, entry, stop, tp
 
 
+def _compact_wait_plan(ta: TAAnalysisResult, *, entry: float, tp: float) -> bool:
+    verdict = (getattr(ta, "verdict", "") or "").upper()
+    rbr = get_rbr_from_ta(ta)
+    phase = str(rbr.get("phase") or "") if rbr else ""
+    if phase in {"fade_top", "await_break"}:
+        return True
+    if verdict == "WAIT" and entry > 0 and tp > 0:
+        return abs(entry - tp) / entry > 0.09
+    return False
+
+
+def draw_forward_short_projection(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+) -> bool:
+    """TV-стиль: блок SL/вход/TP вправо «вперёд» (ожидаемый шорт от зоны)."""
+    rbr = get_rbr_from_ta(ta)
+    phase = str(rbr.get("phase") or "") if rbr else ""
+    if not rbr or phase not in {"fade_top", "await_break", "retest"}:
+        return False
+    plan = _entry_stop_tp(ta)
+    if plan is None:
+        return False
+    side, entry, stop, tp = plan
+    if side != "short" or stop <= entry or tp >= entry:
+        return False
+
+    i0 = max(0, len(bars) - min(len(bars), 72))
+    i1 = len(bars) - 1
+    x0 = mdates.date2num(_idx_to_date(bars, i0))
+    x1 = mdates.date2num(_idx_to_date(bars, i1))
+    span = max(x1 - x0, 0.001)
+    x_box = x1 + span * 0.06
+    width = span * 0.28
+
+    entry_lo = float(rbr.get("entry_lo") or entry)
+    entry_hi = float(rbr.get("entry_hi") or entry)
+    ax.add_patch(
+        Rectangle(
+            (x_box, stop), width, max(stop - entry_hi, (entry_hi - entry_lo) * 0.5),
+            facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.26, zorder=2,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (x_box, entry_lo), width, entry_hi - entry_lo,
+            facecolor="#e3b341", edgecolor="#e3b341", alpha=0.18, zorder=2,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (x_box, tp), width, max(entry_lo - tp, entry * 0.003),
+            facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.24, zorder=2,
+        )
+    )
+    ax.axhline(tp, xmin=0.55, xmax=0.98, color="#e3b341", linewidth=1.4, alpha=0.9, zorder=3)
+    ax.text(
+        x_box + width * 0.04, tp,
+        f"  TP ~ {fmt_price(tp)}  ",
+        color="#e3b341", fontsize=7, fontweight="bold", va="center", zorder=6,
+    )
+    ax.text(
+        x_box + width * 0.04, (entry_lo + entry_hi) / 2,
+        f"  вход  ",
+        color="#e6edf3", fontsize=7, fontweight="bold", va="center", zorder=6,
+    )
+    ax.text(
+        x_box + width * 0.04, stop - (stop - entry_hi) * 0.35,
+        f"  SL {fmt_price(stop)}  ",
+        color=_BOX_RED, fontsize=7, fontweight="bold", va="center", zorder=6,
+    )
+    return True
+
+
 def draw_position_risk_boxes(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    if draw_forward_short_projection(ax, bars, ta):
+        return
     plan = _entry_stop_tp(ta)
     if plan is None or not bars:
         return
@@ -95,24 +188,47 @@ def draw_position_risk_boxes(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisR
     width = max((x1 - x0) * 0.22, 0.0008)
     x_box = x1 - width * 0.95
 
+    compact = _compact_wait_plan(ta, entry=entry, tp=tp)
+
     if side == "long":
-        tp_rect = Rectangle((x_box, entry), width, tp - entry, facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.22, zorder=2)
         sl_rect = Rectangle((x_box, stop), width, entry - stop, facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.28, zorder=2)
         tp_lbl_y, sl_lbl_y = (entry + tp) / 2, (entry + stop) / 2
+        if compact:
+            tp_rect = None
+        else:
+            tp_rect = Rectangle((x_box, entry), width, tp - entry, facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.22, zorder=2)
     else:
         sl_rect = Rectangle((x_box, entry), width, stop - entry, facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.28, zorder=2)
-        tp_rect = Rectangle((x_box, tp), width, entry - tp, facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.22, zorder=2)
         tp_lbl_y, sl_lbl_y = (entry + tp) / 2, (entry + stop) / 2
+        if compact:
+            tp_rect = None
+        else:
+            tp_rect = Rectangle((x_box, tp), width, entry - tp, facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.22, zorder=2)
 
-    ax.add_patch(tp_rect)
+    if tp_rect is not None:
+        ax.add_patch(tp_rect)
     ax.add_patch(sl_rect)
     ax.axhline(entry, xmin=0.72, xmax=0.98, color="#e6edf3", linewidth=1.0, linestyle="-", alpha=0.85, zorder=3)
 
-    ax.text(
-        x_box + width * 0.02, tp_lbl_y,
-        f"тейк {fmt_price(tp)}",
-        color=_BOX_GREEN, fontsize=7.5, fontweight="bold", va="center", ha="left", zorder=6,
-    )
+    if compact:
+        ax.hlines(tp, xmin=x0, xmax=x1, colors=_BOX_GREEN, linewidth=1.0, linestyle=":", alpha=0.65, zorder=2)
+        ax.text(
+            x0 + (x1 - x0) * 0.55,
+            tp,
+            f"  цель (после сценария) {fmt_price(tp)}  ",
+            color=_BOX_GREEN,
+            fontsize=6.8,
+            fontweight="bold",
+            va="top",
+            ha="left",
+            zorder=6,
+        )
+    else:
+        ax.text(
+            x_box + width * 0.02, tp_lbl_y,
+            f"тейк {fmt_price(tp)}",
+            color=_BOX_GREEN, fontsize=7.5, fontweight="bold", va="center", ha="left", zorder=6,
+        )
     ax.text(
         x_box + width * 0.02, sl_lbl_y,
         f"стоп {fmt_price(stop)}",

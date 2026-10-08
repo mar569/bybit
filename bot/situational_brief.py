@@ -191,22 +191,9 @@ def _consolidation_band(ta: "TAAnalysisResult") -> tuple[float, float] | None:
 
 
 def _level_line(ta: "TAAnalysisResult", side: str) -> str:
-    cur = float(getattr(ta, "current_price", 0) or 0)
-    brk = getattr(ta, "breakout_level", None)
-    brdn = getattr(ta, "breakdown_level", None)
-    stop = getattr(ta, "invalidation_price", None) or getattr(ta, "setup_stop", None)
-    tps = list(getattr(ta, "target_prices", None) or [])[:2]
+    from .manual_plan_display import manual_level_line
 
-    bits: list[str] = []
-    if side == "short" and brdn and cur > 0 and float(brdn) < cur:
-        bits.append(f"триггер шорта — закреп ниже {fmt_price(float(brdn))}")
-    elif side == "long" and brk and cur > 0 and float(brk) > cur * 0.998:
-        bits.append(f"триггер лонга — закреп выше {fmt_price(float(brk))}")
-    if stop:
-        bits.append(f"стоп/отмена — {fmt_price(float(stop))}")
-    if tps:
-        bits.append(f"ориентир — {fmt_price(float(tps[0]))}")
-    return "; ".join(bits)
+    return manual_level_line(ta, side)
 
 
 def build_situational_brief_plain(ta: "TAAnalysisResult", *, symbol: str = "") -> str:

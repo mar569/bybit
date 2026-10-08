@@ -1575,6 +1575,27 @@ class TelegramBot:
                 sym_key,
                 chat_id,
             )
+            try:
+                enrolled = self.scenario_watcher.try_enroll_rbr_reaction_watch(
+                    signal,
+                    ta_result,
+                    settings,
+                    chat_id=chat_id,
+                )
+                if enrolled:
+                    from .range_breakdown_retest import get_rbr_from_ta
+
+                    rbr = get_rbr_from_ta(ta_result)
+                    if rbr:
+                        el, eh = rbr.get("entry_lo"), rbr.get("entry_hi")
+                        note = (
+                            f"\n👁 Слежу: зона "
+                            f"{fmt_price(float(el))}–{fmt_price(float(eh))} — "
+                            f"напишу, когда цена зайдёт."
+                        )
+                        await self._send_to_chat(chat_id, note, None, is_priority=False)
+            except Exception:
+                logger.debug("RBR zone watch enroll failed", exc_info=True)
 
     def _get_symbol_dispatch_lock(self, symbol: str) -> asyncio.Lock:
         key = symbol.upper()
@@ -3346,8 +3367,7 @@ class TelegramBot:
                 interval = float(getattr(settings, "scenario_watch_tick_seconds", 12.0))
                 await asyncio.sleep(interval)
                 if (
-                    not settings.scenario_watch_enabled
-                    or settings.bot_paused
+                    settings.bot_paused
                     or self.scanner is None
                     or self.application is None
                     or self.scenario_watcher.active_count == 0
@@ -3376,9 +3396,19 @@ class TelegramBot:
         watch = upd.watch
         settings = self.settings_manager.settings
         mode = str(getattr(settings, "scenario_watch_mode", "off") or "off").lower()
-        if not getattr(settings, "scenario_watch_push_enabled", False) or mode == "off":
+        is_rbr = getattr(watch, "watch_kind", "") == "rbr_reaction"
+        if (
+            not is_rbr
+            and (not getattr(settings, "scenario_watch_push_enabled", False) or mode == "off")
+        ):
             return
         notify_chat_id = self.config.notification_chat_id
+        if is_rbr and upd.kind == "zone_reached":
+            notify_chat_id = (
+                watch.chat_id
+                or self.config.effective_analysis_chat_id
+                or notify_chat_id
+            )
 
         ta_fresh = None
         oi_bars = None
@@ -3438,6 +3468,10 @@ class TelegramBot:
             message = f"🚫 <b>Сценарий снят</b> · <b>{watch.symbol}</b>\n{message}"
         elif upd.kind == "expired":
             message = f"⌛ <b>Слежка истекла</b> · <b>{watch.symbol}</b>\n{message}"
+        elif upd.kind == "zone_reached":
+            message = (
+                f"🎯 <b>Зона сопр. · {watch.symbol}</b>\n{message}"
+            )
         keyboard = InlineKeyboardMarkup([
             self._coinglass_link_buttons(
                 watch.symbol,

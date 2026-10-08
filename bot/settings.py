@@ -618,7 +618,9 @@ class ScannerSettings:
     signal_pro_to_analysis_chat: bool = False
     # «Разбор как у Ed» (RBR / post-pump+боковик) → TELEGRAM_ANALYSIS_CHAT, независимо от entry_only
     trader_deep_analysis_enabled: bool = True
-    trader_deep_analysis_cooldown_seconds: int = 3600
+    trader_deep_analysis_cooldown_seconds: int = 7200
+    trader_deep_zone_watch_enabled: bool = True
+    trader_deep_zone_watch_minutes: int = 360
     # Отдельным сообщением сразу после сигнала: разбор деривативов/потока Coinglass
     signal_coinglass_breakdown_enabled: bool = False
     # График в alert только на ENTRY B+; WATCH — текст (reading + план)
@@ -1212,7 +1214,11 @@ class ScannerSettings:
             signal_pro_to_analysis_chat=bool(base.get("signal_pro_to_analysis_chat", False)),
             trader_deep_analysis_enabled=bool(base.get("trader_deep_analysis_enabled", True)),
             trader_deep_analysis_cooldown_seconds=int(
-                base.get("trader_deep_analysis_cooldown_seconds", 3600) or 3600
+                base.get("trader_deep_analysis_cooldown_seconds", 7200) or 7200
+            ),
+            trader_deep_zone_watch_enabled=bool(base.get("trader_deep_zone_watch_enabled", True)),
+            trader_deep_zone_watch_minutes=int(
+                base.get("trader_deep_zone_watch_minutes", 360) or 360
             ),
             signal_coinglass_breakdown_enabled=bool(
                 base.get("signal_coinglass_breakdown_enabled", True)
@@ -2281,7 +2287,9 @@ class SettingsManager:
                 )
             if version < 106:
                 merged.setdefault("trader_deep_analysis_enabled", True)
-                merged.setdefault("trader_deep_analysis_cooldown_seconds", 3600)
+                merged.setdefault("trader_deep_analysis_cooldown_seconds", 7200)
+                merged.setdefault("trader_deep_zone_watch_enabled", True)
+                merged.setdefault("trader_deep_zone_watch_minutes", 360)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

@@ -16,6 +16,7 @@ UpdateKind = Literal[
     "continuation_confirmed",
     "entry_short",
     "entry_long",
+    "zone_reached",
     "cancelled_late",
     "cancelled_opposite",
     "cancelled_user",
@@ -92,6 +93,7 @@ class ScenarioWatch:
     opposite_cancel_pct: float = 1.2
     confirm_buffer_pct: float = 0.08  # закрепление за уровнем
     chat_id: int | None = None
+    watch_kind: str = ""  # rbr_reaction = ждём цену в зоне сопр.
 
     def __post_init__(self) -> None:
         if self.enroll_high <= 0:
@@ -219,6 +221,85 @@ class ScenarioWatcher:
             primary,
             fmt_price(watch.correction_target) if watch.correction_target else "-",
             fmt_price(watch.continuation_target) if watch.continuation_target else "-",
+        )
+        return True
+
+    def try_enroll_rbr_reaction_watch(
+        self,
+        signal: Signal,
+        ta: TAAnalysisResult,
+        settings: Any,
+        *,
+        chat_id: int | None = None,
+    ) -> bool:
+        """После deep-разбора: следим, когда цена зайдёт в зону реакции (шорт у верха)."""
+        if not getattr(settings, "trader_deep_zone_watch_enabled", True):
+            return False
+        from .range_breakdown_retest import get_rbr_from_ta
+
+        rbr = get_rbr_from_ta(ta)
+        if not rbr:
+            return False
+        phase = str(rbr.get("phase") or "")
+        if phase not in {"fade_top", "await_break"}:
+            return False
+        el, eh = rbr.get("entry_lo"), rbr.get("entry_hi")
+        if not el or not eh or float(eh) <= float(el):
+            return False
+
+        key = (signal.exchange.lower(), signal.symbol.upper())
+        now = time.time()
+        enroll_cd = int(getattr(settings, "scenario_watch_enroll_cooldown_seconds", 600))
+        last = self._last_enroll_at.get(key, 0.0)
+        if now - last < enroll_cd and key not in self._watches:
+            return False
+
+        price = float(ta.current_price or signal.current_price or 0)
+        if price <= 0:
+            return False
+
+        watch_minutes = int(getattr(settings, "trader_deep_zone_watch_minutes", 360))
+        targets = [float(t) for t in (rbr.get("targets") or []) if t]
+        stop = float(rbr["stop"]) if rbr.get("stop") else None
+
+        watch = ScenarioWatch(
+            exchange=signal.exchange,
+            symbol=signal.symbol,
+            side="short",
+            signal_type="rbr_zone_watch",
+            primary="correction",
+            allowed_entry_side="short",
+            enroll_price=price,
+            local_high=price,
+            local_low=price,
+            correction_target=targets[0] if targets else None,
+            continuation_target=None,
+            breakdown_level=float(rbr.get("range_bottom") or 0) or None,
+            breakout_level=float(rbr.get("range_top") or 0) or None,
+            initial_verdict="WAIT",
+            coinglass_url=signal.link or "",
+            started_at=now,
+            expires_at=now + watch_minutes * 60,
+            enroll_high=price,
+            trigger_only=True,
+            correction_fired=True,
+            user_intent="short",
+            zone_low=float(el),
+            zone_high=float(eh),
+            stop_hint=stop,
+            target_hints=tuple(targets[:3]),
+            chat_id=chat_id,
+            watch_kind="rbr_reaction",
+        )
+        self._watches[key] = watch
+        self._last_enroll_at[key] = now
+        logger.info(
+            "RBR zone watch %s %s zone %s–%s tp~%s",
+            signal.exchange,
+            signal.symbol,
+            fmt_price(float(el)),
+            fmt_price(float(eh)),
+            fmt_price(targets[0]) if targets else "-",
         )
         return True
 
@@ -392,7 +473,10 @@ class ScenarioWatcher:
         return True, f"слежу {intent.upper()} ~{watch_minutes} мин"
 
     def tick(self, scanner: Any, settings: Any) -> list[ScenarioUpdate]:
-        if not getattr(settings, "scenario_watch_enabled", False):
+        has_rbr = any(
+            getattr(w, "watch_kind", "") == "rbr_reaction" for w in self._watches.values()
+        )
+        if not getattr(settings, "scenario_watch_enabled", False) and not has_rbr:
             return []
         if not self._watches:
             return []
@@ -434,14 +518,16 @@ class ScenarioWatcher:
                 )
                 if age < min_age:
                     continue
-                if watch.is_user_watch:
+                if getattr(watch, "watch_kind", "") == "rbr_reaction":
+                    batch = self._check_rbr_zone_reached(watch, price)
+                elif watch.is_user_watch:
                     batch = self._check_user_intent(watch, price)
                 else:
                     batch = self._check_entry_ready(watch, price)
                 updates.extend(batch)
                 for upd in batch:
                     if upd.kind in {
-                        "entry_short", "entry_long",
+                        "entry_short", "entry_long", "zone_reached",
                         "cancelled_late", "cancelled_opposite",
                     }:
                         self._watches.pop(key, None)
@@ -507,6 +593,29 @@ class ScenarioWatcher:
                 )]
 
         return self._check_entry_ready(watch, price, intent_side=intent)
+
+    def _check_rbr_zone_reached(
+        self,
+        watch: ScenarioWatch,
+        price: float,
+    ) -> list[ScenarioUpdate]:
+        if watch.entry_fired or watch.zone_low is None or watch.zone_high is None:
+            return []
+        lo, hi = float(watch.zone_low), float(watch.zone_high)
+        if not (lo * 0.998 <= price <= hi * 1.004):
+            return []
+        watch.entry_fired = True
+        mid = (lo + hi) / 2.0
+        move = (price - watch.enroll_price) / watch.enroll_price * 100.0
+        return [
+            ScenarioUpdate(
+                watch=watch,
+                kind="zone_reached",
+                price=price,
+                move_pct=move,
+                reference_price=mid,
+            )
+        ]
 
     def _check_entry_ready(
         self,

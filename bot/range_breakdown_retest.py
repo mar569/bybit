@@ -49,6 +49,35 @@ def _recent_close_below(bars: list[KlineBar], level: float, *, n: int = 10) -> b
     return any(float(b.close) < level * 0.9985 for b in tail)
 
 
+def _retest_short_stop(
+    bars: list[KlineBar],
+    *,
+    floor: float,
+    ceil: float,
+    current: float,
+) -> float:
+    """Стоп над retest / локальным хаем — не у далёкого потолка H4-боковика."""
+    _ = ceil
+    seg = bars[-min(24, len(bars)) :] if bars else []
+    local_hi = max((float(b.high) for b in seg), default=current)
+    stop = max(floor * 1.008, local_hi * 1.0012, current * 1.004)
+    return min(stop, floor * 1.026)
+
+
+def _setup_plan_viable(setup: RangeBreakdownRetestSetup, current: float) -> bool:
+    ref = (setup.entry_lo + setup.entry_hi) / 2.0
+    if ref <= 0 or not setup.targets:
+        return False
+    tp = float(setup.targets[0])
+    risk = abs(float(setup.stop) - ref) / ref
+    reward = abs(ref - tp) / ref if setup.direction == "short" else abs(tp - ref) / ref
+    if risk <= 0.0001:
+        return False
+    if reward < 0.0075:
+        return False
+    return reward / risk >= 0.75
+
+
 def evaluate_range_breakdown_retest(
     bars: list[KlineBar],
     *,
@@ -57,6 +86,7 @@ def evaluate_range_breakdown_retest(
     breakout: float | None,
     post_pump: bool,
     current: float,
+    repeat_spike_dump_risk: bool = False,
 ) -> RangeBreakdownRetestSetup | None:
     if not bars or current <= 0:
         return None
@@ -76,10 +106,13 @@ def evaluate_range_breakdown_retest(
     broke = _recent_close_below(bars, floor)
     near_retest = broke and floor * 0.992 <= current <= floor * 1.018
 
+    if repeat_spike_dump_risk and pos <= 0.25:
+        return None
+
     if near_retest:
         phase = "retest"
         entry_lo, entry_hi = floor * 0.996, floor * 1.01
-        stop = max(ceil * 1.004, floor * 1.028)
+        stop = _retest_short_stop(bars, floor=floor, ceil=ceil, current=current)
         targets = [swing_tp]
         if swing_tp > floor * 0.95:
             targets.append(floor * (1.0 - max(0.03, (floor - swing_tp) / floor)))
@@ -102,7 +135,7 @@ def evaluate_range_breakdown_retest(
     elif current < floor * 0.998:
         phase = "broken"
         entry_lo, entry_hi = current * 0.997, min(current * 1.006, floor * 1.008)
-        stop = floor * 1.018
+        stop = _retest_short_stop(bars, floor=floor, ceil=ceil, current=current)
         targets = [swing_tp]
         label = "пробой состоялся — шорт по откату"
         story = (
@@ -122,7 +155,13 @@ def evaluate_range_breakdown_retest(
     if post_pump and "памп" not in story:
         story = f"После импульса: {story}"
 
-    return RangeBreakdownRetestSetup(
+    ref_px = (entry_lo + entry_hi) / 2.0
+    if targets and ref_px > 0:
+        tp0 = float(targets[0])
+        if tp0 > 0 and abs(ref_px - tp0) / ref_px < 0.012:
+            targets[0] = ref_px * 0.988
+
+    setup = RangeBreakdownRetestSetup(
         direction="short",
         range_top=ceil,
         range_bottom=floor,
@@ -135,6 +174,9 @@ def evaluate_range_breakdown_retest(
         label_ru=label,
         story_ru=story,
     )
+    if not _setup_plan_viable(setup, current):
+        return None
+    return setup
 
 
 def get_rbr_from_ta(ta: object) -> dict[str, Any] | None:
@@ -146,8 +188,11 @@ def get_rbr_from_ta(ta: object) -> dict[str, Any] | None:
 
 
 def should_push_trader_deep_analysis(ta: object) -> bool:
-    if get_rbr_from_ta(ta):
+    rbr = get_rbr_from_ta(ta)
+    if rbr:
         return True
+    if bool(getattr(ta, "repeat_spike_dump_risk", False)):
+        return bool(getattr(ta, "consolidation", None) is not None)
     if bool(getattr(ta, "post_pump", False)) and getattr(ta, "consolidation", None) is not None:
         return True
     return False

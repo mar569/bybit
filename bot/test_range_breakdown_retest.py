@@ -60,6 +60,41 @@ def test_rbr_retest_phase():
     assert setup.swing_low_target < floor
 
 
+def test_rbr_retest_stop_not_at_wide_ceil():
+    floor, ceil = 0.10737, 0.12361
+    bars = _consolidation_bars(floor=floor, ceil=ceil, break_down=True, retest=True)
+    current = float(bars[-1].close)
+    setup = evaluate_range_breakdown_retest(
+        bars,
+        consolidation=_Box(top=ceil, bottom=floor),
+        breakdown=floor,
+        breakout=ceil,
+        post_pump=True,
+        current=current,
+    )
+    if setup is None:
+        return
+    assert setup.stop < ceil * 1.002
+    assert setup.stop <= floor * 1.03
+
+
+def test_rbr_suppressed_on_repeat_spike_at_support():
+    floor, ceil = 0.105, 0.118
+    bars = _consolidation_bars(floor=floor, ceil=ceil, break_down=True, retest=True)
+    current = floor * 1.005
+    bars[-1] = _bar(bars[-1].open_time, current, current * 1.002, floor * 0.999, current)
+    setup = evaluate_range_breakdown_retest(
+        bars,
+        consolidation=_Box(top=ceil, bottom=floor),
+        breakdown=floor,
+        breakout=ceil,
+        post_pump=True,
+        current=current,
+        repeat_spike_dump_risk=True,
+    )
+    assert setup is None
+
+
 def test_rbr_fade_top_phase():
     floor, ceil = 176.0, 182.0
     bars = _consolidation_bars(floor=floor, ceil=ceil, n=50)

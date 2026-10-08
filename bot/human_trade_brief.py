@@ -346,12 +346,11 @@ def preferred_trade_side(ta: "TAAnalysisResult") -> str:
 
 
 def _manual_levels_html(ta: "TAAnalysisResult", *, side: str) -> str:
+    from .manual_plan_display import manual_display_stop_and_targets
+
     cur = float(getattr(ta, "current_price", 0) or 0)
-    stop = getattr(ta, "invalidation_price", None) or getattr(ta, "setup_stop", None)
-    targets = list(getattr(ta, "target_prices", None) or []) or list(
-        getattr(ta, "setup_tps", None) or []
-    )
-    targets = [float(x) for x in targets[:3] if x]
+    stop, targets = manual_display_stop_and_targets(ta)
+    targets = [float(x) for x in targets if x]
     zone = getattr(ta, "entry_zone", None)
     brk = getattr(ta, "breakout_level", None)
     brdn = getattr(ta, "breakdown_level", None)
@@ -431,8 +430,15 @@ def format_manual_ta_human_html(
     stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
     stack_line = f"🧭 {escape(stack)}" if stack else ""
 
+    from .range_breakdown_retest import get_rbr_from_ta
+
+    rbr = get_rbr_from_ta(ta)
+    rbr_story = str(rbr.get("story_ru", "") if rbr else "").strip()
+
     sit_html = str(getattr(ta, "situational_brief_html", "") or "").strip()
-    if sit_html:
+    if rbr_story:
+        story = escape(rbr_story[:480])
+    elif sit_html:
         story = sit_html
     else:
         narrative = _clean_reading_narrative(getattr(ta, "reading_narrative", "") or "")
@@ -449,7 +455,9 @@ def format_manual_ta_human_html(
 
     trigger = str(getattr(ta, "setup_trigger", "") or "").strip()
     seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
-    if trigger:
+    if rbr and rbr.get("label_ru"):
+        wait_line = f"⏳ <b>Ждём:</b> {escape(str(rbr['label_ru'])[:220])}"
+    elif trigger:
         wait_line = f"⏳ <b>Ждём:</b> {escape(trigger[:220])}"
     elif seek:
         wait_line = f"⏳ <b>Ждём:</b> {escape(seek[:220])}"
@@ -474,10 +482,7 @@ def format_manual_ta_human_html(
         btc = f"альт vs BTC {ta.btc_alt_spread:+.1f}%"
     btc_line = f"₿ {escape(btc[:100])}" if btc else ""
 
-    chart_hint = (
-        "<i>На графике:</i> день макс/мин, локальный экстремум, поддержка/сопр., "
-        "диапазон и зона (или «кандидат»), оба триггера пробоя, вход / SL / TP."
-    )
-
-    parts = [head, stack_line, story, wait_line, levels, flow_block, btc_line, chart_hint]
+    iv = int(getattr(ta, "analysis_interval_minutes", 0) or 0)
+    tf_note = f"<i>Уровни и PNG: {iv}m · план совпадает с видимым боковиком на скрине.</i>" if iv >= 5 else ""
+    parts = [head, stack_line, story, wait_line, levels, flow_block, btc_line, tf_note]
     return "\n\n".join(p for p in parts if p)
