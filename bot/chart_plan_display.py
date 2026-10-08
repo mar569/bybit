@@ -24,25 +24,30 @@ def clamp_tp_for_chart(
     entry: float,
     tp: float,
     stop: float,
-    max_reward_pct: float = 0.11,
-    max_risk_pct: float = 0.045,
+    max_reward_pct: float = 0.065,
+    max_risk_pct: float = 0.038,
 ) -> tuple[float, float, str]:
-    """TP/SL для отрисовки — не дальше max_reward_pct от entry."""
+    """TP/SL на PNG: блок на экране не дальше ~6.5% от входа; полная цель — в подписи."""
     if entry <= 0:
         return tp, stop, fmt_price(tp)
     if side == "short":
-        near_tp = entry * (1.0 - max_reward_pct)
-        tp_disp = tp if tp >= near_tp else near_tp
-        stop_disp = stop if stop > entry else entry * (1.0 + max_risk_pct * 0.6)
+        cap = entry * (1.0 - max_reward_pct)
+        reward = entry - tp
+        max_r = entry * max_reward_pct
+        tp_disp = tp if reward <= max_r else cap
+        stop_disp = stop if stop > entry else entry * (1.0 + max_risk_pct * 0.55)
         stop_disp = min(stop_disp, entry * (1.0 + max_risk_pct))
         label = fmt_price(tp)
-        if abs(tp - tp_disp) / entry > 0.012:
-            label = f"{fmt_price(tp_disp)} (далее {fmt_price(tp)})"
+        if abs(tp - tp_disp) / entry > 0.008:
+            label = f"{fmt_price(tp_disp)} → {fmt_price(tp)}"
         return tp_disp, stop_disp, label
-    tp_disp = min(tp, entry * (1.0 + max_reward_pct))
+    cap = entry * (1.0 + max_reward_pct)
+    reward = tp - entry
+    max_r = entry * max_reward_pct
+    tp_disp = tp if reward <= max_r else cap
     stop_disp = max(stop, entry * (1.0 - max_risk_pct))
     label = fmt_price(tp)
-    if abs(tp - tp_disp) / entry > 0.015:
+    if abs(tp - tp_disp) / entry > 0.008:
         label = f"{fmt_price(tp_disp)} → {fmt_price(tp)}"
     return tp_disp, stop_disp, label
 

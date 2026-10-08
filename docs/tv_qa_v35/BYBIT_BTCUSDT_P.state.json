@@ -1,0 +1,69 @@
+﻿{
+  "success": true,
+  "symbol": "BYBIT:BTCUSDT.P",
+  "resolution": "15",
+  "chartType": 1,
+  "studies": [
+    {
+      "id": "YOo7GG",
+      "name": "Ed Bot Analysis v3.5"
+    },
+    {
+      "id": "qYK96C",
+      "name": "Supply and Demand Zones [BigBeluga]"
+    },
+    {
+      "id": "CFaq8Z",
+      "name": "ICT Concepts [LuxAlgo]"
+    },
+    {
+      "id": "fR9eE7",
+      "name": "ICT HTF Candles (fadi)"
+    },
+    {
+      "id": "wNUFcm",
+      "name": "Wolfe Waves [BigBeluga]"
+    },
+    {
+      "id": "CecYNO",
+      "name": "Adaptive S/R Zones [BigBeluga]"
+    },
+    {
+      "id": "KReIIj",
+      "name": "Dynamic Liquidity HeatMap Profile [BigBeluga]"
+    },
+    {
+      "id": "x5Vh77",
+      "name": "Volume"
+    },
+    {
+      "id": "cKFLok",
+      "name": "Liquidity Zones [BigBeluga]"
+    },
+    {
+      "id": "LlE3Np",
+      "name": "FVG Order Blocks [BigBeluga]"
+    },
+    {
+      "id": "MOCFiT",
+      "name": "Target Trend [BigBeluga]"
+    },
+    {
+      "id": "KvqAGv",
+      "name": "Order Block Detector [LuxAlgo]"
+    },
+    {
+      "id": "yOwtp9",
+      "name": "IFVG Sniper Entry Engine [trade_w_samet]"
+    },
+    {
+      "id": "WoP4rR",
+      "name": "Relative strength index"
+    },
+    {
+      "id": "DFXPO9",
+      "name": "Liquidations"
+    }
+  ]
+}
+

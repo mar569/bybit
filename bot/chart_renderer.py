@@ -2618,6 +2618,8 @@ def _render_chart_figure(
         from .chart_pro import pro_trailing_fraction
 
         trail = pro_trailing_fraction(pro_mode_chart)  # type: ignore[arg-type]
+        if pro_mode_chart != "legacy_manual":
+            trail = max(trail, 0.48)
     _apply_display_zoom(
         ax,
         bars,

@@ -1,0 +1,56 @@
+﻿[
+    {
+        "Symbol":  "BYBIT:BTCUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:ETHUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:SOLUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:STRKUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:DOGEUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:WIFUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:AVAXUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "BYBIT:LINKUSDT.P",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    },
+    {
+        "Symbol":  "VANTAGE:UKOUSD",
+        "EdBot":  "3.5",
+        "Studies":  15,
+        "Screenshot":  true
+    }
+]

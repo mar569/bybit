@@ -9,5 +9,5 @@ def test_short_tp_clamped_for_chart() -> None:
         side="short", entry=entry, tp=0.302, stop=0.355,
     )
     assert tp > 0.302
-    assert tp >= entry * 0.89
-    assert "далее" in label or tp < entry
+    assert entry - tp <= entry * 0.07
+    assert "→" in label or tp < entry

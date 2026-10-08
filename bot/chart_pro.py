@@ -73,34 +73,29 @@ def draw_pro_layers(
         draw_education_overlays(ax, bars, ta, manual_compact=True)
         return board
     if mode == "range_wait":
-        from .chart_range_wait import draw_range_wait_layers
+        from .chart_range_wait import draw_range_wait_layers_minimal
 
-        draw_range_wait_layers(ax, bars, ta, interval_minutes=interval_minutes)
-        board.reserve(float(getattr(ta, "breakout_level", 0) or 0))
-        board.reserve(float(getattr(ta, "breakdown_level", 0) or 0))
-        story_plan, story_path = True, False
+        draw_range_wait_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        from .chart_ed_minimal import add_minimal_context_labels
+
+        add_minimal_context_labels(board, bars, ta, mode="range_wait")
     elif mode == "observation":
-        from .chart_observation import draw_observation_layers
+        from .chart_observation import draw_observation_layers_minimal
 
-        draw_observation_layers(ax, bars, ta, interval_minutes=interval_minutes)
-        story_plan, story_path = False, False
+        draw_observation_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        from .chart_ed_minimal import add_minimal_context_labels
+
+        add_minimal_context_labels(board, bars, ta, mode="observation")
     else:
         from .chart_ed_story import draw_ed_story_layers_pro
 
         draw_ed_story_layers_pro(ax, bars, ta, interval_minutes=interval_minutes, board=board)
-        story_plan, story_path = True, True
+        from .chart_ed_minimal import add_minimal_context_labels
 
-    from .chart_readable import draw_readable_overlays
+        add_minimal_context_labels(board, bars, ta, mode="ed_story")
+    from .chart_ed_minimal import draw_pro_teaching_layers
 
-    draw_readable_overlays(
-        ax,
-        bars,
-        ta,
-        board,
-        include_plan=not story_plan,
-        include_path=not story_path,
-        draw_zones=True,
-    )
+    draw_pro_teaching_layers(ax, bars, ta, mode=mode)
     return board
 
 
@@ -143,6 +138,10 @@ def finalize_pro_viewport(
                 if rbr.get(k)
             )
         pmin, pmax = min(prices), max(prices)
+        # Не тянуть Y на далёкий swing — только экранный план
+        cur_band = max(cur * 0.09, (hi - lo) * 0.5)
+        pmin = max(pmin, cur - cur_band)
+        pmax = min(pmax, cur + cur_band * 1.05)
         lo = min(lo, pmin - pad)
         hi = max(hi, pmax + pad)
     else:

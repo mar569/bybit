@@ -143,7 +143,7 @@ def draw_label_board(
 ) -> None:
     if not bars or not board.items:
         return
-    labels = board.compact(current=current)
+    labels = board.compact(current=current, max_labels=4)
     if not labels:
         return
     x0, x1 = ax.get_xlim()

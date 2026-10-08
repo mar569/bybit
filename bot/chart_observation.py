@@ -85,7 +85,26 @@ def draw_observation_layers(
     *,
     interval_minutes: int = 15,
 ) -> None:
+    draw_observation_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=None)
+
+
+def draw_observation_layers_minimal(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    interval_minutes: int = 15,
+    board=None,
+) -> None:
+    _ = board
     _ = interval_minutes
     _draw_range_band(ax, bars, ta)
-    _draw_flow_strip(ax, ta)
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+    x0, x1 = _visible_x_span(ax, bars)
+    if brk > 0 and abs(brk - cur) / cur <= 0.12:
+        ax.hlines(brk, x0, x1, colors="#3fb950", linewidth=1.2, alpha=0.75, zorder=4)
+    if brdn > 0 and abs(brdn - cur) / cur <= 0.12:
+        ax.hlines(brdn, x0, x1, colors="#f85149", linewidth=1.2, alpha=0.75, zorder=4)
     _draw_caption(ax, ta)

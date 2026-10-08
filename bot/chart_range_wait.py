@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 from .bybit_klines import KlineBar
 from .chart_ed_story import ED_STORY_TRAILING, _draw_flow_strip, _visible_x_span
@@ -91,20 +92,42 @@ def draw_range_wait_layers(
     *,
     interval_minutes: int = 15,
 ) -> None:
+    draw_range_wait_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=None)
+
+
+def draw_range_wait_layers_minimal(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    interval_minutes: int = 15,
+    board=None,
+) -> None:
+    _ = interval_minutes
     brk = float(getattr(ta, "breakout_level", 0) or 0)
     brdn = float(getattr(ta, "breakdown_level", 0) or 0)
-    if brk <= 0 or brdn <= 0:
+    if brk <= 0 or brdn <= 0 or brk <= brdn:
         return
-    _draw_level_corridor(ax, bars, level=brk, color=CORRIDOR_RES, label="лонг если закреп")
-    _draw_level_corridor(ax, bars, level=brdn, color=CORRIDOR_SUP, label="шорт если пробой")
+    x0, x1 = _visible_x_span(ax, bars)
+    ax.add_patch(
+        Rectangle(
+            (x0, brdn), max(x1 - x0, 0.001), brk - brdn,
+            facecolor="#8b949e", edgecolor="#484f58", alpha=0.12, linewidth=0.8, zorder=1,
+        )
+    )
+    ax.hlines(brk, x0, x1, colors=CORRIDOR_RES, linewidth=1.35, alpha=0.85, zorder=4)
+    ax.hlines(brdn, x0, x1, colors=CORRIDOR_SUP, linewidth=1.35, alpha=0.85, zorder=4)
+    if board is not None:
+        board.reserve(brk)
+        board.reserve(brdn)
     from .human_trade_brief import preferred_trade_side
+    from .range_breakdown_retest import get_rbr_from_ta
 
     side = preferred_trade_side(ta)
-    if side == "short":
+    if get_rbr_from_ta(ta) or side == "short":
         draw_forward_short_projection(ax, bars, ta, use_xlim=True)
-    else:
+    elif side == "long":
         draw_forward_long_projection(ax, bars, ta, use_xlim=True)
-    _draw_flow_strip(ax, ta)
     _draw_range_caption(ax, ta)
 
 

@@ -387,7 +387,13 @@ def draw_ed_story_layers_pro(
         _draw_range_floor_line(ax, bars, floor)
 
     if phase == "fade_top" and resistance > 0:
-        _draw_resistance_corridor(ax, bars, rbr, ceil=resistance)
+        el = float(rbr.get("entry_lo") or resistance * 0.985)
+        eh = float(rbr.get("entry_hi") or resistance * 1.006)
+        z_lo = min(el, resistance * 0.998)
+        z_hi = max(eh, resistance * 1.002)
+        from .chart_ed_minimal import draw_narrow_resistance_corridor
+
+        draw_narrow_resistance_corridor(ax, bars, z_lo=z_lo, z_hi=z_hi, board=board)
         template = resolve_sweep_template(
             bars, resistance=resistance, floor=floor or resistance * 0.92, tp=tp or resistance * 0.9,
         )
@@ -404,26 +410,16 @@ def draw_ed_story_layers_pro(
             max_x=x_box,
         )
     elif phase == "await_break" and floor > 0:
-        _draw_resistance_corridor(ax, bars, rbr, ceil=resistance if resistance > 0 else floor * 1.03)
+        res = resistance if resistance > 0 else floor * 1.03
+        el = float(rbr.get("entry_lo") or res * 0.985)
+        eh = float(rbr.get("entry_hi") or res * 1.006)
+        from .chart_ed_minimal import draw_narrow_resistance_corridor
+
+        draw_narrow_resistance_corridor(ax, bars, z_lo=min(el, res * 0.998), z_hi=max(eh, res * 1.002), board=board)
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
-    try:
-        from .chart_plan_display import build_display_plan
-        from .chart_position_boxes import plan_for_display
-
-        raw = plan_for_display(ta)
-        if raw and str(rbr.get("direction") or "") == "short":
-            _side, entry, el, eh, stop, tp = raw
-            disp = build_display_plan(
-                side="short", entry=entry, entry_lo=el, entry_hi=eh, stop=stop, tp=tp,
-            )
-            if phase in {"fade_top", "await_break", "retest"} and disp.tp < entry:
-                _draw_probable_path_arrow(ax, bars, ta, tp_display=disp.tp)
-    except Exception:
-        pass
-    _draw_flow_strip(ax, ta)
     _draw_story_caption(ax, ta, rbr)
 
 
