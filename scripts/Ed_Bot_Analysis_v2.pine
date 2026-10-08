@@ -1,0 +1,1422 @@
+//@version=6
+// Ed Bot — разметка Bybit_bot (НЕ EdStory). Стратегия отдельно: Ed_Bot_Strategy_v1.pine
+// Первая строка в TV должна быть: indicator("Ed Bot Analysis v2" ... shorttitle="EdBot")
+indicator("Ed Bot Analysis v2.1", shorttitle="EdBot", overlay=true, max_boxes_count=120, max_lines_count=120, max_labels_count=120)
+
+grpMode = "Режим графика"
+i_edBreakdown = input.bool(true, "Разметка Ed (как docs)", group=grpMode, tooltip="Трендовая по HL/LH, значимая зона, пробой/ретest у свечи — как в презентации.")
+i_showPatLayer = input.bool(false, "Доп. слой: SMC / RBR / старый паттерн", group=grpMode, tooltip="Не выключает «Разметку Ed». Дополнительно: RBR-подписи, SMC-боксы. Для чистого графика — ВЫКЛ.")
+i_storyFirst  = input.bool(true, "Один слой (chart_story_router)", group=grpMode)
+i_showPattern = input.bool(false, "Primary pattern (max 1)", group=grpMode)
+i_showSmc     = input.bool(false, "SMC: свип / BOS / OB / FVG", group=grpMode)
+i_showZone    = input.bool(true, "Зоны спроса/предложения", group=grpMode)
+i_showRbr     = input.bool(false, "Коридор пол/потолок (триггеры)", group=grpMode)
+i_showFib     = input.bool(false, "Fib 0.5–0.618", group=grpMode)
+i_showSession = input.bool(false, "Day H/L", group=grpMode)
+i_showBoxes   = input.bool(false, "Forward SL / entry / TP (узкие боксы)", group=grpMode)
+
+grpEd = "Разметка Ed"
+i_edPatGeom   = input.bool(true, "Фигура на графике (2× вершина / дно)", group=grpEd)
+i_edTrend     = input.bool(true, "Трендовая (по 2 свингам)", group=grpEd)
+i_edSigZone   = input.bool(true, "Значимая зона (HL/HH)", group=grpEd)
+i_edEvents    = input.bool(true, "Метки: пробой / ретest", group=grpEd)
+i_edOb        = input.bool(true, "OB после пробоя", group=grpEd)
+i_edTriggers  = input.bool(false, "Триггеры лонг≥ / шорт≤", group=grpEd)
+i_edShowBos   = input.bool(false, "BOS пунктир", group=grpEd)
+i_edShowLiq   = input.bool(false, "Ликвидность пунктир", group=grpEd)
+
+grpPat = "Паттерны"
+i_swingWin     = input.int(3, "Swing window", minval=2, maxval=5, group=grpPat)
+i_doubleTol    = input.float(0.55, "Double / triple tol %", minval=0.2, maxval=1.5, step=0.05, group=grpPat)
+i_hsTol        = input.float(2.2, "H&S shoulder tol %", minval=1.0, maxval=4.0, step=0.1, group=grpPat)
+i_indiansTol   = input.float(0.65, "Три индейца tol %", minval=0.3, maxval=1.5, step=0.05, group=grpPat)
+i_minPatConf   = input.float(0.68, "MIN pattern confidence", minval=0.5, maxval=0.9, step=0.01, group=grpPat)
+i_drawMinConf  = input.float(0.65, "MIN draw confidence (TP/boxes)", minval=0.55, maxval=0.85, step=0.01, group=grpPat)
+i_drawForming  = input.bool(true, "Линии паттерна forming (≥ min conf)", group=grpPat)
+
+grpVis = "HUD"
+i_showHud      = input.bool(false, "Таблица EdBot (правый верх)", group=grpVis)
+i_showStoryBox = input.bool(false, "Боковик / распределение (1 box)", group=grpVis)
+i_heavyPatterns = input.bool(true, "Полный скан паттернов (выкл = быстрее)", group=grpPat)
+i_patScanWin   = input.int(5, "Скан паттернов (послед. N свингов)", minval=3, maxval=10, group=grpPat, tooltip="Полный скан только на последнем баре — иначе TV timeout 20s")
+
+grpRbr = "RBR"
+i_consLb  = input.int(36, "Lookback боковика", minval=10, group=grpRbr)
+i_fadePos = input.float(0.62, "Fade-top position", minval=0.5, maxval=0.95, step=0.01, group=grpRbr)
+
+grpMtf = "MTF / RSI"
+i_useMtf = input.bool(true, "H4→H1→M15", group=grpMtf)
+i_rsiLen = input.int(14, "RSI", group=grpMtf)
+i_rsiPL  = input.int(5, "RSI pivot L", group=grpMtf)
+i_rsiPR  = input.int(5, "RSI pivot R", group=grpMtf)
+
+float atr = ta.atr(14)
+float volSma20 = ta.sma(volume, 20)
+float volSma10 = ta.sma(volume, 10)
+bool volContract = volSma10 < volSma20 * 0.78
+int SWING_CAP = 22
+int FLAG_BODY = 7
+float flagBodyHi = ta.highest(high, FLAG_BODY)
+float flagBodyLo = ta.lowest(low, FLAG_BODY)
+float hi6 = ta.highest(high, 6)
+float lo6 = ta.lowest(low, 6)
+float hi16 = ta.highest(high, 16)
+float lo16 = ta.lowest(low, 16)
+float closeLo12 = ta.lowest(close, 12)
+float closeHi12 = ta.highest(close, 12)
+int CUP_LB = 22
+float cupLoG = ta.lowest(low, CUP_LB)
+int cupAgoG = int(-ta.lowestbars(low, CUP_LB))
+int rimLAgoG = cupAgoG + 8
+int rimRAgoG = cupAgoG - 2
+bool cupHistOkG = bar_index >= rimLAgoG and rimRAgoG >= 0 and cupAgoG > 4 and cupAgoG < CUP_LB - 4
+float cupRimLG = cupHistOkG ? high[rimLAgoG] : na
+float cupRimRG = cupHistOkG ? high[rimRAgoG] : na
+float handleLoG = ta.lowest(low, 6)
+float rngHiRect = ta.highest(high, i_consLb)
+float rngLoRect = ta.lowest(low, i_consLb)
+
+f_pct(a, b) => math.abs(a - b) / math.max(math.abs(a), 1e-10) * 100.0
+
+f_prior(int swingIx, int lb) =>
+    int ago = bar_index - swingIx
+    bool ok = ago >= lb and ago + lb <= bar_index and ago >= 0
+    ok and close[ago] > close[ago + lb] ? "bullish" : ok and close[ago] < close[ago + lb] ? "bearish" : "neutral"
+
+f_line_y(float y1, int x1, float y2, int x2, int x) =>
+    y1 + (y2 - y1) * (x - x1) / math.max(x2 - x1, 1)
+
+f_eff(float conf, string st) =>
+    conf + (st == "confirmed" ? 0.02 : 0.0)
+
+f_pat_i0(int arrSize, int needCount) =>
+    math.max(0, arrSize - needCount - i_patScanWin + 1)
+
+var float[] shPx = array.new_float()
+var int[] shIx = array.new_int()
+var float[] slPx = array.new_float()
+var int[] slIx = array.new_int()
+
+ph = ta.pivothigh(high, i_swingWin, i_swingWin)
+pl = ta.pivotlow(low, i_swingWin, i_swingWin)
+if not na(ph)
+    array.push(shPx, ph)
+    array.push(shIx, bar_index - i_swingWin)
+    while array.size(shPx) > SWING_CAP
+        array.shift(shPx)
+        array.shift(shIx)
+if not na(pl)
+    array.push(slPx, pl)
+    array.push(slIx, bar_index - i_swingWin)
+    while array.size(slPx) > SWING_CAP
+        array.shift(slPx)
+        array.shift(slIx)
+
+var string patKind = ""
+var string patStatus = ""
+var string patDir = ""
+var float patConf = 0.0
+var float patNeck = na
+var float patTarget = na
+var float patStop = na
+var int patI1 = na
+var int patI2 = na
+var int patI3 = na
+var float patP1 = na
+var float patP2 = na
+var float patP3 = na
+var float patNeckL = na
+var float patNeckR = na
+var int patNeckIxL = na
+var int patNeckIxR = na
+
+// Скан на последнем баре (нужен и для «Фигура на графике», не только i_showPattern)
+bool runPatScan = barstate.islast and i_heavyPatterns and (i_showPattern or (i_edBreakdown and i_edPatGeom))
+if runPatScan
+    string cKind = ""
+    string cStatus = ""
+    string cDir = ""
+    float cConf = 0.0
+    float cNeck = na
+    float cTarget = na
+    float cStop = na
+    int cI1 = na
+    int cI2 = na
+    int cI3 = na
+    float cP1 = na
+    float cP2 = na
+    float cP3 = na
+    float cNeckL = na
+    float cNeckR = na
+    int cNeckIxL = na
+    int cNeckIxR = na
+    float bestEff = 0.0
+    string bestSt = ""
+
+    // ── Double top / bottom ──
+    if array.size(shPx) >= 2
+        for i = f_pat_i0(array.size(shPx), 2) to array.size(shPx) - 2
+            float p1 = array.get(shPx, i)
+            float p2 = array.get(shPx, i + 1)
+            int ix1 = array.get(shIx, i)
+            int ix2 = array.get(shIx, i + 1)
+            if ix2 - ix1 < 6 or ix2 - ix1 > 40 or f_pct(p1, p2) > i_doubleTol
+                continue
+            float neck = na
+            if array.size(slPx) > 0
+                for j = f_pat_i0(array.size(slPx), 1) to array.size(slPx) - 1
+                    int lx = array.get(slIx, j)
+                    if lx > ix1 and lx < ix2
+                        float lp = array.get(slPx, j)
+                        neck := na(neck) ? lp : math.min(neck, lp)
+            if na(neck)
+                continue
+            float peak = math.max(p1, p2)
+            float h = peak - neck
+            if h < atr * 0.8
+                continue
+            string st = close < neck ? "confirmed" : "forming"
+            float conf = 0.62 + (f_pct(p1, p2) < 0.35 ? 0.16 : 0.0) + 0.12 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.04 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "double_top"
+                cStatus := st
+                cDir := "bearish"
+                cConf := conf
+                cNeck := neck
+                cTarget := neck - h
+                cStop := peak + atr * 0.25
+                cI1 := ix1
+                cI2 := ix2
+                cP1 := p1
+                cP2 := p2
+
+    if array.size(slPx) >= 2
+        for i = f_pat_i0(array.size(slPx), 2) to array.size(slPx) - 2
+            float p1 = array.get(slPx, i)
+            float p2 = array.get(slPx, i + 1)
+            int ix1 = array.get(slIx, i)
+            int ix2 = array.get(slIx, i + 1)
+            if ix2 - ix1 < 6 or ix2 - ix1 > 40 or f_pct(p1, p2) > i_doubleTol
+                continue
+            float neck = na
+            if array.size(shPx) > 0
+                for j = f_pat_i0(array.size(shPx), 1) to array.size(shPx) - 1
+                    int hx = array.get(shIx, j)
+                    if hx > ix1 and hx < ix2
+                        float hp = array.get(shPx, j)
+                        neck := na(neck) ? hp : math.max(neck, hp)
+            if na(neck)
+                continue
+            float trough = math.min(p1, p2)
+            float h = neck - trough
+            if h < atr * 0.8
+                continue
+            string st = close > neck ? "confirmed" : "forming"
+            float conf = 0.62 + (f_pct(p1, p2) < 0.35 ? 0.16 : 0.0) + 0.12 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.04 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "double_bottom"
+                cStatus := st
+                cDir := "bullish"
+                cConf := conf
+                cNeck := neck
+                cTarget := neck + h
+                cStop := trough - atr * 0.25
+                cI1 := ix1
+                cI2 := ix2
+                cP1 := p1
+                cP2 := p2
+
+    // ── Triple top / bottom ──
+    if array.size(shPx) >= 3
+        for i = f_pat_i0(array.size(shPx), 3) to array.size(shPx) - 3
+            float t1 = array.get(shPx, i)
+            float t2 = array.get(shPx, i + 1)
+            float t3 = array.get(shPx, i + 2)
+            int x1 = array.get(shIx, i)
+            int x3 = array.get(shIx, i + 2)
+            if x3 - x1 > 80 or math.max(f_pct(t1, t2), f_pct(t2, t3), f_pct(t1, t3)) > i_doubleTol + 0.1
+                continue
+            if f_prior(x1, 20) != "bullish"
+                continue
+            float support = na
+            if array.size(slPx) > 0
+                for j = f_pat_i0(array.size(slPx), 1) to array.size(slPx) - 1
+                    int lx = array.get(slIx, j)
+                    if lx > x1 and lx < x3
+                        support := na(support) ? array.get(slPx, j) : math.min(support, array.get(slPx, j))
+            if na(support)
+                continue
+            float resist = (t1 + t2 + t3) / 3.0
+            float h = resist - support
+            if h < atr
+                continue
+            string st = close < support ? "confirmed" : "forming"
+            float conf = 0.56 + 0.14 + 0.10 + 0.10 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.06 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "triple_top"
+                cStatus := st
+                cDir := "bearish"
+                cConf := conf
+                cNeck := support
+                cTarget := support - h
+                cStop := resist + atr * 0.2
+                cI1 := x1
+                cI2 := array.get(shIx, i + 1)
+                cI3 := x3
+                cP1 := t1
+                cP2 := t2
+                cP3 := t3
+
+    if array.size(slPx) >= 3
+        for i = f_pat_i0(array.size(slPx), 3) to array.size(slPx) - 3
+            float t1 = array.get(slPx, i)
+            float t2 = array.get(slPx, i + 1)
+            float t3 = array.get(slPx, i + 2)
+            int x1 = array.get(slIx, i)
+            int x3 = array.get(slIx, i + 2)
+            if x3 - x1 > 80 or math.max(f_pct(t1, t2), f_pct(t2, t3), f_pct(t1, t3)) > i_doubleTol + 0.1
+                continue
+            if f_prior(x1, 20) != "bearish"
+                continue
+            float resist = na
+            if array.size(shPx) > 0
+                for j = f_pat_i0(array.size(shPx), 1) to array.size(shPx) - 1
+                    int hx = array.get(shIx, j)
+                    if hx > x1 and hx < x3
+                        resist := na(resist) ? array.get(shPx, j) : math.max(resist, array.get(shPx, j))
+            if na(resist)
+                continue
+            float sup = (t1 + t2 + t3) / 3.0
+            float h = resist - sup
+            if h < atr
+                continue
+            string st = close > resist ? "confirmed" : "forming"
+            float conf = 0.56 + 0.14 + 0.10 + 0.10 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.06 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "triple_bottom"
+                cStatus := st
+                cDir := "bullish"
+                cConf := conf
+                cNeck := resist
+                cTarget := resist + h
+                cStop := sup - atr * 0.2
+                cI1 := x1
+                cI2 := array.get(slIx, i + 1)
+                cI3 := x3
+                cP1 := t1
+                cP2 := t2
+                cP3 := t3
+
+    // ── Head & shoulders ──
+    if array.size(shPx) >= 3
+        for i = f_pat_i0(array.size(shPx), 3) to array.size(shPx) - 3
+            float lsP = array.get(shPx, i)
+            float hdP = array.get(shPx, i + 1)
+            float rsP = array.get(shPx, i + 2)
+            int lsIx = array.get(shIx, i)
+            int hdIx = array.get(shIx, i + 1)
+            int rsIx = array.get(shIx, i + 2)
+            if not (lsP < hdP and hdP > rsP) or f_pct(lsP, rsP) > i_hsTol or f_prior(lsIx, 28) != "bullish"
+                continue
+            float nlL = na
+            float nlR = na
+            int nlIxL = lsIx
+            int nlIxR = rsIx
+            if array.size(slPx) > 0
+                for j = f_pat_i0(array.size(slPx), 1) to array.size(slPx) - 1
+                    int lx = array.get(slIx, j)
+                    float lp = array.get(slPx, j)
+                    if lx > lsIx and lx < hdIx
+                        nlL := na(nlL) ? lp : math.min(nlL, lp)
+                        nlIxL := lx
+                    if lx > hdIx and lx < rsIx
+                        nlR := na(nlR) ? lp : math.min(nlR, lp)
+                        nlIxR := lx
+            if na(nlL) or na(nlR)
+                continue
+            float neckNow = f_line_y(nlL, nlIxL, nlR, nlIxR, rsIx)
+            float height = hdP - neckNow
+            if height < atr * 1.1
+                continue
+            string st = close < neckNow ? "confirmed" : "forming"
+            float conf = 0.64 + (f_pct(lsP, rsP) < 1.5 ? 0.12 : 0.06) + 0.10 + (nlR >= nlL * 0.998 ? 0.06 : 0.0) + (st == "confirmed" ? 0.14 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "head_shoulders"
+                cStatus := st
+                cDir := "bearish"
+                cConf := conf
+                cNeck := neckNow
+                cTarget := neckNow - height
+                cStop := math.max(lsP, rsP) + atr * 0.15
+                cI1 := lsIx
+                cI2 := hdIx
+                cI3 := rsIx
+                cP1 := lsP
+                cP2 := hdP
+                cP3 := rsP
+                cNeckL := nlL
+                cNeckR := nlR
+                cNeckIxL := nlIxL
+                cNeckIxR := nlIxR
+
+    if array.size(slPx) >= 3
+        for i = f_pat_i0(array.size(slPx), 3) to array.size(slPx) - 3
+            float lsP = array.get(slPx, i)
+            float hdP = array.get(slPx, i + 1)
+            float rsP = array.get(slPx, i + 2)
+            int lsIx = array.get(slIx, i)
+            int hdIx = array.get(slIx, i + 1)
+            int rsIx = array.get(slIx, i + 2)
+            if not (lsP > hdP and hdP < rsP) or f_pct(lsP, rsP) > i_hsTol or f_prior(lsIx, 28) != "bearish"
+                continue
+            float nlL = na
+            float nlR = na
+            int nlIxL = lsIx
+            int nlIxR = rsIx
+            if array.size(shPx) > 0
+                for j = f_pat_i0(array.size(shPx), 1) to array.size(shPx) - 1
+                    int hx = array.get(shIx, j)
+                    float hp = array.get(shPx, j)
+                    if hx > lsIx and hx < hdIx
+                        nlL := na(nlL) ? hp : math.max(nlL, hp)
+                        nlIxL := hx
+                    if hx > hdIx and hx < rsIx
+                        nlR := na(nlR) ? hp : math.max(nlR, hp)
+                        nlIxR := hx
+            if na(nlL) or na(nlR)
+                continue
+            float neckNow = f_line_y(nlL, nlIxL, nlR, nlIxR, rsIx)
+            float height = neckNow - hdP
+            if height < atr * 1.1
+                continue
+            string st = close > neckNow ? "confirmed" : "forming"
+            float conf = 0.64 + (f_pct(lsP, rsP) < 1.5 ? 0.12 : 0.06) + 0.10 + (nlR <= nlL * 1.002 ? 0.08 : 0.0) + (st == "confirmed" ? 0.14 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "inverse_head_shoulders"
+                cStatus := st
+                cDir := "bullish"
+                cConf := conf
+                cNeck := neckNow
+                cTarget := neckNow + height
+                cStop := math.min(lsP, rsP) - atr * 0.15
+                cI1 := lsIx
+                cI2 := hdIx
+                cI3 := rsIx
+                cP1 := lsP
+                cP2 := hdP
+                cP3 := rsP
+                cNeckL := nlL
+                cNeckR := nlR
+                cNeckIxL := nlIxL
+                cNeckIxR := nlIxR
+
+    // ── 1-2-3 ──
+    if array.size(shPx) >= 2 and array.size(slPx) >= 1
+        for i = f_pat_i0(array.size(shPx), 2) to array.size(shPx) - 2
+            float p1h = array.get(shPx, i)
+            int p1x = array.get(shIx, i)
+            if f_prior(p1x, 20) != "bearish"
+                continue
+            float absLo = array.get(slPx, 0)
+            for j = 0 to math.min(array.size(slPx) - 1, 8)
+                if array.get(slIx, j) < p1x
+                    absLo := math.min(absLo, array.get(slPx, j))
+            float p2l = na
+            int p2x = na
+            for j = f_pat_i0(array.size(slPx), 1) to array.size(slPx) - 1
+                int lx = array.get(slIx, j)
+                if lx > p1x
+                    p2l := array.get(slPx, j)
+                    p2x := lx
+                    break
+            if na(p2l) or p2l <= absLo * 1.001 or p2x - p1x < 3
+                continue
+            string st = close > p1h ? "confirmed" : "forming"
+            float conf = 0.62 + 0.38 + (st == "confirmed" ? 0.14 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "one_two_three"
+                cStatus := st
+                cDir := "bullish"
+                cConf := conf
+                cNeck := p1h
+                cTarget := p1h + (p1h - p2l)
+                cStop := p2l - atr * 0.15
+                cI1 := p1x
+                cI2 := p2x
+                cP1 := p1h
+                cP2 := p2l
+    if array.size(slPx) >= 2 and array.size(shPx) >= 1
+        for i = f_pat_i0(array.size(slPx), 2) to array.size(slPx) - 2
+            float p1l = array.get(slPx, i)
+            int p1x = array.get(slIx, i)
+            if f_prior(p1x, 20) != "bullish"
+                continue
+            float absHi = array.get(shPx, 0)
+            for j = 0 to math.min(array.size(shPx) - 1, 8)
+                if array.get(shIx, j) < p1x
+                    absHi := math.max(absHi, array.get(shPx, j))
+            float p2h = na
+            int p2x = na
+            for j = f_pat_i0(array.size(shPx), 1) to array.size(shPx) - 1
+                int hx = array.get(shIx, j)
+                if hx > p1x
+                    p2h := array.get(shPx, j)
+                    p2x := hx
+                    break
+            if na(p2h) or p2h >= absHi * 0.999 or p2x - p1x < 3
+                continue
+            string st = close < p1l ? "confirmed" : "forming"
+            float conf = 0.62 + 0.38 + (st == "confirmed" ? 0.14 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "one_two_three"
+                cStatus := st
+                cDir := "bearish"
+                cConf := conf
+                cNeck := p1l
+                cTarget := p1l - (p2h - p1l)
+                cStop := p2h + atr * 0.15
+                cI1 := p1x
+                cI2 := p2x
+                cP1 := p1l
+                cP2 := p2h
+
+    // ── Flag / pennant ──
+    int poleLen = 8
+    float poleMove = close[FLAG_BODY] - close[FLAG_BODY + poleLen]
+    if math.abs(poleMove) >= atr * 2.5
+        float bodyH = flagBodyHi - flagBodyLo
+        float poleH = math.abs(poleMove)
+        bool bullPole = poleMove > 0
+        if bodyH <= poleH * 0.55 and bodyH >= atr * 0.2
+            float sTop = (high[FLAG_BODY - 1] - high[0]) / FLAG_BODY
+            float sBot = (low[FLAG_BODY - 1] - low[0]) / FLAG_BODY
+            float maxS = math.max(math.abs(sTop), math.abs(sBot), atr * 1e-6)
+            bool parallel = math.abs(sTop - sBot) / maxS <= 0.55
+            bool converging = high[0] < high[FLAG_BODY - 1] and low[0] > low[FLAG_BODY - 1]
+            string fk = converging ? "pennant" : parallel ? "flag" : ""
+            if fk != ""
+                float trigF = bullPole ? flagBodyHi : flagBodyLo
+                string st = bullPole ? (close > trigF ? "confirmed" : "forming") : (close < trigF ? "confirmed" : "forming")
+                float conf = 0.58 + 0.14 + (fk == "pennant" ? 0.12 : 0.08) + 0.10 + (volContract ? 0.06 : 0.0) + (st == "confirmed" ? 0.14 : 0.0)
+                float eff = f_eff(conf, st)
+                if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                    bestEff := eff
+                    bestSt := st
+                    cKind := fk
+                    cStatus := st
+                    cDir := bullPole ? "bullish" : "bearish"
+                    cConf := conf
+                    cNeck := trigF
+                    cTarget := bullPole ? trigF + poleH * 0.85 : trigF - poleH * 0.85
+                    cStop := bullPole ? flagBodyLo - atr * 0.05 : flagBodyHi + atr * 0.05
+
+    // ── Triangles / wedges (last 4 swings ABCD) ──
+    if array.size(shPx) >= 2 and array.size(slPx) >= 2
+        float aH = array.get(shPx, array.size(shPx) - 2)
+        float cH = array.get(shPx, array.size(shPx) - 1)
+        float bL = array.get(slPx, array.size(slPx) - 2)
+        float dL = array.get(slPx, array.size(slPx) - 1)
+        int aIx = array.get(shIx, array.size(shPx) - 2)
+        int cIx = array.get(shIx, array.size(shPx) - 1)
+        int bIx = array.get(slIx, array.size(slPx) - 2)
+        int dIx = array.get(slIx, array.size(slPx) - 1)
+        int span = math.max(cIx, dIx) - math.min(aIx, bIx)
+        if span >= 8
+            bool hf = cH < aH * 0.999
+            bool lr = dL > bL * 1.001
+            bool hflat = f_pct(aH, cH) < 0.45
+            bool lflat = f_pct(bL, dL) < 0.45
+            bool hr = cH > aH * 1.001
+            bool lf = dL < bL * 0.999
+            string tk = hf and lr ? "triangle_symmetric" : lr and hflat ? "triangle_ascending" : hf and lflat ? "triangle_descending" : hr and lr ? "wedge_rising" : hf and lf ? "wedge_falling" : ""
+            if tk != ""
+                float upNow = f_line_y(aH, aIx, cH, cIx, bar_index)
+                float loNow = f_line_y(bL, bIx, dL, dIx, bar_index)
+                float baseW = math.max(aH, cH) - math.min(bL, dL)
+                if baseW >= atr * 0.8
+                    string dir = tk == "triangle_ascending" ? "bullish" : tk == "triangle_descending" ? "bearish" : tk == "wedge_falling" ? "bullish" : tk == "wedge_rising" ? "bearish" : "neutral"
+                    bool bullBr = close > upNow
+                    bool bearBr = close < loNow
+                    string st = bullBr or bearBr ? "confirmed" : "forming"
+                    if bullBr
+                        dir := "bullish"
+                    if bearBr
+                        dir := "bearish"
+                    float conf = 0.58 + 0.14 + 0.08 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.06 : 0.0)
+                    float tgt = dir == "bullish" ? (bullBr ? close : upNow) + baseW * 0.9 : (bearBr ? close : loNow) - baseW * 0.9
+                    float eff = f_eff(conf, st)
+                    if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                        bestEff := eff
+                        bestSt := st
+                        cKind := tk
+                        cStatus := st
+                        cDir := dir
+                        cConf := conf
+                        cNeck := dir == "bullish" ? upNow : loNow
+                        cTarget := tgt
+                        cStop := dir == "bullish" ? loNow - atr * 0.2 : upNow + atr * 0.2
+
+    // ── False breakout ──
+    if array.size(slPx) >= 2
+        float support = array.get(slPx, array.size(slPx) - 1)
+        for k = 1 to 6
+            if low[k] < support * 0.999 and close[k] > support
+                string st = close > hi6 ? "confirmed" : "forming"
+                float conf = 0.62 + 0.16 + 0.10 + (st == "confirmed" ? 0.12 : 0.0)
+                float eff = f_eff(conf, st)
+                if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                    bestEff := eff
+                    bestSt := st
+                    cKind := "false_breakout"
+                    cStatus := st
+                    cDir := "bullish"
+                    cConf := conf
+                    cNeck := support
+                    cTarget := close + (close - low[k])
+                    cStop := low[k] - atr * 0.2
+                break
+    if array.size(shPx) >= 2
+        float resist = array.get(shPx, array.size(shPx) - 1)
+        for k = 1 to 6
+            if high[k] > resist * 1.001 and close[k] < resist
+                string st = close < lo6 ? "confirmed" : "forming"
+                float conf = 0.62 + 0.16 + 0.10 + (st == "confirmed" ? 0.12 : 0.0)
+                float eff = f_eff(conf, st)
+                if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                    bestEff := eff
+                    bestSt := st
+                    cKind := "false_breakout"
+                    cStatus := st
+                    cDir := "bearish"
+                    cConf := conf
+                    cNeck := resist
+                    cTarget := close - (high[k] - close)
+                    cStop := high[k] + atr * 0.2
+                break
+
+    // ── Three Indians (1.272) ──
+    if array.size(shPx) >= 3
+        for i = f_pat_i0(array.size(shPx), 3) to array.size(shPx) - 3
+            float h1 = array.get(shPx, i)
+            float h2 = array.get(shPx, i + 1)
+            float h3 = array.get(shPx, i + 2)
+            int x1 = array.get(shIx, i)
+            int x2 = array.get(shIx, i + 1)
+            int x3 = array.get(shIx, i + 2)
+            if h2 <= h1 or x2 - x1 < 5 or x3 - x2 < 5
+                continue
+            float exp = h1 + 1.272 * (h2 - h1)
+            float proj = f_line_y(h1, x1, h2, x2, x3)
+            bool near = f_pct(h3, exp) <= i_indiansTol or f_pct(h3, proj) <= i_indiansTol
+            if not near or h3 <= h2 * 0.998
+                continue
+            float trendY = f_line_y(h1, x1, h3, x3, bar_index)
+            string st = close < trendY ? "confirmed" : "forming"
+            float conf = 0.58 + 0.20 + 0.12 + (st == "confirmed" ? 0.12 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "three_indians"
+                cStatus := st
+                cDir := "bearish"
+                cConf := conf
+                cNeck := trendY
+                cTarget := h3 - (h3 - h1) * 0.618
+                cStop := h3 + atr * 0.25
+    if array.size(slPx) >= 3
+        for i = f_pat_i0(array.size(slPx), 3) to array.size(slPx) - 3
+            float l1 = array.get(slPx, i)
+            float l2 = array.get(slPx, i + 1)
+            float l3 = array.get(slPx, i + 2)
+            int x1 = array.get(slIx, i)
+            int x2 = array.get(slIx, i + 1)
+            int x3 = array.get(slIx, i + 2)
+            if l2 >= l1 or x2 - x1 < 5 or x3 - x2 < 5
+                continue
+            float exp = l1 - 1.272 * (l1 - l2)
+            float proj = f_line_y(l1, x1, l2, x2, x3)
+            bool near = f_pct(l3, exp) <= i_indiansTol or f_pct(l3, proj) <= i_indiansTol
+            if not near or l3 >= l2 * 1.002
+                continue
+            float trendY = f_line_y(l1, x1, l3, x3, bar_index)
+            string st = close > trendY ? "confirmed" : "forming"
+            float conf = 0.58 + 0.20 + 0.12 + (st == "confirmed" ? 0.12 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "three_indians"
+                cStatus := st
+                cDir := "bullish"
+                cConf := conf
+                cNeck := trendY
+                cTarget := l3 + (l1 - l3) * 0.618
+                cStop := l3 - atr * 0.25
+
+    // ── Diamond (expanding then contracting swings) ──
+    if array.size(shPx) >= 3 and array.size(slPx) >= 3
+        float fh0 = array.get(shPx, array.size(shPx) - 3)
+        float fh1 = array.get(shPx, array.size(shPx) - 1)
+        float fl0 = array.get(slPx, array.size(slPx) - 3)
+        float fl1 = array.get(slPx, array.size(slPx) - 1)
+        bool expand = fh1 > fh0 and fl1 < fl0
+        bool contract = fh1 < array.get(shPx, array.size(shPx) - 2) and fl1 > array.get(slPx, array.size(slPx) - 2)
+        float width = hi16 - lo16
+        if expand and contract and width >= atr * 1.2
+            string st = close > fh1 or close < fl1 ? "confirmed" : "forming"
+            string dir = close < fl1 ? "bearish" : close > fh1 ? "bullish" : "neutral"
+            float conf = 0.58 + 0.14 + 0.14 + (st == "confirmed" ? 0.12 : 0.0)
+            float eff = f_eff(conf, st)
+            if conf >= i_minPatConf and dir != "neutral" and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+                bestEff := eff
+                bestSt := st
+                cKind := "diamond"
+                cStatus := st
+                cDir := dir
+                cConf := conf
+                cTarget := dir == "bullish" ? close + width * 0.9 : close - width * 0.9
+                cStop := dir == "bullish" ? fl1 - atr * 0.2 : fh1 + atr * 0.2
+
+    // ── Cup & handle (lite) — rim/cupAgo считаются глобально (каждый бар)
+    if cupHistOkG and not na(cupRimLG) and not na(cupRimRG) and f_pct(cupRimLG, cupRimRG) < 4.0 and close > cupLoG * 1.02 and handleLoG > cupLoG * 1.008 and handleLoG < cupRimRG * 0.985
+        string st = close > cupRimRG ? "confirmed" : "forming"
+        float conf = 0.60 + 0.12 + 0.10 + (st == "confirmed" ? 0.14 : 0.0)
+        float eff = f_eff(conf, st)
+        if conf >= i_minPatConf and (eff > bestEff or (eff == bestEff and st == "confirmed" and bestSt != "confirmed"))
+            bestEff := eff
+            bestSt := st
+            cKind := "cup_handle"
+            cStatus := st
+            cDir := "bullish"
+            cConf := conf
+            cNeck := cupRimRG
+            cTarget := cupRimRG + (cupRimRG - cupLoG) * 0.85
+            cStop := handleLoG - atr * 0.15
+
+    // ── Rectangle ──
+    float rngMidT = (rngHiRect + rngLoRect) * 0.5
+    float rngWT = rngMidT > 0 ? (rngHiRect - rngLoRect) / rngMidT * 100 : 0
+    if rngWT >= 0.4 and rngWT <= 2.8 and i_consLb >= 10
+        string st = close > rngHiRect ? "confirmed" : close < rngLoRect ? "confirmed" : "forming"
+        string dir = close > rngHiRect ? "bullish" : close < rngLoRect ? "bearish" : "neutral"
+        float conf = 0.58 + 0.12 + (st == "confirmed" ? 0.14 : 0.0) + (volContract ? 0.08 : 0.0)
+        float eff = f_eff(conf, st)
+        if conf >= i_minPatConf and dir != "neutral" and st == "confirmed" and (eff > bestEff or (eff == bestEff and bestSt != "confirmed"))
+            bestEff := eff
+            bestSt := st
+            cKind := "rectangle"
+            cStatus := st
+            cDir := dir
+            cConf := conf
+            cNeck := dir == "bullish" ? rngHiRect : rngLoRect
+            cTarget := dir == "bullish" ? rngHiRect + (rngHiRect - rngLoRect) * 0.8 : rngLoRect - (rngHiRect - rngLoRect) * 0.8
+            cStop := dir == "bullish" ? rngLoRect - atr * 0.15 : rngHiRect + atr * 0.15
+
+    // Baskerville только если primary = ГиП (chart_patterns._detect_baskerville)
+    if cKind == "head_shoulders" and not na(cNeck)
+        bool brokeDn = closeLo12 < cNeck * 0.998
+        bool reclaimUp = close > cNeck * 1.001
+        if brokeDn and reclaimUp
+            string stB = close >= cP2 * 0.999 ? "confirmed" : "forming"
+            float confB = 0.66 + 0.18 + 0.15 + (stB == "confirmed" ? 0.14 : 0.0)
+            float effB = f_eff(confB, stB)
+            if confB >= i_minPatConf and (effB > bestEff or (effB == bestEff and stB == "confirmed" and bestSt != "confirmed"))
+                bestEff := effB
+                bestSt := stB
+                cKind := "baskerville_bullish"
+                cStatus := stB
+                cDir := "bullish"
+                cConf := confB
+                cTarget := cP2 + (cP2 - cNeck)
+                cStop := cNeck - atr * 0.3
+    if cKind == "inverse_head_shoulders" and not na(cNeck)
+        bool brokeUp = closeHi12 > cNeck * 1.002
+        bool reclaimDn = close < cNeck * 0.999
+        if brokeUp and reclaimDn
+            string stB = close <= cP2 * 1.001 ? "confirmed" : "forming"
+            float confB = 0.66 + 0.18 + 0.15 + (stB == "confirmed" ? 0.14 : 0.0)
+            float effB = f_eff(confB, stB)
+            if confB >= i_minPatConf and (effB > bestEff or (effB == bestEff and stB == "confirmed" and bestSt != "confirmed"))
+                bestEff := effB
+                bestSt := stB
+                cKind := "baskerville_bearish"
+                cStatus := stB
+                cDir := "bearish"
+                cConf := confB
+                cTarget := cP2 - (cNeck - cP2)
+                cStop := cNeck + atr * 0.3
+
+    patKind := cKind
+    patStatus := cStatus
+    patDir := cDir
+    patConf := cConf
+    patNeck := cNeck
+    patTarget := cTarget
+    patStop := cStop
+    patI1 := cI1
+    patI2 := cI2
+    patI3 := cI3
+    patP1 := cP1
+    patP2 := cP2
+    patP3 := cP3
+    patNeckL := cNeckL
+    patNeckR := cNeckR
+    patNeckIxL := cNeckIxL
+    patNeckIxR := cNeckIxR
+
+patLabelRu = patKind == "double_top" ? "Двойная вершина" : patKind == "double_bottom" ? "Двойное дно" : patKind == "triple_top" ? "Тройная вершина" : patKind == "triple_bottom" ? "Тройное дно" : patKind == "head_shoulders" ? "Голова и плечи" : patKind == "inverse_head_shoulders" ? "Перев. ГиП" : patKind == "baskerville_bullish" ? "Баскервиль ↑" : patKind == "baskerville_bearish" ? "Баскервиль ↓" : patKind == "one_two_three" ? "1-2-3" : patKind == "flag" ? "Флаг" : patKind == "pennant" ? "Вымпел" : patKind == "triangle_symmetric" ? "△ симметр." : patKind == "triangle_ascending" ? "△ восход." : patKind == "triangle_descending" ? "△ нисход." : patKind == "wedge_rising" ? "Клин восх." : patKind == "wedge_falling" ? "Клин нисх." : patKind == "false_breakout" ? "Ложный пробой" : patKind == "three_indians" ? "Три индейца" : patKind == "diamond" ? "Ромб" : patKind == "cup_handle" ? "Чашка+ручка" : patKind == "rectangle" ? "Прямоугольник" : ""
+
+// ── SMC ──
+bool sweep = false
+string sweepDir = ""
+float sweepPx = na
+if array.size(shPx) > 0 and array.size(slPx) > 0
+    float refHi = array.get(shPx, array.size(shPx) - 1)
+    float refLo = array.get(slPx, array.size(slPx) - 1)
+    if high[1] > refHi * 1.0005 and close < refHi
+        sweep := true
+        sweepDir := "short"
+        sweepPx := refHi
+    else if low[1] < refLo * 0.9995 and close > refLo
+        sweep := true
+        sweepDir := "long"
+        sweepPx := refLo
+
+bool bos = false
+string bosDir = ""
+float bosLvl = na
+if array.size(shPx) >= 1 and close > array.get(shPx, array.size(shPx) - 1)
+    bos := true
+    bosDir := "long"
+    bosLvl := array.get(shPx, array.size(shPx) - 1)
+else if array.size(slPx) >= 1 and close < array.get(slPx, array.size(slPx) - 1)
+    bos := true
+    bosDir := "short"
+    bosLvl := array.get(slPx, array.size(slPx) - 1)
+
+bool fvgUp = low > high[2]
+bool fvgDn = high < low[2]
+float fvgTop = fvgUp ? low : fvgDn ? low[2] : na
+float fvgBot = fvgUp ? high[2] : fvgDn ? high : na
+
+bool obBull = close > ta.highest(high, 12)[1] and close > open and volume > volSma20 * 1.2
+bool obBear = close < ta.lowest(low, 12)[1] and close < open and volume > volSma20 * 1.2
+var float zoneDemandTop = na
+var float zoneDemandBot = na
+var float zoneSupplyTop = na
+var float zoneSupplyBot = na
+if barstate.isconfirmed
+    if obBull
+        zoneDemandTop := high[1]
+        zoneDemandBot := low[1]
+    if obBear
+        zoneSupplyTop := high[1]
+        zoneSupplyBot := low[1]
+    if array.size(slPx) > 0 and na(zoneDemandBot)
+        zoneDemandBot := array.get(slPx, array.size(slPx) - 1)
+        zoneDemandTop := na(zoneDemandTop) ? zoneDemandBot + atr * 0.35 : zoneDemandTop
+    if array.size(shPx) > 0 and na(zoneSupplyTop)
+        zoneSupplyTop := array.get(shPx, array.size(shPx) - 1)
+        zoneSupplyBot := na(zoneSupplyBot) ? zoneSupplyTop - atr * 0.35 : zoneSupplyBot
+
+float zDemTop = na(zoneDemandTop) ? zoneDemandBot + atr * 0.35 : zoneDemandTop
+float zDemBot = zoneDemandBot
+float zSupTop = zoneSupplyTop
+float zSupBot = na(zoneSupplyBot) ? zoneSupplyTop - atr * 0.35 : zoneSupplyBot
+
+bool inDemand = i_showZone and not na(zDemBot) and low <= zDemTop and close >= zDemBot
+bool inSupply = i_showZone and not na(zSupTop) and high >= zSupBot and close <= zSupTop
+string zoneTag = inDemand ? "retest спрос" : inSupply ? "retest предлож." : ""
+
+// ── RBR ──
+float rngHi = ta.highest(high, i_consLb)
+float rngLo = ta.lowest(low, i_consLb)
+float rngMid = (rngHi + rngLo) * 0.5
+float rngW = rngMid > 0 ? (rngHi - rngLo) / rngMid * 100 : 0
+bool rangeOk = rngW >= 0.35 and rngW <= 18 and rngHi > rngLo
+float posR = rangeOk ? (close - rngLo) / (rngHi - rngLo) : 0.5
+bool broke = ta.barssince(close < rngLo * 0.9985) <= 10
+string rbrPhase = rangeOk ? (broke and low <= rngLo * 1.018 and high >= rngLo * 0.992 ? "retest" : close < rngLo * 0.998 ? "broken" : posR >= i_fadePos and not broke ? "fade_top" : "await_break") : "none"
+
+// ── Fib ──
+float impHi = ta.highest(high, 24)
+float impLo = ta.lowest(low, 24)
+bool impUp = close > close[24]
+float f50 = impUp ? impHi - (impHi - impLo) * 0.5 : impLo + (impHi - impLo) * 0.5
+float f618 = impUp ? impHi - (impHi - impLo) * 0.618 : impLo + (impHi - impLo) * 0.618
+bool inFib = close >= math.min(f50, f618) and close <= math.max(f50, f618)
+
+// ── Phase ──
+bool compression = ta.sma(high - low, 10) <= ta.sma(high - low, 28) * 0.58
+bool postPump = (ta.highest(high, 30) - close[30]) / math.max(close[30], 1e-10) * 100 >= 6
+string basePhase = compression and postPump ? "distribution" : compression ? "consolidation" : "trend"
+
+// ── RSI divergence lite ──
+float rsi = ta.rsi(close, i_rsiLen)
+var float[] rsh = array.new_float()
+var float[] rsl = array.new_float()
+rph = ta.pivothigh(rsi, i_rsiPL, i_rsiPR)
+rpl = ta.pivotlow(rsi, i_rsiPL, i_rsiPR)
+if not na(rph)
+    array.push(rsh, rph)
+    while array.size(rsh) > 12
+        array.shift(rsh)
+if not na(rpl)
+    array.push(rsl, rpl)
+    while array.size(rsl) > 12
+        array.shift(rsl)
+string rsiDiv = ""
+if array.size(rsh) >= 2 and array.size(shPx) >= 2
+    if array.get(rsh, array.size(rsh) - 1) < array.get(rsh, array.size(rsh) - 2) and array.get(shPx, array.size(shPx) - 1) > array.get(shPx, array.size(shPx) - 2)
+        rsiDiv := "RSI bear div"
+if array.size(rsl) >= 2 and array.size(slPx) >= 2
+    if array.get(rsl, array.size(rsl) - 1) > array.get(rsl, array.size(rsl) - 2) and array.get(slPx, array.size(slPx) - 1) < array.get(slPx, array.size(slPx) - 2)
+        rsiDiv := rsiDiv == "" ? "RSI bull div" : rsiDiv
+
+f_tf_arrow() =>
+    close > close[12] ? "↑" : close < close[12] ? "↓" : "→"
+
+[htfC, htfC12] = request.security(syminfo.tickerid, "240", [close, close[12]], lookahead=barmerge.lookahead_off)
+string htfBias = htfC > htfC12 ? "bullish" : htfC < htfC12 ? "bearish" : "neutral"
+
+var string mtf = ""
+if i_useMtf and barstate.islast
+    mtf := "H4" + request.security(syminfo.tickerid, "240", f_tf_arrow(), lookahead=barmerge.lookahead_off) + " H1" + request.security(syminfo.tickerid, "60", f_tf_arrow(), lookahead=barmerge.lookahead_off) + " M15" + request.security(syminfo.tickerid, "15", f_tf_arrow(), lookahead=barmerge.lookahead_off)
+else if not i_useMtf
+    mtf := ""
+
+// ── Confluence (setup_confluence) ──
+int score = 0
+if patConf >= i_drawMinConf
+    score += int(patConf * 30)
+    if patStatus == "confirmed"
+        score += 10
+if sweep
+    score += 12
+if bos
+    score += 10
+if inFib and i_showFib
+    score += 8
+if rbrPhase == "fade_top" or rbrPhase == "retest"
+    score += 8
+if inDemand or inSupply
+    score += 6
+if volContract
+    score += 4
+if rsiDiv != ""
+    score += 8
+if htfBias == "bullish" and patDir == "bullish"
+    score += 6
+if htfBias == "bearish" and patDir == "bearish"
+    score += 6
+string grade = score >= 72 ? "A" : score >= 58 ? "B" : score >= 45 ? "C" : "D"
+
+// ── scenario_engine (5 сценариев) ──
+string scenario = "continuation"
+string scenAct = "WATCH"
+if postPump and posR > 0.72 and rsi > 68
+    scenario := "exhaustion_warning"
+    scenAct := "WATCH"
+else if sweep and bos
+    scenario := "reversal"
+    scenAct := patDir == "bullish" ? "LONG" : patDir == "bearish" ? "SHORT" : "WATCH"
+else if basePhase == "distribution" and posR > 0.65
+    scenario := "range_fade"
+    scenAct := "WATCH"
+else if compression and (posR >= 0.58 or posR <= 0.42)
+    scenario := "breakout_compression"
+    scenAct := posR >= 0.58 ? "LONG" : "SHORT"
+else if htfBias == "bullish" and (grade == "B" or grade == "A")
+    scenario := "continuation"
+    scenAct := "LONG"
+else if htfBias == "bearish" and (grade == "B" or grade == "A")
+    scenario := "continuation"
+    scenAct := "SHORT"
+
+string bias = patDir == "bearish" ? "SHORT" : patDir == "bullish" ? "LONG" : rbrPhase == "fade_top" or rbrPhase == "retest" ? "SHORT" : sweepDir == "long" ? "LONG" : sweepDir == "short" ? "SHORT" : "WAIT"
+
+bool drawPatLines = i_showPattern and patKind != "" and (patConf >= i_drawMinConf or (i_drawForming and patConf >= i_minPatConf))
+bool drawPatPlan = i_showPattern and patConf >= i_drawMinConf and patKind != ""
+bool rbrActive = i_showRbr and rangeOk and rbrPhase != "none"
+bool rbrStory = rbrActive and (rbrPhase == "fade_top" or rbrPhase == "retest" or rbrPhase == "await_break")
+// rbr_short_story_lock (chart_story_router): у потолка RBR не рисуем long-паттерн поверх story
+bool rbrLock = rbrStory and (rbrPhase == "fade_top" or rbrPhase == "retest") and close >= rngHi * 0.94
+string hudBias = rbrLock ? "WAIT" : bias
+
+string chartLayer = "observation"
+if i_storyFirst
+    if rbrLock
+        chartLayer := "ed_rbr"
+    else if drawPatPlan and patStatus == "confirmed"
+        chartLayer := "pattern"
+    else if rbrStory
+        chartLayer := "ed_rbr"
+    else if drawPatLines
+        chartLayer := "pattern"
+    else if rbrActive
+        chartLayer := "ed_rbr"
+else
+    chartLayer := "full"
+
+bool layerRbr = chartLayer == "ed_rbr" or chartLayer == "full"
+bool layerPat = chartLayer == "pattern" or chartLayer == "full"
+bool drawPat = drawPatLines and layerPat and not rbrLock
+bool drawSmc = i_showSmc and chartLayer == "full"
+bool drawRbrPlan = i_showRbr and (rbrPhase == "fade_top" or rbrPhase == "retest") and layerRbr
+bool drawStory = i_showStoryBox and rangeOk and layerRbr
+string layerLegend = chartLayer == "ed_rbr" ? "Серый=пол · Жёлтый=потолок" : chartLayer == "pattern" ? "Фигура + план" : "HUD"
+
+// Разбор Ed = ТОЛЬКО этот слой. Старый RBR/боковик/TP — только «Доп. слой».
+bool edDraw = i_edBreakdown
+bool legacyDraw = i_showPatLayer
+bool legacyPatDraw = legacyDraw and drawPat and not (edDraw and i_edPatGeom)
+bool legacyRbrDraw = legacyDraw and i_showRbr and not edDraw
+
+bool nearBos = bos and not na(bosLvl) and math.abs(close - bosLvl) / math.max(close, 1e-10) < 0.012
+
+var line neckLn = na
+var line hsL1 = na
+var line hsL2 = na
+var line hsNeckLn = na
+var line bosLn = na
+var box fvgBox = na
+var label sweepLbl = na
+var box obBox = na
+var box zBox = na
+var box bS = na
+var box bE = na
+var box bT = na
+var box rbrStoryBox = na
+var label storyLbl = na
+var label patLbl = na
+var label rbrLoLbl = na
+var label rbrHiLbl = na
+var line rbrLoLn = na
+var line rbrHiLn = na
+var line fibL1 = na
+var line fibL2 = na
+var line dblLn = na
+var table hud = table.new(position.top_right, 2, 10, bgcolor=color.new(#161b22, 15), border_width=1, border_color=#30363d)
+var box edRangeBox = na
+var box edSupBox = na
+var line edTrendLn = na
+var box edSigBox = na
+var box edObBox = na
+var line edCeilLn = na
+var line edFloorLn = na
+var line edBosLn = na
+var line edLiqHi = na
+var line edLiqLo = na
+var label edCeilTag = na
+var label edFloorTag = na
+var label edEvBreak = na
+var label edEvRetest = na
+var label edEvStruct = na
+var line edPatLeg1 = na
+var line edPatLeg2 = na
+var line edPatLeg3 = na
+
+if barstate.islast
+    if not na(neckLn)
+        line.delete(neckLn)
+    if not na(hsL1)
+        line.delete(hsL1)
+    if not na(hsL2)
+        line.delete(hsL2)
+    if not na(hsNeckLn)
+        line.delete(hsNeckLn)
+    if not na(bosLn)
+        line.delete(bosLn)
+    if not na(fvgBox)
+        box.delete(fvgBox)
+    if not na(sweepLbl)
+        label.delete(sweepLbl)
+    if not na(obBox)
+        box.delete(obBox)
+    if not na(zBox)
+        box.delete(zBox)
+    if not na(bS)
+        box.delete(bS)
+    if not na(bE)
+        box.delete(bE)
+    if not na(bT)
+        box.delete(bT)
+    if not na(rbrStoryBox)
+        box.delete(rbrStoryBox)
+    if not na(storyLbl)
+        label.delete(storyLbl)
+    if not na(patLbl)
+        label.delete(patLbl)
+    if not na(rbrLoLn)
+        line.delete(rbrLoLn)
+    if not na(rbrHiLn)
+        line.delete(rbrHiLn)
+    if not na(fibL1)
+        line.delete(fibL1)
+    if not na(fibL2)
+        line.delete(fibL2)
+    if not na(dblLn)
+        line.delete(dblLn)
+    if not na(rbrLoLbl)
+        label.delete(rbrLoLbl)
+    if not na(rbrHiLbl)
+        label.delete(rbrHiLbl)
+    if not na(edRangeBox)
+        box.delete(edRangeBox)
+    if not na(edSupBox)
+        box.delete(edSupBox)
+    if not na(edTrendLn)
+        line.delete(edTrendLn)
+    if not na(edSigBox)
+        box.delete(edSigBox)
+    if not na(edObBox)
+        box.delete(edObBox)
+    if not na(edCeilLn)
+        line.delete(edCeilLn)
+    if not na(edFloorLn)
+        line.delete(edFloorLn)
+    if not na(edBosLn)
+        line.delete(edBosLn)
+    if not na(edLiqHi)
+        line.delete(edLiqHi)
+    if not na(edLiqLo)
+        line.delete(edLiqLo)
+    if not na(edCeilTag)
+        label.delete(edCeilTag)
+    if not na(edFloorTag)
+        label.delete(edFloorTag)
+    if not na(edEvBreak)
+        label.delete(edEvBreak)
+    if not na(edEvRetest)
+        label.delete(edEvRetest)
+    if not na(edEvStruct)
+        label.delete(edEvStruct)
+    if not na(edPatLeg1)
+        line.delete(edPatLeg1)
+    if not na(edPatLeg2)
+        line.delete(edPatLeg2)
+    if not na(edPatLeg3)
+        line.delete(edPatLeg3)
+    neckLn := na
+    hsL1 := na
+    hsL2 := na
+    hsNeckLn := na
+    bosLn := na
+    fvgBox := na
+    sweepLbl := na
+    obBox := na
+    zBox := na
+    rbrStoryBox := na
+    storyLbl := na
+    patLbl := na
+    rbrLoLn := na
+    rbrHiLn := na
+    fibL1 := na
+    fibL2 := na
+    dblLn := na
+    edSigBox := na
+    edSupBox := na
+    edTrendLn := na
+    edObBox := na
+    edRangeBox := na
+    edCeilLn := na
+    edFloorLn := na
+    edBosLn := na
+    edLiqHi := na
+    edLiqLo := na
+    edCeilTag := na
+    edFloorTag := na
+    edEvBreak := na
+    edEvRetest := na
+    edEvStruct := na
+    edPatLeg1 := na
+    edPatLeg2 := na
+    edPatLeg3 := na
+    int xL = bar_index - i_consLb
+    int xR = bar_index + 14
+    int xVis = bar_index - math.max(i_consLb, 90)
+    int xEnd = bar_index + 56
+    float edZ = math.max(atr * 0.34, syminfo.mintick * 6)
+
+    // ── 1) Фигура (как на слайдах): шея на всю ширину, 2 вершины, зона сопр. ──
+    if edDraw and i_edPatGeom and patKind != "" and patConf >= i_minPatConf and not na(patNeck)
+        if patKind == "double_top" or patKind == "double_bottom" or patKind == "triple_top" or patKind == "triple_bottom"
+            int xPatL = not na(patI1) ? math.min(patI1, patI2) : xVis
+            neckLn := line.new(xPatL, patNeck, xEnd, patNeck, color=#58a6ff, width=2, extend=extend.right)
+            if not na(patI1) and not na(patI2)
+                dblLn := line.new(patI1, patP1, patI2, patP2, color=#e6edf3, width=2, xloc=xloc.bar_index)
+                edPatLeg1 := line.new(patI1, patP1, patI1, patNeck, color=#8b949e, width=1, style=line.style_dashed, xloc=xloc.bar_index)
+                edPatLeg2 := line.new(patI2, patP2, patI2, patNeck, color=#8b949e, width=1, style=line.style_dashed, xloc=xloc.bar_index)
+                float peakZ = patKind == "double_bottom" or patKind == "triple_bottom" ? math.min(patP1, patP2) : math.max(patP1, patP2)
+                if i_edSigZone
+                    edSigBox := box.new(xVis, peakZ + edZ, xEnd, peakZ - edZ, bgcolor=color.new(#8b949e, 84), border_color=color.new(#484f58, 50), border_width=1)
+                edEvStruct := label.new(patI2, peakZ, patKind == "double_bottom" ? "2× дно" : "2× верш", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f0c040, size=size.small)
+            if not na(patI3)
+                edPatLeg3 := line.new(patI2, patP2, patI3, patP3, color=#e6edf3, width=2, xloc=xloc.bar_index)
+
+    // ── 2) TL → зона → пробой/ретest → OB ──
+    if edDraw and i_edTrend and array.size(slPx) >= 2 and array.size(slIx) >= 2 and array.size(shPx) >= 2
+        int n = array.size(slPx)
+        int xa = array.get(slIx, n - 2)
+        int xb = array.get(slIx, n - 1)
+        float ya = array.get(slPx, n - 2)
+        float yb = array.get(slPx, n - 1)
+        bool bullTls = yb >= ya
+        bool bearRev = array.get(shPx, array.size(shPx) - 1) < array.get(shPx, array.size(shPx) - 2)
+        if bullTls and not bearRev
+            edTrendLn := line.new(xa, ya, xb, yb, color=#e6edf3, width=2, extend=extend.right)
+            if i_edSigZone
+                edSigBox := box.new(xVis, ya + edZ, xEnd, ya - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
+                edEvStruct := label.new(xa, ya + edZ, "HL", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#58a6ff, size=size.small)
+            int brOff = -1
+            int rtOff = -1
+            if i_edEvents
+                for i = 1 to 26
+                    if brOff < 0
+                        int bx = bar_index - i
+                        float tY = f_line_y(ya, xa, yb, xb, bx)
+                        float tYp = f_line_y(ya, xa, yb, xb, bx + 1)
+                        if close[i] < tY and close[i + 1] >= tYp
+                            brOff := i
+                if brOff > 0
+                    int bxi = bar_index - brOff
+                    edEvBreak := label.new(bxi, high[brOff], "пробой", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f85149, size=size.normal)
+                    for j = 1 to 18
+                        if rtOff < 0 and j < brOff
+                            float tYj = f_line_y(ya, xa, yb, xb, bar_index - j)
+                            if high[j] >= tYj * 0.998 and high[j] <= tYj * 1.006 and close[j] < tYj
+                                rtOff := j
+                    if rtOff > 0
+                        edEvRetest := label.new(bar_index - rtOff, high[rtOff], "ретest", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f0c040, size=size.normal)
+            if i_edOb and brOff > 0
+                int obOff = -1
+                for k = brOff to brOff + 12
+                    if obOff < 0 and close[k] > open[k]
+                        obOff := k
+                if obOff > 0
+                    edObBox := box.new(bar_index - obOff, high[obOff], xEnd, low[obOff], bgcolor=color.new(#f85149, 84), border_color=#da3633, border_width=1)
+        else if bearRev and array.size(shIx) >= 2
+            int m = array.size(shPx)
+            int xh1 = array.get(shIx, m - 2)
+            int xh2 = array.get(shIx, m - 1)
+            float yh1 = array.get(shPx, m - 2)
+            float yh2 = array.get(shPx, m - 1)
+            edTrendLn := line.new(xh1, yh1, xh2, yh2, color=#e6edf3, width=2, extend=extend.right)
+            if i_edSigZone
+                edSigBox := box.new(xVis, yh1 + edZ, xEnd, yh1 - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
+                edEvStruct := label.new(xh1, yh1 + edZ, "HH", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#58a6ff, size=size.small)
+            int brOffH = -1
+            if i_edEvents
+                for i = 1 to 26
+                    if brOffH < 0
+                        int bx = bar_index - i
+                        float tY = f_line_y(yh1, xh1, yh2, xh2, bx)
+                        float tYp = f_line_y(yh1, xh1, yh2, xh2, bx + 1)
+                        if close[i] > tY and close[i + 1] <= tYp
+                            brOffH := i
+                if brOffH > 0
+                    edEvBreak := label.new(bar_index - brOffH, high[brOffH], "пробой", style=label.style_label_down, color=color.new(color.black, 100), textcolor=#f85149, size=size.normal)
+            if i_edOb and brOffH > 0
+                int obOffB = -1
+                for k = brOffH to brOffH + 12
+                    if obOffB < 0 and close[k] < open[k]
+                        obOffB := k
+                if obOffB > 0
+                    edObBox := box.new(bar_index - obOffB, high[obOffB], xEnd, low[obOffB], bgcolor=color.new(#f85149, 84), border_color=#da3633, border_width=1)
+        else if array.size(shPx) >= 2 and array.size(shIx) >= 2
+            int mH = array.size(shPx)
+            int xh1f = array.get(shIx, mH - 2)
+            int xh2f = array.get(shIx, mH - 1)
+            float yh1f = array.get(shPx, mH - 2)
+            float yh2f = array.get(shPx, mH - 1)
+            edTrendLn := line.new(xh1f, yh1f, xh2f, yh2f, color=#e6edf3, width=2, extend=extend.right)
+            if i_edSigZone
+                edSigBox := box.new(xVis, yh1f + edZ, xEnd, yh1f - edZ, bgcolor=color.new(#58a6ff, 86), border_color=color.new(#388bfd, 45), border_width=1)
+
+    if edDraw and i_edTriggers and rangeOk and i_showRbr
+        float ceilPx = rngHi
+        float floorPx = rngLo
+        edRangeBox := box.new(xL, ceilPx, bar_index + 1, floorPx, bgcolor=color.new(#8b949e, 97), border_color=color.new(#484f58, 60), border_width=1)
+        edCeilLn := line.new(xVis, ceilPx, bar_index, ceilPx, color=#f0c040, width=2, extend=extend.right)
+        edFloorLn := line.new(xVis, floorPx, bar_index, floorPx, color=#8b949e, width=2, extend=extend.right)
+        edCeilTag := label.new(bar_index + 6, ceilPx, "лонг ≥ " + str.tostring(ceilPx, format.mintick), style=label.style_label_left, color=color.new(color.black, 100), textcolor=#3fb950, size=size.normal)
+        edFloorTag := label.new(bar_index + 6, floorPx, "шорт ≤ " + str.tostring(floorPx, format.mintick), style=label.style_label_left, color=color.new(color.black, 100), textcolor=#f85149, size=size.normal)
+
+    if edDraw and i_edShowBos and bos and not na(bosLvl)
+        edBosLn := line.new(xVis, bosLvl, bar_index, bosLvl, color=#58a6ff, width=1, style=line.style_dashed, extend=extend.right)
+    if edDraw and i_edShowLiq and array.size(shPx) >= 2
+        edLiqHi := line.new(xVis, array.get(shPx, array.size(shPx) - 2), bar_index, array.get(shPx, array.size(shPx) - 2), color=#c297ff, style=line.style_dotted, width=1, extend=extend.right)
+    if edDraw and i_edShowLiq and array.size(slPx) >= 2
+        edLiqLo := line.new(xVis, array.get(slPx, array.size(slPx) - 2), bar_index, array.get(slPx, array.size(slPx) - 2), color=#c297ff, style=line.style_dotted, width=1, extend=extend.right)
+
+    // ── 3) Базовые уровни (ВСЕГДА при «Разметка Ed»): сплошные линии + зоны ──
+    if edDraw
+        float baseHi = rangeOk ? rngHi : ta.highest(high, i_consLb)
+        float baseLo = rangeOk ? rngLo : ta.lowest(low, i_consLb)
+        edCeilLn := line.new(xVis, baseHi, bar_index, baseHi, color=#f0c040, width=3, extend=extend.right)
+        edFloorLn := line.new(xVis, baseLo, bar_index, baseLo, color=#8b949e, width=3, extend=extend.right)
+        edCeilTag := label.new(bar_index + 4, baseHi, str.tostring(baseHi, format.mintick), style=label.style_label_left, color=color.new(#161b22, 10), textcolor=#f0c040, size=size.normal)
+        edFloorTag := label.new(bar_index + 4, baseLo, str.tostring(baseLo, format.mintick), style=label.style_label_left, color=color.new(#161b22, 10), textcolor=#8b949e, size=size.normal)
+        if i_edSigZone
+            edSigBox := box.new(xVis, baseHi + edZ, xEnd, baseHi - edZ, bgcolor=color.new(#f85149, 72), border_color=#da3633, border_width=2)
+            edSupBox := box.new(xVis, baseLo + edZ, xEnd, baseLo - edZ, bgcolor=color.new(#58a6ff, 72), border_color=#388bfd, border_width=2)
+
+    // ── Слой ed_rbr / паттерны (только если включён доп. слой) ──
+    if legacyDraw and drawStory and not edDraw
+        string phaseRu = basePhase == "distribution" ? "Распределение" : basePhase == "consolidation" ? "Консолидация" : "Боковик"
+        color boxCol = basePhase == "distribution" ? color.new(#f85149, 90) : color.new(#8b949e, 92)
+        rbrStoryBox := box.new(xL, rngHi, bar_index + 1, rngLo, bgcolor=boxCol, border_color=#8b949e, border_width=1)
+        storyLbl := label.new(xL + 3, rngHi, phaseRu + " · " + rbrPhase, style=label.style_label_down, color=color.new(#161b22, 40), textcolor=#e6edf3, size=size.small)
+
+    if legacyRbrDraw and layerRbr
+        rbrLoLn := line.new(xL, rngLo, xR, rngLo, color=#8b949e, width=2, extend=extend.right)
+        rbrHiLn := line.new(xL, rngHi, xR, rngHi, color=#f0c040, width=2, extend=extend.right)
+        rbrLoLbl := label.new(xL + 2, rngLo, "Пол RBR", style=label.style_label_upper_left, color=color.new(#8b949e, 35), textcolor=#e6edf3, size=size.tiny)
+        rbrHiLbl := label.new(xL + 2, rngHi, "Потолок RBR", style=label.style_label_lower_left, color=color.new(#f0c040, 35), textcolor=#1a1a1a, size=size.tiny)
+
+    if legacyPatDraw and not na(patNeck) and patKind != "head_shoulders" and patKind != "inverse_head_shoulders"
+        int xLpat = not na(patI1) ? patI1 : bar_index - 40
+        int xRpat = bar_index + 8
+        neckLn := line.new(xLpat, patNeck, xRpat, patNeck, color=#58a6ff, width=2, xloc=xloc.bar_index)
+        if (patKind == "double_top" or patKind == "double_bottom" or patKind == "triple_top" or patKind == "triple_bottom") and not na(patI1) and not na(patI2)
+            dblLn := line.new(patI1, patP1, patI2, patP2, color=#f0c040, width=2, xloc=xloc.bar_index)
+            if not na(patI3)
+                line.new(patI2, patP2, patI3, patP3, color=#f0c040, width=2, xloc=xloc.bar_index)
+        float patLblY = not na(patP2) ? patP2 : patNeck
+        int patLblX = not na(patI2) ? patI2 : bar_index - 5
+        patLbl := label.new(patLblX, patLblY, patLabelRu + " " + (patStatus == "confirmed" ? "✓" : "…"), style=label.style_label_down, color=color.new(#161b22, 35), textcolor=#f0c040, size=size.small)
+    if legacyPatDraw and (patKind == "head_shoulders" or patKind == "inverse_head_shoulders") and not na(patNeckIxL)
+        hsL1 := line.new(patI1, patP1, patI2, patP2, color=#ffa657, width=2, xloc=xloc.bar_index)
+        hsL2 := line.new(patI2, patP2, patI3, patP3, color=#ffa657, width=2, xloc=xloc.bar_index)
+        hsNeckLn := line.new(patNeckIxL, patNeckL, patNeckIxR, patNeckR, color=#58a6ff, width=2, xloc=xloc.bar_index)
+        patLbl := label.new(patI2, patP2, patLabelRu, style=label.style_label_down, color=color.new(#161b22, 35), textcolor=#ffa657, size=size.small)
+
+    if legacyDraw and i_showFib and (inFib or barstate.islast)
+        int xf = bar_index - 12
+        int xt = bar_index + 10
+        fibL1 := line.new(xf, f50, xt, f50, color=color.new(#a371f7, 40), width=1, style=line.style_dashed)
+        fibL2 := line.new(xf, f618, xt, f618, color=color.new(#a371f7, 20), width=1, style=line.style_dashed)
+
+    if legacyDraw and drawSmc
+        if obBull
+            obBox := box.new(bar_index - 1, high[1], bar_index + 10, low[1], bgcolor=color.new(#3fb950, 85), border_color=#3fb950)
+        if obBear
+            obBox := box.new(bar_index - 1, high[1], bar_index + 10, low[1], bgcolor=color.new(#f85149, 85), border_color=#f85149)
+        if sweep and not na(sweepPx)
+            sweepLbl := label.new(bar_index, sweepPx, sweepDir == "long" ? "свип↓" : "свип↑", style=label.style_label_up, color=#e3b341, textcolor=color.black, size=size.small)
+        if bos and not na(bosLvl)
+            bosLn := line.new(bar_index - 30, bosLvl, bar_index + 4, bosLvl, color=bosDir == "long" ? #3fb950 : #f85149, style=line.style_dashed)
+        if (fvgUp or fvgDn) and not na(fvgTop)
+            fvgBox := box.new(bar_index - 2, fvgTop, bar_index + 8, fvgBot, bgcolor=color.new(#58a6ff, 88), border_color=#58a6ff)
+
+    if legacyDraw and i_showZone and chartLayer == "full" and not na(zDemBot)
+        zBox := box.new(bar_index - 15, zDemTop, bar_index + 6, zDemBot, bgcolor=color.new(#3fb950, 90), border_color=#3fb950)
+
+    float eLo = na
+    float eHi = na
+    float stp = na
+    float tp = na
+    if drawPatPlan and patDir == "bearish" and not na(patNeck)
+        eLo := patNeck
+        eHi := math.max(math.max(patP1, patP2), na(patP3) ? patP2 : patP3)
+        stp := patStop
+        tp := patTarget
+    else if drawPatPlan and patDir == "bullish" and not na(patNeck)
+        eLo := math.min(math.min(patP1, patP2), na(patP3) ? patP2 : patP3)
+        eHi := patNeck
+        stp := patStop
+        tp := patTarget
+    else if drawRbrPlan
+        eLo := rbrPhase == "retest" ? rngLo * 0.996 : rngHi * 0.982
+        eHi := rbrPhase == "retest" ? rngLo * 1.01 : rngHi * 1.006
+        stp := rbrPhase == "retest" ? rngLo * 1.02 : rngHi * 1.015
+        tp := rngLo
+
+    bool planOk = false
+    bool planShort = drawRbrPlan or (drawPatPlan and patDir == "bearish")
+    bool planLong = drawPatPlan and patDir == "bullish" and not rbrLock
+    if legacyDraw and i_showBoxes and not na(eLo) and not na(stp) and not na(tp)
+        float ref = (eLo + eHi) / 2.0
+        float risk = math.abs(stp - ref) / math.max(ref, 1e-10)
+        float reward = planShort ? math.abs(ref - tp) / math.max(ref, 1e-10) : math.abs(tp - ref) / math.max(ref, 1e-10)
+        float minRR = rbrPhase == "fade_top" ? 0.55 : 0.75
+        planOk := risk > 0.0001 and reward >= 0.0075 and reward / risk >= minRR
+        int x0 = bar_index + 1
+        int x1 = bar_index + 14
+        int slA = planOk ? 72 : 88
+        if planLong
+            bS := box.new(x0, eLo, x1, stp, bgcolor=color.new(#f85149, slA), border_color=#f85149)
+            bE := box.new(x0, eLo, x1, eHi, bgcolor=color.new(#e3b341, slA + 8), border_color=#e3b341)
+            bT := box.new(x0, eHi, x1, tp, bgcolor=color.new(#3fb950, slA + 2), border_color=#3fb950)
+        else
+            bS := box.new(x0, math.max(stp, eHi), x1, eHi, bgcolor=color.new(#f85149, slA), border_color=#f85149)
+            bE := box.new(x0, eHi, x1, eLo, bgcolor=color.new(#e3b341, slA + 8), border_color=#e3b341)
+            bT := box.new(x0, eLo, x1, tp, bgcolor=color.new(#3fb950, slA + 2), border_color=#3fb950)
+
+    string pTxt = patKind != "" ? patLabelRu + " " + (patStatus == "confirmed" ? "✓" : "…") + " " + str.tostring(patConf, "#.##") : "—"
+    if i_showHud
+        table.cell(hud, 0, 0, "EdBot", text_color=#58a6ff, text_size=size.small)
+        table.cell(hud, 1, 0, hudBias, text_color=hudBias == "LONG" ? #3fb950 : hudBias == "SHORT" ? #f85149 : #8b949e, text_size=size.small)
+        table.cell(hud, 0, 1, "Grade", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 1, grade + " (" + str.tostring(score) + ")", text_color=grade == "A" or grade == "B" ? #3fb950 : #e6edf3, text_size=size.tiny)
+        table.cell(hud, 0, 2, "Pattern", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 2, pTxt, text_color=#e6edf3, text_size=size.tiny)
+        table.cell(hud, 0, 3, "RBR", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 3, rangeOk ? rbrPhase : "—", text_color=#f0c040, text_size=size.tiny)
+        table.cell(hud, 0, 4, "Сценарий", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 4, scenario, text_color=#e6edf3, text_size=size.tiny)
+        table.cell(hud, 0, 5, "MTF", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 5, mtf, text_color=#e6edf3, text_size=size.tiny)
+        string planNote = planOk ? "" : i_showBoxes and not na(eLo) ? " · план скрыт R:R" : ""
+        table.cell(hud, 0, 6, "Фаза", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 6, basePhase + planNote, text_color=#e6edf3, text_size=size.tiny)
+        table.cell(hud, 0, 7, "Слой", text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 1, 7, i_edBreakdown ? "ed_breakdown" : chartLayer, text_color=#58a6ff, text_size=size.tiny)
+        table.cell(hud, 0, 8, "Легенда", text_color=#8b949e, text_size=size.tiny)
+        string legTxt = layerLegend + (rbrLock and patKind != "" ? " · lock: RBR > " + patLabelRu : "")
+        table.cell(hud, 1, 8, legTxt, text_color=#8b949e, text_size=size.tiny)
+        table.cell(hud, 0, 9, "На графике", text_color=#8b949e, text_size=size.tiny)
+        string onChart = i_edBreakdown ? "S/R + триггеры" : chartLayer == "ed_rbr" ? "боковик" : chartLayer == "pattern" ? "фигура" : "—"
+        table.cell(hud, 1, 9, onChart, text_color=#e6edf3, text_size=size.tiny)
+
+// Day H/L — только line на последнем баре (без plot)
+var line dayHiLn = na
+var line dayLoLn = na
+if barstate.islast and i_showSession and not edDraw
+    if not na(dayHiLn)
+        line.delete(dayHiLn)
+    if not na(dayLoLn)
+        line.delete(dayLoLn)
+    float dHi = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+    float dLo = request.security(syminfo.tickerid, "D", low, lookahead=barmerge.lookahead_off)
+    dayHiLn := line.new(bar_index - 80, dHi, bar_index + 20, dHi, color=color.new(#8b949e, 50), style=line.style_dashed, extend=extend.right)
+    dayLoLn := line.new(bar_index - 80, dLo, bar_index + 20, dLo, color=color.new(#8b949e, 50), style=line.style_dashed, extend=extend.right)
+
+alertcondition(patStatus == "confirmed" and patKind != "", "EdBot: паттерн ✓", "{{ticker}} pattern confirmed")
+alertcondition(rbrPhase == "retest", "EdBot: RBR retest", "RBR retest")
+alertcondition(grade == "A" or grade == "B", "EdBot: grade B+", "Grade B or A")

@@ -1,0 +1,286 @@
+//@version=6
+// Ed Story RBR v1 — overlay (логика bot/range_breakdown_retest.py + chart_ed_story)
+indicator("Ed Story RBR v1", shorttitle="EdStory", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ── Inputs ──
+grpRange = "Боковик / RBR"
+i_consLookback   = input.int(36, "Lookback боковика", minval=10, maxval=200, group=grpRange)
+i_maxRangePct    = input.float(6.5, "Макс. ширина range, %", minval=0.4, maxval=20.0, step=0.1, group=grpRange)
+i_minRangePct    = input.float(0.4, "Мин. ширина range, %", minval=0.1, maxval=5.0, step=0.1, group=grpRange)
+i_fadePos        = input.float(0.62, "Fade-top: позиция в range ≥", minval=0.5, maxval=0.95, step=0.01, group=grpRange)
+i_breakBuf       = input.float(0.9985, "Закреп под полом (close ×)", minval=0.995, maxval=0.9999, step=0.0001, group=grpRange)
+i_breakBars      = input.int(10, "Окно баров для закрепа", minval=3, maxval=30, group=grpRange)
+i_retestLo       = input.float(0.992, "Retest band низ (× пол)", minval=0.98, maxval=1.0, step=0.001, group=grpRange)
+i_retestHi       = input.float(1.018, "Retest band верх (× пол)", minval=1.0, maxval=1.05, step=0.001, group=grpRange)
+i_swingLookback  = input.int(140, "Swing-low lookback", minval=20, maxval=500, group=grpRange)
+i_swingMinPct    = input.float(1.2, "Мин. ход цели от пола, %", minval=0.5, maxval=10.0, step=0.1, group=grpRange)
+
+grpDraw = "Отрисовка"
+i_showBoxes        = input.bool(true, "Forward box: стоп / вход / тейк", group=grpDraw)
+i_boxForwardBars   = input.int(12, "Ширина box вперёд (бары)", minval=4, maxval=40, group=grpDraw)
+i_showStatus       = input.bool(true, "Статус сверху", group=grpDraw)
+i_showRsiDiv       = input.bool(true, "RSI дивергенция на цене", group=grpDraw)
+
+grpRsi = "RSI"
+i_rsiLen     = input.int(14, "RSI length", minval=2, group=grpRsi)
+i_pivotLeft  = input.int(5, "Pivot left", minval=1, group=grpRsi)
+i_pivotRight = input.int(5, "Pivot right", minval=1, group=grpRsi)
+i_minRsiDelta = input.float(1.5, "Min |ΔRSI|", minval=0.5, step=0.1, group=grpRsi)
+
+grpVol = "Объём"
+i_volContract = input.float(0.78, "Сжатие body/pole", minval=0.5, maxval=1.0, step=0.01, group=grpVol)
+i_volSpike    = input.float(1.35, "Спайк break/body", minval=1.0, maxval=3.0, step=0.05, group=grpVol)
+i_cvdLookback = input.int(12, "CVD-прокси lookback", minval=3, group=grpVol)
+
+grpMtf = "MTF (строка статуса)"
+i_useMtf = input.bool(true, "H4 / H1 / M15 bias", group=grpMtf)
+
+grpSig = "Сигнал / алерты"
+i_markOnly     = input.bool(true, "Только разметка (без alertcondition)", group=grpSig)
+i_earlyPivot   = input.bool(false, "Ранний pivot vs close-confirmed", group=grpSig)
+
+// ── Range (не называем floor/ceil — конфликт с math) ──
+float rngHi = ta.highest(high, i_consLookback)
+float rngLo = ta.lowest(low, i_consLookback)
+float rngMid = (rngHi + rngLo) * 0.5
+float rngWidthPct = rngMid > 0 ? (rngHi - rngLo) / rngMid * 100.0 : 0.0
+bool rangeOk = rngWidthPct >= i_minRangePct and rngWidthPct <= i_maxRangePct and rngHi > rngLo
+
+float rangeBot = rngLo
+float rangeTop = rngHi
+float width = rangeTop - rangeBot
+float pos   = width > 0 ? (close - rangeBot) / width : 0.5
+float locHi24 = ta.highest(high, 24)
+
+bool broke = false
+for i = 0 to i_breakBars - 1
+    if close[i] < rangeBot * i_breakBuf
+        broke := true
+
+bool nearRetest = broke and low <= rangeBot * i_retestHi and high >= rangeBot * i_retestLo
+bool underFloor = close < rangeBot * 0.998
+
+string phase = "none"
+if rangeOk
+    if nearRetest
+        phase := "retest"
+    else if underFloor
+        phase := "broken"
+    else if pos >= i_fadePos and not broke
+        phase := "fade_top"
+    else
+        phase := "await_break"
+
+// ── Plan (short RBR) ──
+float swingLo = ta.lowest(low, i_swingLookback)
+float swingTp = swingLo
+if rangeBot > 0 and swingLo >= rangeBot * (1.0 - i_swingMinPct / 100.0)
+    swingTp := rangeBot * (1.0 - math.max(0.03, i_swingMinPct / 100.0))
+
+float entryLo = na
+float entryHi = na
+float stopPx  = na
+float tpPx    = na
+
+if phase == "retest"
+    entryLo := rangeBot * 0.996
+    entryHi := rangeBot * 1.01
+    stopPx  := math.max(rangeBot * 1.008, math.max(locHi24, close) * 1.0012)
+    stopPx  := math.min(stopPx, rangeBot * 1.026)
+    tpPx    := swingTp
+else if phase == "fade_top"
+    entryLo := rangeTop * 0.982
+    entryHi := rangeTop * 1.006
+    stopPx  := math.max(rangeTop * 1.012, close * 1.015)
+    tpPx    := rangeBot
+else if phase == "await_break"
+    entryLo := rangeTop * 0.985
+    entryHi := rangeTop * 1.008
+    stopPx  := rangeTop * 1.022
+    tpPx    := rangeBot
+else if phase == "broken"
+    entryLo := close * 0.997
+    entryHi := math.min(close * 1.006, rangeBot * 1.008)
+    stopPx  := math.max(rangeBot * 1.008, locHi24 * 1.0012)
+    tpPx    := swingTp
+
+float entryMid = not na(entryLo) and not na(entryHi) ? (entryLo + entryHi) * 0.5 : na
+float riskPct = not na(entryMid) and entryMid > 0 and not na(stopPx) ? math.abs(stopPx - entryMid) / entryMid * 100.0 : 0.0
+float rewardPct = not na(entryMid) and entryMid > 0 and not na(tpPx) ? math.abs(entryMid - tpPx) / entryMid * 100.0 : 0.0
+float rr = riskPct > 0 ? rewardPct / riskPct : 0.0
+float minRr = phase == "fade_top" ? 0.55 : 0.75
+float minReward = phase == "fade_top" ? 0.55 : 0.75
+bool planOk = not na(entryMid) and not na(stopPx) and not na(tpPx) and stopPx > entryMid and tpPx < entryMid and rewardPct >= minReward and rr >= minRr
+
+// ── Volume lite ──
+float bodyVol = math.sum(volume, 10)
+int poleLen = math.max(i_consLookback - 10, 10)
+float poleVol = math.sum(volume[10], poleLen)
+bool volSqueeze = poleVol > 0 and bodyVol / poleVol <= i_volContract
+float avgBodyVol = bodyVol / 10.0
+bool volSpike = avgBodyVol > 0 and volume / avgBodyVol >= i_volSpike
+
+float buyVol = 0.0
+float sellVol = 0.0
+for i = 0 to i_cvdLookback - 1
+    if close[i] >= open[i]
+        buyVol += volume[i]
+    else
+        sellVol += volume[i]
+float cvdRatio = buyVol + sellVol > 0 ? buyVol / (buyVol + sellVol) : 0.5
+string cvdTag = cvdRatio >= 0.62 ? "CVD↑" : cvdRatio <= 0.38 ? "CVD↓" : "CVD—"
+
+// ── RSI + pivots ──
+float rsi = ta.rsi(close, i_rsiLen)
+float ph = ta.pivothigh(high, i_pivotLeft, i_pivotRight)
+float pl = ta.pivotlow(low, i_pivotLeft, i_pivotRight)
+
+var float pHiA = na
+var float pHiB = na
+var float rHiA = na
+var float rHiB = na
+var int   iHiA = na
+var int   iHiB = na
+var float pLoA = na
+var float pLoB = na
+var float rLoA = na
+var float rLoB = na
+var int   iLoA = na
+var int   iLoB = na
+
+if not na(ph)
+    pHiA := pHiB
+    rHiA := rHiB
+    iHiA := iHiB
+    pHiB := ph
+    rHiB := rsi[i_pivotRight]
+    iHiB := bar_index - i_pivotRight
+
+if not na(pl)
+    pLoA := pLoB
+    rLoA := rLoB
+    iLoA := iLoB
+    pLoB := pl
+    rLoB := rsi[i_pivotRight]
+    iLoB := bar_index - i_pivotRight
+
+bool regBear = not na(pHiA) and not na(pHiB) and pHiB > pHiA and rHiB < rHiA and math.abs(rHiB - rHiA) >= i_minRsiDelta
+bool regBull = not na(pLoA) and not na(pLoB) and pLoB < pLoA and rLoB > rLoA and math.abs(rLoB - rLoA) >= i_minRsiDelta
+
+// MTF: одна security на TF, без вложенных request.security
+f_htf_arrow() =>
+    close > close[12] ? "↑" : close < close[12] ? "↓" : "→"
+
+string mtfLine = ""
+if i_useMtf
+    string b4 = request.security(syminfo.tickerid, "240", f_htf_arrow(), lookahead=barmerge.lookahead_off)
+    string b1 = request.security(syminfo.tickerid, "60", f_htf_arrow(), lookahead=barmerge.lookahead_off)
+    string b15 = request.security(syminfo.tickerid, "15", f_htf_arrow(), lookahead=barmerge.lookahead_off)
+    mtfLine := "H4" + b4 + " → H1" + b1 + " → M15" + b15
+
+// ── Lines ──
+color colFloor = color.new(#8b949e, 0)
+color colCeil  = color.new(#f0c040, 0)
+color colRetest = color.new(#58a6ff, 0)
+
+plot(rangeOk ? rangeBot : na, "Пол", color=colFloor, linewidth=1, style=plot.style_linebr)
+plot(rangeOk ? rangeTop : na, "Потолок", color=colCeil, linewidth=1, style=plot.style_linebr)
+
+plot(phase == "fade_top" or phase == "await_break" ? entryLo : na, "Коридор сопр низ", color=colCeil, linewidth=1, style=plot.style_linebr)
+plot(phase == "fade_top" or phase == "await_break" ? entryHi : na, "Коридор сопр верх", color=colCeil, linewidth=1, style=plot.style_linebr)
+
+plot(phase == "retest" ? entryLo : na, "Retest lo", color=colRetest, linewidth=2, style=plot.style_linebr)
+plot(phase == "retest" ? entryHi : na, "Retest hi", color=colRetest, linewidth=2, style=plot.style_linebr)
+
+// ── Forward boxes (top > bottom в box.new) ──
+var box bxStop = na
+var box bxEntry = na
+var box bxTp = na
+var label lblStop = na
+var label lblEntry = na
+var label lblTp = na
+
+if barstate.isconfirmed and barstate.islast
+    if not na(lblStop)
+        label.delete(lblStop)
+    if not na(lblEntry)
+        label.delete(lblEntry)
+    if not na(lblTp)
+        label.delete(lblTp)
+    lblStop := na
+    lblEntry := na
+    lblTp := na
+    if not na(bxStop)
+        box.delete(bxStop)
+    if not na(bxEntry)
+        box.delete(bxEntry)
+    if not na(bxTp)
+        box.delete(bxTp)
+    bxStop := na
+    bxEntry := na
+    bxTp := na
+
+    if i_showBoxes and planOk and phase != "none"
+        int x0 = bar_index + 1
+        int x1 = bar_index + i_boxForwardBars
+        float topStop = math.max(stopPx, entryHi)
+        float botStop = entryHi
+        float topEntry = entryHi
+        float botEntry = entryLo
+        float topTp = entryLo
+        float botTp = tpPx
+        bxStop := box.new(x0, topStop, x1, botStop, bgcolor=color.new(#f85149, 70), border_color=#f85149)
+        bxEntry := box.new(x0, topEntry, x1, botEntry, bgcolor=color.new(#e3b341, 78), border_color=#e3b341)
+        bxTp := box.new(x0, topTp, x1, botTp, bgcolor=color.new(#3fb950, 72), border_color=#3fb950)
+        lblStop := label.new(x1, topStop, "стоп " + str.tostring(stopPx, format.mintick), style=label.style_label_left, color=#f85149, textcolor=color.white, size=size.tiny)
+        lblEntry := label.new(x1, (entryLo + entryHi) * 0.5, "вход", style=label.style_label_left, color=#e3b341, textcolor=color.white, size=size.tiny)
+        lblTp := label.new(x1, botTp, "тейк " + str.tostring(tpPx, format.mintick), style=label.style_label_left, color=#3fb950, textcolor=color.white, size=size.tiny)
+
+// ── RSI div (одна пара line+label, без утечки) ──
+var line rsiDivLine = na
+var label rsiDivLbl = na
+
+if barstate.isconfirmed and barstate.islast
+    if not na(rsiDivLine)
+        line.delete(rsiDivLine)
+    if not na(rsiDivLbl)
+        label.delete(rsiDivLbl)
+    rsiDivLine := na
+    rsiDivLbl := na
+    if i_showRsiDiv
+        if regBear and not na(iHiA) and not na(iHiB)
+            rsiDivLine := line.new(iHiA, pHiA, iHiB, pHiB, color=color.new(#f85149, 0), width=2)
+            rsiDivLbl := label.new(iHiB, pHiB, "Bear", style=label.style_label_down, color=#f85149, textcolor=color.white, size=size.small)
+        else if regBull and not na(iLoA) and not na(iLoB)
+            rsiDivLine := line.new(iLoA, pLoA, iLoB, pLoB, color=color.new(#3fb950, 0), width=2)
+            rsiDivLbl := label.new(iLoB, pLoB, "Bull", style=label.style_label_up, color=#3fb950, textcolor=color.white, size=size.small)
+
+// ── Status label ──
+var label statusLbl = na
+if barstate.isconfirmed and barstate.islast
+    if i_showStatus
+        string cap = switch phase
+            "fade_top" => "fade_top · шорт у потолка после отказа"
+            "await_break" => "await_break · ждём close под полом"
+            "retest" => "retest · шорт в коридоре пола"
+            "broken" => "broken · под полом"
+            => rangeOk ? "нет фазы RBR" : "нет боковика"
+        string volTag = volSqueeze ? " · squeeze" : ""
+        string rsiTag = regBear ? " · RSI Bear" : regBull ? " · RSI Bull" : ""
+        string planTag = planOk ? "" : " · план скрыт (R:R)"
+        string txt = cap + planTag + (mtfLine != "" ? "\n" + mtfLine : "") + " · " + cvdTag + volTag + rsiTag + " · RSI " + str.tostring(rsi, "#")
+        label.delete(statusLbl)
+        statusLbl := label.new(bar_index, high, txt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down, color=color.new(#161b22, 10), textcolor=#e6edf3, size=size.normal)
+
+// ── Alerts ──
+bool signalFade = phase == "fade_top" and planOk and close <= entryHi and close >= entryLo and not i_markOnly
+bool signalRetest = phase == "retest" and planOk and close <= entryHi and close >= entryLo and not i_markOnly
+
+alertcondition(signalFade, "Ed: fade_top в зоне", "Шорт у потолка, close в зоне")
+alertcondition(signalRetest, "Ed: retest пола", "Retest пола, close в коридоре")
+alertcondition(volSpike and broke, "Ed: пробой + vol", "Закреп под полом, всплеск объёма")
+
+plotchar(volSqueeze ? low : na, "squeeze", "▾", location.belowbar, color=#8b949e, size=size.tiny)
+plotchar(volSpike and broke ? high : na, "vol+", "▲", location.abovebar, color=#3fb950, size=size.tiny)
+
+bgcolor(rangeOk ? color.new(#8b949e, 92) : na, title="Range band")

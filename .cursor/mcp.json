@@ -3,6 +3,13 @@
     "pdfvision": {
       "command": "C:\\Users\\User\\AppData\\Roaming\\npm\\pdfvision.cmd",
       "args": ["mcp"]
+    },
+    "tradingview": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "D:\\tradingview-mcp-main\\tradingview-mcp-main\\src\\server.js"
+      ]
     }
   }
 }

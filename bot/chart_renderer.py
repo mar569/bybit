@@ -2547,37 +2547,18 @@ def _render_chart_figure(
             ta = enrich_ta_for_chart_story(ta, bars)
         except Exception:
             logger.debug("Chart story enrich skipped", exc_info=True)
-    ed_story = False
-    range_wait = False
-    observation = False
-    story_kind = "full_manual"
+    pro_mode_chart: str | None = None
     if manual_ta_chart or signal_chart:
         try:
-            from .chart_ed_story import use_ed_story_chart
-            from .chart_range_wait import use_range_wait_chart
-            from .chart_story_router import resolve_chart_story_kind
+            from .chart_pro import resolve_pro_chart_mode
 
-            story_kind = resolve_chart_story_kind(ta)
-            ed_story = story_kind == "ed_story" or use_ed_story_chart(ta)
-            range_wait = story_kind == "range_wait" or use_range_wait_chart(ta)
-            observation = story_kind == "observation"
-        except Exception:
-            ed_story = False
-            range_wait = False
-            observation = False
-            story_kind = "full_manual"
-    story_minimal = story_kind != "full_manual"
-    if (manual_ta_chart or signal_chart) and story_kind == "full_manual":
-        try:
-            from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
-
-            draw_manual_ta_layers(ax, bars, ta)
-            draw_education_overlays(
-                ax, bars, ta, manual_compact=(manual_ta_chart or signal_chart),
+            pro_mode_chart = resolve_pro_chart_mode(
+                ta, allow_legacy=manual_ta_chart and not signal_chart,
             )
         except Exception:
-            logger.exception("Manual TA chart layers failed")
-    elif clean_chart:
+            pro_mode_chart = "observation"
+    story_minimal = pro_mode_chart is not None and pro_mode_chart != "legacy_manual"
+    if clean_chart:
         try:
             _draw_essential_oil_overlays(ax, bars, ta)
         except Exception:
@@ -2626,19 +2607,10 @@ def _render_chart_figure(
 
     zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
     trail = 0.22
-    if story_minimal:
-        if range_wait:
-            from .chart_range_wait import range_wait_trailing
+    if pro_mode_chart:
+        from .chart_pro import pro_trailing_fraction
 
-            trail = range_wait_trailing()
-        elif observation:
-            from .chart_observation import observation_trailing
-
-            trail = observation_trailing()
-        elif ed_story:
-            from .chart_ed_story import ED_STORY_TRAILING
-
-            trail = ED_STORY_TRAILING
+        trail = pro_trailing_fraction(pro_mode_chart)  # type: ignore[arg-type]
     _apply_display_zoom(
         ax,
         bars,
@@ -2647,31 +2619,16 @@ def _render_chart_figure(
         trailing=trail,
         set_ylim=True,
     )
-    if range_wait:
+    if pro_mode_chart:
         try:
-            from .chart_range_wait import draw_range_wait_layers, expand_range_wait_ylim
+            from .chart_pro import draw_pro_layers, finalize_pro_viewport
 
-            draw_range_wait_layers(ax, bars, ta, interval_minutes=interval_minutes)
-            expand_range_wait_ylim(ax, ta)
+            draw_pro_layers(
+                ax, bars, ta, pro_mode_chart, interval_minutes=interval_minutes,  # type: ignore[arg-type]
+            )
+            finalize_pro_viewport(ax, bars, ta, pro_mode_chart)  # type: ignore[arg-type]
         except Exception:
-            logger.exception("Range wait chart layers failed")
-    elif observation:
-        try:
-            from .chart_observation import draw_observation_layers
-
-            draw_observation_layers(ax, bars, ta, interval_minutes=interval_minutes)
-        except Exception:
-            logger.exception("Observation chart layers failed")
-    elif ed_story:
-        try:
-            from .chart_ed_story import draw_ed_story_layers
-
-            draw_ed_story_layers(ax, bars, ta, interval_minutes=interval_minutes)
-            from .chart_ed_story import expand_ed_story_ylim
-
-            expand_ed_story_ylim(ax, ta)
-        except Exception:
-            logger.exception("Ed story chart layers failed")
+            logger.exception("Pro chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:
         try:
             _draw_urals_inset(

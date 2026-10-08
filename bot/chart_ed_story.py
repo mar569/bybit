@@ -304,13 +304,14 @@ def expand_ed_story_ylim(ax: plt.Axes, ta: TAAnalysisResult) -> None:
     ax.set_ylim(min(lo, pmin - pad), max(hi, pmax + pad))
 
 
-def draw_ed_story_layers(
+def draw_ed_story_layers_pro(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
     *,
     interval_minutes: int = 15,
 ) -> None:
+    """Минимальный story: без базы импульса / трендлайна / серого боковика на весь экран."""
     if not bars:
         return
     rbr = get_rbr_from_ta(ta)
@@ -322,18 +323,11 @@ def draw_ed_story_layers(
     targets = [float(t) for t in (rbr.get("targets") or []) if t]
     tp = float(targets[0]) if targets else float(rbr.get("swing_low_target") or 0)
     phase = str(rbr.get("phase") or "")
+    resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
 
-    slim = phase in {"retest", "await_break"}
-    if not slim:
-        _draw_consolidation_context(ax, bars, ta, floor=floor, ceil=ceil)
-        _draw_impulse_demand_zone(ax, bars, floor=floor)
-        _draw_impulse_trendline(ax, bars)
-        if floor > 0:
-            _draw_range_floor_line(ax, bars, floor)
-    elif floor > 0:
+    if floor > 0:
         _draw_range_floor_line(ax, bars, floor)
 
-    resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
     if phase == "fade_top" and resistance > 0:
         _draw_resistance_corridor(ax, bars, rbr, ceil=resistance)
         template = resolve_sweep_template(
@@ -349,20 +343,19 @@ def draw_ed_story_layers(
         )
     elif phase == "await_break" and floor > 0:
         _draw_resistance_corridor(ax, bars, rbr, ceil=resistance if resistance > 0 else floor * 1.03)
-        template = resolve_sweep_template(
-            bars, resistance=floor * 1.002, floor=floor, tp=tp or floor * 0.92,
-        )
-        draw_ghost_bars_forward(
-            ax,
-            bars,
-            template,
-            interval_minutes=interval_minutes,
-            resistance=floor * 1.004,
-            tp=tp if tp > 0 else floor * 0.9,
-        )
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
     _draw_flow_strip(ax, ta)
     _draw_story_caption(ax, ta, rbr)
+
+
+def draw_ed_story_layers(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    interval_minutes: int = 15,
+) -> None:
+    draw_ed_story_layers_pro(ax, bars, ta, interval_minutes=interval_minutes)

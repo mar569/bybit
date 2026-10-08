@@ -40,6 +40,34 @@ def _idx_to_date(bars: list[KlineBar], idx: int):
     return datetime.fromtimestamp(bars[idx].open_time, tz=timezone.utc)
 
 
+def plan_for_display(
+    ta: TAAnalysisResult,
+) -> tuple[str, float, float, float, float, float] | None:
+    """side, entry, entry_lo, entry_hi, stop, tp (real)."""
+    rbr = get_rbr_from_ta(ta)
+    if rbr and str(rbr.get("direction") or "") == "short":
+        el, eh = rbr.get("entry_lo"), rbr.get("entry_hi")
+        stop = rbr.get("stop")
+        if el and eh and stop:
+            entry_lo, entry_hi = float(el), float(eh)
+            if entry_hi > entry_lo and float(stop) > 0:
+                tps = [float(t) for t in (rbr.get("targets") or []) if t]
+                if tps:
+                    entry = (entry_lo + entry_hi) / 2.0
+                    stop_f = float(stop)
+                    tp = float(tps[0])
+                    if stop_f > entry and tp < entry:
+                        return "short", entry, entry_lo, entry_hi, stop_f, tp
+    raw = _entry_stop_tp(ta)
+    if raw is None:
+        return None
+    side, entry, stop, tp = raw
+    entry_lo = entry_hi = entry
+    if ta.entry_zone and len(ta.entry_zone) == 2:
+        entry_lo, entry_hi = float(ta.entry_zone[0]), float(ta.entry_zone[1])
+    return side, entry, entry_lo, entry_hi, stop, tp
+
+
 def _entry_stop_tp(ta: TAAnalysisResult) -> tuple[str, float, float, float] | None:
     rbr = get_rbr_from_ta(ta)
     if rbr and str(rbr.get("direction") or "") == "short":
@@ -121,12 +149,24 @@ def draw_forward_short_projection(
     phase = str(rbr.get("phase") or "") if rbr else ""
     if not rbr or phase not in {"fade_top", "await_break", "retest"}:
         return False
-    plan = _entry_stop_tp(ta)
-    if plan is None:
+    raw = plan_for_display(ta)
+    if raw is None:
         return False
-    side, entry, stop, tp = plan
+    side, entry, entry_lo, entry_hi, stop, tp = raw
     if side != "short" or stop <= entry or tp >= entry:
         return False
+    from .chart_plan_display import build_display_plan
+
+    disp = build_display_plan(
+        side=side,
+        entry=entry,
+        entry_lo=entry_lo,
+        entry_hi=entry_hi,
+        stop=stop,
+        tp=tp,
+    )
+    stop, tp = disp.stop, disp.tp
+    tp_label = disp.tp_label
 
     x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
     if use_xlim:
@@ -143,8 +183,8 @@ def draw_forward_short_projection(
         x_box = x1 + span * 0.06
         width = span * 0.28
 
-    entry_lo = float(rbr.get("entry_lo") or entry)
-    entry_hi = float(rbr.get("entry_hi") or entry)
+    entry_lo = float(rbr.get("entry_lo") or entry_lo)
+    entry_hi = float(rbr.get("entry_hi") or entry_hi)
     ax.add_patch(
         Rectangle(
             (x_box, stop), width, max(stop - entry_hi, (entry_hi - entry_lo) * 0.5),
@@ -167,7 +207,7 @@ def draw_forward_short_projection(
     tp_mid = (entry_lo + tp) / 2.0
     ax.text(
         x_box + width * 0.05, tp_mid,
-        f"тейк {fmt_price(tp)}",
+        f"тейк {tp_label}",
         color="#3fb950", fontsize=7.5, fontweight="bold", va="center", ha="left", zorder=10,
     )
     ax.text(

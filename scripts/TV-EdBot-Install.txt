@@ -1,0 +1,31 @@
+Ed Bot vs Ed Story — что открывать в TradingView
+================================================
+
+В репозитории ДВА разных Pine-файла:
+
+  Ed_Bot_Analysis_v2.pine  →  indicator("Ed Bot Analysis v2", shorttitle="EdBot")
+  Ed_Story_RBR_v1.pine     →  indicator("Ed Story RBR v1", shorttitle="EdStory")  ← старый тест, НЕ Ed Bot
+
+Если в Pine Editor в первой строке после @version видишь "Ed Story RBR" — это НЕ бот.
+
+Как поставить Ed Bot на график:
+1. TradingView → Pine Editor → «Открыть» → «Новый пустой индикатор»
+2. Удали всё → вставь полностью текст из:
+   D:\PROJECTS\Bybit_bot\scripts\Ed_Bot_Analysis_v2.pine
+3. Сохрани как «Ed Bot Analysis v2»
+4. «Добавить на график»
+5. ОБЯЗАТЕЛЬНО сними галочку EdStory — на скрине оба сразу ломают картину.
+6. Фиолетовые 100.43 / 100.73 на шкале = старый EdBot с plot(Fib). В новом коде plot() нет.
+7. После вставки в легенде EdBot не должно быть двух цен — только параметры inputs.
+
+По умолчанию «Разбор Ed»: только коридор (серый) + жёлтый потолок + серый пол + 2 подписи «лонг ≥ / шорт ≤».
+«Доп. слой» и «Боковик box» должны быть ВЫКЛ — иначе наложится старый RBR.
+HUD выключен.
+
+В легенде должно быть: indicator("Ed Bot Analysis v2.1" ...) — иначе старый код.
+Если только 2 пунктира: выключи «Ликвидность пунктир»; включи «Разметка Ed (как docs)».
+
+На графике: таблица справа вверху + легенда справа внизу.
+Не включай EdStory на том же графике.
+
+Debug-launch TV (для CLI): scripts\Launch-TradingView-Debug.bat

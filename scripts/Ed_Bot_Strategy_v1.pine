@@ -1,0 +1,172 @@
+//@version=6
+// Ed Bot Strategy v1 — входы только grade ≥ B, close confirmed, min R:R как pro_invariants / RBR
+// Для полной разметки графика добавьте Ed Bot Analysis v2 на тот же символ/TF
+strategy("Ed Bot Strategy v1", shorttitle="EdBotStrat", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.04)
+
+i_minGrade = input.string("B", "Мин. grade", options=["A", "B"], group="Риск")
+i_minRR    = input.float(0.75, "Min R:R (retest 0.55)", minval=0.4, maxval=2.0, step=0.05, group="Риск")
+i_useRbr   = input.bool(true, "RBR retest / fade_top", group="Сигналы")
+i_usePat   = input.bool(true, "Confirmed pattern", group="Сигналы")
+i_swingWin = input.int(3, "Swing window", minval=2, maxval=5, group="Сигналы")
+i_consLb   = input.int(36, "RBR lookback", group="Сигналы")
+i_fadePos  = input.float(0.62, "Fade-top", group="Сигналы")
+
+float atr = ta.atr(14)
+float volSma20 = ta.sma(volume, 20)
+
+var float[] shPx = array.new_float()
+var int[] shIx = array.new_int()
+var float[] slPx = array.new_float()
+var int[] slIx = array.new_int()
+ph = ta.pivothigh(high, i_swingWin, i_swingWin)
+pl = ta.pivotlow(low, i_swingWin, i_swingWin)
+if not na(ph)
+    array.push(shPx, ph)
+    array.push(shIx, bar_index - i_swingWin)
+    while array.size(shPx) > 30
+        array.shift(shPx)
+        array.shift(shIx)
+if not na(pl)
+    array.push(slPx, pl)
+    array.push(slIx, bar_index - i_swingWin)
+    while array.size(slPx) > 30
+        array.shift(slPx)
+        array.shift(slIx)
+
+f_pct(a, b) => math.abs(a - b) / math.max(math.abs(a), 1e-10) * 100.0
+
+var string patDir = ""
+var string patStatus = ""
+var float patNeck = na
+var float patStop = na
+var float patTarget = na
+var float patConf = 0.0
+
+if barstate.isconfirmed
+    patDir := ""
+    patStatus := ""
+    patConf := 0.0
+    patNeck := na
+    patStop := na
+    patTarget := na
+    float best = 0.0
+    if array.size(shPx) >= 2
+        for i = 0 to array.size(shPx) - 2
+            float p1 = array.get(shPx, i)
+            float p2 = array.get(shPx, i + 1)
+            int ix1 = array.get(shIx, i)
+            int ix2 = array.get(shIx, i + 1)
+            if ix2 - ix1 < 6 or f_pct(p1, p2) > 0.55
+                continue
+            float neck = na
+            if array.size(slPx) > 0
+                for j = 0 to array.size(slPx) - 1
+                    int lx = array.get(slIx, j)
+                    if lx > ix1 and lx < ix2
+                        neck := na(neck) ? array.get(slPx, j) : math.min(neck, array.get(slPx, j))
+            if na(neck)
+                continue
+            float peak = math.max(p1, p2)
+            float h = peak - neck
+            if h < atr * 0.8
+                continue
+            string st = close < neck ? "confirmed" : "forming"
+            float conf = 0.72 + (st == "confirmed" ? 0.14 : 0.0)
+            if conf > best
+                best := conf
+                patDir := "bearish"
+                patStatus := st
+                patConf := conf
+                patNeck := neck
+                patStop := peak + atr * 0.25
+                patTarget := neck - h
+    if array.size(slPx) >= 2
+        for i = 0 to array.size(slPx) - 2
+            float p1 = array.get(slPx, i)
+            float p2 = array.get(slPx, i + 1)
+            int ix1 = array.get(slIx, i)
+            int ix2 = array.get(slIx, i + 1)
+            if ix2 - ix1 < 6 or f_pct(p1, p2) > 0.55
+                continue
+            float neck = na
+            if array.size(shPx) > 0
+                for j = 0 to array.size(shPx) - 1
+                    int hx = array.get(shIx, j)
+                    if hx > ix1 and hx < ix2
+                        neck := na(neck) ? array.get(shPx, j) : math.max(neck, array.get(shPx, j))
+            if na(neck)
+                continue
+            float trough = math.min(p1, p2)
+            float h = neck - trough
+            if h < atr * 0.8
+                continue
+            string st = close > neck ? "confirmed" : "forming"
+            float conf = 0.72 + (st == "confirmed" ? 0.14 : 0.0)
+            if conf > best
+                best := conf
+                patDir := "bullish"
+                patStatus := st
+                patConf := conf
+                patNeck := neck
+                patStop := trough - atr * 0.25
+                patTarget := neck + h
+
+float rngHi = ta.highest(high, i_consLb)
+float rngLo = ta.lowest(low, i_consLb)
+float rngMid = (rngHi + rngLo) * 0.5
+float rngW = rngMid > 0 ? (rngHi - rngLo) / rngMid * 100 : 0
+bool rangeOk = rngW >= 0.4 and rngW <= 12
+float posR = rangeOk ? (close - rngLo) / (rngHi - rngLo) : 0.5
+bool broke = ta.barssince(close < rngLo * 0.9985) <= 10
+string rbrPhase = rangeOk ? (broke and low <= rngLo * 1.018 and high >= rngLo * 0.992 ? "retest" : posR >= i_fadePos and not broke ? "fade_top" : "none") : "none"
+
+bool sweepLong = array.size(slPx) > 0 and low[1] < array.get(slPx, array.size(slPx) - 1) * 0.9995 and close > array.get(slPx, array.size(slPx) - 1)
+bool sweepShort = array.size(shPx) > 0 and high[1] > array.get(shPx, array.size(shPx) - 1) * 1.0005 and close < array.get(shPx, array.size(shPx) - 1)
+
+int score = 0
+if patConf >= 0.70
+    score += int(patConf * 30)
+    if patStatus == "confirmed"
+        score += 10
+if sweepLong or sweepShort
+    score += 12
+if rbrPhase == "retest" or rbrPhase == "fade_top"
+    score += 8
+string grade = score >= 72 ? "A" : score >= 58 ? "B" : score >= 45 ? "C" : "D"
+bool gradeOk = i_minGrade == "A" ? grade == "A" : grade == "A" or grade == "B"
+
+f_plan_ok(float eLo, float eHi, float stp, float tp, float minRr) =>
+    float ref = (eLo + eHi) / 2.0
+    float risk = math.abs(stp - ref) / math.max(ref, 1e-10)
+    float reward = math.abs(ref - tp) / math.max(ref, 1e-10)
+    risk > 0.0001 and reward >= 0.0075 and reward / risk >= minRr
+
+bool longPat = i_usePat and patDir == "bullish" and patStatus == "confirmed" and gradeOk
+bool shortPat = i_usePat and patDir == "bearish" and patStatus == "confirmed" and gradeOk
+
+float eLoS = rngLo * 0.996
+float eHiS = rngLo * 1.01
+float stpS = rngLo * 1.02
+float tpS = rngLo
+float rrRbr = rbrPhase == "fade_top" ? 0.55 : i_minRR
+bool shortRbr = i_useRbr and gradeOk and (rbrPhase == "retest" or rbrPhase == "fade_top") and f_plan_ok(eLoS, eHiS, stpS, tpS, rrRbr)
+
+float eLoL = patNeck
+float eHiL = close
+float stpL = patStop
+float tpL = patTarget
+bool longOk = longPat and not na(patStop) and not na(patTarget) and f_plan_ok(math.min(eLoL, eHiL), math.max(eLoL, eHiL), stpL, tpL, i_minRR)
+bool shortOk = (shortPat or shortRbr) and (shortPat ? f_plan_ok(patNeck, close, patStop, patTarget, i_minRR) : true)
+
+if barstate.isconfirmed
+    if longOk and strategy.position_size <= 0
+        strategy.entry("Long", strategy.long)
+        strategy.exit("XL", "Long", stop=patStop, limit=patTarget)
+    if shortOk and strategy.position_size >= 0
+        float stpUse = shortRbr and not shortPat ? stpS : patStop
+        float tpUse = shortRbr and not shortPat ? tpS : patTarget
+        strategy.entry("Short", strategy.short)
+        strategy.exit("XS", "Short", stop=stpUse, limit=tpUse)
+
+plotshape(longOk, "Long", shape.triangleup, location.belowbar, color=#3fb950, size=size.tiny)
+plotshape(shortOk, "Short", shape.triangledown, location.abovebar, color=#f85149, size=size.tiny)
