@@ -238,14 +238,10 @@ def draw_pro_teaching_layers(
             quiet=True,
         )
 
-    smc = getattr(ta, "smc", None)
-    if smc and getattr(smc, "liquidity_sweep", False):
-        from .chart_pro_layers import draw_sweep_circles
-
-        draw_sweep_circles(ax, bars, ta)
-
     _draw_one_context_zone(ax, bars, ta)
 
     from .chart_breakout_markers import draw_breakout_retest_markers
+    from .chart_education_visual import draw_education_visuals_mpl
 
+    draw_education_visuals_mpl(ax, bars, ta)
     draw_breakout_retest_markers(ax, bars, ta, max_markers=2)

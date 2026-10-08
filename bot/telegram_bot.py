@@ -4256,6 +4256,7 @@ class TelegramBot:
                     exchange="bybit",
                     liq_context=liq_context,
                     market_metrics=await self._fetch_manual_ta_market_details(symbol),
+                    manual_ta_chart=True,
                 ),
                 timeout=50.0,
             )
@@ -4479,6 +4480,8 @@ class TelegramBot:
                     hours=hours,
                     oi_bars=oi_bars,
                     market_metrics=await self._fetch_manual_ta_market_details(symbol),
+                    manual_ta_chart=True,
+                    chart_source="annotated",
                 ),
                 timeout=25.0,
             )

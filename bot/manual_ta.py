@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 MANUAL_TA_TIMEFRAMES: tuple[int, ...] = (5, 10, 15, 30, 60)
-# Все варианты ведут на один PNG (manual layers); legacy-имена для callback-кнопок.
+# Callback-алиасы → normalize_chart_source() → единый PRO annotated.
 MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("annotated", "tv_annotated", "annotated_pro")
 
 

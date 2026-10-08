@@ -359,21 +359,8 @@ def draw_tv_pro_layers(
         _draw_forward_boxes_tv(ax, mapper, ta, get_rbr_from_ta(ta))
         _draw_probable_path_tv(ax, mapper, ta)
 
-    from .pattern_specs import MIN_DRAW_CONFIDENCE
+    from .chart_education_visual import draw_education_visuals_tv
 
-    primary = getattr(ta, "primary_chart_pattern", None)
-    patterns = list(getattr(ta, "chart_patterns", None) or [])
-    if getattr(ta, "reading_accept_pattern", True) and (primary or patterns):
-        from .chart_pattern_draw import PATTERN_STYLE
-        from .chart_patterns import pick_primary_pattern
-
-        pat = primary
-        if pat is None:
-            pat = pick_primary_pattern([p for p in patterns if p.confidence >= max(0.68, float(MIN_DRAW_CONFIDENCE))])
-        if pat is not None:
-            style = PATTERN_STYLE.get(pat.kind, {"color": "#ffa657"})
-            _draw_primary_pattern_tv(ax, mapper, pat, color=str(style["color"]))
-
-    _draw_sweep_tv(ax, mapper, ta)
+    draw_education_visuals_tv(mapper, ax, ta)
     _draw_context_zone_tv(ax, mapper, ta)
     _draw_breakout_tv(ax, mapper, ta)

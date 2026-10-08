@@ -30,8 +30,7 @@ SET_HELP = (
     "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
-    "/set chart tv_annotated — сигналы: скрин TradingView + разметка\n"
-    "/set chart annotated — сигналы: только matplotlib (fallback)\n"
+    "/set chart annotated — единый PRO-график (сигналы и разбор)\n"
     "/set chart on — включить графики к сигналам\n"
     "/set chart off — только текст без картинки\n"
     "/set chart_height 1.3 — высота графика (0.85–1.6, 1.0 = стандарт)\n"
@@ -316,24 +315,22 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
             value = raw_value.lower()
-            if value not in {"annotated", "tv_annotated", "tv"}:
+            if value not in {"annotated", "tv_annotated", "tv", "pro"}:
                 return SetResult(
                     False,
-                    "График: <code>tv_annotated</code> (TV+разметка) или <code>annotated</code> (matplotlib).",
+                    "Единый режим: <code>/set chart annotated</code> (TV только с ED_CHART_TV=1).",
                     {},
                 )
-            if value == "tv":
-                value = "tv_annotated"
+            value = "annotated"
         elif field == "manual_ta_chart_source":
             value = raw_value.lower()
-            if value not in {"annotated", "tv_annotated", "tv"}:
+            if value not in {"annotated", "tv_annotated", "tv", "pro"}:
                 return SetResult(
                     False,
-                    "Manual TA: <code>tv_annotated</code> или <code>annotated</code>.",
+                    "Manual TA: только <code>annotated</code> (единый PRO).",
                     {},
                 )
-            if value == "tv":
-                value = "tv_annotated"
+            value = "annotated"
         elif field == "signal_chart_height_scale":
             value = float(raw_value)
             if not 0.85 <= value <= 1.6:

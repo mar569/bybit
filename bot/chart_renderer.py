@@ -2552,13 +2552,11 @@ def _render_chart_figure(
         try:
             from .chart_pro import resolve_pro_chart_mode, signal_chart_legacy_enabled
 
+            from .chart_unified import legacy_manual_chart_enabled
+
             pro_mode_chart = resolve_pro_chart_mode(
                 ta,
-                allow_legacy=(
-                    manual_ta_chart
-                    and not signal_chart
-                    and signal_chart_legacy_enabled()
-                ),
+                allow_legacy=legacy_manual_chart_enabled() and manual_ta_chart and not signal_chart,
             )
         except Exception:
             pro_mode_chart = "observation"
@@ -3280,6 +3278,9 @@ async def render_annotated_chart(
     as_of_open_time_ms: int | float | None = None,
     as_of_price: float | None = None,
 ) -> tuple[bytes | None, TAAnalysisResult | None]:
+    from .chart_unified import normalize_chart_source
+
+    chart_source = normalize_chart_source(chart_source)
     # Analyze enough history for patterns, then zoom the display window.
     analysis_hours = max(hours, pattern_chart_hours(interval_minutes))
     if manual_ta_chart:
@@ -3669,6 +3670,7 @@ async def render_annotated_chart(
         mm = dict(getattr(out_ta, "market_metrics", None) or {})
         mm["chart_setup_interval"] = iv_chart
         mm["chart_scanner_interval"] = interval_minutes
+        mm["chart_render_backend"] = "unified_pro"
         try:
             from dataclasses import replace
 
@@ -3969,6 +3971,8 @@ async def render_analysis_chart(
         exchange=exchange,
         verdict_override=verdict_override,
         height_scale=height_scale,
+        signal_chart=True,
+        chart_source="annotated",
     )
 
 

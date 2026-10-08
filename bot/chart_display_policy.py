@@ -38,8 +38,9 @@ def chart_breakout_marker_labels_enabled() -> bool:
 
 
 def signal_chart_tradingview_enabled() -> bool:
-    """TV widget + наш overlay (если Playwright доступен). Иначе matplotlib PRO."""
-    return _env_on("SIGNAL_CHART_TV", default="1")
+    from .chart_unified import tradingview_experimental_enabled
+
+    return tradingview_experimental_enabled()
 
 
 def use_tradingview_chart_base(
@@ -48,12 +49,10 @@ def use_tradingview_chart_base(
     signal_chart: bool = False,
     manual_ta_chart: bool = False,
 ) -> bool:
-    """Скрин TradingView как подложка для сигналов / manual TA."""
-    src = (chart_source or "").strip().lower()
-    if src in {"matplotlib", "mpl", "annotated_only"}:
-        return False
-    if src in {"tv_annotated", "tv", "tradingview"}:
-        return True
-    if signal_chart or manual_ta_chart:
-        return signal_chart_tradingview_enabled()
-    return False
+    from .chart_unified import use_tradingview_experimental
+
+    return use_tradingview_experimental(
+        chart_source,
+        signal_chart=signal_chart,
+        manual_ta_chart=manual_ta_chart,
+    )
