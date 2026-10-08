@@ -4,8 +4,9 @@ from __future__ import annotations
 from .bybit_klines import KlineBar
 from .ta_analysis import TAAnalysisResult
 
-TV_CHART_Y_BOTTOM = 0.24
-TV_CHART_Y_TOP = 0.84
+# После crop+resize: снизу объём, сверху пара px отступа
+TV_CHART_Y_BOTTOM = 0.10
+TV_CHART_Y_TOP = 0.90
 
 
 def price_to_tv_y(price: float, y_min: float, y_max: float) -> float:

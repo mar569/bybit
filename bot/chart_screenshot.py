@@ -96,8 +96,8 @@ class ChartScreenshotService:
         page = None
         try:
             page = await self._browser.new_page(
-                viewport={"width": 1280, "height": 720},
-                device_scale_factor=1,
+                viewport={"width": 1600, "height": 900},
+                device_scale_factor=2,
             )
             await page.goto(url, wait_until="domcontentloaded", timeout=CAPTURE_TIMEOUT_MS)
             try:
@@ -105,9 +105,37 @@ class ChartScreenshotService:
             except Exception:
                 await page.wait_for_timeout(RENDER_WAIT_MS)
             else:
-                await page.wait_for_timeout(2_000)
+                await page.wait_for_timeout(2_500)
 
-            png = await page.screenshot(type="png", full_page=False)
+            png: bytes | None = None
+            try:
+                canvases = page.locator("canvas")
+                n = await canvases.count()
+                best_box = None
+                best_area = 0.0
+                for i in range(n):
+                    box = await canvases.nth(i).bounding_box()
+                    if not box:
+                        continue
+                    area = float(box["width"]) * float(box["height"])
+                    if area > best_area and box["width"] > 200 and box["height"] > 150:
+                        best_area = area
+                        best_box = box
+                if best_box:
+                    png = await page.screenshot(
+                        type="png",
+                        clip={
+                            "x": best_box["x"],
+                            "y": best_box["y"],
+                            "width": best_box["width"],
+                            "height": best_box["height"],
+                        },
+                    )
+            except Exception:
+                logger.debug("TV canvas clip failed, using full page", exc_info=True)
+
+            if not png:
+                png = await page.screenshot(type="png", full_page=False)
             logger.info("TradingView chart captured %s %s (%s)", exchange, symbol, tv_symbol)
             return png
         except Exception:

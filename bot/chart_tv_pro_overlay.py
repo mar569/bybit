@@ -31,8 +31,8 @@ class TvCoordMapper:
         vis_count = max(24, min(self.n, int(self.n * 0.58))) if self.n else 24
         self.vis_start = max(0, self.n - vis_count)
         self.vis_n = max(1, self.n - self.vis_start)
-        self.x_start = 0.06
-        self.x_end = 0.88
+        self.x_start = 0.02
+        self.x_end = 0.96
 
     def y(self, price: float) -> float:
         return price_to_tv_y(float(price), self.y_min, self.y_max)
@@ -277,28 +277,47 @@ def compose_tradingview_pro_png(
     ta: TAAnalysisResult,
     *,
     interval_minutes: int = 15,
-) -> bytes:
+) -> bytes | None:
     import io
 
     import matplotlib.image as mpimg
     import matplotlib.pyplot as plt
 
     from .chart_tv_coords import tv_visible_price_range
+    from .chart_tv_image import TV_EXPORT_HEIGHT, TV_EXPORT_WIDTH
 
-    img = mpimg.imread(io.BytesIO(tv_png))
+    dpi = 160
+    from .chart_tv_image import prepare_tv_background
+
+    prepared = prepare_tv_background(tv_png)
+    if prepared is None:
+        return None
+
+    img = mpimg.imread(io.BytesIO(prepared))
     img_h, img_w = img.shape[:2]
-    dpi = 100
+    if img_w < 100:
+        img_w, img_h = TV_EXPORT_WIDTH, TV_EXPORT_HEIGHT
     fig, ax = plt.subplots(figsize=(img_w / dpi, img_h / dpi), dpi=dpi)
     fig.subplots_adjust(0, 0, 1, 1)
     fig.patch.set_facecolor("#0d1117")
-    ax.imshow(img, extent=[0, 1, 0, 1], aspect="equal", zorder=0, interpolation="bilinear")
+    ax.set_position([0, 0, 1, 1])
+    # aspect='equal' на широком fig даёт «полоску» по центру — только auto
+    ax.imshow(img, extent=[0, 1, 0, 1], aspect="auto", zorder=0, interpolation="bilinear")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
+    ax.set_anchor("C")
     y_min, y_max = tv_visible_price_range(bars, ta)
     draw_tv_pro_layers(ax, bars, ta, y_min=y_min, y_max=y_max, interval_minutes=interval_minutes)
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=dpi, facecolor=fig.get_facecolor(), pad_inches=0, bbox_inches=None)
+    fig.savefig(
+        buffer,
+        format="png",
+        dpi=dpi,
+        facecolor=fig.get_facecolor(),
+        pad_inches=0,
+        bbox_inches=None,
+    )
     plt.close(fig)
     buffer.seek(0)
     return buffer.getvalue()
