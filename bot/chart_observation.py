@@ -87,6 +87,5 @@ def draw_observation_layers(
 ) -> None:
     _ = interval_minutes
     _draw_range_band(ax, bars, ta)
-    _draw_triggers(ax, bars, ta)
     _draw_flow_strip(ax, ta)
     _draw_caption(ax, ta)

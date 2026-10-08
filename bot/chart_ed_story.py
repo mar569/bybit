@@ -269,7 +269,10 @@ def _draw_probable_path_arrow(
     x0 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
     x1lim = ax.get_xlim()[1]
     span = max(x1lim - x0, 0.001)
-    x1 = min(x0 + span * 0.38, x1lim - span * 0.02)
+    from .chart_position_boxes import forward_box_slot
+
+    x_box, _w = forward_box_slot(ax, bars, use_xlim=True)
+    x1 = min(x0 + span * 0.28, x_box - span * 0.01)
     ax.annotate(
         "",
         xy=(x1, tp_display),
@@ -285,18 +288,16 @@ def _draw_probable_path_arrow(
         ),
         zorder=6,
     )
-    mid_y = (cur + tp_display) / 2.0
     ax.text(
-        x0 + span * 0.12,
-        mid_y,
-        "  вероятный ход ↓  ",
+        x1,
+        tp_display,
+        "  ход ↓  ",
         color="#58a6ff",
-        fontsize=7.0,
+        fontsize=6.8,
         fontweight="bold",
-        va="center",
-        ha="left",
+        va="bottom" if tp_display < cur else "top",
+        ha="right",
         zorder=7,
-        bbox=dict(boxstyle="round,pad=0.2", facecolor=CHART_BG, edgecolor="#30363d", alpha=0.9),
     )
 
 
@@ -357,8 +358,9 @@ def draw_ed_story_layers_pro(
     ta: TAAnalysisResult,
     *,
     interval_minutes: int = 15,
+    board=None,
 ) -> None:
-    """Минимальный story: без базы импульса / трендлайна / серого боковика на весь экран."""
+    """Story + коридор/пол; подписи уровней — через LabelBoard, не стопкой справа."""
     if not bars:
         return
     rbr = get_rbr_from_ta(ta)
@@ -372,6 +374,15 @@ def draw_ed_story_layers_pro(
     phase = str(rbr.get("phase") or "")
     resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
 
+    if board is not None:
+        board.reserve(floor)
+        board.reserve(ceil)
+        board.reserve(float(rbr.get("entry_lo") or 0))
+        board.reserve(float(rbr.get("entry_hi") or 0))
+        board.reserve(float(rbr.get("stop") or 0))
+        if tp > 0:
+            board.reserve(tp)
+
     if floor > 0:
         _draw_range_floor_line(ax, bars, floor)
 
@@ -380,6 +391,9 @@ def draw_ed_story_layers_pro(
         template = resolve_sweep_template(
             bars, resistance=resistance, floor=floor or resistance * 0.92, tp=tp or resistance * 0.9,
         )
+        from .chart_position_boxes import forward_box_slot
+
+        x_box, _w = forward_box_slot(ax, bars, use_xlim=True)
         draw_ghost_bars_forward(
             ax,
             bars,
@@ -387,6 +401,7 @@ def draw_ed_story_layers_pro(
             interval_minutes=interval_minutes,
             resistance=float(rbr.get("entry_hi") or resistance),
             tp=tp if tp > 0 else resistance * 0.88,
+            max_x=x_box,
         )
     elif phase == "await_break" and floor > 0:
         _draw_resistance_corridor(ax, bars, rbr, ceil=resistance if resistance > 0 else floor * 1.03)

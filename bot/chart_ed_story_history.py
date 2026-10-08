@@ -134,6 +134,7 @@ def draw_ghost_bars_forward(
     interval_minutes: int,
     resistance: float,
     tp: float,
+    max_x: float | None = None,
 ) -> None:
     """Полупрозрачные «будущие» свечи от последнего бара."""
     if not bars or not template.ohlc:
@@ -154,8 +155,10 @@ def draw_ghost_bars_forward(
 
     up = "#8b949e"
     down = "#6e7681"
-    for i, (o, h, l, c) in enumerate(template.ohlc):
+    for i, (o, h, l, c) in enumerate(template.ohlc[:8]):
         x = x_start + i * width_days
+        if max_x is not None and x + width_days * 0.6 >= max_x:
+            break
         o_abs = anchor_price + o * scale
         h_abs = anchor_price + h * scale
         l_abs = anchor_price + l * scale

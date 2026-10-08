@@ -2626,14 +2626,20 @@ def _render_chart_figure(
         trailing=trail,
         set_ylim=True,
     )
+    label_board = None
     if pro_mode_chart:
         try:
             from .chart_pro import draw_pro_layers, finalize_pro_viewport
 
-            draw_pro_layers(
+            label_board = draw_pro_layers(
                 ax, bars, ta, pro_mode_chart, interval_minutes=interval_minutes,  # type: ignore[arg-type]
             )
             finalize_pro_viewport(ax, bars, ta, pro_mode_chart)  # type: ignore[arg-type]
+            if label_board is not None:
+                from .chart_label_layout import draw_label_board
+
+                cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+                draw_label_board(ax, bars, label_board, current=cur)
         except Exception:
             logger.exception("Pro chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:

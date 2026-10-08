@@ -62,26 +62,46 @@ def draw_pro_layers(
     mode: ProMode,
     *,
     interval_minutes: int = 15,
-) -> None:
+):
+    from .chart_label_layout import LabelBoard
+
+    board = LabelBoard()
     if mode == "legacy_manual":
         from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
 
         draw_manual_ta_layers(ax, bars, ta)
         draw_education_overlays(ax, bars, ta, manual_compact=True)
-        return
+        return board
     if mode == "range_wait":
         from .chart_range_wait import draw_range_wait_layers
 
         draw_range_wait_layers(ax, bars, ta, interval_minutes=interval_minutes)
-        return
-    if mode == "observation":
+        board.reserve(float(getattr(ta, "breakout_level", 0) or 0))
+        board.reserve(float(getattr(ta, "breakdown_level", 0) or 0))
+        story_plan, story_path = True, False
+    elif mode == "observation":
         from .chart_observation import draw_observation_layers
 
         draw_observation_layers(ax, bars, ta, interval_minutes=interval_minutes)
-        return
-    from .chart_ed_story import draw_ed_story_layers_pro
+        story_plan, story_path = False, False
+    else:
+        from .chart_ed_story import draw_ed_story_layers_pro
 
-    draw_ed_story_layers_pro(ax, bars, ta, interval_minutes=interval_minutes)
+        draw_ed_story_layers_pro(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        story_plan, story_path = True, True
+
+    from .chart_readable import draw_readable_overlays
+
+    draw_readable_overlays(
+        ax,
+        bars,
+        ta,
+        board,
+        include_plan=not story_plan,
+        include_path=not story_path,
+        draw_zones=True,
+    )
+    return board
 
 
 def finalize_pro_viewport(
