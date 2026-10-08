@@ -397,6 +397,136 @@ def _manual_levels_html(ta: "TAAnalysisResult", *, side: str) -> str:
     return "📍 <b>План</b> (не market, только после триггера): " + " · ".join(bits)
 
 
+def _symbol_short(symbol: str) -> str:
+    sym = (symbol or "").strip().upper()
+    for suffix in ("USDT", "USDC", "USD"):
+        if sym.endswith(suffix) and len(sym) > len(suffix):
+            return sym[: -len(suffix)]
+    return sym or "—"
+
+
+def use_range_wait_caption(ta: "TAAnalysisResult") -> bool:
+    from .chart_range_wait import use_range_wait_chart
+
+    return use_range_wait_chart(ta)
+
+
+def _ed_wait_flow_one_liner(ta: "TAAnalysisResult") -> str:
+    picked = flow_strip_lines_for_chart(ta, max_lines=3)
+    if not picked:
+        return ""
+    parts: list[str] = []
+    for line in picked:
+        low = line.lower()
+        if "funding" in low:
+            parts.append(line.split(":", 1)[-1].strip() if ":" in line else line)
+        elif "cvd" in low or "l/s" in low or "перекос" in low:
+            parts.append(line[:100])
+        elif len(parts) < 2:
+            parts.append(line[:90])
+    return " · ".join(parts[:2])
+
+
+def _ed_wait_intro_paragraph(ta: "TAAnalysisResult", sym_short: str) -> str:
+    side = preferred_trade_side(ta)
+    stack = str(getattr(ta, "reading_tf_stack", "") or "").lower()
+    h1_up = "h1 вверх" in stack or "h1 up" in stack
+    m15_flat = "m15 боковик" in stack or "m15 sideway" in stack
+    crowded = any(
+        k in " ".join(getattr(ta, "market_participation_lines", None) or []).lower()
+        for k in ("перекос в лонг", "l/s", "2.", "crowded")
+    )
+    lines: list[str] = []
+    if side == "long" and h1_up and m15_flat:
+        lines.append(
+            f"По {escape(sym_short)} сейчас: <b>вверх вроде хочет, но на 15m пока не хватает уверенности</b>. "
+            "На часовике тянут в лонг, а на младшем ТФ цена топчется у сопротивления."
+        )
+    elif side == "long":
+        lines.append(
+            f"По {escape(sym_short)} уклон в рост, но <b>входить market-ом рано</b> — "
+            "нужен пробой или нормальный откат к зоне."
+        )
+    elif side == "short":
+        lines.append(
+            f"По {escape(sym_short)} смотрим вниз, но <b>шортить в импульс опасно</b> — "
+            "ждём отказ у верха или закреп под поддержкой."
+        )
+    else:
+        lines.append(
+            f"По {escape(sym_short)} цена зажата между уровнями — <b>лучше не угадывать</b>, "
+            "пусть рынок сам покажет направление."
+        )
+    if crowded and side == "long":
+        lines.append(
+            "Покупатели давят, но в лонге уже много — возможен ещё один вынос вверх "
+            "и резкий откат, поэтому без подтверждения не лезем."
+        )
+    elif side == "long":
+        lines.append("Покупатели есть, но без закрепа над ключевым уровнем план не активен.")
+    return " ".join(lines)
+
+
+def format_ed_range_wait_html(
+    ta: "TAAnalysisResult",
+    *,
+    symbol: str = "",
+) -> str:
+    """WAIT между breakout/breakdown: проза + 🟢🔴🟡, без 📍 План / 📊 Поток."""
+    sym = _symbol_short(symbol or getattr(ta, "symbol", "") or "")
+    conf = int(getattr(ta, "verdict_confidence", 0) or 0)
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    if brk <= 0 or brdn <= 0:
+        return ""
+
+    tps = [float(x) for x in (getattr(ta, "target_prices", None) or []) if x]
+    tg = " → ".join(fmt_price(t) for t in tps[:2]) if tps else ""
+
+    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
+    stack_line = f"🧭 {escape(stack)}" if stack else ""
+
+    head = (
+        f"📌 Сейчас по <b>{escape(sym)}</b> я бы просто подождал ({conf}/10). "
+        "Не догонять — только лимит/триггер по плану."
+    )
+
+    intro = _ed_wait_intro_paragraph(ta, sym)
+    brk_s, brdn_s = fmt_price(brk), fmt_price(brdn)
+    side = preferred_trade_side(ta)
+    if side == "long":
+        green = f"🟢 Выше <b>{brk_s}</b> — если закрепимся, можно смотреть лонг"
+        if tg:
+            green += f", цели <b>{escape(tg)}</b>"
+        green += "."
+        red = (
+            f"🔴 Ниже <b>{brdn_s}</b> — идея на рост ломается, интереснее смотреть шорт."
+        )
+    elif side == "short":
+        green = f"🟢 Выше <b>{brk_s}</b> — шорт отменяется, возможен пробой вверх."
+        red = f"🔴 Ниже <b>{brdn_s}</b> — после пробоя можно искать шорт."
+    else:
+        green = f"🟢 Выше <b>{brk_s}</b> — смотрим пробой вверх."
+        red = f"🔴 Ниже <b>{brdn_s}</b> — смотрим пробой вниз."
+    yellow = f"🟡 Между <b>{brdn_s}</b> и <b>{brk_s}</b> — просто наблюдаем."
+
+    flow = _ed_wait_flow_one_liner(ta)
+    flow_line = f"<i>{escape(flow)}</i>" if flow else ""
+    note = "<i>Стоп, зона входа и поток — на графике.</i>"
+
+    parts = [
+        head,
+        stack_line,
+        f"🧠 <b>Разбор</b>\n{intro}",
+        green,
+        red,
+        yellow,
+        flow_line,
+        note,
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
 def flow_strip_lines_for_chart(ta: object, *, max_lines: int = 2) -> list[str]:
     """Коротко для PNG — без дубля в Telegram."""
     raw = [str(x).strip() for x in (getattr(ta, "market_participation_lines", None) or []) if str(x).strip()]
@@ -469,91 +599,6 @@ def format_manual_ta_human_html(
     """Подпись manual TA: один вердикт, ждём, план уровней, поток — без A/B/C и setup D."""
     from .range_breakdown_retest import get_rbr_from_ta
 
-    if get_rbr_from_ta(ta):
-        compact = format_rbr_alert_caption_html(ta, symbol=symbol)
-        if compact:
-            return compact
+    from .living_analysis import build_living_analysis_html
 
-    sym = (symbol or "").strip().upper()
-    v = (ta.verdict or "WAIT").upper()
-    side = preferred_trade_side(ta)
-    conf = int(getattr(ta, "verdict_confidence", 0) or 0)
-
-    if v == "WAIT":
-        if side == "long":
-            head = (
-                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
-                "Уклон в <b>лонг</b> — только после подтверждения (close/ретest), не догонять."
-            )
-        elif side == "short":
-            head = (
-                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
-                "Уклон в <b>шорт</b> — только после подтверждения, не шортить в импульс."
-            )
-        else:
-            head = (
-                f"📌 <b>Сейчас не входим</b> ({conf}/10). "
-                "Старшие ТФ спорят или цена в середине — нет смысла в market."
-            )
-    else:
-        head = f"📌 Вердикт <b>{v}</b> ({conf}/10) — вход только лимит/триггер по плану."
-
-    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
-    stack_line = f"🧭 {escape(stack)}" if stack else ""
-
-    from .range_breakdown_retest import get_rbr_from_ta
-
-    rbr = get_rbr_from_ta(ta)
-    rbr_story = str(rbr.get("story_ru", "") if rbr else "").strip()
-
-    sit_html = str(getattr(ta, "situational_brief_html", "") or "").strip()
-    if rbr_story:
-        story = escape(rbr_story[:480])
-    elif sit_html:
-        story = sit_html
-    else:
-        narrative = _clean_reading_narrative(getattr(ta, "reading_narrative", "") or "")
-        if not narrative:
-            from .situational_brief import build_situational_brief_plain
-
-            narrative = build_situational_brief_plain(ta, symbol=sym) or build_human_trade_brief(
-                ta, symbol=sym
-            )
-            for cut in ("Итог:", "Отмена идеи:", "Чего не хватает:"):
-                if cut in narrative:
-                    narrative = narrative.split(cut)[0].strip()
-        story = escape(narrative[:480]) if narrative else ""
-
-    trigger = str(getattr(ta, "setup_trigger", "") or "").strip()
-    seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
-    if rbr and rbr.get("label_ru"):
-        wait_line = f"⏳ <b>Ждём:</b> {escape(str(rbr['label_ru'])[:220])}"
-    elif trigger:
-        wait_line = f"⏳ <b>Ждём:</b> {escape(trigger[:220])}"
-    elif seek:
-        wait_line = f"⏳ <b>Ждём:</b> {escape(seek[:220])}"
-    else:
-        wait_line = ""
-
-    absent = _dedupe_reading_lines(list(getattr(ta, "reading_absent", None) or []), max_items=2)
-    if absent:
-        miss = " · ".join(escape(x[:80]) for x in absent)
-        wait_line = (wait_line + f"\n<i>Пока нет:</i> {miss}").strip()
-
-    levels = _manual_levels_html(ta, side=side)
-
-    flow_raw = [str(x).strip() for x in (getattr(ta, "market_participation_lines", None) or []) if str(x).strip()]
-    flow_body = flow_raw[1:4] if len(flow_raw) > 1 else flow_raw[:3]
-    flow_block = ""
-    if flow_body:
-        flow_block = "📊 <b>Поток</b>\n" + "\n".join(escape(line[:140]) for line in flow_body)
-
-    btc = (getattr(ta, "btc_context", "") or "").strip()
-    if not btc and getattr(ta, "btc_alt_spread", None) is not None:
-        btc = f"альт vs BTC {ta.btc_alt_spread:+.1f}%"
-    btc_line = f"₿ {escape(btc[:100])}" if btc else ""
-
-    iv = int(getattr(ta, "analysis_interval_minutes", 0) or 0)
-    tf_note = f"<i>Уровни и PNG: {iv}m · план совпадает с видимым боковиком на скрине.</i>" if iv >= 5 else ""
-    parts = [head, stack_line, story, wait_line, levels, flow_block, btc_line, tf_note]
-    return "\n\n".join(p for p in parts if p)
+    return build_living_analysis_html(ta, symbol=symbol) or ""

@@ -235,6 +235,7 @@ class TAAnalysisResult:
     situational_brief_html: str = ""
     situation_kind: str = ""
     bar_replay_label: str = ""
+    recent_price_action_ru: str = ""
     liq_cascade_active: bool = False
     liq_cascade_note: str = ""
     cvd_source: str = "proxy"
@@ -3185,7 +3186,8 @@ def run_ta_analysis(
         if candle_compression and abs(flow.continuation - flow.correction) < 22:
             action_priority = "neutral"
         elif flow.continuation >= flow.correction + 18 and momentum in {"up", "flat"}:
-            action_priority = "long"
+            if not (rbr_setup and rbr_setup.phase == "fade_top"):
+                action_priority = "long"
         elif flow.correction >= flow.continuation + 18:
             # При сжатии нужен более жёсткий перевес для SHORT-bias
             if candle_compression and flow.correction < flow.continuation + 28:
@@ -3452,6 +3454,25 @@ def run_ta_analysis(
         setup.grade = _grade(setup.score)
         setup.label_ru = f"сетап {setup.grade} · {setup.side.upper()} · {setup.score}/100"
 
+    if rbr_setup and rbr_setup.phase == "fade_top" and rbr_setup.direction == "short":
+        if verdict in {"WAIT", "SHORT"}:
+            action_priority = "short"
+            if verdict == "WAIT" and int(flow.continuation) >= int(flow.correction) + 10:
+                top_note = (
+                    "у потолка после пампа — покупатели в потоке ≠ лонг market; "
+                    "ждём отказ для шорта"
+                )
+                reason = f"{reason} · {top_note}" if reason else top_note
+
+    recent_price_action_ru = ""
+    if bars:
+        try:
+            from .recent_bars_narrative import describe_recent_bars
+
+            recent_price_action_ru = describe_recent_bars(bars, count=4)
+        except Exception:
+            recent_price_action_ru = ""
+
     _base = TAAnalysisResult(
         swings=swings,
         levels=levels,
@@ -3657,6 +3678,7 @@ def run_ta_analysis(
         ),
         verdict_scenario_note=verdict_scenario_note,
         bar_replay_label=bar_replay_label,
+        recent_price_action_ru=recent_price_action_ru,
         fib_levels=(
             list(wave.chart_fib_levels)
             if (market_reading is None or market_reading.accept_fib) and wave.leg

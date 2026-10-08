@@ -79,6 +79,13 @@ def draw_education_overlays(
     """Фигуры, стрелки сценария, подписи «поддержка/манипуляция» поверх manual layers."""
     if not bars:
         return
+    try:
+        from .chart_story_router import use_story_chart
+
+        if use_story_chart(ta):
+            return
+    except Exception:
+        pass
     from .chart_pattern_draw import draw_chart_patterns, draw_pattern_foresight_path
     from .pattern_specs import MIN_DRAW_CONFIDENCE
 

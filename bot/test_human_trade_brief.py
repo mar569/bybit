@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from .human_trade_brief import (
     build_human_trade_brief,
+    format_ed_range_wait_html,
     format_manual_ta_human_html,
     reconcile_verdict_with_scenario,
     scanner_side_blocked_by_scenario,
+    use_range_wait_caption,
 )
 from .scenario_engine import ScenarioPick, SCENARIO_CONTINUATION
 from .ta_analysis import TAAnalysisResult
@@ -109,7 +111,35 @@ def test_manual_html_avoids_abcd_jargon() -> None:
     assert "setup D" not in html
     assert "режим C" not in html.lower()
     assert "bias SHORT" not in html
-    assert "Сейчас не входим" in html
+    assert use_range_wait_caption(ta)
+    assert "подождал" in html.lower()
+    assert "🟢" in html and "🟡" in html
+    assert "📍 План" not in html
+    assert "📊 <b>Поток</b>" not in html
     assert "0.08350" in html
-    assert "пробой лонг" in html.lower()
-    assert "поддерж" in html.lower()
+
+
+def test_ed_range_wait_jup_style() -> None:
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        verdict_confidence=7,
+        action_priority="long",
+        current_price=0.3802,
+        breakout_level=0.381,
+        breakdown_level=0.37187,
+        reading_tf_stack="W1 боковик → H4 боковик → H1 вверх → M15 боковик",
+        target_prices=[0.3882, 0.39269],
+        invalidation_price=0.37096,
+        entry_zone=(0.37982, 0.38058),
+        market_participation_lines=[
+            "Поток",
+            "Funding +0.005% (нейтральный)",
+            "CVD buy 73%",
+        ],
+    )
+    html = format_ed_range_wait_html(ta, symbol="JUPUSDT")
+    assert "JUP" in html
+    assert "0.38100" in html
+    assert "0.37187" in html or "0.3718" in html
+    assert "0.388" in html
+    assert "breakout_level" not in html

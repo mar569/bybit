@@ -132,10 +132,10 @@ def draw_forward_short_projection(
     if use_xlim:
         x0lim, x1lim = ax.get_xlim()
         span = max(x1lim - x0lim, 0.001)
-        width = span * 0.14
-        x_box = x1 + span * 0.03
-        if x_box + width > x1lim * 0.995:
-            x_box = x1lim - width * 1.02
+        width = span * 0.11
+        x_box = min(x1 + span * 0.015, x1lim - width * 1.05)
+        if x_box < x1:
+            x_box = x1 + span * 0.008
     else:
         i0 = max(0, len(bars) - min(len(bars), 72))
         x0 = mdates.date2num(_idx_to_date(bars, i0))
@@ -164,6 +164,81 @@ def draw_forward_short_projection(
         )
     )
     ax.axhline(tp, color="#3fb950", linewidth=1.35, linestyle="-", alpha=0.85, zorder=8)
+    tp_mid = (entry_lo + tp) / 2.0
+    ax.text(
+        x_box + width * 0.05, tp_mid,
+        f"тейк {fmt_price(tp)}",
+        color="#3fb950", fontsize=7.5, fontweight="bold", va="center", ha="left", zorder=10,
+    )
+    ax.text(
+        x_box + width * 0.06, (entry_lo + entry_hi) / 2,
+        "вход",
+        color="#e6edf3", fontsize=7.5, fontweight="bold", va="center", zorder=10,
+    )
+    sl_mid = (entry_hi + stop) / 2.0
+    ax.text(
+        x_box + width * 0.05, sl_mid,
+        f"стоп {fmt_price(stop)}",
+        color=_BOX_RED, fontsize=7.5, fontweight="bold", va="center", ha="left", zorder=10,
+    )
+    return True
+
+
+def draw_forward_long_projection(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    *,
+    use_xlim: bool = False,
+) -> bool:
+    """TV-стиль: блок SL/вход/TP вправо «вперёд» (ожидаемый лонг от зоны)."""
+    plan = _entry_stop_tp(ta)
+    if plan is None:
+        return False
+    side, entry, stop, tp = plan
+    if side != "long" or stop >= entry or tp <= entry:
+        return False
+
+    entry_lo = entry_hi = entry
+    if ta.entry_zone and len(ta.entry_zone) == 2:
+        entry_lo, entry_hi = float(ta.entry_zone[0]), float(ta.entry_zone[1])
+    elif entry_hi <= entry_lo:
+        entry_lo, entry_hi = entry * 0.9992, entry * 1.0008
+
+    x1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+    if use_xlim:
+        x0lim, x1lim = ax.get_xlim()
+        span = max(x1lim - x0lim, 0.001)
+        width = span * 0.14
+        x_box = x1 + span * 0.03
+        if x_box + width > x1lim * 0.995:
+            x_box = x1lim - width * 1.02
+    else:
+        i0 = max(0, len(bars) - min(len(bars), 72))
+        x0 = mdates.date2num(_idx_to_date(bars, i0))
+        span = max(x1 - x0, 0.001)
+        x_box = x1 + span * 0.06
+        width = span * 0.28
+
+    ax.add_patch(
+        Rectangle(
+            (x_box, stop), width, max(entry_lo - stop, entry * 0.003),
+            facecolor=_BOX_RED, edgecolor=_BOX_RED, alpha=0.32, linewidth=1.1, zorder=9,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (x_box, entry_lo), width, max(entry_hi - entry_lo, entry * 0.0008),
+            facecolor="#e3b341", edgecolor="#e3b341", alpha=0.22, linewidth=1.0, zorder=9,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (x_box, entry_hi), width, max(tp - entry_hi, entry * 0.003),
+            facecolor=_BOX_GREEN, edgecolor=_BOX_GREEN, alpha=0.30, linewidth=1.0, zorder=9,
+        )
+    )
+    ax.axhline(tp, color="#3fb950", linewidth=1.35, linestyle="-", alpha=0.85, zorder=8)
     ax.text(
         x_box + width * 1.02, tp,
         fmt_price(tp),
@@ -184,6 +259,8 @@ def draw_forward_short_projection(
 
 def draw_position_risk_boxes(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
     if draw_forward_short_projection(ax, bars, ta):
+        return
+    if draw_forward_long_projection(ax, bars, ta):
         return
     plan = _entry_stop_tp(ta)
     if plan is None or not bars:

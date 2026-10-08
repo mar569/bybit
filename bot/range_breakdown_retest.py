@@ -75,7 +75,8 @@ def _setup_plan_viable(setup: RangeBreakdownRetestSetup, current: float) -> bool
         return False
     if reward < 0.0075:
         return False
-    return reward / risk >= 0.75
+    min_rr = 0.55 if setup.phase == "fade_top" else 0.75
+    return reward / risk >= min_rr
 
 
 def evaluate_range_breakdown_retest(

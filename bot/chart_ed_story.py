@@ -20,10 +20,9 @@ ED_STORY_TRAILING = 0.54
 
 
 def use_ed_story_chart(ta: TAAnalysisResult) -> bool:
-    rbr = get_rbr_from_ta(ta)
-    if not rbr:
-        return False
-    return str(rbr.get("phase") or "") in {"fade_top", "await_break", "retest"}
+    from .chart_story_router import use_story_chart
+
+    return use_story_chart(ta)
 
 
 def ed_story_min_analysis_hours(interval_minutes: int) -> int:
@@ -324,12 +323,15 @@ def draw_ed_story_layers(
     tp = float(targets[0]) if targets else float(rbr.get("swing_low_target") or 0)
     phase = str(rbr.get("phase") or "")
 
-    _draw_consolidation_context(ax, bars, ta, floor=floor, ceil=ceil)
-
-    if floor > 0:
+    slim = phase in {"retest", "await_break"}
+    if not slim:
+        _draw_consolidation_context(ax, bars, ta, floor=floor, ceil=ceil)
+        _draw_impulse_demand_zone(ax, bars, floor=floor)
+        _draw_impulse_trendline(ax, bars)
+        if floor > 0:
+            _draw_range_floor_line(ax, bars, floor)
+    elif floor > 0:
         _draw_range_floor_line(ax, bars, floor)
-    _draw_impulse_demand_zone(ax, bars, floor=floor)
-    _draw_impulse_trendline(ax, bars)
 
     resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
     if phase == "fade_top" and resistance > 0:
@@ -360,17 +362,6 @@ def draw_ed_story_layers(
         )
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
-        template = resolve_sweep_template(
-            bars, resistance=floor * 1.008, floor=floor, tp=tp or floor * 0.92,
-        )
-        draw_ghost_bars_forward(
-            ax,
-            bars,
-            template,
-            interval_minutes=interval_minutes,
-            resistance=floor * 1.006,
-            tp=tp if tp > 0 else floor * 0.9,
-        )
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
     _draw_flow_strip(ax, ta)

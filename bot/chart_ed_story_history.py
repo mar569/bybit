@@ -149,7 +149,8 @@ def draw_ghost_bars_forward(
 
     width_min = max(interval_minutes * 0.88, 2.5)
     width_days = width_min / (24 * 60)
-    x_start = mdates.date2num(_bar_ts(bars, len(bars) - 1)) + width_days * 0.55
+    x_last = mdates.date2num(_bar_ts(bars, len(bars) - 1))
+    x_start = x_last + width_days * 0.12
 
     up = "#8b949e"
     down = "#6e7681"

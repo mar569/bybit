@@ -90,6 +90,12 @@ def build_trader_deep_analysis_html(
             )
         return "\n".join(lines) + link_html
 
+    from .living_analysis import build_living_analysis_html
+
+    living = build_living_analysis_html(ta, symbol=sym)
+    if living:
+        return living + link_html
+
     conf = int(getattr(ta, "verdict_confidence", 0) or 0)
     seek = str(getattr(ta, "reading_seek_label", "") or "").strip()[:200]
     body = seek or "Смотрим структуру на графике — без длинного текста."

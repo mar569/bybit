@@ -2540,15 +2540,34 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes, crisp=wide)
+    if manual_ta_chart or signal_chart:
+        try:
+            from .chart_story_router import enrich_ta_for_chart_story
+
+            ta = enrich_ta_for_chart_story(ta, bars)
+        except Exception:
+            logger.debug("Chart story enrich skipped", exc_info=True)
     ed_story = False
+    range_wait = False
+    observation = False
+    story_kind = "full_manual"
     if manual_ta_chart or signal_chart:
         try:
             from .chart_ed_story import use_ed_story_chart
+            from .chart_range_wait import use_range_wait_chart
+            from .chart_story_router import resolve_chart_story_kind
 
-            ed_story = use_ed_story_chart(ta)
+            story_kind = resolve_chart_story_kind(ta)
+            ed_story = story_kind == "ed_story" or use_ed_story_chart(ta)
+            range_wait = story_kind == "range_wait" or use_range_wait_chart(ta)
+            observation = story_kind == "observation"
         except Exception:
             ed_story = False
-    if (manual_ta_chart or signal_chart) and not ed_story:
+            range_wait = False
+            observation = False
+            story_kind = "full_manual"
+    story_minimal = story_kind != "full_manual"
+    if (manual_ta_chart or signal_chart) and story_kind == "full_manual":
         try:
             from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
 
@@ -2578,7 +2597,7 @@ def _render_chart_figure(
         except Exception:
             logger.debug("UT overlay draw failed", exc_info=True)
     current = bars[-1].close
-    if not ed_story:
+    if not story_minimal:
         ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
         ax.text(
             _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
@@ -2607,10 +2626,19 @@ def _render_chart_figure(
 
     zoom_h = display_hours if display_hours and display_hours > 0 else chart_display_hours(interval_minutes)
     trail = 0.22
-    if ed_story:
-        from .chart_ed_story import ED_STORY_TRAILING
+    if story_minimal:
+        if range_wait:
+            from .chart_range_wait import range_wait_trailing
 
-        trail = ED_STORY_TRAILING
+            trail = range_wait_trailing()
+        elif observation:
+            from .chart_observation import observation_trailing
+
+            trail = observation_trailing()
+        elif ed_story:
+            from .chart_ed_story import ED_STORY_TRAILING
+
+            trail = ED_STORY_TRAILING
     _apply_display_zoom(
         ax,
         bars,
@@ -2619,7 +2647,22 @@ def _render_chart_figure(
         trailing=trail,
         set_ylim=True,
     )
-    if ed_story:
+    if range_wait:
+        try:
+            from .chart_range_wait import draw_range_wait_layers, expand_range_wait_ylim
+
+            draw_range_wait_layers(ax, bars, ta, interval_minutes=interval_minutes)
+            expand_range_wait_ylim(ax, ta)
+        except Exception:
+            logger.exception("Range wait chart layers failed")
+    elif observation:
+        try:
+            from .chart_observation import draw_observation_layers
+
+            draw_observation_layers(ax, bars, ta, interval_minutes=interval_minutes)
+        except Exception:
+            logger.exception("Observation chart layers failed")
+    elif ed_story:
         try:
             from .chart_ed_story import draw_ed_story_layers
 
@@ -3439,46 +3482,64 @@ async def render_annotated_chart(
     iv_chart = interval_minutes
     ah_chart = analysis_hours
     if ta and (manual_ta_chart or signal_chart):
-        from .chart_setup_interval import pick_setup_chart_interval, setup_chart_analysis_hours
+        from .chart_setup_interval import (
+            plan_search_intervals,
+            setup_chart_analysis_hours,
+            ta_plan_readable,
+        )
 
-        setup_iv = pick_setup_chart_interval(ta, interval_minutes)
-        if setup_iv != interval_minutes:
+        picked_iv = interval_minutes
+        picked_bars = bars
+        picked_ta = ta
+        picked_ah = analysis_hours
+        for setup_iv in plan_search_intervals(ta, interval_minutes)[:4]:
             ah_setup = max(analysis_hours, setup_chart_analysis_hours(setup_iv))
+            if setup_iv == interval_minutes and ta_plan_readable(ta):
+                picked_iv, picked_bars, picked_ta, picked_ah = setup_iv, bars, ta, analysis_hours
+                break
             bars_setup = await _fetch_bars(symbol, ah_setup, interval_minutes=setup_iv)
-            if bars_setup and len(bars_setup) >= 20:
-                ta_setup = run_ta_analysis(
-                    bars_setup,
-                    is_long=is_long,
-                    oi_bars=oi_bars,
-                    btc_bars=btc_bars,
-                    mid_bars=mid_bars,
-                    htf_bars=htf_bars,
-                    macro_bars=macro_bars,
-                    weekly_bars=weekly_bars,
-                    symbol=symbol,
-                    hours=ah_setup,
-                    invalidation_price=invalidation_price,
-                    neutral=neutral,
-                    liq_context=liq_context,
-                    interval_minutes=setup_iv,
-                    htf_interval_minutes=htf_interval_minutes,
-                    mid_interval_minutes=mid_interval_minutes,
-                    macro_interval_minutes=macro_interval_minutes,
-                    history_bars=bars_setup,
-                    taker_cvd=taker_cvd,
-                    market_metrics=market_metrics,
-                    pattern_detection_enabled=pattern_detection_enabled,
-                    pattern_min_confidence=pattern_min_confidence,
-                    as_of_bar_index=as_of_bar_index,
-                    as_of_open_time_ms=as_of_open_time_ms,
-                    as_of_price=as_of_price,
-                )
-                if verdict_override:
-                    ta_setup.verdict = verdict_override
-                bars_chart = bars_setup
-                ta_chart = ta_setup
-                iv_chart = setup_iv
-                ah_chart = ah_setup
+            if not bars_setup or len(bars_setup) < 20:
+                continue
+            ta_setup = run_ta_analysis(
+                bars_setup,
+                is_long=is_long,
+                oi_bars=oi_bars,
+                btc_bars=btc_bars,
+                mid_bars=mid_bars,
+                htf_bars=htf_bars,
+                macro_bars=macro_bars,
+                weekly_bars=weekly_bars,
+                symbol=symbol,
+                hours=ah_setup,
+                invalidation_price=invalidation_price,
+                neutral=neutral,
+                liq_context=liq_context,
+                interval_minutes=setup_iv,
+                htf_interval_minutes=htf_interval_minutes,
+                mid_interval_minutes=mid_interval_minutes,
+                macro_interval_minutes=macro_interval_minutes,
+                history_bars=bars_setup,
+                taker_cvd=taker_cvd,
+                market_metrics=market_metrics,
+                pattern_detection_enabled=pattern_detection_enabled,
+                pattern_min_confidence=pattern_min_confidence,
+                as_of_bar_index=as_of_bar_index,
+                as_of_open_time_ms=as_of_open_time_ms,
+                as_of_price=as_of_price,
+            )
+            if verdict_override:
+                ta_setup.verdict = verdict_override
+            picked_iv, picked_bars, picked_ta, picked_ah = setup_iv, bars_setup, ta_setup, ah_setup
+            if ta_plan_readable(ta_setup):
+                break
+        bars_chart = picked_bars
+        ta_chart = picked_ta
+        iv_chart = picked_iv
+        ah_chart = picked_ah
+        mm = dict(getattr(ta_chart, "market_metrics", None) or {})
+        mm["chart_setup_interval"] = iv_chart
+        mm["chart_scanner_interval"] = interval_minutes
+        ta_chart.market_metrics = mm
 
     if (manual_ta_chart or signal_chart) and ta_chart and symbol:
         try:
@@ -3526,9 +3587,18 @@ async def render_annotated_chart(
 
     if manual_ta_chart or signal_chart:
         from .chart_ed_story import ed_story_chart_zoom_hours, use_ed_story_chart
+        from .chart_range_wait import range_wait_chart_zoom_hours, use_range_wait_chart
 
         if ta_chart and use_ed_story_chart(ta_chart):
             zoom_hours = ed_story_chart_zoom_hours(
+                ta_chart,
+                bars_chart,
+                interval_minutes=iv_chart,
+                analysis_hours=ah_chart,
+                configured=display_hours,
+            )
+        elif ta_chart and use_range_wait_chart(ta_chart):
+            zoom_hours = range_wait_chart_zoom_hours(
                 ta_chart,
                 bars_chart,
                 interval_minutes=iv_chart,

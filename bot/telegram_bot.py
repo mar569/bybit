@@ -3219,6 +3219,16 @@ class TelegramBot:
         if not self.config.ai_configured:
             return
         try:
+            from .chart_story_router import use_minimal_story_chart
+            from .living_analysis import build_living_analysis_html
+
+            if use_minimal_story_chart(ta) or len(
+                build_living_analysis_html(ta, symbol=symbol) or ""
+            ) > 80:
+                return
+        except Exception:
+            pass
+        try:
             from .ai_situational import run_situational_ai_reading
 
             html = await run_situational_ai_reading(

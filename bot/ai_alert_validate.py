@@ -48,6 +48,13 @@ def build_alert_validate_context(
         "quality": getattr(ta, "scenario_engine_quality", ""),
     }
     blob["entry_quality"] = getattr(ta, "entry_quality", "")
+    try:
+        from .chart_story_router import resolve_chart_story_kind
+
+        blob["story_kind"] = resolve_chart_story_kind(ta)
+    except Exception:
+        blob["story_kind"] = ""
+    blob["recent_price_action"] = str(getattr(ta, "recent_price_action_ru", "") or "")[:500]
     metrics = ta.market_metrics or {}
     if isinstance(metrics, dict) and metrics.get("methodology_weights"):
         blob["methodology_weights"] = metrics["methodology_weights"]
