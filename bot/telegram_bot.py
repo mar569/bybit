@@ -3219,10 +3219,11 @@ class TelegramBot:
         if not self.config.ai_configured:
             return
         try:
+            from .chart_display_policy import ed_minimal_voice_enabled
             from .chart_story_router import use_minimal_story_chart
             from .living_analysis import build_living_analysis_html
 
-            if use_minimal_story_chart(ta) or len(
+            if ed_minimal_voice_enabled() or use_minimal_story_chart(ta) or len(
                 build_living_analysis_html(ta, symbol=symbol) or ""
             ) > 80:
                 return

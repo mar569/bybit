@@ -63,6 +63,10 @@ def _label_inside_box(
     text: str,
     color: str,
 ) -> None:
+    from .chart_display_policy import chart_box_labels_enabled
+
+    if not chart_box_labels_enabled():
+        return
     ax.text(
         x_box + width * 0.06,
         y,

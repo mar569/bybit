@@ -1,21 +1,33 @@
 //@version=6
 // EdBot v3 — разметка как у Ed (docs + нефть). НЕ EdStory. Стратегия: Ed_Bot_Strategy_v1.pine
-indicator("Ed Bot Analysis v3.6", shorttitle="EdBot", overlay=true, max_boxes_count=32, max_lines_count=80, max_labels_count=56)
+indicator("Ed Bot Analysis v4.3", shorttitle="EdBot", overlay=true, max_boxes_count=56, max_lines_count=144, max_labels_count=100)
 
 // ═══════════════════════════════════════════════════════════
-//  Каждая галочка РИСУЕТ свой слой. Нет скрытых блокировок.
+//  Профиль «Ed clean» — один клик; «Полный» — все галочки ниже.
 // ═══════════════════════════════════════════════════════════
+grpProf = "Профиль"
+i_profile = input.string("Разметка Ed", "Режим разметки", options=["Разметка Ed", "Ed clean", "Полный", "Только паттерны"], group=grpProf, tooltip="Разметка Ed: структура + один план ▲/▼ (E/SL/TP на графике, подписи — цены). Ed clean: Beluga+карточка. Полный: галочки.")
+
 grp = "На графике (галочка = слой)"
 i_sr      = input.bool(true,  "1. Сопр. / Подд. (структура)", group=grp, tooltip="Жёлтый/синий = ближайшие свинги для триггера. Пунктир = контекст lookback.")
 i_ctxRng  = input.bool(true,  "1b. Контекст LB (пунктир)", group=grp, tooltip="Hi/Lo всего окна — только ориентир, не триггер сделки.")
-i_zone    = input.bool(true,  "2. Зелёная зона у поддержки", group=grp, tooltip="Как на разборе нефти.")
-i_wedge   = input.bool(true,  "3. Клин / треугольник (2 белые линии)", group=grp, tooltip="По первым и последним свингам lookback — крупная фигура, не короткий отрезок.")
-i_pat     = input.bool(true,  "4. Графический паттерн (2× / ГиП / 1-2-3)", group=grp)
-i_fib     = input.bool(true,  "5. Сетка Fib (0–100 + золотая зона)", group=grp, tooltip="Откат импульса: 0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100. Расширения 127.2 — как цели.")
+i_zone    = input.bool(true,  "2. Зона OB (имп+vol)", group=grp, tooltip="Order block / breaker — одна зона без «кирпичей» (см. 2a).")
+i_zoneOne = input.bool(true,  "2a. Только одна зона на экране", group=grp, tooltip="Не рисовать полосу подд. + demand + supply друг на друге.")
+i_wedge   = input.bool(true,  "3. △ / клин (PDF-паттерны)", group=grp, tooltip="Восход./нисход./симметр. △ как в шпаргалке: вход=пробой, SL=за противоп. грань, TP=высота базы H.")
+i_triPdf  = input.bool(true,  "3b. Уровни Вход/Стоп/Цель △", group=grp, tooltip="Рисует пунктиром цели по measured move (ширина △ at start).")
+i_pat     = input.bool(true,  "4. Графический паттерн (2× / ГиП / 1-2-3)", group=grp, tooltip="M/W, голова-плечи, 1-2-3 — шея и цель на графике; forming = пунктир.")
+i_fib     = input.bool(false, "5. Сетка Fib (0–100 + золотая зона)", group=grp, tooltip="Включай для отката; для чистого входа — OFF.")
 i_smc     = input.bool(false, "6. SMC: BOS + FVG + свип (по идее)", group=grp, tooltip="FVG только после BOS и retest; свип — если в «главной идее».")
 i_path    = input.bool(false, "7. Прогноз хода (зигзаг) — OFF", group=grp, tooltip="Рекомендуется выключено: декоративный зигзаг не вход Ed-разбора.")
-i_plan    = input.bool(true,  "8. Разбор + действие (таблица)", group=grp)
-i_boxes   = input.bool(true,  "9. SL / TP1 / TP2 по реакциям", group=grp, tooltip="TP = ближайшие исторические уровни (свинг/Fib/пол), не фиксированный R:R.")
+i_story   = input.bool(true,  "8. Карточка входа (HUD)", group=grp, tooltip="ДЕЙСТВИЕ · фигура · триггеры · edge — закреплена в углу графика.")
+i_storyPos = input.string("Вверху справа", "Позиция карточки", options=["Вверху справа", "Над ценой"], group=grp)
+i_boxes   = input.bool(true,  "9. План сделки (Beluga L/S)", group=grp, tooltip="SL/TP EdBot: linefill + ◉ + TP1/2 + ✔/✖.")
+i_onePos  = input.bool(true,  "9a. Одна главная позиция", group=grp, tooltip="Не рисовать L и S вместе — только сценарий по ХОДу/действию.")
+i_posStyle = input.string("Beluga", "Стиль позиции", options=["Beluga", "TV боксы"], group=grp, tooltip="Beluga: linefill красный SL→вход, зелёный вход→TP, подписи ◉ и 1·2. TV: цветные боксы.")
+i_dualPos = input.bool(false, "9b. ЖДАТЬ: оба триггера L+S", group=grp, tooltip="Только если нужны два «что если»; иначе шум.")
+i_posW    = input.int(20, "Ширина блока позиции (баров)", minval=12, maxval=48, group=grp)
+i_posHits = input.bool(true, "9c. ✔ TP / ✖ SL при касании", group=grp)
+i_candleMode = input.string("barcolor", "Свечи по ХОДу", options=["off", "barcolor", "plotcandle"], group=grp, tooltip="barcolor — тонировка без дубля. plotcandle — как Beluga (может перекрыть свечи TV).")
 
 grpW = "Толщина линий"
 i_wSR    = input.int(2, "Сопр. / Подд.", minval=1, maxval=6, group=grpW)
@@ -26,16 +38,19 @@ i_wPat   = input.int(2, "Паттерн / шея", minval=1, maxval=5, group=grp
 
 grpP = "Параметры"
 i_lb      = input.int(90, "Lookback разметки (баров)", minval=40, maxval=200, group=grpP, tooltip="Размер клина и диапазона. 90 ≈ как ручной разбор на 15m.")
-i_swing   = input.int(3, "Окно свинга", minval=2, maxval=5, group=grpP, tooltip="Сколько баров слева/справа для pivot. Меньше (2–3) = больше свингов, чувствительнее. Больше (4–5) = глаже, медленнее. Если ±1 меняет ХОД — смотри «Уверенность» в таблице.")
-i_minConf = input.float(0.55, "MIN confidence фигуры", minval=0.50, maxval=0.80, step=0.01, group=grpP)
-i_dtol    = input.float(0.55, "Допуск 2× вершины %", minval=0.2, maxval=1.5, step=0.05, group=grpP)
+i_swing   = input.int(3, "Окно свинга", minval=2, maxval=5, group=grpP, tooltip="Сколько баров слева/справа для pivot. Меньше (2–3) = больше свингов, чувствительнее. Больше (4–5) = глаже, медленнее. Если ±1 меняет ХОД — смотри строку edge в карточке входа.")
+i_minConf = input.float(0.52, "MIN confidence фигуры", minval=0.48, maxval=0.80, step=0.01, group=grpP)
+i_dtol    = input.float(0.85, "Допуск 2× вершины %", minval=0.2, maxval=2.0, step=0.05, group=grpP)
+i_patSpanMin = input.int(4, "Паттерн: min баров между pivots", minval=3, maxval=12, group=grpP)
+i_patSpanMax = input.int(68, "Паттерн: max баров между pivots", minval=24, maxval=100, group=grpP)
 i_hstol   = input.float(2.2, "Допуск плеч ГиП %", minval=1.0, maxval=4.0, step=0.1, group=grpP)
 i_rsiLen  = input.int(14, "RSI длина", minval=5, maxval=28, group=grpP)
 i_rsiOB   = input.int(70, "RSI перекупленность", minval=60, maxval=85, group=grpP)
 i_rsiOS   = input.int(30, "RSI перепроданность", minval=15, maxval=40, group=grpP)
 
 grpT = "Сделка (хирургия)"
-i_minRR     = input.float(1.15, "Min R:R для SL/TP", minval=1.0, maxval=2.5, step=0.05, group=grpT, tooltip="Если TP1 ближе чем SL — боксы не рисуем, в таблице «нет edge».")
+i_minRR     = input.float(1.15, "Min R:R для SL/TP", minval=1.0, maxval=2.5, step=0.05, group=grpT, tooltip="Если TP1 ближе чем SL — Beluga не рисуем, в карточке «нет edge».")
+i_minQual   = input.string("B", "Min качество для SL/TP", options=["A", "B", "C"], group=grpT, tooltip="Боксы только при A или B (или C если выбрано C).")
 i_surgical  = input.bool(true, "Вход на триггере (не chase)", group=grpT, tooltip="R:R считается от longPx/shortPx, не от текущей close.")
 i_mtf       = input.bool(true, "Сверка 60m vs текущий TF", group=grpT)
 i_autoClean = input.bool(true, "Меньше слоёв на 30m+", group=grpT, tooltip="SMC/зигзаг скрываются на старших TF — меньше «налеплено».")
@@ -43,9 +58,33 @@ i_autoClean = input.bool(true, "Меньше слоёв на 30m+", group=grpT, 
 grpSt = "Стабильность (без «прыжков»)"
 i_sweepMem  = input.int(32, "Память свипа (баров)", minval=8, maxval=80, group=grpSt, tooltip="Свип учитывается в ХОДе N баров после закрытия свечи, уровень не меняется.")
 i_freezePath = input.bool(true, "ХОД/голоса только на close", group=grpSt, tooltip="Пока свеча не закрылась — не пересчитывать сценарий (нет смены на каждом тике).")
-i_histPat   = input.bool(true, "Паттерн: приоритет подтверждённого в lookback", group=grpSt, tooltip="На истории рисуется последняя подтверждённая фигура, а не «forming» на текущем тике.")
+i_histPat   = input.bool(false, "Паттерн: только confirmed (OFF = показывать forming)", group=grpSt, tooltip="OFF — видна формирующаяся 2×/ГиП с шеей; ON — только после пробоя шеи.")
+i_patFocus  = input.bool(true, "Паттерн важнее △-шума", group=grpSt, tooltip="Если есть 2×/ГиП — не рисовать «черновой» клин поверх.")
 i_oneIdea   = input.bool(true, "Одна идея на графике (иерархия)", group=grpSt, tooltip="На хвосте не рисуем FVG+свип+клин одновременно — только то, что в «Главная идея».")
 i_wedgeMinT = input.int(2, "Мин. касаний границы клина", minval=2, maxval=4, group=grpSt)
+
+bool profFull = i_profile == "Полный"
+bool profClean = i_profile == "Ed clean"
+bool profPatOnly = i_profile == "Только паттерны"
+bool profMarkup = i_profile == "Разметка Ed"
+bool eff_sr = profFull ? i_sr : true
+bool eff_ctxRng = profFull ? i_ctxRng : profMarkup
+bool eff_zone = profFull ? i_zone : profMarkup or profClean
+bool eff_zoneOne = profFull ? i_zoneOne : true
+bool eff_wedge = profFull ? i_wedge : profMarkup or profClean
+bool eff_triPdf = profFull ? i_triPdf : profMarkup or profClean
+bool eff_pat = profFull ? i_pat : not profMarkup
+bool eff_fib = profFull ? i_fib : false
+bool eff_smc = profFull ? i_smc : profMarkup
+bool eff_path = profFull ? i_path : false
+bool eff_story = profFull ? i_story : profClean
+bool eff_boxes = profFull ? i_boxes : profClean
+bool eff_onePos = profFull ? i_onePos : profClean
+bool eff_dualPos = profFull ? i_dualPos : false
+bool eff_patFocus = profFull ? i_patFocus : profMarkup ? false : true
+string eff_candleMode = profFull ? i_candleMode : "off"
+bool eff_oneIdeaDraw = profMarkup ? false : i_oneIdea
+bool mkCompact = profMarkup
 
 // ── helpers ──
 f_rr(float entry, float sl, float tp, bool isLong) =>
@@ -53,10 +92,36 @@ f_rr(float entry, float sl, float tp, bool isLong) =>
     float rew = isLong ? tp - entry : entry - tp
     risk > syminfo.mintick ? rew / risk : 0.0
 float atr = ta.atr(14)
+float volSma20 = ta.sma(volume, 20)
+float bodySz = math.abs(close - open)
 f_pct(float a, float b) => math.abs(a - b) / math.max(math.abs(a), 1e-10) * 100.0
 f_y(float y1, int x1, float y2, int x2, int x) =>
     y1 + (y2 - y1) * (x - x1) / math.max(x2 - x1, 1)
 f_fib(float top, float bot, float r) => top - (top - bot) * r
+
+f_struct_lbl(int tr) =>
+    tr == 1 ? "HH·HL" : tr == -1 ? "LH·LL" : "боковик"
+
+// trend 1 bull / -1 bear / 0 chop; last swing hi/lo; BOS on close vs last pivot
+f_mkt_struct(int sw) =>
+    var float lSh = na
+    var float pSh = na
+    var float lSl = na
+    var float pSl = na
+    float ph = ta.pivothigh(high, sw, sw)
+    float pl = ta.pivotlow(low, sw, sw)
+    if not na(ph)
+        pSh := lSh
+        lSh := ph
+    if not na(pl)
+        pSl := lSl
+        lSl := pl
+    int tr = 0
+    if not na(lSh) and not na(pSh) and not na(lSl) and not na(pSl)
+        tr := lSh > pSh and lSl > pSl ? 1 : lSh < pSh and lSl < pSl ? -1 : 0
+    bool bosU = not na(lSh) and close > lSh
+    bool bosD = not na(lSl) and close < lSl
+    [tr, lSh, lSl, bosU, bosD]
 
 colW = #e6edf3
 colY = #f0c040
@@ -162,6 +227,105 @@ float posR  = structW > 0 ? (close - structSup) / structW : 0.5
 float posRctx = rngW > 0 ? (close - rngLo) / rngW : 0.5
 bool  inMid = posR > 0.32 and posR < 0.68
 
+[ctfTr, ctfSh, ctfSl, ctfBosU, ctfBosD] = f_mkt_struct(i_swing)
+int htfSw = math.max(2, i_swing - 1)
+[htfTr, htfSh, htfSl, htfBosU, htfBosD] = request.security(syminfo.tickerid, "60", f_mkt_struct(htfSw), lookahead=barmerge.lookahead_off)
+string ctxStructRu = "60m " + f_struct_lbl(int(htfTr)) + (htfBosU ? " · BOS↑" : htfBosD ? " · BOS↓" : "")
+string trdStructRu = timeframe.period + " " + f_struct_lbl(ctfTr) + (ctfBosU ? " · BOS↑" : ctfBosD ? " · BOS↓" : "")
+
+// OB / breaker: последний импульс + объём
+var float demTop = na
+var float demBot = na
+var int   demBar = na
+var bool  demBrk = false
+var float supTop = na
+var float supBot = na
+var int   supBar = na
+var bool  supBrk = false
+if barstate.isconfirmed
+    bool bullImp = close > open and bodySz > atr * 0.82 and volume > volSma20 * 1.08
+    bool bearImp = close < open and bodySz > atr * 0.82 and volume > volSma20 * 1.08
+    if bullImp
+        demTop := math.max(open, close)
+        demBot := low
+        demBar := bar_index
+        demBrk := false
+    if bearImp
+        supTop := high
+        supBot := math.min(open, close)
+        supBar := bar_index
+        supBrk := false
+    if not na(demBot) and close < demBot - syminfo.mintick * 2
+        demBrk := true
+    if not na(supTop) and close > supTop + syminfo.mintick * 2
+        supBrk := true
+
+bool inDemand = not na(demBot) and not demBrk and close >= demBot - atr * 0.08 and close <= demTop + atr * 0.22
+bool inSupply = not na(supTop) and not supBrk and close <= supTop + atr * 0.08 and close >= supBot - atr * 0.22
+bool brkDemand = demBrk and close >= demBot and close <= demTop
+bool brkSupply = supBrk and close <= supTop and close >= supBot
+string zoneRu = inDemand ? "спрос " + str.tostring(demBot, format.mintick) + "–" + str.tostring(demTop, format.mintick) : inSupply ? "предложение " + str.tostring(supBot, format.mintick) + "–" + str.tostring(supTop, format.mintick) : brkDemand ? "breaker↓ бывш. спрос" : brkSupply ? "breaker↑ бывш. предлож." : "вне OB"
+
+// Ретest структурных уровней: пробили → вернулись → удержали / провал
+var int resSt = 0
+var int supSt = 0
+if barstate.isconfirmed
+    float rtTol = atr * 0.28
+    if close > structRes
+        if resSt == 0
+            resSt := 1
+    if resSt == 1 and low <= structRes + rtTol
+        resSt := 2
+    if resSt == 2
+        resSt := close > structRes ? 3 : close < structRes - rtTol ? 4 : 2
+    if close < structRes - rtTol * 1.2 and resSt >= 3
+        resSt := 0
+    if close < structSup
+        if supSt == 0
+            supSt := 1
+    if supSt == 1 and high >= structSup - rtTol
+        supSt := 2
+    if supSt == 2
+        supSt := close < structSup ? 3 : close > structSup + rtTol ? 4 : 2
+    if close > structSup + rtTol * 1.2 and supSt >= 3
+        supSt := 0
+
+f_retest_lbl(int st) =>
+    st == 0 ? "до пробоя" : st == 1 ? "пробили" : st == 2 ? "вернулись" : st == 3 ? "удержали" : "провал retest"
+
+string retResRu = "сопр.: " + f_retest_lbl(resSt)
+string retSupRu = "подд.: " + f_retest_lbl(supSt)
+
+// Объём: откат слабее импульса + див. на новом экстремуме
+float volUpSum = 0.0
+float volDnSum = 0.0
+int nUpV = 0
+int nDnV = 0
+for vi = 0 to 11
+    if close[vi] > open[vi]
+        volUpSum += volume[vi]
+        nUpV += 1
+    else if close[vi] < open[vi]
+        volDnSum += volume[vi]
+        nDnV += 1
+float avgVolUp = nUpV > 0 ? volUpSum / nUpV : volSma20
+float avgVolDn = nDnV > 0 ? volDnSum / nDnV : volSma20
+bool volPullBull = avgVolDn < avgVolUp * 0.92
+bool volPullBear = avgVolUp < avgVolDn * 0.92
+bool volBearDivPx = false
+bool volBullDivPx = false
+if array.size(shP) >= 2 and array.size(shX) >= 2
+    int bxA = bar_index - array.get(shX, array.size(shX) - 2)
+    int bxB = bar_index - array.get(shX, array.size(shX) - 1)
+    if bxA >= 0 and bxB >= 0 and array.get(shP, array.size(shP) - 1) > array.get(shP, array.size(shP) - 2) and volume[bxB] < volume[bxA] * 0.9
+        volBearDivPx := true
+if array.size(slP) >= 2 and array.size(slX) >= 2
+    int bxA = bar_index - array.get(slX, array.size(slX) - 2)
+    int bxB = bar_index - array.get(slX, array.size(slX) - 1)
+    if bxA >= 0 and bxB >= 0 and array.get(slP, array.size(slP) - 1) < array.get(slP, array.size(slP) - 2) and volume[bxB] < volume[bxA] * 0.9
+        volBullDivPx := true
+string volRu = volBearDivPx ? "новый high · vol слабее" : volBullDivPx ? "новый low · vol слабее" : volPullBull ? "откат вверх · vol OK" : volPullBear ? "откат вниз · vol OK" : "нейтрально"
+
 // ── impulse + fib (якорь на реальных экстремумах ноги) ──
 int fibLb = math.min(i_lb, 80)
 float impHi = ta.highest(high, fibLb)
@@ -228,7 +392,8 @@ if barstate.isconfirmed
 
 bool sweepHiAct = not na(sweepBearBar) and bar_index - sweepBearBar <= i_sweepMem
 bool sweepLoAct = not na(sweepBullBar) and bar_index - sweepBullBar <= i_sweepMem
-string sweepRu = sweepHiAct ? "свип ↑ @ " + str.tostring(sweepBearLvl, format.mintick) + " · " + str.tostring(bar_index - sweepBearBar) + " бар назад" : sweepLoAct ? "свип ↓ @ " + str.tostring(sweepBullLvl, format.mintick) + " · " + str.tostring(bar_index - sweepBullBar) + " бар назад" : "не зафиксирован"
+string sweepZoneTag = sweepLoAct and (inDemand or brkDemand) ? " · в зоне спроса" : sweepHiAct and (inSupply or brkSupply) ? " · в зоне предлож." : sweepLoAct and htfTr >= 0 ? " · HTF не медв." : sweepHiAct and htfTr <= 0 ? " · HTF не быч." : ""
+string sweepRu = sweepHiAct ? "свип ↑ @ " + str.tostring(sweepBearLvl, format.mintick) + " · " + str.tostring(bar_index - sweepBearBar) + " бар" + sweepZoneTag : sweepLoAct ? "свип ↓ @ " + str.tostring(sweepBullLvl, format.mintick) + " · " + str.tostring(bar_index - sweepBullBar) + " бар" + sweepZoneTag : "не зафиксирован"
 
 var bool bosUpMemo = false
 var bool bosDnMemo = false
@@ -268,7 +433,6 @@ bool fvgRetest = fvgUnfilled and (fvgBull ? close >= fvgBot and close <= fvgTop 
 bool fvgSetup = fvgRetest and ((fvgBull and bosUpMemo) or (not fvgBull and bosDnMemo))
 float hi12 = ta.highest(high, 12)
 float lo12 = ta.lowest(low, 12)
-float volSma20 = ta.sma(volume, 20)
 bool obBull = close > hi12[1] and close > open and volume > volSma20 * 1.15
 bool obBear = close < lo12[1] and close < open and volume > volSma20 * 1.15
 
@@ -346,12 +510,12 @@ if barstate.islast and (barstate.isconfirmed or not i_freezePath)
 
     // double top
     if array.size(shP) >= 2
-        for i = math.max(0, array.size(shP) - 6) to array.size(shP) - 2
+        for i = math.max(0, array.size(shP) - 10) to array.size(shP) - 2
             float a = array.get(shP, i)
             float b = array.get(shP, i + 1)
             int xa = array.get(shX, i)
             int xb = array.get(shX, i + 1)
-            if xb - xa < 6 or xb - xa > 50 or f_pct(a, b) > i_dtol
+            if xb < xNow - i_lb or xb - xa < i_patSpanMin or xb - xa > i_patSpanMax or f_pct(a, b) > i_dtol
                 continue
             float neck = na
             if array.size(slP) > 0
@@ -362,10 +526,10 @@ if barstate.islast and (barstate.isconfirmed or not i_freezePath)
             if na(neck)
                 continue
             float h = math.max(a, b) - neck
-            if h < atr * 0.7
+            if h < atr * 0.52
                 continue
             string st = close < neck ? "confirmed" : "forming"
-            float conf = 0.58 + (f_pct(a, b) < 0.35 ? 0.12 : 0.0) + (st == "confirmed" ? 0.14 : 0.04)
+            float conf = 0.56 + (f_pct(a, b) < 0.45 ? 0.10 : 0.0) + (st == "confirmed" ? 0.14 : 0.08) + (xb >= xNow - i_lb ? 0.04 : 0.0)
             if conf >= i_minConf and conf >= best
                 best := conf
                 cK := "double_top"
@@ -416,12 +580,12 @@ if barstate.islast and (barstate.isconfirmed or not i_freezePath)
 
     // double bottom
     if array.size(slP) >= 2
-        for i = math.max(0, array.size(slP) - 6) to array.size(slP) - 2
+        for i = math.max(0, array.size(slP) - 10) to array.size(slP) - 2
             float a = array.get(slP, i)
             float b = array.get(slP, i + 1)
             int xa = array.get(slX, i)
             int xb = array.get(slX, i + 1)
-            if xb - xa < 6 or xb - xa > 50 or f_pct(a, b) > i_dtol
+            if xb < xNow - i_lb or xb - xa < i_patSpanMin or xb - xa > i_patSpanMax or f_pct(a, b) > i_dtol
                 continue
             float neck = na
             if array.size(shP) > 0
@@ -432,10 +596,10 @@ if barstate.islast and (barstate.isconfirmed or not i_freezePath)
             if na(neck)
                 continue
             float h = neck - math.min(a, b)
-            if h < atr * 0.7
+            if h < atr * 0.52
                 continue
             string st = close > neck ? "confirmed" : "forming"
-            float conf = 0.58 + (f_pct(a, b) < 0.35 ? 0.12 : 0.0) + (st == "confirmed" ? 0.14 : 0.04)
+            float conf = 0.56 + (f_pct(a, b) < 0.45 ? 0.10 : 0.0) + (st == "confirmed" ? 0.14 : 0.08) + (xb >= xNow - i_lb ? 0.04 : 0.0)
             if conf >= i_minConf and conf >= best
                 best := conf
                 cK := "double_bottom"
@@ -484,248 +648,272 @@ if barstate.islast and (barstate.isconfirmed or not i_freezePath)
                     y1c2 := a
                     y2c2 := b
 
-    // H&S
+    // H&S — перебор triplet pivots в lookback
     if array.size(shP) >= 3
-        int i = array.size(shP) - 3
-        float ls = array.get(shP, i)
-        float hd = array.get(shP, i + 1)
-        float rs = array.get(shP, i + 2)
-        int xs = array.get(shX, i)
-        int xh = array.get(shX, i + 1)
-        int xr = array.get(shX, i + 2)
-        if ls < hd and hd > rs and f_pct(ls, rs) <= i_hstol
-            float nl = na
-            float nr = na
-            int nli = xs
-            int nri = xr
-            if array.size(slP) > 0
-                for j = 0 to array.size(slP) - 1
-                    int lx = array.get(slX, j)
-                    float lp = array.get(slP, j)
-                    if lx > xs and lx < xh
-                        nl := na(nl) ? lp : math.min(nl, lp)
-                        nli := lx
-                    if lx > xh and lx < xr
-                        nr := na(nr) ? lp : math.min(nr, lp)
-                        nri := lx
-            if not na(nl) and not na(nr)
-                float neck = f_y(nl, nli, nr, nri, xr)
-                float h = hd - neck
-                if h >= atr
-                    string st = close < neck ? "confirmed" : "forming"
-                    float conf = 0.62 + (st == "confirmed" ? 0.14 : 0.04)
-                    if conf >= i_minConf and conf >= best
-                        best := conf
-                        cK := "head_shoulders"
-                        cS := st
-                        cD := "bearish"
-                        cC := conf
-                        cN := neck
-                        cT := neck - h
-                        cSp := hd + atr * 0.15
-                        i1 := xs
-                        i2 := xh
-                        i3 := xr
-                        y1 := ls
-                        y2 := hd
-                        y3 := rs
-                        nL := nl
-                        nR := nr
-                        nLx := nli
-                        nRx := nri
-                    if st == "confirmed" and xr >= xNow - i_lb and conf >= i_minConf and conf >= bestC
-                        bestC := conf
-                        cKc := "head_shoulders"
-                        cSc := st
-                        cDc := "bearish"
-                        cCc := conf
-                        cNc := neck
-                        cTc := neck - h
-                        cSpc := hd + atr * 0.15
-                        i1c := xs
-                        i2c := xh
-                        i3c := xr
-                        y1c := ls
-                        y2c := hd
-                        y3c := rs
-                        nLc := nl
-                        nRc := nr
-                        nLxc := nli
-                        nRxc := nri
+        for ii = 0 to array.size(shP) - 3
+            int i = ii
+            float ls = array.get(shP, i)
+            float hd = array.get(shP, i + 1)
+            float rs = array.get(shP, i + 2)
+            int xs = array.get(shX, i)
+            int xh = array.get(shX, i + 1)
+            int xr = array.get(shX, i + 2)
+            if xr < xNow - i_lb or xh - xs < i_patSpanMin or xr - xs > i_patSpanMax * 2
+                continue
+            if ls < hd and hd > rs and f_pct(ls, rs) <= i_hstol
+                float nl = na
+                float nr = na
+                int nli = xs
+                int nri = xr
+                if array.size(slP) > 0
+                    for j = 0 to array.size(slP) - 1
+                        int lx = array.get(slX, j)
+                        float lp = array.get(slP, j)
+                        if lx > xs and lx < xh
+                            nl := na(nl) ? lp : math.min(nl, lp)
+                            nli := lx
+                        if lx > xh and lx < xr
+                            nr := na(nr) ? lp : math.min(nr, lp)
+                            nri := lx
+                if not na(nl) and not na(nr)
+                    float neck = f_y(nl, nli, nr, nri, xr)
+                    float h = hd - neck
+                    if h >= atr * 0.85
+                        string st = close < neck ? "confirmed" : "forming"
+                        float conf = 0.60 + (st == "confirmed" ? 0.14 : 0.08) + (xr >= xNow - i_lb / 2 ? 0.04 : 0.0)
+                        if conf >= i_minConf and conf >= best
+                            best := conf
+                            cK := "head_shoulders"
+                            cS := st
+                            cD := "bearish"
+                            cC := conf
+                            cN := neck
+                            cT := neck - h
+                            cSp := hd + atr * 0.15
+                            i1 := xs
+                            i2 := xh
+                            i3 := xr
+                            y1 := ls
+                            y2 := hd
+                            y3 := rs
+                            nL := nl
+                            nR := nr
+                            nLx := nli
+                            nRx := nri
+                        if st == "confirmed" and xr >= xNow - i_lb and conf >= i_minConf and conf >= bestC
+                            bestC := conf
+                            cKc := "head_shoulders"
+                            cSc := st
+                            cDc := "bearish"
+                            cCc := conf
+                            cNc := neck
+                            cTc := neck - h
+                            cSpc := hd + atr * 0.15
+                            i1c := xs
+                            i2c := xh
+                            i3c := xr
+                            y1c := ls
+                            y2c := hd
+                            y3c := rs
+                            nLc := nl
+                            nRc := nr
+                            nLxc := nli
+                            nRxc := nri
 
     // inverse H&S
     if array.size(slP) >= 3
-        int i = array.size(slP) - 3
-        float ls = array.get(slP, i)
-        float hd = array.get(slP, i + 1)
-        float rs = array.get(slP, i + 2)
-        int xs = array.get(slX, i)
-        int xh = array.get(slX, i + 1)
-        int xr = array.get(slX, i + 2)
-        if ls > hd and hd < rs and f_pct(ls, rs) <= i_hstol
-            float nl = na
-            float nr = na
-            int nli = xs
-            int nri = xr
-            if array.size(shP) > 0
-                for j = 0 to array.size(shP) - 1
-                    int hx = array.get(shX, j)
-                    float hp = array.get(shP, j)
-                    if hx > xs and hx < xh
-                        nl := na(nl) ? hp : math.max(nl, hp)
-                        nli := hx
-                    if hx > xh and hx < xr
-                        nr := na(nr) ? hp : math.max(nr, hp)
-                        nri := hx
-            if not na(nl) and not na(nr)
-                float neck = f_y(nl, nli, nr, nri, xr)
-                float h = neck - hd
-                if h >= atr
-                    string st = close > neck ? "confirmed" : "forming"
-                    float conf = 0.62 + (st == "confirmed" ? 0.14 : 0.04)
-                    if conf >= i_minConf and conf >= best
-                        best := conf
-                        cK := "inverse_head_shoulders"
-                        cS := st
-                        cD := "bullish"
-                        cC := conf
-                        cN := neck
-                        cT := neck + h
-                        cSp := hd - atr * 0.15
-                        i1 := xs
-                        i2 := xh
-                        i3 := xr
-                        y1 := ls
-                        y2 := hd
-                        y3 := rs
-                        nL := nl
-                        nR := nr
-                        nLx := nli
-                        nRx := nri
-                    if st == "confirmed" and xr >= xNow - i_lb and conf >= i_minConf and conf >= bestC
-                        bestC := conf
-                        cKc := "inverse_head_shoulders"
-                        cSc := st
-                        cDc := "bullish"
-                        cCc := conf
-                        cNc := neck
-                        cTc := neck + h
-                        cSpc := hd - atr * 0.15
-                        i1c := xs
-                        i2c := xh
-                        i3c := xr
-                        y1c := ls
-                        y2c := hd
-                        y3c := rs
-                        nLc := nl
-                        nRc := nr
-                        nLxc := nli
-                        nRxc := nri
+        for ii = 0 to array.size(slP) - 3
+            int i = ii
+            float ls = array.get(slP, i)
+            float hd = array.get(slP, i + 1)
+            float rs = array.get(slP, i + 2)
+            int xs = array.get(slX, i)
+            int xh = array.get(slX, i + 1)
+            int xr = array.get(slX, i + 2)
+            if xr < xNow - i_lb or xh - xs < i_patSpanMin or xr - xs > i_patSpanMax * 2
+                continue
+            if ls > hd and hd < rs and f_pct(ls, rs) <= i_hstol
+                float nl = na
+                float nr = na
+                int nli = xs
+                int nri = xr
+                if array.size(shP) > 0
+                    for j = 0 to array.size(shP) - 1
+                        int hx = array.get(shX, j)
+                        float hp = array.get(shP, j)
+                        if hx > xs and hx < xh
+                            nl := na(nl) ? hp : math.max(nl, hp)
+                            nli := hx
+                        if hx > xh and hx < xr
+                            nr := na(nr) ? hp : math.max(nr, hp)
+                            nri := hx
+                if not na(nl) and not na(nr)
+                    float neck = f_y(nl, nli, nr, nri, xr)
+                    float h = neck - hd
+                    if h >= atr * 0.85
+                        string st = close > neck ? "confirmed" : "forming"
+                        float conf = 0.60 + (st == "confirmed" ? 0.14 : 0.08) + (xr >= xNow - i_lb / 2 ? 0.04 : 0.0)
+                        if conf >= i_minConf and conf >= best
+                            best := conf
+                            cK := "inverse_head_shoulders"
+                            cS := st
+                            cD := "bullish"
+                            cC := conf
+                            cN := neck
+                            cT := neck + h
+                            cSp := hd - atr * 0.15
+                            i1 := xs
+                            i2 := xh
+                            i3 := xr
+                            y1 := ls
+                            y2 := hd
+                            y3 := rs
+                            nL := nl
+                            nR := nr
+                            nLx := nli
+                            nRx := nri
+                        if st == "confirmed" and xr >= xNow - i_lb and conf >= i_minConf and conf >= bestC
+                            bestC := conf
+                            cKc := "inverse_head_shoulders"
+                            cSc := st
+                            cDc := "bullish"
+                            cCc := conf
+                            cNc := neck
+                            cTc := neck + h
+                            cSpc := hd - atr * 0.15
+                            i1c := xs
+                            i2c := xh
+                            i3c := xr
+                            y1c := ls
+                            y2c := hd
+                            y3c := rs
+                            nLc := nl
+                            nRc := nr
+                            nLxc := nli
+                            nRxc := nri
 
-    // 1-2-3 bear (HH then LH then break of HL)
+    // 1-2-3 bear — scan пар LH + LL в lookback
     if array.size(shP) >= 2 and array.size(slP) >= 2
-        float h1 = array.get(shP, array.size(shP) - 2)
-        float h2 = array.get(shP, array.size(shP) - 1)
-        float l1 = array.get(slP, array.size(slP) - 2)
-        float l2 = array.get(slP, array.size(slP) - 1)
-        int xh1 = array.get(shX, array.size(shP) - 2)
-        int xh2 = array.get(shX, array.size(shP) - 1)
-        int xl2 = array.get(slX, array.size(slP) - 1)
-        if h2 < h1 and l2 < l1 and xh2 > xh1
-            string st = close < l2 ? "confirmed" : "forming"
-            float conf = 0.56 + (st == "confirmed" ? 0.14 : 0.04)
-            if conf >= i_minConf and conf >= best
-                best := conf
-                cK := "one_two_three"
-                cS := st
-                cD := "bearish"
-                cC := conf
-                cN := l2
-                cT := l2 - (h2 - l2)
-                cSp := h2 + atr * 0.2
-                i1 := xh1
-                i2 := xh2
-                i3 := xl2
-                y1 := h1
-                y2 := h2
-                y3 := l2
-            if st == "confirmed" and xh2 >= xNow - i_lb and conf >= i_minConf and conf >= bestC
-                bestC := conf
-                cKc := "one_two_three"
-                cSc := st
-                cDc := "bearish"
-                cCc := conf
-                cNc := l2
-                cTc := l2 - (h2 - l2)
-                cSpc := h2 + atr * 0.2
-                i1c := xh1
-                i2c := xh2
-                i3c := xl2
-                y1c := h1
-                y2c := h2
-                y3c := l2
+        for hi = math.max(0, array.size(shP) - 10) to array.size(shP) - 2
+            float h1 = array.get(shP, hi)
+            float h2 = array.get(shP, hi + 1)
+            int xh1 = array.get(shX, hi)
+            int xh2 = array.get(shX, hi + 1)
+            if h2 >= h1 or xh2 - xh1 < i_patSpanMin or xh2 < xNow - i_lb
+                continue
+            for lo = math.max(0, array.size(slP) - 10) to array.size(slP) - 1
+                float l2 = array.get(slP, lo)
+                int xl2 = array.get(slX, lo)
+                if xl2 <= xh2 or xl2 - xh2 > i_patSpanMax
+                    continue
+                float l1 = na
+                int xl1 = na
+                if lo >= 1
+                    l1 := array.get(slP, lo - 1)
+                    xl1 := array.get(slX, lo - 1)
+                if na(l1) or l2 >= l1 or xl1 >= xl2
+                    continue
+                string st = close < l2 ? "confirmed" : "forming"
+                float conf = 0.52 + (st == "confirmed" ? 0.14 : 0.08) + (xh2 >= xNow - i_lb / 2 ? 0.05 : 0.0)
+                if conf >= i_minConf and conf >= best
+                    best := conf
+                    cK := "one_two_three"
+                    cS := st
+                    cD := "bearish"
+                    cC := conf
+                    cN := l2
+                    cT := l2 - (h2 - l2)
+                    cSp := h2 + atr * 0.2
+                    i1 := xh1
+                    i2 := xh2
+                    i3 := xl2
+                    y1 := h1
+                    y2 := h2
+                    y3 := l2
+                if st == "confirmed" and xh2 >= xNow - i_lb and conf >= i_minConf and conf >= bestC
+                    bestC := conf
+                    cKc := "one_two_three"
+                    cSc := st
+                    cDc := "bearish"
+                    cCc := conf
+                    cNc := l2
+                    cTc := l2 - (h2 - l2)
+                    cSpc := h2 + atr * 0.2
+                    i1c := xh1
+                    i2c := xh2
+                    i3c := xl2
+                    y1c := h1
+                    y2c := h2
+                    y3c := l2
 
-    // 1-2-3 bull
+    // 1-2-3 bull — scan пар HL + HH в lookback
     if array.size(slP) >= 2 and array.size(shP) >= 2
-        float l1 = array.get(slP, array.size(slP) - 2)
-        float l2 = array.get(slP, array.size(slP) - 1)
-        float h1 = array.get(shP, array.size(shP) - 2)
-        float h2 = array.get(shP, array.size(shP) - 1)
-        int xl1 = array.get(slX, array.size(slP) - 2)
-        int xl2 = array.get(slX, array.size(slP) - 1)
-        int xh2 = array.get(shX, array.size(shP) - 1)
-        if l2 > l1 and h2 > h1 and xl2 > xl1
-            string st = close > h2 ? "confirmed" : "forming"
-            float conf = 0.56 + (st == "confirmed" ? 0.14 : 0.04)
-            if conf >= i_minConf and conf >= best
-                best := conf
-                cK := "one_two_three"
-                cS := st
-                cD := "bullish"
-                cC := conf
-                cN := h2
-                cT := h2 + (h2 - l2)
-                cSp := l2 - atr * 0.2
-                i1 := xl1
-                i2 := xl2
-                i3 := xh2
-                y1 := l1
-                y2 := l2
-                y3 := h2
-            if st == "confirmed" and xl2 >= xNow - i_lb and conf >= i_minConf and conf >= bestC
-                bestC := conf
-                cKc := "one_two_three"
-                cSc := st
-                cDc := "bullish"
-                cCc := conf
-                cNc := h2
-                cTc := h2 + (h2 - l2)
-                cSpc := l2 - atr * 0.2
-                i1c := xl1
-                i2c := xl2
-                i3c := xh2
-                y1c := l1
-                y2c := l2
-                y3c := h2
+        for lo = math.max(0, array.size(slP) - 10) to array.size(slP) - 2
+            float l1 = array.get(slP, lo)
+            float l2 = array.get(slP, lo + 1)
+            int xl1 = array.get(slX, lo)
+            int xl2 = array.get(slX, lo + 1)
+            if l2 <= l1 or xl2 - xl1 < i_patSpanMin or xl2 < xNow - i_lb
+                continue
+            for hi = math.max(0, array.size(shP) - 10) to array.size(shP) - 2
+                float h1 = array.get(shP, hi)
+                float h2 = array.get(shP, hi + 1)
+                int xh1 = array.get(shX, hi)
+                int xh2 = array.get(shX, hi + 1)
+                if h2 <= h1 or xh2 < xl2 or xh2 - xl2 > i_patSpanMax
+                    continue
+                string st = close > h2 ? "confirmed" : "forming"
+                float conf = 0.52 + (st == "confirmed" ? 0.14 : 0.08) + (xl2 >= xNow - i_lb / 2 ? 0.05 : 0.0)
+                if conf >= i_minConf and conf >= best
+                    best := conf
+                    cK := "one_two_three"
+                    cS := st
+                    cD := "bullish"
+                    cC := conf
+                    cN := h2
+                    cT := h2 + (h2 - l2)
+                    cSp := l2 - atr * 0.2
+                    i1 := xl1
+                    i2 := xl2
+                    i3 := xh2
+                    y1 := l1
+                    y2 := l2
+                    y3 := h2
+                if st == "confirmed" and xl2 >= xNow - i_lb and conf >= i_minConf and conf >= bestC
+                    bestC := conf
+                    cKc := "one_two_three"
+                    cSc := st
+                    cDc := "bullish"
+                    cCc := conf
+                    cNc := h2
+                    cTc := h2 + (h2 - l2)
+                    cSpc := l2 - atr * 0.2
+                    i1c := xl1
+                    i2c := xl2
+                    i3c := xh2
+                    y1c := l1
+                    y2c := l2
+                    y3c := h2
 
     bool useHist = i_histPat and cKc != ""
-    patKind := useHist ? cKc : cK
-    patSt := useHist ? cSc : cS
-    patDir := useHist ? cDc : cD
-    patConf := useHist ? cCc : cC
-    patNeck := useHist ? cNc : cN
-    patTgt := useHist ? cTc : cT
-    patStp := useHist ? cSpc : cSp
-    pI1 := useHist ? i1c : i1
-    pI2 := useHist ? i2c : i2
-    pI3 := useHist ? i3c : i3
-    pP1 := useHist ? y1c : y1
-    pP2 := useHist ? y2c : y2
-    pP3 := useHist ? y3c : y3
-    pNL := useHist ? nLc : nL
-    pNR := useHist ? nRc : nR
-    pNLx := useHist ? nLxc : nLx
-    pNRx := useHist ? nRxc : nRx
+    bool useForm = not useHist and cK != ""
+    patKind := useHist ? cKc : useForm ? cK : cKc
+    patSt := useHist ? cSc : useForm ? cS : cSc
+    patDir := useHist ? cDc : useForm ? cD : cDc
+    patConf := useHist ? cCc : useForm ? cC : cCc
+    patNeck := useHist ? cNc : useForm ? cN : cNc
+    patTgt := useHist ? cTc : useForm ? cT : cTc
+    patStp := useHist ? cSpc : useForm ? cSp : cSpc
+    pI1 := useHist ? i1c : useForm ? i1 : i1c
+    pI2 := useHist ? i2c : useForm ? i2 : i2c
+    pI3 := useHist ? i3c : useForm ? i3 : i3c
+    pP1 := useHist ? y1c : useForm ? y1 : y1c
+    pP2 := useHist ? y2c : useForm ? y2 : y2c
+    pP3 := useHist ? y3c : useForm ? y3 : y3c
+    pNL := useHist ? nLc : useForm ? nL : nLc
+    pNR := useHist ? nRc : useForm ? nR : nRc
+    pNLx := useHist ? nLxc : useForm ? nLx : nLxc
+    pNRx := useHist ? nRxc : useForm ? nRx : nRxc
     patKind2 := cKc2
     patNeck2 := cNc2
     p2I1 := i1c2
@@ -740,7 +928,8 @@ string patRu = patKind == "double_top" ? "двойная вершина" : patKi
 [wHx1, wHy1] = f_last_hi()
 [wLx0, wLy0] = f_first_lo_in(xL0)
 [wLx1, wLy1] = f_last_lo()
-bool wedgeGeom = i_wedge and not na(wHx0) and not na(wHx1) and not na(wLx0) and not na(wLx1) and wHx1 != wHx0 and wLx1 != wLx0 and (wHx1 - wHx0) >= 12 and (wLx1 - wLx0) >= 12
+bool wedgeGeom = eff_wedge and not na(wHx0) and not na(wHx1) and not na(wLx0) and not na(wLx1) and wHx1 != wHx0 and wLx1 != wLx0 and (wHx1 - wHx0) >= 12 and (wLx1 - wLx0) >= 12
+bool patActive = patKind != "" and patConf >= i_minConf
 int xW0g = wedgeGeom ? math.min(wHx0, wLx0) : na
 float wTop0 = wedgeGeom ? f_y(wHy0, wHx0, wHy1, wHx1, xW0g) : na
 float wBot0 = wedgeGeom ? f_y(wLy0, wLx0, wLy1, wLx1, xW0g) : na
@@ -783,41 +972,144 @@ string wedgeRu = not wedgeGeom ? "" : not figValid ? "линии без каса
 bool wedgeBrUp = wedgeOk and close > wHiNow
 bool wedgeBrDn = wedgeOk and close < wLoNow
 
+float emaTri = ta.ema(close, 34)
+float triFlatTol = wedgeGeom ? math.max(atr * 0.40, wWide0 * 0.065) : na
+bool triTopFlat = wedgeGeom and math.abs(wHy1 - wHy0) <= triFlatTol
+bool triBotFlat = wedgeGeom and math.abs(wLy1 - wLy0) <= triFlatTol
+string triKind = ""
+string triRu = wedgeRu
+bool triLong = false
+bool triShort = false
+float triEntry = na
+float triSl = na
+float triTp = na
+string triPlanRu = ""
+if wedgeOk and wConverge
+    if triTopFlat and loRise and not triBotFlat
+        triKind := "asc"
+        triRu := "восходящий △"
+        triLong := true
+        triEntry := wHiNow
+        triSl := wLoNow - atr * 0.12
+        triTp := (wedgeBrUp ? close : wHiNow) + wWide0
+        triPlanRu := "LONG: close>гориз.сопр · SL под раст.подд · TP=+H"
+    else if triBotFlat and hiFall and not triTopFlat
+        triKind := "desc"
+        triRu := "нисходящий △"
+        triShort := true
+        triEntry := wLoNow
+        triSl := wHiNow + atr * 0.12
+        triTp := (wedgeBrDn ? close : wLoNow) - wWide0
+        triPlanRu := "SHORT: close<гориз.подд · SL над нисх.сопр · TP=−H"
+    else if hiFall and loRise
+        bool triUpCtx = close > emaTri or impUp
+        triKind := wedgeBrUp ? "sym_bull" : wedgeBrDn ? "sym_bear" : triUpCtx ? "sym_bull" : "sym_bear"
+        if triKind == "sym_bull"
+            triRu := "симметрич. △ · бычий"
+            triLong := true
+            triEntry := wHiNow
+            triSl := wLoNow - atr * 0.12
+            triTp := (wedgeBrUp ? close : wHiNow) + wWide0
+            triPlanRu := "LONG: пробой нисх.сопр · SL под раст.подд · TP=+H"
+        else
+            triRu := "симметрич. △ · медвежий"
+            triShort := true
+            triEntry := wLoNow
+            triSl := wHiNow + atr * 0.12
+            triTp := (wedgeBrDn ? close : wLoNow) - wWide0
+            triPlanRu := "SHORT: пробой раст.подд · SL над нисх.сопр · TP=−H"
+if triKind != ""
+    wedgeRu := triRu
+
+bool effWedgeDraw = wedgeGeom and (not eff_patFocus or not patActive or wedgeBrUp or wedgeBrDn or (wedgeOk and triKind != ""))
+
 int priRank = 9
 string ideaRu = "ждать — нет доминирующего сетапа"
 if patSt == "confirmed" and patRu != ""
     priRank := 1
-    ideaRu := "1) " + patRu + " · шея " + str.tostring(patNeck, format.mintick)
+    ideaRu := "1) " + patRu + " ✓ · шея " + str.tostring(patNeck, format.mintick) + " · цель " + str.tostring(patTgt, format.mintick)
+else if patKind != "" and patSt == "forming" and patRu != ""
+    priRank := 2
+    ideaRu := "2) " + patRu + " · шея " + str.tostring(patNeck, format.mintick) + " · ждать пробой"
 else if wedgeBrUp
-    priRank := 2
-    ideaRu := "2) пробой верха · " + wedgeRu
+    priRank := 3
+    ideaRu := "3) пробой △ · " + triRu + (triPlanRu != "" ? " · " + triPlanRu : "")
 else if wedgeBrDn
-    priRank := 2
-    ideaRu := "2) пробой низа · " + wedgeRu
+    priRank := 3
+    ideaRu := "3) пробой △ · " + triRu + (triPlanRu != "" ? " · " + triPlanRu : "")
 else if sweepLoAct
-    priRank := 3
-    ideaRu := "3) свип dn @ " + str.tostring(sweepBullLvl, format.mintick)
-else if sweepHiAct
-    priRank := 3
-    ideaRu := "3) свип up @ " + str.tostring(sweepBearLvl, format.mintick)
-else if fvgSetup
     priRank := 4
-    ideaRu := fvgBull ? "4) BOS + retest demand FVG" : "4) BOS + retest supply FVG"
-else if wedgeOk
+    ideaRu := "4) свип dn @ " + str.tostring(sweepBullLvl, format.mintick)
+else if sweepHiAct
+    priRank := 4
+    ideaRu := "4) свип up @ " + str.tostring(sweepBearLvl, format.mintick)
+else if fvgSetup
     priRank := 5
-    ideaRu := "5) " + wedgeRu + " · триггер у границы"
-else if patKind != "" and patSt == "forming"
+    ideaRu := fvgBull ? "5) BOS + retest demand FVG" : "5) BOS + retest supply FVG"
+else if wedgeOk
     priRank := 6
-    ideaRu := "6) " + patRu + " · ждать пробой шеи"
+    ideaRu := "6) " + triRu + (triPlanRu != "" ? " · " + triPlanRu : " · триггер у границы")
 
-bool showSmcSweep = i_smc and (sweepHiAct or sweepLoAct) and (not i_oneIdea or priRank == 3)
-bool showSmcFvg = i_smc and fvgSetup and fvgFresh and (not i_oneIdea or priRank == 4)
-bool showSmcBos = i_smc and (bosUp or bosDn) and (not i_oneIdea or priRank <= 2)
+bool showSmcSweep = eff_smc and (sweepHiAct or sweepLoAct) and (not eff_oneIdeaDraw or priRank == 3 or profMarkup)
+bool showSmcFvg = eff_smc and (profMarkup ? fvgUnfilled and fvgFresh : fvgSetup and fvgFresh) and (not eff_oneIdeaDraw or priRank == 4 or profMarkup)
+bool showSmcBos = eff_smc and (bosUp or bosDn) and (not eff_oneIdeaDraw or priRank <= 2 or profMarkup)
 
 // ── phase + bias (путь) vs action (вход) ──
 bool compress = ta.sma(high - low, 10) <= ta.sma(high - low, 28) * 0.60
 string phaseRu = compress ? "сжатие / боковик" : close > close[i_lb / 2] ? "импульс вверх" : "импульс вниз"
 string whereRu = posR >= 0.72 ? "у потолка" : posR <= 0.28 ? "у пола" : "в середине диапазона"
+
+// Сквиз / flush — намёк ДО импульса (у верха канала + слабость)
+bool nearChTop = wedgeOk and not na(wHiNow) and high >= wHiNow - atr * 0.45
+bool lhPivot = array.size(shP) >= 2 and array.get(shP, array.size(shP) - 1) < array.get(shP, array.size(shP) - 2)
+bool atCeil = posR >= 0.65 or nearChTop
+int sqDn = 0
+string sqDnRu = ""
+if lhPivot
+    sqDn += 2
+    sqDnRu += "LH · "
+if volBearDivPx
+    sqDn += 2
+    sqDnRu += "vol на HH слабее · "
+if rsiBearDiv or rsiOB
+    sqDn += 1
+    sqDnRu += rsiBearDiv ? "RSI див. · " : "RSI OB · "
+if sweepHiAct
+    sqDn += 2
+    sqDnRu += "свип ↑ · "
+if inSupply or brkSupply or (not na(supBar) and bar_index - supBar <= i_lb)
+    sqDn += 2
+    sqDnRu += "зона предлож. · "
+if nearChTop and loRise
+    sqDn += 1
+    sqDnRu += "у верха △ · "
+bool sqHintDown = atCeil and sqDn >= 3 and close >= structSup - atr * 0.15
+bool sqFlushDown = sqDn >= 3 and (close < structSup - atr * 0.08 or (close < open and bodySz > atr * 0.85 and atCeil))
+string sqDnHead = sqFlushDown ? "▼ сквиз вниз (flush)" : sqHintDown ? "⚠ риск сквиза вниз" : ""
+
+int sqUp = 0
+string sqUpRu = ""
+bool nearChBot = wedgeOk and not na(wLoNow) and low <= wLoNow + atr * 0.45
+bool hlPivot = array.size(slP) >= 2 and array.get(slP, array.size(slP) - 1) > array.get(slP, array.size(slP) - 2)
+bool atFloor = posR <= 0.35 or nearChBot
+if hlPivot
+    sqUp += 2
+    sqUpRu += "HL · "
+if volBullDivPx
+    sqUp += 2
+    sqUpRu += "vol на LL слабее · "
+if rsiBullDiv or rsiOS
+    sqUp += 1
+    sqUpRu += rsiBullDiv ? "RSI див. · " : "RSI OS · "
+if sweepLoAct
+    sqUp += 2
+    sqUpRu += "свип ↓ · "
+if inDemand or brkDemand
+    sqUp += 2
+    sqUpRu += "зона спроса · "
+bool sqHintUp = atFloor and sqUp >= 3 and close <= structRes + atr * 0.15
+bool sqFlushUp = sqUp >= 3 and (close > structRes + atr * 0.08 or (close > open and bodySz > atr * 0.85 and atFloor))
+string sqUpHead = sqFlushUp ? "▲ сквиз вверх (short squeeze)" : sqHintUp ? "⚠ риск сквиза вверх" : ""
 
 var int bearN = 0
 var int bullN = 0
@@ -862,6 +1154,26 @@ if barstate.isconfirmed or not i_freezePath
         bullN += 2
     if wedgeBrDn
         bearN += 2
+    if htfTr > 0
+        bullN += 2
+    if htfTr < 0
+        bearN += 2
+    if volPullBull
+        bullN += 1
+    if volPullBear
+        bearN += 1
+    if volBearDivPx
+        bearN += 2
+    if volBullDivPx
+        bullN += 2
+    if inDemand
+        bullN += 1
+    if inSupply
+        bearN += 1
+    if resSt == 3
+        bullN += 2
+    if supSt == 3
+        bearN += 2
     pathScore := bearN - bullN
     pathDir := pathScore >= 2 ? "down" : pathScore <= -2 ? "up" : "chop"
 string pathRu = pathDir == "down" ? "ожидаем вниз" : pathDir == "up" ? "ожидаем вверх" : "нет ясного хода"
@@ -878,11 +1190,27 @@ if not na(patNeck) and patDir == "bullish"
     longPx := math.max(longPx, patNeck)
 if not na(patNeck) and patDir == "bearish"
     shortPx := math.min(shortPx, patNeck)
+if inDemand and not demBrk
+    longPx := math.max(longPx, demTop)
+if inSupply and not supBrk
+    shortPx := math.min(shortPx, supBot)
 
 if barstate.isconfirmed or not i_freezePath
     act := "ЖДАТЬ"
     why := "между полом и потолком без закрытия за уровень — нет входа"
-    if wedgeBrUp or (bosUp and close > structRes)
+    if resSt == 3 and close > structRes
+        act := "LONG"
+        why := "retest сопр.: пробили → вернулись → удержали"
+    else if supSt == 3 and close < structSup
+        act := "SHORT"
+        why := "retest подд.: пробили → вернулись → удержали"
+    else if inDemand and close > demTop and volPullBull
+        act := "LONG"
+        why := "зона спроса (имп+vol) + close выше OB"
+    else if inSupply and close < supBot and volPullBear
+        act := "SHORT"
+        why := "зона предложения (имп+vol) + close ниже OB"
+    else if wedgeBrUp or (bosUp and close > structRes)
         act := "LONG"
         why := "закрытие выше структуры / границы фигуры"
     else if wedgeBrDn or (bosDn and close < structSup)
@@ -905,8 +1233,8 @@ if barstate.isconfirmed or not i_freezePath
         act := "ЖДАТЬ"
         why := "у поддержки: шорт только после close < триггера"
 
-bool effSmc = i_smc and not (i_autoClean and isHtf)
-bool effPath = i_path and not (i_autoClean and isHtf and pathMag < 4 and act == "ЖДАТЬ")
+bool effSmc = eff_smc and not (i_autoClean and isHtf)
+bool effPath = eff_path and not (i_autoClean and isHtf and pathMag < 4 and act == "ЖДАТЬ")
 bool effSmcAny = effSmc and (showSmcSweep or showSmcFvg or showSmcBos)
 
 float minGap = math.max(atr * 0.35, rngW * 0.04)
@@ -953,6 +1281,39 @@ f_nearest_above(float px, float floorGap, float skipLv) =>
                 best := lv
     best
 
+f_plan_sl_tp(bool isLong, float entryPx) =>
+    float sl = na
+    float t1 = na
+    float t2 = na
+    float rr = 0.0
+    if not na(entryPx)
+        if isLong
+            float lastLo = array.size(slP) > 0 ? array.get(slP, array.size(slP) - 1) : low
+            sl := math.min(lastLo, na(wLoNow) ? lastLo : wLoNow) - atr * 0.18
+            t1 := f_nearest_above(entryPx, minGap, na)
+            t2 := f_nearest_above(na(t1) ? entryPx : t1, minGap, t1)
+            if na(t1)
+                t1 := rngHi
+            if na(t2)
+                t2 := impUp ? f127 : f0
+        else
+            float lastHi = array.size(shP) > 0 ? array.get(shP, array.size(shP) - 1) : high
+            sl := math.max(lastHi, na(wHiNow) ? lastHi : wHiNow) + atr * 0.18
+            t1 := f_nearest_below(entryPx, minGap, na)
+            t2 := f_nearest_below(na(t1) ? entryPx : t1, minGap, t1)
+            if na(t1)
+                t1 := rngLo
+            if na(t2)
+                t2 := impUp ? f100 : f127
+        rr := f_rr(entryPx, sl, t1, isLong)
+        if rr < i_minRR and not na(t2)
+            float rr2 = f_rr(entryPx, sl, t2, isLong)
+            if rr2 >= i_minRR
+                t1 := t2
+                rr := rr2
+                t2 := isLong ? f_nearest_above(t1, minGap, t1) : f_nearest_below(t1, minGap, t1)
+    [sl, t1, t2, rr]
+
 string planSide = ""
 if act == "LONG" or act == "SHORT"
     planSide := act
@@ -971,68 +1332,199 @@ else if planSide == "SHORT"
 float slPx = na
 float tp1 = na
 float tp2 = na
-string tp1Why = ""
-string slWhy = ""
-if planSide == "SHORT"
-    float lastHi = array.size(shP) > 0 ? array.get(shP, array.size(shP) - 1) : high
-    slPx := math.max(lastHi, na(wHiNow) ? lastHi : wHiNow) + atr * 0.18
-    slWhy := "за последним хаем / верхом клина"
-    tp1 := f_nearest_below(entryPx, minGap, na)
-    tp1Why := "ближайшая реакция снизу (свинг / Fib / пол)"
-    tp2 := f_nearest_below(na(tp1) ? entryPx : tp1, minGap, tp1)
-    if na(tp1)
-        tp1 := rngLo
-        tp1Why := "пол диапазона"
-    if na(tp2)
-        tp2 := impUp ? f100 : f127
-else if planSide == "LONG"
-    float lastLo = array.size(slP) > 0 ? array.get(slP, array.size(slP) - 1) : low
-    slPx := math.min(lastLo, na(wLoNow) ? lastLo : wLoNow) - atr * 0.18
-    slWhy := "за последним лоем / низом клина"
-    tp1 := f_nearest_above(entryPx, minGap, na)
-    tp1Why := "ближайшая реакция сверху (свинг / Fib / потолок)"
-    tp2 := f_nearest_above(na(tp1) ? entryPx : tp1, minGap, tp1)
-    if na(tp1)
-        tp1 := rngHi
-        tp1Why := "потолок диапазона"
-    if na(tp2)
-        tp2 := impUp ? f127 : f0
+float rr1 = 0.0
+string tp1Why = "ближайшие реакции (свинг / Fib)"
+string slWhy = planSide == "LONG" ? "за лоем / низом клина" : planSide == "SHORT" ? "за хаем / верхом клина" : ""
+if planSide == "LONG" or planSide == "SHORT"
+    [_sl, _t1, _t2, _rr] = f_plan_sl_tp(planSide == "LONG", entryPx)
+    slPx := _sl
+    tp1 := _t1
+    tp2 := _t2
+    rr1 := _rr
 
 bool isLongPlan = planSide == "LONG"
-float rr1 = planSide != "" and not na(entryPx) and not na(slPx) and not na(tp1) ? f_rr(entryPx, slPx, tp1, isLongPlan) : 0.0
-if planSide != "" and rr1 < i_minRR and not na(tp2)
-    float rr2 = f_rr(entryPx, slPx, tp2, isLongPlan)
-    if rr2 >= i_minRR
-        tp1 := tp2
-        tp1Why := tp1Why + " (TP2→TP1: min R:R)"
-        rr1 := rr2
-        tp2 := isLongPlan ? f_nearest_above(tp1, minGap, tp1) : f_nearest_below(tp1, minGap, tp1)
+
+float lTrig = longPx
+float sTrig = shortPx
+[lSl, lTp1, lTp2, lRr] = f_plan_sl_tp(true, i_surgical ? lTrig : close)
+[sSl, sTp1, sTp2, sRr] = f_plan_sl_tp(false, i_surgical ? sTrig : close)
+if eff_triPdf and triLong and not na(triSl)
+    lSl := triSl
+    if not na(triTp) and triTp > lTrig
+        lTp1 := triTp
+        lRr := f_rr(lTrig, lSl, lTp1, true)
+if eff_triPdf and triShort and not na(triSl)
+    sSl := triSl
+    if not na(triTp) and triTp < sTrig
+        sTp1 := triTp
+        sRr := f_rr(sTrig, sSl, sTp1, false)
+bool lReward = not na(lTp1) and lTp1 > lTrig + syminfo.mintick
+bool sReward = not na(sTp1) and sTp1 < sTrig - syminfo.mintick
 
 float htfCl = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
 float htfEma = request.security(syminfo.tickerid, "60", ta.ema(close, 20), lookahead=barmerge.lookahead_off)
 float ltfCl = request.security(syminfo.tickerid, "15", close, lookahead=barmerge.lookahead_off)
 float ltfEma = request.security(syminfo.tickerid, "15", ta.ema(close, 20), lookahead=barmerge.lookahead_off)
-string htfRu = htfCl > htfEma * 1.001 ? "60m ↑" : htfCl < htfEma * 0.999 ? "60m ↓" : "60m →"
-string ltfRu = ltfCl > ltfEma * 1.001 ? "15m ↑" : ltfCl < ltfEma * 0.999 ? "15m ↓" : "15m →"
 bool mtfBlock = false
-if i_mtf and planSide == "LONG" and htfCl < htfEma * 0.998
+if i_mtf and planSide == "LONG" and htfTr < 0
     mtfBlock := true
-if i_mtf and planSide == "SHORT" and htfCl > htfEma * 1.002
+if i_mtf and planSide == "SHORT" and htfTr > 0
     mtfBlock := true
-if i_mtf and isHtf and planSide == "LONG" and ltfCl < ltfEma * 0.998
+if i_mtf and planSide == "LONG" and htfTr == 0 and htfCl < htfEma * 0.998
     mtfBlock := true
-if i_mtf and isHtf and planSide == "SHORT" and ltfCl > ltfEma * 1.002
+if i_mtf and planSide == "SHORT" and htfTr == 0 and htfCl > htfEma * 1.002
     mtfBlock := true
-string mtfRu = htfRu + " · " + ltfRu + (mtfBlock ? " · конфликт" : "")
+if i_mtf and isHtf and planSide == "LONG" and ctfTr < 0
+    mtfBlock := true
+if i_mtf and isHtf and planSide == "SHORT" and ctfTr > 0
+    mtfBlock := true
+string mtfRu = ctxStructRu + " · " + trdStructRu + (mtfBlock ? " · конфликт" : "")
+
+int facN = 0
+string facRu = ""
+string missRu = ""
+if planSide != ""
+    bool facHtf = planSide == "LONG" ? htfTr >= 0 : htfTr <= 0
+    bool facTrd = planSide == "LONG" ? ctfTr >= 0 or resSt >= 2 : ctfTr <= 0 or supSt >= 2
+    bool facRet = planSide == "LONG" ? resSt == 3 or (fvgSetup and fvgBull) : supSt == 3 or (fvgSetup and not fvgBull)
+    bool facZone = planSide == "LONG" ? inDemand or sweepLoAct : inSupply or sweepHiAct
+    bool facVol = planSide == "LONG" ? volPullBull and not volBearDivPx : volPullBear and not volBullDivPx
+    bool facLoc = planSide == "LONG" ? posR <= 0.65 : posR >= 0.35
+    bool facIdea = priRank <= 4
+    bool facRr = rr1 >= i_minRR
+    if facHtf
+        facN += 1
+        facRu += "HTF·"
+    else
+        missRu += "HTF; "
+    if facTrd
+        facN += 1
+        facRu += "TF·"
+    if facRet
+        facN += 1
+        facRu += "retest·"
+    else
+        missRu += "retest; "
+    if facZone
+        facN += 1
+        facRu += "зона·"
+    else
+        missRu += "зона; "
+    if facVol
+        facN += 1
+        facRu += "vol·"
+    else
+        missRu += "vol; "
+    if facLoc
+        facN += 1
+        facRu += "loc·"
+    else
+        missRu += "loc; "
+    if facIdea
+        facN += 1
+        facRu += "идея·"
+    if facRr
+        facN += 1
+        facRu += "R:R·"
+    else
+        missRu += "R:R; "
+string qualGr = planSide == "" ? "—" : facN >= 6 ? "A" : facN >= 4 ? "B" : "C"
+bool qualOk = i_minQual == "C" ? true : i_minQual == "B" ? qualGr == "A" or qualGr == "B" : qualGr == "A"
+if missRu == "" and planSide != "" and qualGr != "A"
+    missRu := "добрать факторы до A"
 
 bool rewardOk = planSide == "LONG" ? tp1 > entryPx + syminfo.mintick : planSide == "SHORT" ? tp1 < entryPx - syminfo.mintick : false
-bool planOk = planSide != "" and rewardOk and rr1 >= i_minRR and not mtfBlock
-string edgeRu = planOk ? "R:R " + str.tostring(rr1, "#.2") + " · вход @ " + str.tostring(entryPx, format.mintick) : planSide != "" and mtfBlock ? "MTF конфликт — без SL/TP" : planSide != "" ? "нет edge (R:R " + str.tostring(rr1, "#.2") + " < " + str.tostring(i_minRR, "#.2") + ")" : "сценарий без сделки"
-bool showPlan = i_boxes and planOk
+bool planOk = planSide != "" and rewardOk and rr1 >= i_minRR and not mtfBlock and qualOk
+string edgeRu = planOk ? qualGr + " · R:R " + str.tostring(rr1, "#.2") + " @ " + str.tostring(entryPx, format.mintick) : planSide != "" and mtfBlock ? "конфликт контекста — без SL/TP" : planSide != "" and not qualOk ? "кач. " + qualGr + " < min " + i_minQual : planSide != "" ? "нет edge (R:R " + str.tostring(rr1, "#.2") + ")" : "сценарий без сделки"
+string qualRu = qualGr + " (" + str.tostring(facN) + "/8) · " + facRu
+bool showPlan = eff_boxes and planOk
+bool showLongCand = eff_boxes and lRr >= i_minRR and lReward and not na(lSl) and not na(lTp1) and (showPlan and planSide == "LONG" or eff_dualPos and (act == "ЖДАТЬ" or act == "LONG") or act == "LONG")
+bool showShortCand = eff_boxes and sRr >= i_minRR and sReward and not na(sSl) and not na(sTp1) and (showPlan and planSide == "SHORT" or eff_dualPos and (act == "ЖДАТЬ" or act == "SHORT") or act == "SHORT")
+bool wantLong = act == "LONG" or (act == "ЖДАТЬ" and (pathDir == "up" or triLong or (planSide == "LONG" and not mtfBlock)))
+bool wantShort = act == "SHORT" or (act == "ЖДАТЬ" and (pathDir == "down" or triShort or (planSide == "SHORT" and not mtfBlock)))
+bool showLongPos = showLongCand and (not eff_onePos or eff_dualPos or wantLong) and not (eff_onePos and act == "ЖДАТЬ" and wantShort and not wantLong and not eff_dualPos)
+bool showShortPos = showShortCand and (not eff_onePos or eff_dualPos or wantShort) and not (eff_onePos and act == "ЖДАТЬ" and wantLong and not wantShort and not eff_dualPos)
+if eff_onePos and act == "ЖДАТЬ" and wantLong and wantShort and not eff_dualPos
+    showLongPos := showLongCand and pathDir != "down"
+    showShortPos := showShortCand and pathDir == "down"
 
-string figRu = wedgeOk ? wedgeRu : wedgeGeom ? wedgeRu : patRu != "" ? patRu : "фигура не выделена"
-if wedgeOk and patRu != "" and patKind != "one_two_three"
-    figRu := wedgeRu + " · " + patRu
+// Разметка Ed: один сценарий на графике — линии E/SL/TP, подписи только цены
+string mkSide = ""
+if profMarkup
+    if act == "SHORT"
+        mkSide := "SHORT"
+    else if act == "LONG"
+        mkSide := "LONG"
+    else if sqFlushDown or sqHintDown or (atCeil and sqDn >= 2)
+        mkSide := "SHORT"
+    else if sqFlushUp or sqHintUp or (atFloor and sqUp >= 2)
+        mkSide := "LONG"
+    else if pathDir == "down" and posR >= 0.52
+        mkSide := "SHORT"
+    else if pathDir == "up" and posR <= 0.48
+        mkSide := "LONG"
+bool mkShort = profMarkup and mkSide == "SHORT" and sRr >= 1.0 and sReward and not na(sSl) and not na(sTp1)
+bool mkLong = profMarkup and mkSide == "LONG" and lRr >= 1.0 and lReward and not na(lSl) and not na(lTp1)
+bool mkHasPlan = mkShort or mkLong
+bool mkMinLbl = profMarkup and mkHasPlan and not showLongPos and not showShortPos
+bool drawLongPlan = showLongPos or mkLong
+bool drawShortPlan = showShortPos or mkShort
+
+string figRu = patActive ? patRu + (patSt == "confirmed" ? " ✓" : " …") : wedgeOk ? wedgeRu : wedgeGeom ? wedgeRu : "фигура не выделена"
+if patActive and wedgeOk and patKind != "one_two_three"
+    figRu := patRu + (patSt == "confirmed" ? " ✓" : " …") + " · " + triRu
+string storyAct = act == "LONG" ? "▲ LONG" : act == "SHORT" ? "▼ SHORT" : "◆ ЖДАТЬ"
+string storyHead = storyAct + "  ·  " + qualGr + "  ·  " + whereRu + "  ·  " + pathRu
+string storyFig = figRu
+string storyTrig = "▲ close> " + str.tostring(longPx, format.mintick) + "     ▼ close< " + str.tostring(shortPx, format.mintick)
+string storyEdge = planOk ? edgeRu : mtfBlock ? "нет входа: конфликт HTF" : act != "ЖДАТЬ" ? why : missRu != "" ? "нет edge: " + missRu : why
+string storyCtx = ctxStructRu + " · " + (inDemand ? zoneRu : inSupply ? zoneRu : retResRu)
+string storyTxt = storyHead + "\n" + storyFig + "\n" + ideaRu + "\n" + storyTrig + "\n" + storyEdge + "\n" + storyCtx
+bool longSolid = showPlan and planSide == "LONG"
+bool shortSolid = showPlan and planSide == "SHORT"
+colTvProfit = color.new(#089981, longSolid ? 72 : 86)
+colTvStop = color.new(#f23645, longSolid ? 72 : 86)
+colTvProfitS = color.new(#089981, shortSolid ? 72 : 86)
+colTvStopS = color.new(#f23645, shortSolid ? 72 : 86)
+
+// Касание уровней позиции (✔ / ✖), сброс при смене триггера
+var float memLTrig = na
+var float memSTrig = na
+var bool lSlHit = false
+var bool lT1Hit = false
+var bool lT2Hit = false
+var bool sSlHit = false
+var bool sT1Hit = false
+var bool sT2Hit = false
+if barstate.isconfirmed
+    if not showLongPos or lTrig != memLTrig
+        lSlHit := false
+        lT1Hit := false
+        lT2Hit := false
+        memLTrig := showLongPos ? lTrig : na
+    if showLongPos and i_posHits
+        if low <= lSl
+            lSlHit := true
+        if not lSlHit and high >= lTp1 and low <= lTp1
+            lT1Hit := true
+        if not lSlHit and not na(lTp2) and high >= lTp2 and low <= lTp2
+            lT2Hit := true
+    if not showShortPos or sTrig != memSTrig
+        sSlHit := false
+        sT1Hit := false
+        sT2Hit := false
+        memSTrig := showShortPos ? sTrig : na
+    if showShortPos and i_posHits
+        if high >= sSl
+            sSlHit := true
+        if not sSlHit and low <= sTp1 and high >= sTp1
+            sT1Hit := true
+        if not sSlHit and not na(sTp2) and low <= sTp2 and high >= sTp2
+            sT2Hit := true
+
+color belTrendUp = #06b690
+color belTrendDn = color.rgb(182, 112, 6)
+color candleTint = pathDir == "up" ? belTrendUp : pathDir == "down" ? belTrendDn : na
 
 color actCol = act == "LONG" ? colG : act == "SHORT" ? colR : colY
 
@@ -1043,6 +1535,9 @@ var line lnCtxHi = na
 var line lnCtxLo = na
 var line lnPat2 = na
 var line lnNeck2 = na
+var line lnPatV1 = na
+var line lnPatV2 = na
+var line lnPatTgt = na
 var line lnWh = na
 var line lnWl = na
 var line lnNeck = na
@@ -1063,15 +1558,36 @@ var line lnP0 = na
 var line lnP1 = na
 var line lnP2 = na
 var line lnP3 = na
+var line lnTriE = na
+var line lnTriS = na
+var line lnTriT = na
+var label lbTriPlan = na
 var box  bxSup = na
-var box  bxFvg = na
 var box  bxOb = na
+var box  bxSply = na
+var box  bxFvg = na
 var box  bxFib = na
 var box  bxFibSell = na
-var box  bxSL = na
-var box  bxEN = na
-var box  bxTP = na
-var box  bxTP2 = na
+var box  bxLStop = na
+var box  bxLProfit = na
+var box  bxSStop = na
+var box  bxSProfit = na
+var line lnLSl = na
+var line lnLE = na
+var line lnLT1 = na
+var line lnLT2 = na
+var line lnSSl = na
+var line lnSE = na
+var line lnST1 = na
+var line lnST2 = na
+var label lbLSl = na
+var label lbLEnt = na
+var label lbLT1 = na
+var label lbLT2 = na
+var label lbSSl = na
+var label lbSEnt = na
+var label lbST1 = na
+var label lbST2 = na
 var label lbCeil = na
 var label lbFloor = na
 var label lbWedge = na
@@ -1089,7 +1605,22 @@ var label lbSweep = na
 var label lbPath = na
 var label lbSL = na
 var label lbTP1 = na
-var table plan = table.new(position.bottom_left, 2, 19, bgcolor=color.new(colBg, 6), border_width=1, border_color=#30363d)
+var table tbStory = na
+var label lbStory = na
+var line lnTrigL = na
+var line lnTrigS = na
+var line lnTrendHL = na
+var box  bxHlSup = na
+var box  bxSupplyMk = na
+var label lbHiStruct = na
+var label lbLoStruct = na
+var label lbRev = na
+var label lbRetRes = na
+var label lbRetSup = na
+var label lbSqDn = na
+var label lbSqUp = na
+var label lbVolHint = na
+var line lnSqTrig = na
 
 f_kill_line(line ln) =>
     if not na(ln)
@@ -1103,6 +1634,10 @@ f_kill_lab(label lb) =>
     if not na(lb)
         label.delete(lb)
 
+f_kill_tab(table t) =>
+    if not na(t)
+        table.delete(t)
+
 if barstate.islast
     f_kill_line(lnCeil)
     f_kill_line(lnFloor)
@@ -1110,6 +1645,9 @@ if barstate.islast
     f_kill_line(lnCtxLo)
     f_kill_line(lnPat2)
     f_kill_line(lnNeck2)
+    f_kill_line(lnPatV1)
+    f_kill_line(lnPatV2)
+    f_kill_line(lnPatTgt)
     f_kill_line(lnWh)
     f_kill_line(lnWl)
     f_kill_line(lnNeck)
@@ -1130,15 +1668,52 @@ if barstate.islast
     f_kill_line(lnP1)
     f_kill_line(lnP2)
     f_kill_line(lnP3)
+    f_kill_line(lnTriE)
+    f_kill_line(lnTriS)
+    f_kill_line(lnTriT)
+    f_kill_lab(lbTriPlan)
     f_kill_box(bxSup)
-    f_kill_box(bxFvg)
     f_kill_box(bxOb)
+    f_kill_box(bxSply)
+    f_kill_box(bxFvg)
     f_kill_box(bxFib)
     f_kill_box(bxFibSell)
-    f_kill_box(bxSL)
-    f_kill_box(bxEN)
-    f_kill_box(bxTP)
-    f_kill_box(bxTP2)
+    f_kill_box(bxLStop)
+    f_kill_box(bxLProfit)
+    f_kill_box(bxSStop)
+    f_kill_box(bxSProfit)
+    f_kill_line(lnLSl)
+    f_kill_line(lnLE)
+    f_kill_line(lnLT1)
+    f_kill_line(lnLT2)
+    f_kill_line(lnSSl)
+    f_kill_line(lnSE)
+    f_kill_line(lnST1)
+    f_kill_line(lnST2)
+    f_kill_lab(lbLSl)
+    f_kill_lab(lbLEnt)
+    f_kill_lab(lbLT1)
+    f_kill_lab(lbLT2)
+    f_kill_lab(lbSSl)
+    f_kill_lab(lbSEnt)
+    f_kill_lab(lbST1)
+    f_kill_lab(lbST2)
+    f_kill_tab(tbStory)
+    f_kill_lab(lbStory)
+    f_kill_line(lnTrigL)
+    f_kill_line(lnTrigS)
+    f_kill_line(lnTrendHL)
+    f_kill_box(bxHlSup)
+    f_kill_box(bxSupplyMk)
+    f_kill_lab(lbHiStruct)
+    f_kill_lab(lbLoStruct)
+    f_kill_lab(lbRev)
+    f_kill_lab(lbRetRes)
+    f_kill_lab(lbRetSup)
+    f_kill_lab(lbSqDn)
+    f_kill_lab(lbSqUp)
+    f_kill_lab(lbVolHint)
+    f_kill_line(lnSqTrig)
     f_kill_lab(lbCeil)
     f_kill_lab(lbFloor)
     f_kill_lab(lbWedge)
@@ -1182,15 +1757,40 @@ if barstate.islast
     lnP1 := na
     lnP2 := na
     lnP3 := na
+    lnTriE := na
+    lnTriS := na
+    lnTriT := na
+    lbTriPlan := na
     bxSup := na
-    bxFvg := na
     bxOb := na
+    bxSply := na
+    bxFvg := na
     bxFib := na
     bxFibSell := na
-    bxSL := na
-    bxEN := na
-    bxTP := na
-    bxTP2 := na
+    bxLStop := na
+    bxLProfit := na
+    bxSStop := na
+    bxSProfit := na
+    lnLSl := na
+    lnLE := na
+    lnLT1 := na
+    lnLT2 := na
+    lnSSl := na
+    lnSE := na
+    lnST1 := na
+    lnST2 := na
+    lbLSl := na
+    lbLEnt := na
+    lbLT1 := na
+    lbLT2 := na
+    lbSSl := na
+    lbSEnt := na
+    lbST1 := na
+    lbST2 := na
+    tbStory := na
+    lbStory := na
+    lnTrigL := na
+    lnTrigS := na
     lbCeil := na
     lbFloor := na
     lbWedge := na
@@ -1212,21 +1812,118 @@ if barstate.islast
     int xL = xL0
     int xC = xR
 
+    if eff_story
+        bool storyHud = i_storyPos == "Вверху справа"
+        if storyHud
+            tbStory := table.new(position.top_right, 1, 1, bgcolor=color.new(colBg, 4), border_width=1, border_color=color.new(actCol, 55), frame_color=color.new(colBg, 30), frame_width=1)
+            table.cell(tbStory, 0, 0, storyTxt, text_color=actCol, text_size=size.normal, text_halign=text.align_left, text_valign=text.align_top, bgcolor=color.new(colBg, 4), width=46)
+        else
+            float yStory = high + atr * 1.15
+            lbStory := label.new(xNow, yStory, storyTxt, style=label.style_label_down, color=color.new(colBg, 8), textcolor=actCol, size=size.normal, textalign=text.align_left)
+    if eff_boxes
+        lnTrigL := line.new(xL, longPx, xC, longPx, color=color.new(colG, longSolid ? 0 : 45), width=longSolid ? 2 : 1, style=line.style_dotted)
+        lnTrigS := line.new(xL, shortPx, xC, shortPx, color=color.new(colR, shortSolid ? 0 : 45), width=shortSolid ? 2 : 1, style=line.style_dotted)
+    else if profMarkup and mkLong
+        lnTrigL := line.new(xL, lTrig, xC, lTrig, color=color.new(colG, 0), width=2, style=line.style_dashed)
+    else if profMarkup and mkShort
+        lnTrigS := line.new(xL, sTrig, xC, sTrig, color=color.new(colR, 0), width=2, style=line.style_dashed)
+
     // 1) S/R — структура (свинги) + опционально контекст LB
-    if i_sr
+    if eff_sr
         lnCeil := line.new(xL, structRes, xC, structRes, color=colY, width=i_wSR, extend=extend.none)
         lnFloor := line.new(xL, structSup, xC, structSup, color=colB, width=i_wSR, extend=extend.none)
-        lbCeil := label.new(xL + 2, structRes, "Сопр. " + str.tostring(structRes, format.mintick) + " · L если close >", style=label.style_label_right, color=color.new(colBg, 15), textcolor=colY, size=size.small)
-        lbFloor := label.new(xL + 2, structSup, "Подд. " + str.tostring(structSup, format.mintick) + " · S если close <", style=label.style_label_right, color=color.new(colBg, 15), textcolor=colB, size=size.small)
-        if i_ctxRng and (math.abs(rngHi - structRes) > atr * 0.15 or math.abs(rngLo - structSup) > atr * 0.15)
+        string resCap = profMarkup ? str.tostring(structRes, format.mintick) : "Сопр. " + str.tostring(structRes, format.mintick) + " · L если close >"
+        string supCap = profMarkup ? str.tostring(structSup, format.mintick) : "Подд. " + str.tostring(structSup, format.mintick) + " · S если close <"
+        lbCeil := label.new(xL + 2, structRes, resCap, style=label.style_label_right, color=color.new(colBg, 15), textcolor=colY, size=profMarkup ? size.tiny : size.small)
+        lbFloor := label.new(xL + 2, structSup, supCap, style=label.style_label_right, color=color.new(colBg, 15), textcolor=colB, size=profMarkup ? size.tiny : size.small)
+        if eff_ctxRng and (math.abs(rngHi - structRes) > atr * 0.15 or math.abs(rngLo - structSup) > atr * 0.15)
             lnCtxHi := line.new(xL, rngHi, xC, rngHi, color=color.new(colY, 55), width=1, style=line.style_dotted, extend=extend.none)
             lnCtxLo := line.new(xL, rngLo, xC, rngLo, color=color.new(colB, 55), width=1, style=line.style_dotted, extend=extend.none)
-        if i_zone
+        if eff_zone
+            int xZn = math.min(xC, xNow + 10)
             float zH = structSup + math.max(atr * 0.45, structW * 0.06)
-            bxSup := box.new(xL, zH, xC, structSup, bgcolor=color.new(colG, 78), border_color=colG, border_width=1)
+            bool demFresh = not na(demBar) and bar_index - demBar <= i_lb
+            bool supFresh = not na(supBar) and bar_index - supBar <= i_lb
+            int zonePick = 0
+            if eff_zoneOne
+                if brkDemand and demFresh
+                    zonePick := 1
+                else if brkSupply and supFresh
+                    zonePick := 2
+                else if demFresh and not demBrk and (inDemand or priRank <= 3)
+                    zonePick := 3
+                else if supFresh and not supBrk and (inSupply or priRank <= 3)
+                    zonePick := 4
+                else if posR <= 0.42 and patKind == ""
+                    zonePick := 5
+            if not eff_zoneOne or zonePick == 5
+                bxSup := box.new(xL, zH, xZn, structSup, bgcolor=color.new(colG, 82), border_color=colG, border_width=1)
+            if not eff_zoneOne or zonePick == 1 or zonePick == 3
+                if demFresh
+                    int xOb = math.max(xL, demBar)
+                    int xObE = math.min(xZn, xOb + 36)
+                    color dCol = demBrk ? color.new(colR, 86) : color.new(colG, 88)
+                    bxOb := box.new(xOb, demTop, xObE, demBot, bgcolor=dCol, border_color=demBrk ? colR : colG, border_width=1)
+                    if not profMarkup
+                        string demLbl = demBrk ? "Breaker ↓\nбывш. спрос" : "спрос OB"
+                        lbOb := label.new(xOb, demTop, demLbl, style=label.style_label_down, color=color.new(colBg, 15), textcolor=demBrk ? colR : colG, size=size.small)
+            if not eff_zoneOne or zonePick == 2 or zonePick == 4
+                if supFresh
+                    int xSp = math.max(xL, supBar)
+                    int xSpE = math.min(xZn, xSp + 36)
+                    color sCol = supBrk ? color.new(colG, 86) : color.new(colR, 88)
+                    bxSply := box.new(xSp, supTop, xSpE, supBot, bgcolor=sCol, border_color=supBrk ? colG : colR, border_width=1)
+    // 2b) Разметка Ed — HH/HL, TL, поддержка HL, разворот (схема «Разворот цены»)
+    if profMarkup
+        int xZnMk = math.min(xC, xNow + 10)
+        bool supFreshMk = not na(supBar) and bar_index - supBar <= i_lb
+        bool mkCardTop = (sqHintDown or sqFlushDown or atCeil) and not mkHasPlan
+        if array.size(shP) >= 2 and not mkCardTop and not mkHasPlan
+            int hn = array.size(shP) - 1
+            float hp = array.get(shP, hn)
+            int hx = array.get(shX, hn)
+            float hp0 = array.get(shP, hn - 1)
+            string hTag = hp > hp0 ? "HH" : "LH"
+            lbHiStruct := label.new(hx, hp, hTag, style=label.style_label_down, color=color.new(colBg, 10), textcolor=hp > hp0 ? colG : colR, size=size.tiny)
+        if array.size(slP) >= 2 and not mkCardTop and not mkHasPlan
+            int ln = array.size(slP) - 1
+            float lp = array.get(slP, ln)
+            int lx = array.get(slX, ln)
+            float lp0 = array.get(slP, ln - 1)
+            int hxFar = array.size(shX) >= 1 ? array.get(shX, array.size(shX) - 1) : xNow
+            bool sepHl = math.abs(lx - hxFar) > 8
+            string lTag = lp > lp0 ? "HL" : "LL"
+            if sepHl
+                lbLoStruct := label.new(lx, lp, lTag, style=label.style_label_up, color=color.new(colBg, 10), textcolor=lp > lp0 ? colG : colR, size=size.tiny)
+            int lx0 = array.get(slX, ln - 1)
+            float ly0 = lp0
+            if lp >= ly0 and lx > lx0
+                float tSlope = (lp - ly0) / math.max(lx - lx0, 1)
+                float yEnd = ly0 + tSlope * (xC - lx0)
+                lnTrendHL := line.new(lx0, ly0, xC, yEnd, color=color.new(colW, 0), width=2, extend=extend.none)
+                float zTop = lp + atr * 0.22
+                float zBot = lp - atr * 0.12
+                bxHlSup := box.new(lx, zTop, xZnMk, zBot, bgcolor=color.new(colB, 86), border_color=colB, border_width=1)
+        if array.size(shP) >= 2 and array.size(slP) >= 1
+            bool isLh = array.get(shP, array.size(shP) - 1) < array.get(shP, array.size(shP) - 2)
+            float lastHl = array.get(slP, array.size(slP) - 1)
+            bool brokeHl = close < lastHl - atr * 0.05
+            bool tlBreak = not na(lnTrendHL) and close < structSup
+            if isLh and (brokeHl or tlBreak) and not mkHasPlan
+                lbRev := label.new(xNow - 2, high + atr * 0.35, "↓", style=label.style_label_down, color=color.new(colR, 15), textcolor=colR, size=size.small)
+        if not na(supTop) and supFreshMk and na(bxSply)
+            int xSpM = math.max(xL, supBar)
+            int xSpE = math.min(xZnMk, xSpM + 40)
+            bxSupplyMk := box.new(xSpM, supTop, xSpE, supBot, bgcolor=color.new(colR, 88), border_color=colR, border_width=1)
+        if not mkHasPlan and mkCardTop
+            lbSqDn := label.new(xNow + 2, high + atr * 0.55, "⚠", style=label.style_label_down, color=color.new(colR, 12), textcolor=colR, size=size.small)
+        else if not mkHasPlan and (sqHintDown or sqFlushDown)
+            lnSqTrig := line.new(xNow - 18, structSup, xC, structSup, color=color.new(colR, sqFlushDown ? 0 : 45), width=sqFlushDown ? 2 : 1, style=line.style_dashed)
+        if not mkHasPlan and (sqHintUp or sqFlushUp)
+            lbSqUp := label.new(xNow - 1, low - atr * 0.35, "▲", style=label.style_label_up, color=color.new(colG, 18), textcolor=colG, size=size.small)
 
     // 3) клин / канал — сплошной если касания OK, иначе пунктир «черновик»
-    if i_wedge and wedgeGeom
+    if effWedgeDraw
         int xW0 = math.min(wHx0, wLx0)
         float yH0 = f_y(wHy0, wHx0, wHy1, wHx1, xW0)
         float yH1 = f_y(wHy0, wHx0, wHy1, wHx1, xC)
@@ -1236,37 +1933,67 @@ if barstate.islast
         int wW = wedgeOk ? i_wWedge : math.max(1, i_wWedge - 1)
         lnWh := line.new(xW0, yH0, xC, yH1, color=wCol, width=wW, style=wedgeOk ? line.style_solid : line.style_dashed, extend=extend.none)
         lnWl := line.new(xW0, yL0, xC, yL1, color=wCol, width=wW, style=wedgeOk ? line.style_solid : line.style_dashed, extend=extend.none)
-        lbWedge := label.new(xC - 1, (yH1 + yL1) * 0.5, wedgeRu, style=label.style_label_left, color=color.new(colBg, 20), textcolor=wCol, size=size.normal)
+        string wLbl = triKind != "" ? triRu : wedgeRu
+        if profMarkup
+            wLbl := loRise and hiRise ? "↑" : hiFall and loFall ? "↓" : triKind == "asc" ? "△" : triKind == "desc" ? "▽" : "↑"
+        lbWedge := label.new(xC - 1, (yH1 + yL1) * 0.5, wLbl, style=label.style_label_left, color=color.new(colBg, 20), textcolor=wCol, size=profMarkup ? size.tiny : size.normal)
+        if eff_triPdf and wedgeOk and triKind != "" and not na(triEntry) and not mkHasPlan
+            int xTa = math.max(xW0, xNow - 8)
+            color cE = triLong ? colG : colR
+            lnTriE := line.new(xTa, triEntry, xC, triEntry, color=cE, width=2, style=line.style_solid)
+            lnTriS := line.new(xTa, triSl, xC, triSl, color=colR, width=1, style=line.style_dashed)
+            lnTriT := line.new(xTa, triTp, xC, triTp, color=colG, width=1, style=line.style_dashed)
+            string triLbl = profMarkup ? str.tostring(triEntry, format.mintick) + "\n" + str.tostring(triSl, format.mintick) + "\n" + str.tostring(triTp, format.mintick) : "Вход " + str.tostring(triEntry, format.mintick) + "\nСтоп " + str.tostring(triSl, format.mintick) + "\nЦель " + str.tostring(triTp, format.mintick) + " (H=" + str.tostring(wWide0, format.mintick) + ")"
+            lbTriPlan := label.new(xTa, triEntry, triLbl, style=label.style_label_right, color=color.new(colBg, 12), textcolor=cE, size=size.tiny)
+            if triKind == "asc" and triTopFlat
+                float yFlat = (wHy0 + wHy1) * 0.5
+                lnWh := line.new(xW0, yFlat, xC, yFlat, color=colY, width=2, style=line.style_dotted, extend=extend.none)
+            if triKind == "desc" and triBotFlat
+                float yFlatB = (wLy0 + wLy1) * 0.5
+                lnWl := line.new(xW0, yFlatB, xC, yFlatB, color=colB, width=2, style=line.style_dotted, extend=extend.none)
 
-    // 4) pattern geometry (не дублируем △, если уже клин)
-    bool drawPat = i_pat and patKind != "" and patConf >= i_minConf
+    // 4) графический паттерн — M/W, ГиП, 1-2-3 (шея + measured move)
+    bool drawPat = eff_pat and patActive
     bool isHs = patKind == "head_shoulders" or patKind == "inverse_head_shoulders"
     bool isDbl = patKind == "double_top" or patKind == "double_bottom"
+    int xPatLbl = math.max(na(pI2) ? xNow - 8 : pI2, xNow - 14)
+    int patW = patSt == "confirmed" ? math.max(i_wPat, 2) : i_wPat
+    color patCol = patDir == "bullish" ? colG : patDir == "bearish" ? colR : colY
     if drawPat and isDbl and not na(pI1) and not na(pI2) and not na(patNeck)
-        lnP12 := line.new(pI1, pP1, pI2, pP2, color=colY, width=i_wPat, extend=extend.none)
-        lnNeck := line.new(math.min(pI1, pI2), patNeck, xC, patNeck, color=colB, width=i_wPat, extend=extend.none)
-        string dN = patKind == "double_top" ? "2× вершина · шея" : "2× дно · шея"
-        lbPat := label.new(pI2, pP2, dN + (patSt == "confirmed" ? " ✓" : " …"), style=label.style_label_down, color=color.new(colBg, 20), textcolor=colY, size=size.small)
+        lnP12 := line.new(pI1, pP1, pI2, pP2, color=patCol, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        lnPatV1 := line.new(pI1, pP1, pI1, patNeck, color=color.new(patCol, 35), width=1, style=line.style_dotted)
+        lnPatV2 := line.new(pI2, pP2, pI2, patNeck, color=color.new(patCol, 35), width=1, style=line.style_dotted)
+        lnNeck := line.new(math.min(pI1, pI2), patNeck, xC, patNeck, color=colB, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        if not na(patTgt)
+            lnPatTgt := line.new(xNow - 6, patTgt, xC, patTgt, color=color.new(patCol, 20), width=1, style=line.style_dotted, extend=extend.none)
+        string dN = patKind == "double_top" ? "2× вершина" : "2× дно"
+        float yLbl = patKind == "double_top" ? math.max(pP1, pP2) + atr * 0.08 : math.min(pP1, pP2) - atr * 0.08
+        lbPat := label.new(xPatLbl, yLbl, dN + (patSt == "confirmed" ? " ✓" : " …") + "\nшея " + str.tostring(patNeck, format.mintick) + "\nцель " + str.tostring(patTgt, format.mintick), style=label.style_label_down, color=color.new(colBg, 8), textcolor=patCol, size=size.normal)
     else if drawPat and isHs and not na(pNLx)
-        lnP12 := line.new(pI1, pP1, pI2, pP2, color=colO, width=i_wPat, extend=extend.none)
-        lnP23 := line.new(pI2, pP2, pI3, pP3, color=colO, width=i_wPat, extend=extend.none)
-        lnHsN := line.new(pNLx, pNL, pNRx, pNR, color=colB, width=i_wPat, extend=extend.none)
-        lbPat := label.new(pI2, pP2, patRu + (patSt == "confirmed" ? " ✓" : " …"), style=label.style_label_down, color=color.new(colBg, 20), textcolor=colO, size=size.small)
+        lnP12 := line.new(pI1, pP1, pI2, pP2, color=patCol, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        lnP23 := line.new(pI2, pP2, pI3, pP3, color=patCol, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        lnHsN := line.new(pNLx, pNL, pNRx, pNR, color=colB, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        lnNeck := line.new(pNRx, pNR, xC, f_y(pNL, pNLx, pNR, pNRx, xC), color=colB, width=1, style=line.style_dotted, extend=extend.none)
+        if not na(patTgt)
+            lnPatTgt := line.new(xNow - 6, patTgt, xC, patTgt, color=color.new(patCol, 20), width=1, style=line.style_dotted, extend=extend.none)
+        lbPat := label.new(xPatLbl, pP2, patRu + (patSt == "confirmed" ? " ✓" : " …") + "\nшея · цель " + str.tostring(patTgt, format.mintick), style=label.style_label_down, color=color.new(colBg, 8), textcolor=colO, size=size.normal)
     else if drawPat and patKind == "one_two_three" and not na(pI1)
-        lnP12 := line.new(pI1, pP1, pI2, pP2, color=colW, width=i_wPat, extend=extend.none)
+        lnP12 := line.new(pI1, pP1, pI2, pP2, color=patCol, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
         if not na(pI3)
-            lnP23 := line.new(pI2, pP2, pI3, pP3, color=colW, width=1, extend=extend.none)
+            lnP23 := line.new(pI2, pP2, pI3, pP3, color=patCol, width=1, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
         if not na(patNeck)
-            lnNeck := line.new(pI1, patNeck, xC, patNeck, color=colB, width=2, extend=extend.none)
-        lbPat := label.new(pI2, pP2, "1-2-3 " + (patDir == "bullish" ? "↑" : "↓") + " · шея " + str.tostring(patNeck, format.mintick), style=label.style_label_down, color=color.new(colBg, 20), textcolor=colY, size=size.small)
+            lnNeck := line.new(pI1, patNeck, xC, patNeck, color=colB, width=patW, style=patSt == "confirmed" ? line.style_solid : line.style_dashed, extend=extend.none)
+        if not na(patTgt)
+            lnPatTgt := line.new(xNow - 6, patTgt, xC, patTgt, color=color.new(patCol, 20), width=1, style=line.style_dotted, extend=extend.none)
+        lbPat := label.new(xPatLbl, pP2, "1-2-3 " + (patDir == "bullish" ? "↑" : "↓") + (patSt == "confirmed" ? " ✓" : " …") + "\nшея " + str.tostring(patNeck, format.mintick), style=label.style_label_down, color=color.new(colBg, 8), textcolor=patCol, size=size.normal)
 
-    bool drawPat2 = i_pat and i_histPat and patKind2 != "" and patKind2 != patKind and (patKind2 == "double_top" or patKind2 == "double_bottom")
+    bool drawPat2 = eff_pat and i_histPat and patKind2 != "" and patKind2 != patKind and (patKind2 == "double_top" or patKind2 == "double_bottom")
     if drawPat2 and not na(p2I1) and not na(p2I2) and not na(patNeck2)
         lnPat2 := line.new(p2I1, p2P1, p2I2, p2P2, color=color.new(colMuted, 25), width=1, extend=extend.none)
         lnNeck2 := line.new(math.min(p2I1, p2I2), patNeck2, xC, patNeck2, color=color.new(colB, 45), width=1, style=line.style_dashed, extend=extend.none)
 
     // 5) Fib grid — от ноги импульса, не «висящие» линии
-    if i_fib and (impHi - impLo) > atr * 0.4
+    if eff_fib and (impHi - impLo) > atr * 0.4
         int xf0 = math.max(xL, xFib0)
         lnF0   := line.new(xf0, f0,   xC, f0,   color=color.new(colW, 35), width=i_wFib, style=line.style_solid, extend=extend.none)
         lnF236 := line.new(xf0, f236, xC, f236, color=color.new(colMuted, 45), width=i_wFib, style=line.style_dotted, extend=extend.none)
@@ -1290,17 +2017,22 @@ if barstate.islast
         if showSmcFvg and not na(fvgBar)
             int xF0 = fvgBar - 2
             bxFvg := box.new(xF0, fvgTop, xC, fvgBot, bgcolor=color.new(fvgBull ? colG : colR, 86), border_color=fvgBull ? colG : colR, border_width=1)
-            lbFvg := label.new(fvgBar, (fvgTop + fvgBot) * 0.5, fvgBull ? "FVG demand · retest" : "FVG supply · retest", style=label.style_label_left, color=color.new(colBg, 25), textcolor=fvgBull ? colG : colR, size=size.tiny)
+            if not profMarkup
+                string fvgLbl = fvgBull ? "FVG demand · retest" : "FVG supply · retest"
+                lbFvg := label.new(fvgBar, (fvgTop + fvgBot) * 0.5, fvgLbl, style=label.style_label_left, color=color.new(colBg, 25), textcolor=fvgBull ? colG : colR, size=size.tiny)
         if showSmcBos and (bosUp or bosDn)
             float bPx = bosUp ? structRes : structSup
             lnBos := line.new(xNow - 24, bPx, xC, bPx, color=bosUp ? colG : colR, width=1, style=line.style_dashed, extend=extend.none)
             lbBos := label.new(xNow - 20, bPx, bosUp ? "BOS ↑" : "BOS ↓", style=label.style_label_right, color=color.new(color.black, 100), textcolor=bosUp ? colG : colR, size=size.tiny)
         if showSmcSweep and sweepHiAct and not na(sweepBearBar)
             lnSweep := line.new(sweepBearBar, sweepBearLvl, xC, sweepBearLvl, color=colY, width=1, style=line.style_dotted, extend=extend.none)
-            lbSweep := label.new(sweepBearBar, sweepBearY, "свип ↑ · " + str.tostring(sweepBearLvl, format.mintick), style=label.style_label_down, color=color.new(colY, 10), textcolor=colBg, size=size.small)
+            if not (profMarkup and (atCeil or mkHasPlan))
+                string swB = profMarkup ? str.tostring(sweepBearLvl, format.mintick) : "свип ↑ · " + str.tostring(sweepBearLvl, format.mintick)
+                lbSweep := label.new(sweepBearBar, sweepBearY, swB, style=label.style_label_down, color=color.new(colY, 10), textcolor=colBg, size=size.tiny)
         else if showSmcSweep and sweepLoAct and not na(sweepBullBar)
             lnSweep := line.new(sweepBullBar, sweepBullLvl, xC, sweepBullLvl, color=colY, width=1, style=line.style_dotted, extend=extend.none)
-            lbSweep := label.new(sweepBullBar, sweepBullY, "свип ↓ · " + str.tostring(sweepBullLvl, format.mintick), style=label.style_label_up, color=color.new(colY, 10), textcolor=colBg, size=size.small)
+            string swL = profMarkup ? str.tostring(sweepBullLvl, format.mintick) : "свип ↓ · " + str.tostring(sweepBullLvl, format.mintick)
+            lbSweep := label.new(sweepBullBar, sweepBullY, swL, style=label.style_label_up, color=color.new(colY, 10), textcolor=colBg, size=size.tiny)
 
     // прогноз хода (как учебный зигзаг, но по счёту RSI/структуры)
     if effPath and pathDir != "chop" and not na(tp1)
@@ -1328,74 +2060,75 @@ if barstate.islast
                 lnP3 := line.new(xd, tp1, xe, tp2, color=#e6c56e, width=i_wPath, extend=extend.none)
             lbPath := label.new(xe, na(tp2) ? tp1 : tp2, "ожидание ↑", style=label.style_label_left, color=color.new(colBg, 20), textcolor=#e6c56e, size=size.small)
 
-    // SL / TP только при хирургическом edge (R:R + MTF)
-    if showPlan and not na(slPx) and not na(tp1) and not na(entryPx)
-        int x0 = xNow + 1
-        int x1 = xNow + 16
-        float band = math.max(atr * 0.12, syminfo.mintick * 8)
-        color a = color.new(colR, act == "ЖДАТЬ" ? 82 : 72)
-        color g1 = color.new(colG, act == "ЖДАТЬ" ? 84 : 74)
-        color g2 = color.new(colG, 88)
-        color eN = color.new(colB, 86)
-        if planSide == "LONG"
-            bxSL := box.new(x0, math.min(entryPx, slPx), x1, slPx, bgcolor=a, border_color=colR)
-            bxEN := box.new(x0, entryPx, x1, entryPx + band, bgcolor=eN, border_color=colB)
-            bxTP := box.new(x0, entryPx + band, x1, tp1, bgcolor=g1, border_color=colG)
-            if not na(tp2) and tp2 > tp1
-                bxTP2 := box.new(x0, tp1, x1, tp2, bgcolor=g2, border_color=color.new(colG, 40))
-            lbSL := label.new(x1, slPx, "SL " + str.tostring(slPx, format.mintick), style=label.style_label_left, color=color.new(colBg, 25), textcolor=colR, size=size.tiny)
-            lbTP1 := label.new(x1, tp1, "TP1 " + str.tostring(tp1, format.mintick) + " · R:R " + str.tostring(rr1, "#.2"), style=label.style_label_left, color=color.new(colBg, 25), textcolor=colG, size=size.tiny)
+    // Позиции Long/Short — уровни EdBot, визуал Beluga (linefill) или TV-боксы
+    int xPos0 = xNow
+    int xPos1 = xNow + i_posW
+    color belUp = #06b690
+    color belDn = #db1e1e
+    color belEntry = #1d80dd
+    int fillT = 92
+    if drawLongPlan
+        float eL = lTrig
+        bool longSolidMk = longSolid or mkLong
+        if i_posStyle == "Beluga"
+            int fT = longSolidMk ? fillT : 96
+            color lSlCol = lSlHit ? belDn : belDn
+            lnLSl := line.new(xPos0, lSl, xPos1, lSl, color=lSlCol, width=lSlHit ? 2 : 1)
+            lnLE := line.new(xPos0, eL, xPos1, eL, color=belEntry, width=2)
+            lnLT1 := line.new(xPos0, lTp1, xPos1, lTp1, color=lT1Hit ? color.new(#16ac09, 35) : color.new(colMuted, 30), width=1, style=lT1Hit ? line.style_dashed : line.style_dashed)
+            linefill.new(lnLSl, lnLE, color.new(belDn, fT))
+            line lnFar = lnLT1
+            if not na(lTp2) and lTp2 > lTp1 + syminfo.mintick * 4 and not mkMinLbl
+                lnLT2 := line.new(xPos0, lTp2, xPos1, lTp2, color=lT2Hit ? color.new(#16ac09, 35) : color.new(colMuted, 40), width=1, style=line.style_dashed)
+                lnFar := lnLT2
+            linefill.new(lnLE, lnFar, color.new(belUp, fT))
+            string lSlTxt = mkMinLbl ? str.tostring(lSl, format.mintick) : lSlHit and i_posHits ? "  ✖  " : str.tostring(lSl, format.mintick)
+            string lT1Txt = mkMinLbl ? str.tostring(lTp1, format.mintick) : lT1Hit and i_posHits ? "   ✔   " : "1 · " + str.tostring(lTp1, format.mintick)
+            string lEntTxt = mkMinLbl ? "▲ " + str.tostring(eL, format.mintick) : "◉ " + str.tostring(eL, format.mintick) + " · R:R " + str.tostring(lRr, "#.2")
+            lbLSl := label.new(xPos1, lSl, lSlTxt, style=label.style_label_left, color=colBg, textcolor=lSlHit ? belDn : belDn, size=size.tiny)
+            lbLEnt := label.new(xPos1, eL, lEntTxt, style=label.style_label_left, color=colBg, textcolor=belEntry, size=mkMinLbl ? size.tiny : size.small)
+            lbLT1 := label.new(xPos1, lTp1, lT1Txt, style=label.style_label_left, color=colBg, textcolor=lT1Hit ? #16ac09 : belUp, size=size.tiny)
+            if not na(lnLT2)
+                string lT2Txt = lT2Hit and i_posHits ? "   ✔   " : "2 · " + str.tostring(lTp2, format.mintick)
+                lbLT2 := label.new(xPos1, lTp2, lT2Txt, style=label.style_label_left, color=colBg, textcolor=lT2Hit ? #16ac09 : belUp, size=size.tiny)
         else
-            bxSL := box.new(x0, slPx, x1, math.max(entryPx, slPx), bgcolor=a, border_color=colR)
-            bxEN := box.new(x0, entryPx - band, x1, entryPx, bgcolor=eN, border_color=colB)
-            bxTP := box.new(x0, tp1, x1, entryPx - band, bgcolor=g1, border_color=colG)
-            if not na(tp2) and tp2 < tp1
-                bxTP2 := box.new(x0, tp2, x1, tp1, bgcolor=g2, border_color=color.new(colG, 40))
-            lbSL := label.new(x1, slPx, "SL " + str.tostring(slPx, format.mintick), style=label.style_label_left, color=color.new(colBg, 25), textcolor=colR, size=size.tiny)
-            lbTP1 := label.new(x1, tp1, "TP1 " + str.tostring(tp1, format.mintick) + " · R:R " + str.tostring(rr1, "#.2"), style=label.style_label_left, color=color.new(colBg, 25), textcolor=colG, size=size.tiny)
+            bxLStop := box.new(xPos0, eL, xPos1, lSl, bgcolor=colTvStop, border_color=color.new(#f23645, 55), border_width=1)
+            bxLProfit := box.new(xPos0, lTp1, xPos1, eL, bgcolor=colTvProfit, border_color=color.new(#089981, 55), border_width=1)
+            lnLE := line.new(xPos0, eL, xPos1, eL, color=#808080, width=1)
+            lbSL := label.new(xPos1, eL, "LONG @ " + str.tostring(eL, format.mintick) + "\nTP " + str.tostring(lTp1, format.mintick) + " · SL " + str.tostring(lSl, format.mintick) + "\nR:R " + str.tostring(lRr, "#.2"), style=label.style_label_left, color=color.new(colBg, 18), textcolor=longSolid ? colG : colMuted, size=size.small)
+    if drawShortPlan
+        float eS = sTrig
+        bool shortSolidMk = shortSolid or mkShort
+        if i_posStyle == "Beluga"
+            int fTs = shortSolidMk ? fillT : 96
+            lnSSl := line.new(xPos0, sSl, xPos1, sSl, color=belDn, width=sSlHit ? 2 : 1)
+            lnSE := line.new(xPos0, eS, xPos1, eS, color=belEntry, width=2)
+            lnST1 := line.new(xPos0, sTp1, xPos1, sTp1, color=sT1Hit ? color.new(#16ac09, 35) : color.new(colMuted, 30), width=1, style=line.style_dashed)
+            linefill.new(lnSE, lnSSl, color.new(belDn, fTs))
+            line lnFarS = lnST1
+            if not na(sTp2) and sTp2 < sTp1 - syminfo.mintick * 4 and not mkMinLbl
+                lnST2 := line.new(xPos0, sTp2, xPos1, sTp2, color=sT2Hit ? color.new(#16ac09, 35) : color.new(colMuted, 40), width=1, style=line.style_dashed)
+                lnFarS := lnST2
+            linefill.new(lnFarS, lnSE, color.new(belUp, fTs))
+            string sSlTxt = mkMinLbl ? str.tostring(sSl, format.mintick) : sSlHit and i_posHits ? "  ✖  " : str.tostring(sSl, format.mintick)
+            string sT1Txt = mkMinLbl ? str.tostring(sTp1, format.mintick) : sT1Hit and i_posHits ? "   ✔   " : "1 · " + str.tostring(sTp1, format.mintick)
+            string sEntTxt = mkMinLbl ? "▼ " + str.tostring(eS, format.mintick) : "◉ " + str.tostring(eS, format.mintick) + " · R:R " + str.tostring(sRr, "#.2")
+            lbSSl := label.new(xPos1, sSl, sSlTxt, style=label.style_label_left, color=colBg, textcolor=belDn, size=size.tiny)
+            lbSEnt := label.new(xPos1, eS, sEntTxt, style=label.style_label_left, color=colBg, textcolor=belEntry, size=mkMinLbl ? size.tiny : size.small)
+            lbST1 := label.new(xPos1, sTp1, sT1Txt, style=label.style_label_left, color=colBg, textcolor=sT1Hit ? #16ac09 : belUp, size=size.tiny)
+            if not na(lnST2)
+                string sT2Txt = sT2Hit and i_posHits ? "   ✔   " : "2 · " + str.tostring(sTp2, format.mintick)
+                lbST2 := label.new(xPos1, sTp2, sT2Txt, style=label.style_label_left, color=colBg, textcolor=sT2Hit ? #16ac09 : belUp, size=size.tiny)
+        else
+            bxSStop := box.new(xPos0, sSl, xPos1, eS, bgcolor=colTvStopS, border_color=color.new(#f23645, 55), border_width=1)
+            bxSProfit := box.new(xPos0, eS, xPos1, sTp1, bgcolor=colTvProfitS, border_color=color.new(#089981, 55), border_width=1)
+            lnSE := line.new(xPos0, eS, xPos1, eS, color=#808080, width=1)
+            lbTP1 := label.new(xPos1, eS, "SHORT @ " + str.tostring(eS, format.mintick) + "\nTP " + str.tostring(sTp1, format.mintick) + " · SL " + str.tostring(sSl, format.mintick) + "\nR:R " + str.tostring(sRr, "#.2"), style=label.style_label_left, color=color.new(colBg, 18), textcolor=shortSolid ? colR : colMuted, size=size.small)
 
-    // таблица
-    if i_plan
-        table.cell(plan, 0, 0, "Разбор Ed", text_color=colB, text_size=size.small)
-        table.cell(plan, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color=colW, text_size=size.small)
-        table.cell(plan, 0, 1, "Фаза", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 1, phaseRu + " · " + whereRu, text_color=colW, text_size=size.tiny)
-        table.cell(plan, 0, 2, "Фигура", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 2, figRu + (patSt == "confirmed" ? " ✓" : patSt == "forming" ? " …" : ""), text_color=colY, text_size=size.tiny)
-        table.cell(plan, 0, 3, "Главная идея", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 3, ideaRu, text_color=priRank <= 4 ? colW : colMuted, text_size=size.tiny)
-        table.cell(plan, 0, 4, "Свип", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 4, sweepRu, text_color=sweepHiAct or sweepLoAct ? colO : colMuted, text_size=size.tiny)
-        table.cell(plan, 0, 5, "RSI", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 5, rsiRu, text_color=rsiOB or rsiOS ? colO : colW, text_size=size.tiny)
-        table.cell(plan, 0, 6, "Тренд", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 6, trendStrRu, text_color=adxVal >= 26 ? colG : adxVal >= 18 ? colY : colMuted, text_size=size.tiny)
-        table.cell(plan, 0, 7, "MTF", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 7, mtfRu, text_color=mtfBlock ? colO : colW, text_size=size.tiny)
-        table.cell(plan, 0, 8, "ХОД", text_color=colMuted, text_size=size.small)
-        table.cell(plan, 1, 8, pathRu, text_color=pathDir == "down" ? colR : pathDir == "up" ? colG : colY, text_size=size.small)
-        table.cell(plan, 0, 9, "Уверенность", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 9, confRu + " · " + voteRu, text_color=pathMag >= 4 ? colG : colY, text_size=size.tiny)
-        table.cell(plan, 0, 10, "Свинг " + str.tostring(i_swing), text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 10, stabRu, text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 0, 11, "ДЕЙСТВИЕ", text_color=colMuted, text_size=size.small)
-        table.cell(plan, 1, 11, act, text_color=actCol, text_size=size.normal)
-        table.cell(plan, 0, 12, "Почему", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 12, why, text_color=colW, text_size=size.tiny)
-        table.cell(plan, 0, 13, "Триггеры", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 13, "L close> " + str.tostring(longPx, format.mintick) + " · S close< " + str.tostring(shortPx, format.mintick), text_color=colW, text_size=size.tiny)
-        table.cell(plan, 0, 14, "Edge", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 14, edgeRu, text_color=planOk ? colG : colY, text_size=size.tiny)
-        table.cell(plan, 0, 15, "SL", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 15, showPlan and not na(slPx) ? str.tostring(slPx, format.mintick) + " · " + slWhy : "—", text_color=colR, text_size=size.tiny)
-        table.cell(plan, 0, 16, "TP1 / TP2", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 16, showPlan ? (str.tostring(tp1, format.mintick) + " / " + (na(tp2) ? "—" : str.tostring(tp2, format.mintick)) + " · " + tp1Why) : "—", text_color=colG, text_size=size.tiny)
-        table.cell(plan, 0, 17, "Контекст LB", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 17, str.tostring(posRctx * 100, "#.0") + "% диапазона · " + str.tostring(rngLo, format.mintick) + "–" + str.tostring(rngHi, format.mintick), text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 0, 18, "Легенда", text_color=colMuted, text_size=size.tiny)
-        table.cell(plan, 1, 18, "v3.6 · идея 1-6 · клин пунктир=мало касаний", text_color=colMuted, text_size=size.tiny)
-    else
-        table.clear(plan, 0, 0, 1, 18)
+// Свечи по ХОДу (Beluga-палитра)
+color edBar = eff_candleMode != "off" and pathDir != "chop" ? candleTint : na
+barcolor(eff_candleMode == "barcolor" ? edBar : na, title="Ed ход (body)")
+plotcandle(eff_candleMode == "plotcandle" and pathDir != "chop" ? open : na, eff_candleMode == "plotcandle" and pathDir != "chop" ? high : na, eff_candleMode == "plotcandle" and pathDir != "chop" ? low : na, eff_candleMode == "plotcandle" and pathDir != "chop" ? close : na, title="Ed свечи (ХОД)", color=edBar, wickcolor=edBar, bordercolor=edBar)
 
 alertcondition(act == "LONG", "EdBot LONG", "EdBot: LONG trigger")
 alertcondition(act == "SHORT", "EdBot SHORT", "EdBot: SHORT trigger")

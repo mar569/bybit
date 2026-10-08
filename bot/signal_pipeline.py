@@ -212,9 +212,12 @@ def build_signal_alert_caption(
     body = scenario_body_html(ta, symbol=symbol, reading_style=reading_style)
     if body and body not in header:
         parts.append(body)
-    if quality_html.strip() and quality_html.strip() not in "\n\n".join(parts):
-        parts.append(quality_html.strip())
-    if action_line.strip():
+    from .chart_display_policy import ed_minimal_voice_enabled
+
+    if not ed_minimal_voice_enabled():
+        if quality_html.strip() and quality_html.strip() not in "\n\n".join(parts):
+            parts.append(quality_html.strip())
+    if action_line.strip() and not ed_minimal_voice_enabled():
         plain = action_line.strip()
         if plain not in "\n\n".join(parts):
             parts.append(plain)

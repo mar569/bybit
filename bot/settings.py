@@ -594,7 +594,7 @@ class ScannerSettings:
 
     # Все сигналы используют единый аннотированный график.
     signal_chart_enabled: bool = True
-    signal_chart_source: str = "annotated"
+    signal_chart_source: str = "tv_annotated"
     signal_chart_hours: int = 18
     signal_chart_display_hours: int = 14
     signal_chart_interval_minutes: int = 5
@@ -606,7 +606,7 @@ class ScannerSettings:
     pattern_min_confidence: float = 0.68
 
     # Ручной TA использует единый чистый график без внешних боковых панелей.
-    manual_ta_chart_source: str = "annotated"
+    manual_ta_chart_source: str = "tv_annotated"
     # 0 = авто-зум под структуру; иначе фикс. часов на графике ручного TA (4…72)
     manual_ta_chart_display_hours: int = 0
 
@@ -1202,14 +1202,14 @@ class ScannerSettings:
             market_structure_enabled=bool(base.get("market_structure_enabled", True)),
             market_structure_hours=int(base.get("market_structure_hours", 5)),
             signal_chart_enabled=bool(base.get("signal_chart_enabled", True)),
-            signal_chart_source="annotated",
+            signal_chart_source=str(base.get("signal_chart_source", "tv_annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_display_hours=int(base.get("signal_chart_display_hours", 12)),
             signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
             signal_chart_height_scale=float(base.get("signal_chart_height_scale", 1.0)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
-            manual_ta_chart_source="annotated",
+            manual_ta_chart_source=str(base.get("manual_ta_chart_source", "tv_annotated")),
             manual_ta_chart_display_hours=int(base.get("manual_ta_chart_display_hours", 0) or 0),
             signal_message_compact=bool(base.get("signal_message_compact", True)),
             signal_playbook_enabled=bool(base.get("signal_playbook_enabled", False)),

@@ -147,28 +147,34 @@ def _draw_resistance_corridor(
 
 
 def _draw_floor_corridor(ax: plt.Axes, bars: list[KlineBar], *, floor: float, rbr: dict) -> None:
+    from .chart_display_policy import chart_anno_text_enabled
+
     el = float(rbr.get("entry_lo") or floor * 0.996)
     eh = float(rbr.get("entry_hi") or floor * 1.01)
     x0, x1 = _visible_x_span(ax, bars)
     ax.hlines(eh, x0, x1, colors="#58a6ff", linewidth=1.6, alpha=0.9, zorder=5)
     ax.hlines(el, x0, x1, colors="#58a6ff", linewidth=1.6, alpha=0.9, zorder=5)
-    ax.text(
-        x0 + (x1 - x0) * 0.01,
-        eh,
-        f"  retest {fmt_price(el)} – {fmt_price(eh)}  ",
-        color="#58a6ff",
-        fontsize=7.5,
-        fontweight="bold",
-        va="bottom",
-        ha="left",
-        zorder=6,
-    )
+    if chart_anno_text_enabled():
+        ax.text(
+            x0 + (x1 - x0) * 0.01,
+            eh,
+            f"  retest {fmt_price(el)} – {fmt_price(eh)}  ",
+            color="#58a6ff",
+            fontsize=7.5,
+            fontweight="bold",
+            va="bottom",
+            ha="left",
+            zorder=6,
+        )
 
 
 def _draw_range_floor_line(ax: plt.Axes, bars: list[KlineBar], floor: float) -> None:
+    from .chart_display_policy import chart_anno_text_enabled
+
     x0, x1 = _visible_x_span(ax, bars)
     ax.hlines(floor, x0, x1, colors="#8b949e", linewidth=1.0, linestyle="--", alpha=0.65, zorder=4)
-    ax.text(x0, floor, f"  пол {fmt_price(floor)}  ", color="#8b949e", fontsize=6.8, va="top", ha="left", zorder=5)
+    if chart_anno_text_enabled():
+        ax.text(x0, floor, f"  пол {fmt_price(floor)}  ", color="#8b949e", fontsize=6.8, va="top", ha="left", zorder=5)
 
 
 def _draw_impulse_demand_zone(ax: plt.Axes, bars: list[KlineBar], *, floor: float) -> None:
@@ -197,16 +203,19 @@ def _draw_impulse_demand_zone(ax: plt.Axes, bars: list[KlineBar], *, floor: floa
             zorder=2,
         )
     )
-    ax.text(
-        x0,
-        lo,
-        "  база импульса  ",
-        color="#3fb950",
-        fontsize=6.6,
-        va="bottom",
-        ha="left",
-        zorder=5,
-    )
+    from .chart_display_policy import chart_anno_text_enabled
+
+    if chart_anno_text_enabled():
+        ax.text(
+            x0,
+            lo,
+            "  база импульса  ",
+            color="#3fb950",
+            fontsize=6.6,
+            va="bottom",
+            ha="left",
+            zorder=5,
+        )
 
 
 def _draw_impulse_trendline(ax: plt.Axes, bars: list[KlineBar]) -> None:
@@ -288,17 +297,20 @@ def _draw_probable_path_arrow(
         ),
         zorder=6,
     )
-    ax.text(
-        x1,
-        tp_display,
-        "  ход ↓  ",
-        color="#58a6ff",
-        fontsize=6.8,
-        fontweight="bold",
-        va="bottom" if tp_display < cur else "top",
-        ha="right",
-        zorder=7,
-    )
+    from .chart_display_policy import chart_anno_text_enabled
+
+    if chart_anno_text_enabled():
+        ax.text(
+            x1,
+            tp_display,
+            "  ход ↓  ",
+            color="#58a6ff",
+            fontsize=6.8,
+            fontweight="bold",
+            va="bottom" if tp_display < cur else "top",
+            ha="right",
+            zorder=7,
+        )
 
 
 def _draw_story_caption(ax: plt.Axes, ta: TAAnalysisResult, rbr: dict) -> None:
@@ -420,7 +432,10 @@ def draw_ed_story_layers_pro(
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
     draw_forward_short_projection(ax, bars, ta, use_xlim=True)
-    _draw_story_caption(ax, ta, rbr)
+    from .chart_display_policy import chart_anno_text_enabled
+
+    if chart_anno_text_enabled():
+        _draw_story_caption(ax, ta, rbr)
 
 
 def draw_ed_story_layers(

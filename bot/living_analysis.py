@@ -209,6 +209,12 @@ def build_living_analysis_html(
     *,
     symbol: str = "",
 ) -> str:
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_html
+
+    if ed_minimal_voice_enabled():
+        return build_minimal_ed_voice_html(ta, symbol=symbol)
+
     if get_rbr_from_ta(ta) or effective_rbr(ta):
         html = build_living_rbr_html(ta, symbol=symbol)
         if html:

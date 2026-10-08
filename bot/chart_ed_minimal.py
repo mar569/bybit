@@ -106,21 +106,24 @@ def draw_narrow_resistance_corridor(
     )
     ax.hlines(z_hi, x0, x1, colors="#f0c040", linewidth=1.5, alpha=0.9, zorder=5)
     ax.hlines(z_lo, x0, x1, colors="#f0c040", linewidth=1.5, alpha=0.9, zorder=5)
+    from .chart_display_policy import ed_chart_visual_only
+
     if board is not None:
-        mid = (z_lo + z_hi) / 2.0
-        board.add(
-            mid,
-            f"сопр. {fmt_price(z_lo)}–{fmt_price(z_hi)}",
-            "#f0c040",
-            side="right",
-            priority=92,
-            kind="corridor",
-            draw_line=False,
-            ref=mid,
-            skip_if_reserved=False,
-        )
         board.reserve(z_lo)
         board.reserve(z_hi)
+        if not ed_chart_visual_only():
+            mid = (z_lo + z_hi) / 2.0
+            board.add(
+                mid,
+                f"сопр. {fmt_price(z_lo)}–{fmt_price(z_hi)}",
+                "#f0c040",
+                side="right",
+                priority=92,
+                kind="corridor",
+                draw_line=False,
+                ref=mid,
+                skip_if_reserved=False,
+            )
 
 
 def _draw_one_context_zone(

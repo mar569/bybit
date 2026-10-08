@@ -30,7 +30,8 @@ SET_HELP = (
     "/set prob_filter off — отключить фильтр вероятности\n"
     "/set score 1 — мин. сила сигнала\n"
     "/set signals off — остановить уведомления\n"
-    "/set chart annotated — TA-график к сигналам (рекомендуется)\n"
+    "/set chart tv_annotated — сигналы: скрин TradingView + разметка\n"
+    "/set chart annotated — сигналы: только matplotlib (fallback)\n"
     "/set chart on — включить графики к сигналам\n"
     "/set chart off — только текст без картинки\n"
     "/set chart_height 1.3 — высота графика (0.85–1.6, 1.0 = стандарт)\n"
@@ -315,20 +316,24 @@ def parse_set_command(args: list[str]) -> SetResult:
             value = raw_value.lower() in {"1", "on", "true", "yes", "вкл"}
         elif field == "signal_chart_source":
             value = raw_value.lower()
-            if value != "annotated":
+            if value not in {"annotated", "tv_annotated", "tv"}:
                 return SetResult(
                     False,
-                    "Доступен единый чистый график: <code>annotated</code>.",
+                    "График: <code>tv_annotated</code> (TV+разметка) или <code>annotated</code> (matplotlib).",
                     {},
                 )
+            if value == "tv":
+                value = "tv_annotated"
         elif field == "manual_ta_chart_source":
             value = raw_value.lower()
-            if value != "annotated":
+            if value not in {"annotated", "tv_annotated", "tv"}:
                 return SetResult(
                     False,
-                    "Доступен единый чистый график: <code>annotated</code>.",
+                    "Manual TA: <code>tv_annotated</code> или <code>annotated</code>.",
                     {},
                 )
+            if value == "tv":
+                value = "tv_annotated"
         elif field == "signal_chart_height_scale":
             value = float(raw_value)
             if not 0.85 <= value <= 1.6:

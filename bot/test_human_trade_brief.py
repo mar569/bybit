@@ -84,10 +84,10 @@ def test_human_brief_is_sentences_not_bullet_soup() -> None:
         reading_absent=["подтверждённый пробой вверх"],
     )
     text = build_human_trade_brief(ta, symbol="MONUSDT")
-    assert "MONUSDT" in text
+    assert "MON" in text
     assert "· ·" not in text
     assert "Сценарий C:" not in text
-    assert "Итог:" in text
+    assert "0.034" not in text
 
 
 def test_manual_html_avoids_abcd_jargon() -> None:
@@ -112,11 +112,11 @@ def test_manual_html_avoids_abcd_jargon() -> None:
     assert "режим C" not in html.lower()
     assert "bias SHORT" not in html
     assert use_range_wait_caption(ta)
-    assert "подождал" in html.lower()
-    assert "🟢" in html and "🟡" in html
+    assert "SAND" in html
+    assert "🧠" not in html
     assert "📍 План" not in html
     assert "📊 <b>Поток</b>" not in html
-    assert "0.08350" in html
+    assert "0.083" not in html
 
 
 def test_ed_range_wait_jup_style() -> None:
@@ -139,7 +139,6 @@ def test_ed_range_wait_jup_style() -> None:
     )
     html = format_ed_range_wait_html(ta, symbol="JUPUSDT")
     assert "JUP" in html
-    assert "0.38100" in html
-    assert "0.37187" in html or "0.3718" in html
-    assert "0.388" in html
+    assert "0.381" not in html
+    assert "CVD" not in html
     assert "breakout_level" not in html

@@ -184,11 +184,14 @@ def draw_breakout_retest_markers(
     *,
     max_markers: int = 2,
 ) -> None:
+    from .chart_display_policy import chart_breakout_marker_labels_enabled
+
     events = collect_breakout_retest_events(bars, ta, max_events=max_markers)
     if not events:
         return
     y0, y1 = ax.get_ylim()
     span = max(y1 - y0, 1e-9)
+    show_labels = chart_breakout_marker_labels_enabled()
     for k, ev in enumerate(events):
         x = _idx_to_x(bars, ev.bar_idx)
         if ev.kind == "breakout":
@@ -206,6 +209,8 @@ def draw_breakout_retest_markers(
             linewidths=2.0,
             zorder=11,
         )
+        if not show_labels:
+            continue
         dy = span * (0.035 if k % 2 == 0 else -0.04)
         ax.annotate(
             f"  {ev.label}  ",

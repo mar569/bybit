@@ -38,14 +38,16 @@ def test_living_general_wait_has_candles_and_rules() -> None:
         verdict="WAIT",
         verdict_confidence=6,
         action_priority="long",
+        phase_label="боковик",
         breakout_level=0.0835,
         breakdown_level=0.076,
         reading_narrative="Цена в середине диапазона, ждём пробой.",
         recent_price_action_ru="Последние свечи: зелёная → красная. Close 0.080.",
     )
     html = build_living_analysis_html(ta, symbol="SANDUSDT")
-    assert "🕯" in html
-    assert "🟡" in html
+    assert "SAND" in html
+    assert "0.08" not in html
+    assert "🧠" not in html
     assert "📍 План" not in html
 
 
@@ -73,7 +75,6 @@ def test_living_html_oil_style_not_long_chase() -> None:
         },
     )
     html = build_living_analysis_html(ta, symbol="BZUSDT")
-    assert "шорт" in html.lower()
-    assert "не market" in html.lower()
-    assert "уклон в лонг" not in html.lower()
-    assert "🟢" in html
+    assert "BZ" in html
+    assert "99" not in html and "104" not in html
+    assert "шорт" in html.lower() or "вниз" in html.lower()

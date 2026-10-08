@@ -102,6 +102,12 @@ def build_human_trade_brief(
     conflict_note: str = "",
 ) -> str:
     """4–6 предложений plain text (для тестов и логов)."""
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_plain
+
+    if ed_minimal_voice_enabled():
+        return build_minimal_ed_voice_plain(ta, symbol=symbol)
+
     sym = (symbol or "").strip().upper()
     price = float(getattr(ta, "current_price", 0) or 0)
     stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
@@ -305,6 +311,12 @@ def build_human_trade_brief_html(
     symbol: str = "",
     conflict_note: str = "",
 ) -> str:
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_html
+
+    if ed_minimal_voice_enabled():
+        return build_minimal_ed_voice_html(ta, symbol=symbol)
+
     parts: list[str] = []
     analysis = build_trade_analysis_html(ta)
     if analysis:
@@ -473,6 +485,12 @@ def format_ed_range_wait_html(
     symbol: str = "",
 ) -> str:
     """WAIT между breakout/breakdown: проза + 🟢🔴🟡, без 📍 План / 📊 Поток."""
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_html
+
+    if ed_minimal_voice_enabled():
+        return build_minimal_ed_voice_html(ta, symbol=symbol)
+
     sym = _symbol_short(symbol or getattr(ta, "symbol", "") or "")
     conf = int(getattr(ta, "verdict_confidence", 0) or 0)
     brk = float(getattr(ta, "breakout_level", 0) or 0)
@@ -550,7 +568,12 @@ def format_rbr_alert_caption_html(
     symbol: str = "",
 ) -> str:
     """WATCH/alert при RBR: текст минимальный — уровни и поток на PNG."""
+    from .chart_display_policy import ed_minimal_voice_enabled
+    from .minimal_ed_voice import build_minimal_ed_voice_html
     from .range_breakdown_retest import get_rbr_from_ta
+
+    if ed_minimal_voice_enabled():
+        return build_minimal_ed_voice_html(ta, symbol=symbol)
 
     rbr = get_rbr_from_ta(ta)
     if not rbr:

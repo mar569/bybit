@@ -76,23 +76,29 @@ def draw_pro_layers(
         from .chart_range_wait import draw_range_wait_layers_minimal
 
         draw_range_wait_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        from .chart_display_policy import ed_chart_visual_only
         from .chart_ed_minimal import add_minimal_context_labels
 
-        add_minimal_context_labels(board, bars, ta, mode="range_wait")
+        if not ed_chart_visual_only():
+            add_minimal_context_labels(board, bars, ta, mode="range_wait")
     elif mode == "observation":
         from .chart_observation import draw_observation_layers_minimal
 
         draw_observation_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        from .chart_display_policy import ed_chart_visual_only
         from .chart_ed_minimal import add_minimal_context_labels
 
-        add_minimal_context_labels(board, bars, ta, mode="observation")
+        if not ed_chart_visual_only():
+            add_minimal_context_labels(board, bars, ta, mode="observation")
     else:
         from .chart_ed_story import draw_ed_story_layers_pro
 
         draw_ed_story_layers_pro(ax, bars, ta, interval_minutes=interval_minutes, board=board)
+        from .chart_display_policy import ed_chart_visual_only
         from .chart_ed_minimal import add_minimal_context_labels
 
-        add_minimal_context_labels(board, bars, ta, mode="ed_story")
+        if not ed_chart_visual_only():
+            add_minimal_context_labels(board, bars, ta, mode="ed_story")
     from .chart_ed_minimal import draw_pro_teaching_layers
 
     draw_pro_teaching_layers(ax, bars, ta, mode=mode)

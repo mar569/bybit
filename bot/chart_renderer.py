@@ -3595,6 +3595,56 @@ async def render_annotated_chart(
             fib_span_bars=0,
         )
 
+    from .chart_display_policy import use_tradingview_chart_base
+
+    if (
+        bars_chart
+        and ta_chart
+        and symbol
+        and use_tradingview_chart_base(
+            chart_source,
+            signal_chart=signal_chart,
+            manual_ta_chart=manual_ta_chart,
+        )
+    ):
+        try:
+            from .chart_screenshot import chart_capture_service
+            from .chart_tv_pro_overlay import compose_tradingview_pro_png
+
+            tv_png = await chart_capture_service.capture_tradingview(
+                exchange,
+                symbol,
+                interval_minutes=iv_chart,
+            )
+            if tv_png:
+                composed = compose_tradingview_pro_png(
+                    tv_png,
+                    bars_chart,
+                    ta_chart,
+                    interval_minutes=iv_chart,
+                )
+                if composed:
+                    out_ta = ta_chart if ta_chart is not None else ta
+                    if out_ta is not None and iv_chart != interval_minutes:
+                        mm = dict(getattr(out_ta, "market_metrics", None) or {})
+                        mm["chart_setup_interval"] = iv_chart
+                        mm["chart_scanner_interval"] = interval_minutes
+                        mm["chart_render_backend"] = "tradingview"
+                        try:
+                            from dataclasses import replace
+
+                            out_ta = replace(
+                                out_ta,
+                                market_metrics=mm,
+                                analysis_interval_minutes=iv_chart,
+                            )
+                        except Exception:
+                            pass
+                    logger.info("Chart %s %s: TradingView + PRO overlay (%sm)", exchange, symbol, iv_chart)
+                    return composed, out_ta
+        except Exception:
+            logger.warning("TradingView chart failed for %s — matplotlib fallback", symbol, exc_info=True)
+
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
     pro_mode = False if (manual_ta_chart or signal_chart) else chart_source == "annotated_pro"
     title = f"Bybit {iv_chart}m · вид {zoom_hours}ч"
