@@ -48,13 +48,29 @@ def draw_mpl_spec_core(
             ax.text(x0, lv.price, f"  {tag}", color=color, fontsize=7, va="center", zorder=6)
 
     if not levels_only and spec.show_range and tops and bots:
+        rx0, rx1 = x0, x1
+        cons = getattr(ta, "consolidation", None)
+        if cons is not None:
+            import matplotlib.dates as mdates
+
+            from ...chart_ed_story import _idx_to_date
+
+            start = max(0, min(int(getattr(cons, "start_idx", 0)), len(bars) - 2))
+            rx0 = mdates.date2num(_idx_to_date(bars, start))
+            rx1 = mdates.date2num(_idx_to_date(bars, len(bars) - 1))
+        else:
+            w = max(x1 - x0, 0.001)
+            rx0 = x0 + w * 0.28
         ax.add_patch(
             Rectangle(
-                (x0, min(bots)),
-                max(x1 - x0, 0.001),
+                (rx0, min(bots)),
+                max(rx1 - rx0, 0.001),
                 max(tops) - min(bots),
                 facecolor="#8b949e",
-                alpha=0.08,
+                alpha=0.06,
+                edgecolor="#484f58",
+                linewidth=0.6,
+                linestyle="--",
                 zorder=2,
             )
         )

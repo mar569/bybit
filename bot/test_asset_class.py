@@ -19,8 +19,9 @@ def test_resolve_flags_equity_playbook_off_by_default() -> None:
     assert flags.quiver_intel is True
 
 
-def test_chart_spec_layers_off_when_rich_analysis_on() -> None:
-    from bot.chart_display_policy import ed_chart_rich_analysis_enabled
+def test_chart_spec_layers_on_with_playbook_v3() -> None:
+    from bot.chart_display_policy import ed_chart_rich_analysis_enabled, ed_playbook_v3_enabled
 
+    assert ed_playbook_v3_enabled() is True
     assert ed_chart_rich_analysis_enabled() is True
-    assert ed_chart_spec_layers_enabled() is False
+    assert ed_chart_spec_layers_enabled() is True

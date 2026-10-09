@@ -68,20 +68,9 @@ def draw_pro_layers(
     board = LabelBoard()
     if mode != "legacy_manual":
         try:
-            from .chart_display_policy import ed_chart_rich_analysis_enabled
-            from .chart_rich_layers import draw_rich_analysis_layers
+            from .chart_display_policy import ed_playbook_v3_enabled
 
-            if ed_chart_rich_analysis_enabled():
-                return draw_rich_analysis_layers(
-                    ax, bars, ta, mode=mode, interval_minutes=interval_minutes,
-                )
-        except Exception:
-            logger.debug("rich chart layers fallback", exc_info=True)
-
-        try:
-            from .chart_display_policy import ed_chart_spec_layers_enabled
-
-            if ed_chart_spec_layers_enabled():
+            if ed_playbook_v3_enabled():
                 from .core.playbook.chart_layers import draw_mpl_playbook_layers
 
                 sym = str(getattr(ta, "symbol", "") or "")

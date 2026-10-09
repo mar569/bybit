@@ -66,13 +66,10 @@ def try_draw_tv_playbook_layers(
     else:
         layers += draw_playbook_rbr_phase_tv(ax, mapper, ta, spec)
 
-    if spec.show_primary_pattern and not rbr_active:
+    if spec.show_primary_pattern:
         draw_primary_pattern_tv_layer(ax, mapper, ta)
         if getattr(ta, "primary_chart_pattern", None):
             layers += 1
-    elif rbr_active and getattr(ta, "primary_chart_pattern", None):
-        draw_primary_pattern_tv_layer(ax, mapper, ta)
-        layers += 1
 
     if spec.show_smc_fvg and not rbr_active:
         from ...chart_education_visual import draw_education_visuals_tv
@@ -102,65 +99,24 @@ def draw_mpl_playbook_layers(
     symbol: str = "",
     interval_minutes: int = 15,
 ) -> object | None:
-    """Matplotlib LabelBoard when spec-mode on; else None → legacy pro layers."""
+    """Matplotlib: глобальный PRO-стек (ChartSpec + chart_pro_visual)."""
     spec = chart_spec_for_ta(ta, symbol=symbol)
     if spec is None:
         return None
 
     from ...chart_label_layout import LabelBoard
-    from .chart_mpl_spec import draw_mpl_spec_core
-
     from ...chart_rbr_refresh import refresh_rbr_for_chart
-    from ...range_breakdown_retest import get_rbr_from_ta
+    from ...chart_pro_visual import draw_pro_visual_mpl
 
     ta = refresh_rbr_for_chart(ta, bars)
-    rbr = get_rbr_from_ta(ta)
-    if rbr:
-        spec = chart_spec_for_ta(ta, symbol=symbol) or spec
-    scenario_rbr = bool(spec.rbr_phase and rbr)
+    spec = chart_spec_for_ta(ta, symbol=symbol) or spec
 
     board = LabelBoard()
-    drawn = draw_mpl_spec_core(ax, bars, ta, spec, levels_only=scenario_rbr)
-    if drawn <= 0:
-        drawn = 1
+    draw_pro_visual_mpl(ax, bars, ta, spec, interval_minutes=interval_minutes)
 
-    if scenario_rbr:
-        try:
-            from ...chart_ed_story import _draw_consolidation_context
-            from ...chart_range_breakdown_draw import draw_range_breakdown_retest_path
+    from ...chart_display_policy import chart_teaching_tags_enabled
 
-            floor = float(rbr.get("range_bottom") or 0)
-            ceil = float(rbr.get("range_top") or 0)
-            if floor > 0 and ceil > floor:
-                _draw_consolidation_context(ax, bars, ta, floor=floor, ceil=ceil)
-            draw_range_breakdown_retest_path(ax, bars, ta)
-            drawn += 3
-        except Exception:
-            logger.debug("RBR scenario path draw failed", exc_info=True)
-
-    mode = "ed_story" if spec.rbr_phase else "observation"
-    from ...chart_ed_minimal import draw_pro_teaching_layers
-
-    draw_pro_teaching_layers(ax, bars, ta, mode=mode, compact_rbr=scenario_rbr)
-
-    if spec.show_smc_fvg and not scenario_rbr:
-        try:
-            from ...chart_education_visual import draw_education_visuals_mpl
-
-            draw_education_visuals_mpl(ax, bars, ta)
-        except Exception:
-            logger.debug("mpl smc overlays skipped", exc_info=True)
-
-    from ...chart_display_policy import chart_teaching_tags_enabled, ed_chart_visual_only
-    from ...chart_ed_minimal import add_minimal_context_labels
-    from ...chart_teaching_tags import enrich_teaching_label_board
-
-    if (chart_teaching_tags_enabled() or not ed_chart_visual_only()) and not scenario_rbr:
-        enrich_teaching_label_board(board, bars, ta, mode=mode)
-        if not ed_chart_visual_only():
-            add_minimal_context_labels(board, bars, ta, mode=mode)
-
-    if scenario_rbr and chart_teaching_tags_enabled():
+    if chart_teaching_tags_enabled() and spec.rbr_phase:
         from ...chart_teaching_tags import story_banner_line
 
         line = story_banner_line(ta, mode="ed_story")
@@ -177,5 +133,4 @@ def draw_mpl_playbook_layers(
                 zorder=12,
                 bbox=dict(boxstyle="round,pad=0.32", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
             )
-    _ = drawn
     return board

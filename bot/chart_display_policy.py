@@ -14,7 +14,7 @@ def ed_playbook_v3_enabled() -> bool:
 
 
 def ed_chart_rich_analysis_enabled() -> bool:
-    """Полный PNG: тренды, паттерны, план-полосы, 48ч — не урезанный ChartSpec."""
+    """Полный mpl-разбор (48ч, паттерны/тренды). Слои всё равно из ChartSpec — не отдельный «rich»-стек."""
     return _env_on("ED_CHART_RICH", default="1")
 
 
@@ -29,9 +29,7 @@ def ed_chart_visible_hours(default: int = 48) -> int | None:
 
 
 def ed_chart_spec_layers_enabled() -> bool:
-    """TV/mpl слои только из ChartSpec (без дубля ed_story range lines)."""
-    if ed_chart_rich_analysis_enabled():
-        return False
+    """TV/mpl — один ChartSpec для всех символов (rich не отключает spec)."""
     if not ed_playbook_v3_enabled():
         return _env_on("ED_CHART_SPEC_LAYERS", default="0")
     return _env_on("ED_CHART_SPEC_LAYERS", default="1")
@@ -66,9 +64,7 @@ def chart_box_labels_enabled() -> bool:
 
 
 def chart_trade_plan_on_chart_enabled() -> bool:
-    """Блоки TP/SL/IN и риск-боксы на PNG."""
-    if ed_chart_rich_analysis_enabled():
-        return _env_on("ED_CHART_TRADE_PLAN", default="1")
+    """Блоки TP/SL/IN на PNG — только явно ED_CHART_TRADE_PLAN=1 (не с RBR-WATCH)."""
     return _env_on("ED_CHART_TRADE_PLAN", default="0")
 
 
