@@ -52,6 +52,20 @@ def ed_pdf_chart_style_enabled() -> bool:
     return _env_on("ED_PDF_CHART_STYLE", default="1")
 
 
+def ed_chart_composite_enabled() -> bool:
+    """PNG: паттерны + SMC + уровни + канал на одном графике (не один «режим»)."""
+    if not ed_pdf_chart_style_enabled():
+        return False
+    return _env_on("ED_CHART_COMPOSITE", default="1")
+
+
+def chart_pdf_setup_hint_enabled() -> bool:
+    """Одна строка на PNG: что означает разметка (не дубль Telegram)."""
+    if not ed_pdf_chart_style_enabled():
+        return False
+    return _env_on("ED_CHART_PDF_HINT", default="1")
+
+
 def ed_playbook_minimal_copy_enabled() -> bool:
     """Без «На графике…», дублей verdict/score, лишних простыней в Telegram."""
     if not ed_playbook_v3_enabled():

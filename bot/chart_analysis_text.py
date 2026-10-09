@@ -7,8 +7,14 @@ if TYPE_CHECKING:
     from .ta_analysis import TAAnalysisResult
 
 
-def structure_break_label_ru(kind: str) -> str:
+def structure_break_label_ru(kind: str, *, short: bool = False) -> str:
     k = (kind or "").lower()
+    if short:
+        if k == "mss":
+            return "CHoCH"
+        if k == "bos":
+            return "BOS"
+        return "BOS"
     if k == "mss":
         return "смена характера"
     if k == "bos":

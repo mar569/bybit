@@ -96,7 +96,7 @@ def draw_smc_visuals_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
             ax.plot(ts, marker.price, marker="*", color=color, ms=9, linestyle="None", zorder=7)
         elif kind in {"equal_highs", "equal_lows"}:
             ax.axhline(float(marker.price), color="#d2a8ff", linestyle=":", linewidth=0.8, alpha=0.7, zorder=3)
-        if show_text and getattr(marker, "label", ""):
+        if show_text and getattr(marker, "label", "") and kind in {"sweep", "bos", "mss", "expansion"}:
             ax.text(ts, marker.price, f" {marker.label[:12]}", color="#c9d1d9", fontsize=6, va="bottom")
 
 

@@ -182,6 +182,13 @@ def draw_pro_teaching_layers(
     """Графический разбор бота: 1 паттерн, foresight/sweep, 1 зона — не дублирует SL/TP."""
     if not bars or mode == "legacy_manual":
         return
+    try:
+        from .chart_display_policy import ed_chart_composite_enabled
+
+        if ed_chart_composite_enabled():
+            return
+    except Exception:
+        pass
     if compact_rbr:
         primary = getattr(ta, "primary_chart_pattern", None)
         if getattr(ta, "reading_accept_pattern", True) and primary:
