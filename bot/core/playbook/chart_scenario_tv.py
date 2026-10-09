@@ -69,24 +69,32 @@ def draw_rbr_scenario_narrative_tv(ax: plt.Axes, mapper: object, ta: TAAnalysisR
                     bbox=dict(boxstyle="round,pad=0.12", facecolor="#161b22", edgecolor="#58a6ff", alpha=0.9),
                 )
             layers += 2
-        if tp > 0 and tp < cur and mapper.price_visible(tp):  # type: ignore[attr-defined]
-            y_tp = mapper.y(tp)  # type: ignore[attr-defined]
+        if tp > 0 and tp < cur:
+            y_tp = mapper.y(tp) if mapper.price_visible(tp) else 0.08  # type: ignore[attr-defined]
+            x_tip = min(x1 + 0.06, 0.92)
+            y_tip = max(min(y_tp, 0.92), 0.08)
+            y_cur = max(min(mapper.y(cur), 0.92), 0.08)  # type: ignore[attr-defined]
             ax.annotate(
                 "",
-                xy=(x1 + 0.04, y_tp),
-                xytext=(x1, mapper.y(cur)),  # type: ignore[attr-defined]
+                xy=(x_tip, y_tip),
+                xytext=(min(x1, 0.88), y_cur),
                 arrowprops=dict(arrowstyle="->", color="#3fb950", lw=1.15, alpha=0.82),
                 zorder=5,
             )
+            label = f"цель ≈ {fmt_price(tp)}"
+            if not mapper.price_visible(tp):  # type: ignore[attr-defined]
+                label += " (ниже экрана)"
             ax.text(
-                x1 + 0.02,
-                y_tp,
-                f"  цель ≈ {fmt_price(tp)}  ",
+                0.03,
+                0.08,
+                f"  {label}  ",
+                transform=ax.transAxes,
                 color="#3fb950",
                 fontsize=6.2,
                 fontweight="bold",
-                va="top",
+                va="bottom",
                 zorder=6,
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="#161b22", edgecolor="#238636", alpha=0.9),
             )
             layers += 1
     return layers

@@ -35,6 +35,13 @@ def prefer_tradingview_for_pro(
 ) -> bool:
     if not unified_pro_chart(signal_chart=signal_chart, manual_ta_chart=manual_ta_chart):
         return False
+    try:
+        from .chart_display_policy import ed_chart_rich_analysis_enabled
+
+        if ed_chart_rich_analysis_enabled():
+            return False
+    except Exception:
+        pass
     if matplotlib_only_for_pro():
         return False
     if not tradingview_base_enabled():

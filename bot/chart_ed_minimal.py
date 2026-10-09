@@ -177,9 +177,26 @@ def draw_pro_teaching_layers(
     ta: TAAnalysisResult,
     *,
     mode: str,
+    compact_rbr: bool = False,
 ) -> None:
     """Графический разбор бота: 1 паттерн, foresight/sweep, 1 зона — не дублирует SL/TP."""
     if not bars or mode == "legacy_manual":
+        return
+    if compact_rbr:
+        primary = getattr(ta, "primary_chart_pattern", None)
+        if getattr(ta, "reading_accept_pattern", True) and primary:
+            from .pattern_specs import MIN_DRAW_CONFIDENCE
+            from .chart_pattern_draw import draw_chart_patterns
+
+            draw_chart_patterns(
+                ax,
+                bars,
+                list(getattr(ta, "chart_patterns", None) or []),
+                max_patterns=1,
+                min_confidence=max(0.72, float(MIN_DRAW_CONFIDENCE)),
+                force_primary=primary,
+                draw_target_labels=False,
+            )
         return
     from .pattern_specs import MIN_DRAW_CONFIDENCE
 

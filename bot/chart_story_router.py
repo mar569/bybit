@@ -27,6 +27,8 @@ def build_synthetic_rbr_dict(
     cur = float(getattr(ta, "current_price", 0) or 0)
     if top <= bot or cur <= 0:
         return None
+    if cur > top * 1.004:
+        return None
     pos = (cur - bot) / (top - bot)
     if pos < 0.55:
         return None
@@ -85,6 +87,10 @@ def enrich_ta_for_chart_story(
     ta: TAAnalysisResult,
     bars: list[KlineBar] | None = None,
 ) -> TAAnalysisResult:
+    if bars:
+        from .chart_rbr_refresh import refresh_rbr_for_chart
+
+        ta = refresh_rbr_for_chart(ta, bars)
     if bars and not str(getattr(ta, "recent_price_action_ru", "") or "").strip():
         try:
             from .recent_bars_narrative import describe_recent_bars

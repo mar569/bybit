@@ -64,16 +64,19 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 def pattern_chart_hours(interval_minutes: int) -> int:
     """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
-    return {5: 18, 10: 14, 15: 24, 30: 48, 60: 72}.get(interval_minutes, 18)
+    return {5: 24, 10: 36, 15: 48, 30: 48, 60: 72}.get(interval_minutes, 24)
 
 
 def chart_display_hours(interval_minutes: int, *, configured: int | None = None) -> int:
-    """Сколько часов показывать на графике по умолчанию (~12ч на 5m — весь дневной дамп)."""
-    defaults = {5: 14, 10: 13, 15: 15, 30: 48, 60: 36}
-    base = defaults.get(interval_minutes, 12)
+    """Сколько часов показывать на графике по умолчанию."""
+    from .chart_display_policy import ed_chart_visible_hours
+
+    env_vis = ed_chart_visible_hours()
+    defaults = {5: 18, 10: 24, 15: 48, 30: 48, 60: 48}
+    base = env_vis if env_vis is not None else defaults.get(interval_minutes, 24)
     if configured is None:
         return base
-    return max(4, min(int(configured), pattern_chart_hours(interval_minutes)))
+    return max(4, min(int(configured), 96))
 
 
 def structure_aware_display_hours(
@@ -110,7 +113,12 @@ def structure_aware_display_hours(
 
 def manual_ta_hours(interval_minutes: int) -> int:
     """Сколько часов свечей грузим для ручного разбора (больше, чем зум по умолчанию)."""
-    return {5: 22, 10: 30, 15: 36, 30: 48, 60: 72}.get(interval_minutes, 22)
+    from .chart_display_policy import ed_chart_visible_hours
+
+    env_vis = ed_chart_visible_hours()
+    if env_vis is not None:
+        return max(env_vis, 12)
+    return {5: 24, 10: 36, 15: 48, 30: 48, 60: 72}.get(interval_minutes, 36)
 
 
 def compute_structure_bar_span(ta: object, bars: list) -> int:

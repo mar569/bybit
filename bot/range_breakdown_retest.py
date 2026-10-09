@@ -42,6 +42,13 @@ def _swing_low_target(bars: list[KlineBar], below: float, *, lookback: int = 140
     return lows[0]
 
 
+def _recent_close_above(bars: list[KlineBar], level: float, *, n: int = 10) -> bool:
+    if not bars or level <= 0:
+        return False
+    tail = bars[-min(n, len(bars)) :]
+    return any(float(b.close) > level * 1.0015 for b in tail)
+
+
 def _recent_close_below(bars: list[KlineBar], level: float, *, n: int = 10) -> bool:
     if not bars or level <= 0:
         return False
@@ -109,6 +116,9 @@ def evaluate_range_breakdown_retest(
     upper_range = pos >= 0.55 and current >= floor * 1.001
 
     if repeat_spike_dump_risk and pos <= 0.25:
+        return None
+
+    if current > ceil * 1.004 or _recent_close_above(bars, ceil, n=5):
         return None
 
     if upper_range:

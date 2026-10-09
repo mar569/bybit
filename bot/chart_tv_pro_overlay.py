@@ -416,6 +416,26 @@ def _tv_plan_glyphs(
         )
 
 
+def _draw_observation_baseline_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> int:
+    """Минимум для «пустых» кадров (нефть, flat): сопр/подд если есть в TA."""
+    from .chart_display_policy import chart_teaching_tags_enabled
+
+    layers = 0
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    if brk > 0 and mapper.price_visible(brk):
+        mapper.hline(ax, brk, color="#f0c040", lw=1.25, alpha=0.82)
+        if chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(brk), " СОПР", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+        layers += 1
+    if brdn > 0 and mapper.price_visible(brdn):
+        mapper.hline(ax, brdn, color="#3fb950", lw=1.25, alpha=0.82)
+        if chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(brdn), " ПОДД", color="#3fb950", fontsize=6.5, va="top", zorder=8)
+        layers += 1
+    return layers
+
+
 def _draw_probable_path_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
     from .chart_display_policy import chart_trade_plan_on_chart_enabled
     from .plan_staleness import plan_is_stale
@@ -532,7 +552,9 @@ def compose_tradingview_pro_png(
         interval_minutes=interval_minutes,
         display_hours=display_hours,
     )
-    if drew < 2:
+    from .range_breakdown_retest import get_rbr_from_ta
+
+    if drew < 2 or (drew < 4 and not get_rbr_from_ta(ta)):
         plt.close(fig)
         logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
         return None
