@@ -869,30 +869,6 @@ class TelegramBot:
         ta: object,
         symbol: str,
     ) -> bool:
-        from .channel_discipline import (
-            ed_entries_only_enabled,
-            manual_ta_skip_chart_when_no_entry,
-        )
-        from .human_trade_brief import manual_entry_ready
-
-        if (
-            ed_entries_only_enabled()
-            and manual_ta_skip_chart_when_no_entry()
-            and not manual_entry_ready(ta, symbol=symbol)
-            and self.application is not None
-        ):
-            try:
-                await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption[:4000],
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard,
-                )
-                self._last_send_time[chat_id] = time.time()
-                return True
-            except Exception:
-                logger.exception("Failed to send manual TA text-only to chat %s", chat_id)
-                return False
         return await self._send_chart(
             chat_id,
             png_bytes,
@@ -900,6 +876,9 @@ class TelegramBot:
             is_priority=False,
             keyboard=keyboard,
         )
+
+    def _manual_ta_chart_source(self) -> str:
+        return self.settings_manager.settings.manual_ta_chart_source or "annotated"
 
     def _coinglass_link_buttons(
         self,
@@ -1998,6 +1977,7 @@ class TelegramBot:
                         ta_result,
                         readiness=readiness,
                         quality_tier=quality.tier,
+                        quality_block_reason=quality.block_reason or "",
                         watch_allowed=gate_watch_ok,
                         min_entry_score=int(getattr(settings, "trade_decision_min_entry_score", 62)),
                         min_watch_score=int(getattr(settings, "trade_decision_min_watch_score", 36)),
@@ -2057,6 +2037,7 @@ class TelegramBot:
                             symbol=signal.symbol,
                             quality_tier=quality.tier,
                             trade_action=trade_decision.action,
+                            signal_type=signal.signal_type or "",
                         )
                     )
                     if (
@@ -2065,12 +2046,14 @@ class TelegramBot:
                         and not rbr_watch
                         and not channel_ready
                     ):
-                        extra = f" · {quality.block_reason}" if quality.block_reason else ""
+                        br = (quality.block_reason or "").strip()
+                        tr = (trade_decision.reason or "").strip()
+                        extra = f" · {br}" if br and br != tr else ""
                         logger.info(
                             "Telegram skip %s %s: trade gate — %s%s",
                             signal.exchange,
                             signal.symbol,
-                            trade_decision.reason,
+                            tr or br or "skip",
                             extra,
                         )
                         if ta_result is not None and not skip_dedupe:
@@ -2125,6 +2108,7 @@ class TelegramBot:
                         symbol=signal.symbol,
                         quality_tier=quality.tier,
                         trade_action=td_act,
+                        signal_type=signal.signal_type or "",
                     ):
                         logger.info(
                             "Telegram skip %s %s: entry-only (tier=%s decision=%s)",
@@ -2210,6 +2194,7 @@ class TelegramBot:
                         symbol=signal.symbol,
                         quality_tier=quality.tier if quality else None,
                         trade_action=(trade_decision.action if trade_decision else "") or "",
+                        signal_type=signal.signal_type or "",
                     )
                 )
                 if enforce_actionable and not skip_dedupe and not channel_ready:
@@ -2260,6 +2245,7 @@ class TelegramBot:
                 quality_tier=quality.tier if quality else None,
                 trade_decision=trade_decision,
                 settings=settings,
+                signal_type=signal.signal_type or "",
             )
             if not attach_chart:
                 png = None
@@ -3971,45 +3957,7 @@ class TelegramBot:
         query: CallbackQuery | None = None,
         chart_source: str | None = None,
     ) -> None:
-        if chart_source is None:
-            text = (
-                f"📐 <b>{symbol}</b> · {interval_minutes}m\n"
-                "Выберите тип графика:"
-            )
-            if query:
-                await query.answer("Выберите вид графика")
-                try:
-                    await query.edit_message_text(
-                        text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=self._manual_ta_chart_source_keyboard(
-                            symbol,
-                            interval_minutes,
-                            wizard=True,
-                        ),
-                    )
-                except BadRequest:
-                    if query.message:
-                        await query.message.reply_text(
-                            text,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=self._manual_ta_chart_source_keyboard(
-                                symbol,
-                                interval_minutes,
-                                wizard=True,
-                            ),
-                        )
-            elif update.message:
-                await update.message.reply_text(
-                    text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self._manual_ta_chart_source_keyboard(
-                        symbol,
-                        interval_minutes,
-                        wizard=True,
-                    ),
-                )
-            return
+        chart_source = chart_source or self._manual_ta_chart_source()
 
         state = self._mta_wizard_state(context) or {}
         photo_file_id = state.get("photo_file_id")
@@ -4486,19 +4434,14 @@ class TelegramBot:
                 parse_mode=ParseMode.HTML,
             )
             return
-        if interval in MANUAL_TA_TIMEFRAMES:
-            await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
-            )
-        else:
+        if interval not in MANUAL_TA_TIMEFRAMES:
             interval = 5
-            await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
-            )
+        await self._process_manual_ta_request(
+            update,
+            symbol,
+            interval,
+            chart_source=self._manual_ta_chart_source(),
+        )
 
     async def on_manual_ta_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -4559,22 +4502,14 @@ class TelegramBot:
                 "price": replay_price,
                 "open_time_ms": open_ms,
             }
-        replay_hint = ""
-        if bar_idx is not None or replay_price is not None or open_ms is not None:
-            replay_hint = "\n⏪ <i>Replay — срез по метке, после выбора графика.</i>"
-        if interval in MANUAL_TA_TIMEFRAMES:
-            await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:{replay_hint}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
-            )
-        else:
+        if interval not in MANUAL_TA_TIMEFRAMES:
             interval = 5
-            await update.message.reply_text(
-                f"📐 <b>{symbol}</b> · 5m по умолчанию\nВыберите тип графика:{replay_hint}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._manual_ta_chart_source_keyboard(symbol, interval, wizard=False),
-            )
+        await self._process_manual_ta_request(
+            update,
+            symbol,
+            interval,
+            chart_source=self._manual_ta_chart_source(),
+        )
 
     async def on_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
@@ -5858,28 +5793,14 @@ class TelegramBot:
                 await query.answer("Некорректный запрос.", show_alert=True)
                 return
             symbol, interval = parsed
-            await query.answer("Выберите вид графика")
-            try:
-                await query.edit_message_text(
-                    f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self._manual_ta_chart_source_keyboard(
-                        symbol,
-                        interval,
-                        wizard=False,
-                    ),
-                )
-            except BadRequest:
-                if query.message:
-                    await query.message.reply_text(
-                        f"📐 <b>{symbol}</b> · {interval}m\nВыберите тип графика:",
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=self._manual_ta_chart_source_keyboard(
-                            symbol,
-                            interval,
-                            wizard=False,
-                        ),
-                    )
+            await query.answer(f"⏳ {symbol} · {interval}m")
+            await self._process_manual_ta_request(
+                update,
+                symbol,
+                interval,
+                query=query,
+                chart_source=self._manual_ta_chart_source(),
+            )
             return
 
         from .manual_ta import MTAI_CALLBACK_PREFIX

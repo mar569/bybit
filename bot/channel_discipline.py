@@ -40,11 +40,23 @@ def proactive_intel_on_watch_enabled() -> bool:
 
 
 def manual_ta_skip_chart_when_no_entry() -> bool:
-    """Ручной /ta: без PNG, если вход не готов (только текст)."""
-    raw = os.environ.get("ED_MANUAL_TA_SKIP_CHART_IF_NO_ENTRY")
-    if raw is not None:
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    return True
+    """Устарело: PNG ручного TA всегда отправляется."""
+    return False
+
+
+_BREAKOUT_ALERT_TYPES = frozenset({
+    "vertical_dump",
+    "vertical_pump",
+    "mega_dump",
+    "mega_pump",
+    "liq_cascade_dump",
+    "liq_cascade_pump",
+})
+
+
+def ed_breakout_watch_alerts_enabled() -> bool:
+    """Сканер vertical/mega: WATCH + PNG в alert-канал (даже при ED_ENTRIES_ONLY)."""
+    return _on("ED_ALERT_BREAKOUT_WATCH", default="1")
 
 
 def signal_alert_channel_ready(
@@ -53,15 +65,26 @@ def signal_alert_channel_ready(
     symbol: str = "",
     quality_tier: str | None = None,
     trade_action: str | None = None,
+    signal_type: str = "",
 ) -> bool:
-    """Можно слать в alert-канал: готовый план (ARMED/LONG/SHORT), не «наблюдение»."""
+    """Можно слать в alert-канал: ENTRY или breakout-WATCH с графиком."""
     from .human_trade_brief import manual_entry_ready
 
     if manual_entry_ready(ta, symbol=symbol):  # type: ignore[arg-type]
         return True
     tier = (quality_tier or "").lower()
     act = (trade_action or "").lower()
-    return tier == "entry" and act in {"", "entry"}
+    if tier == "entry" and act in {"", "entry"}:
+        return True
+    st = (signal_type or "").lower()
+    if (
+        ed_breakout_watch_alerts_enabled()
+        and st in _BREAKOUT_ALERT_TYPES
+        and tier == "watch"
+        and act in {"watch", ""}
+    ):
+        return True
+    return False
 
 
 def ed_entries_only_enabled(settings: object | None = None) -> bool:

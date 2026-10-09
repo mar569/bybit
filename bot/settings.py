@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 107
+SETTINGS_VERSION = 108
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Активный рынок: пампы/дампы на Binance, WATCH в analysis, без спама ENTRY.
@@ -50,7 +50,7 @@ ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
     "telegram_max_per_hour": 10,
     "telegram_min_interval_seconds": 25.0,
     "priority_score_max": 3,
-    "actionable_signals_only": True,
+    "actionable_signals_only": False,
     "actionable_min_ta_score": 6,
     "actionable_min_signal_score": 2,
     "signal_watch_mode_enabled": False,
@@ -73,7 +73,8 @@ ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
     "target_watcher_enabled": False,
     "anomaly_enabled": False,
     "liquidation_alerts_enabled": False,
-    "analysis_enabled": True,
+    "analysis_enabled": False,
+    "oil_news_enabled": False,
     "analysis_max_per_hour": 8,
     "pattern_min_confidence": 0.68,
     "trade_decision_gate_enabled": True,
@@ -533,8 +534,8 @@ class ScannerSettings:
     min_probability_percent: float = 66.0
     probability_filter_enabled: bool = True
 
-    # Только ENTRY без WATCH — Balanced PRO
-    actionable_signals_only: bool = True
+    # «Готовый вход» в 🎛 Каналы / настройках — по умолчанию OFF (шире алерты сканера)
+    actionable_signals_only: bool = False
     actionable_min_ta_score: int = 7
     actionable_max_trigger_dist_pct: float = 2.5
     actionable_min_signal_score: int = 3
@@ -701,8 +702,8 @@ class ScannerSettings:
     anomaly_symbol_cooldown_seconds: int = 1800
     anomaly_min_importance: float = 55.0
 
-    # Oil monitor — новости Iran/US + дайджест Brent/WTI
-    oil_news_enabled: bool = True
+    # Oil monitor — по умолчанию OFF (🎛 Каналы → 🛢 Нефть)
+    oil_news_enabled: bool = False
     oil_news_interval_seconds: int = 180
     oil_news_max_per_poll: int = 1
     oil_news_max_age_hours: float = 12.0
@@ -1140,7 +1141,7 @@ class ScannerSettings:
             min_signal_score=float(base.get("min_signal_score", 1.0)),
             top_n_symbols=(int(top_n) if top_n is not None else None),
             priority_score_max=int(base.get("priority_score_max", 5)),
-            signals_enabled=bool(base.get("signals_enabled", False)),
+            signals_enabled=bool(base.get("signals_enabled", True)),
             bot_paused=bool(base.get("bot_paused", False)),
             price_only_min_percent=float(base.get("price_only_min_percent", 3.0)),
             telegram_max_per_minute=int(base.get("telegram_max_per_minute", 1)),
@@ -1148,7 +1149,7 @@ class ScannerSettings:
             telegram_min_interval_seconds=float(base.get("telegram_min_interval_seconds", 2.0)),
             min_probability_percent=float(base.get("min_probability_percent", 72.0)),
             probability_filter_enabled=bool(base.get("probability_filter_enabled", True)),
-            actionable_signals_only=bool(base.get("actionable_signals_only", True)),
+            actionable_signals_only=bool(base.get("actionable_signals_only", False)),
             actionable_min_ta_score=int(base.get("actionable_min_ta_score", 8)),
             actionable_max_trigger_dist_pct=float(base.get("actionable_max_trigger_dist_pct", 2.5)),
             actionable_min_signal_score=int(base.get("actionable_min_signal_score", 3)),
@@ -1326,7 +1327,7 @@ class ScannerSettings:
                 base.get("anomaly_symbol_cooldown_seconds", 1800)
             ),
             anomaly_min_importance=float(base.get("anomaly_min_importance", 55.0)),
-            oil_news_enabled=bool(base.get("oil_news_enabled", True)),
+            oil_news_enabled=bool(base.get("oil_news_enabled", False)),
             oil_news_interval_seconds=int(base.get("oil_news_interval_seconds", 180)),
             oil_news_max_per_poll=int(base.get("oil_news_max_per_poll", 1)),
             oil_news_max_age_hours=float(base.get("oil_news_max_age_hours", 12.0)),
@@ -2299,6 +2300,17 @@ class SettingsManager:
                 merged.setdefault("trader_deep_zone_watch_minutes", 360)
             if version < 107:
                 merged["signal_rbr_watch_to_alert_channel"] = True
+            if version < 108:
+                # Дефолт 🎛 Каналы: только 📡 сигналы; остальное OFF (сохраняем явные значения из JSON)
+                for key in (
+                    "oil_news_enabled",
+                    "actionable_signals_only",
+                    "manual_ta_alerts_enabled",
+                    "scenario_watch_enabled",
+                    "anomaly_enabled",
+                ):
+                    merged[key] = bool(data[key]) if key in data else False
+                merged["signals_enabled"] = bool(data.get("signals_enabled", True))
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

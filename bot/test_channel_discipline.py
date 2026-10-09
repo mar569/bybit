@@ -43,6 +43,16 @@ def test_signal_alert_ready_entry_tier() -> None:
     assert not signal_alert_channel_ready(ta, quality_tier="entry", trade_action="skip")
 
 
+def test_breakout_watch_alert_allowed() -> None:
+    ta = TAAnalysisResult(current_price=1.0, verdict="WAIT")
+    assert signal_alert_channel_ready(
+        ta,
+        quality_tier="watch",
+        trade_action="watch",
+        signal_type="vertical_dump",
+    )
+
+
 def test_manual_ta_blocks_intel_window() -> None:
     sym = "BTCUSDT"
     last = {sym: time.time()}

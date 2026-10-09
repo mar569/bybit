@@ -310,3 +310,34 @@ def test_liq_magnet_align_boosts_score() -> None:
     a = score_trade_setup(_sig(side="short"), weak)
     b = score_trade_setup(_sig(side="short"), strong)
     assert b.total >= a.total
+
+
+def test_quality_skip_shows_block_reason() -> None:
+    ta = TAAnalysisResult(verdict="WAIT", current_price=1.0)
+    d = decide_trade_action(
+        _sig(),
+        ta,
+        quality_tier="skip",
+        quality_block_reason="CVD 62% buy против SHORT",
+        watch_allowed=False,
+    )
+    assert d.action == "skip"
+    assert "CVD" in d.reason
+
+
+def test_vertical_dump_relax_quality_skip_to_watch_path() -> None:
+    ta = TAAnalysisResult(verdict="WAIT", current_price=1.0)
+    d = decide_trade_action(
+        _sig(
+            side="short",
+            signal_type="vertical_dump",
+            price_change_percent=-2.1,
+            details={"probability_percent": 73},
+        ),
+        ta,
+        quality_tier="skip",
+        quality_block_reason="CVD 62% buy против SHORT",
+        watch_allowed=True,
+        min_watch_score=30,
+    )
+    assert d.action != "skip" or "CVD" in d.reason

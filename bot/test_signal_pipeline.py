@@ -21,9 +21,9 @@ class _Decision:
     setup_score = 70
 
 
-def test_watch_tier_no_chart_by_default() -> None:
+def test_watch_tier_attaches_chart() -> None:
     ta = TAAnalysisResult(setup_grade="B", setup_score=8)
-    assert not should_attach_signal_chart(
+    assert should_attach_signal_chart(
         ta,
         quality_tier="watch",
         trade_decision=_Decision(),

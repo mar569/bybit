@@ -23,6 +23,21 @@ _AGGRESSIVE_TYPES = frozenset({
     "impulse_dump", "impulse_pump", "vertical_dump", "vertical_pump",
     "trend_dump", "trend_pump", "pulse_dump", "pulse_pump",
 })
+_SCANNER_BREAKOUT_RELAX = frozenset({
+    "vertical_dump",
+    "vertical_pump",
+    "mega_dump",
+    "mega_pump",
+    "liq_cascade_dump",
+    "liq_cascade_pump",
+})
+
+
+def scanner_breakout_quality_relax(signal: Signal) -> bool:
+    """Высокая prob у vertical/mega — не tier=skip, минимум WATCH (график + план)."""
+    st = (signal.signal_type or "").lower()
+    prob = float(signal.details.get("probability_percent") or 0)
+    return st in _SCANNER_BREAKOUT_RELAX and prob >= 65
 
 
 def is_strong_aggressive_signal(signal: Signal) -> bool:
@@ -370,7 +385,7 @@ def assess_signal_quality(
                 cvd_detail=cvd_detail,
             )
         watch_ok = bool(getattr(settings, "signal_watch_mode_enabled", False))
-        tier = "watch" if watch_ok else "skip"
+        tier = "watch" if (watch_ok or scanner_breakout_quality_relax(signal)) else "skip"
         return SignalQualityResult(
             tier=tier,
             block_reason=hard_blocks[0],
@@ -414,6 +429,10 @@ def assess_signal_quality(
 
     if ta is not None and rbr_alert_eligible(ta):
         why = readiness[1] if readiness and not readiness[0] else "RBR — ждём зону или реакцию"
+        return _finish("watch", block_reason=why)
+
+    if scanner_breakout_quality_relax(signal):
+        why = readiness[1] if readiness and not readiness[0] else "vertical — ждём уровень, не market"
         return _finish("watch", block_reason=why)
 
     return _finish(

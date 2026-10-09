@@ -305,6 +305,16 @@ async def main() -> None:
             len(bybit.symbols),
             len(binance.symbols),
         )
+        from .channel_discipline import (
+            ed_breakout_watch_alerts_enabled,
+            ed_entries_only_enabled,
+        )
+
+        logger.info(
+            "ED: entries_only=%s charts=always breakout_watch=%s",
+            "ON" if ed_entries_only_enabled(s) else "OFF",
+            "ON" if ed_breakout_watch_alerts_enabled() else "OFF",
+        )
         if getattr(s, "oil_news_enabled", False) and config.oil_news_chat_configured:
             logger.info(
                 "Oil chat=%s · news every %ss · digest every %.0fh · chart=%s",

@@ -69,26 +69,12 @@ def should_attach_signal_chart(
     quality_tier: str | None,
     trade_decision: TradeDecision | None,
     settings: ScannerSettings,
+    signal_type: str = "",
 ) -> bool:
+    """PNG к алерту всегда, если TA построена и графики не выключены в settings."""
     if ta is None:
         return False
-    if not getattr(settings, "signal_chart_enabled", True):
-        return False
-    tier = (quality_tier or "").lower()
-    if tier == "watch":
-        from .range_breakdown_retest import rbr_alert_eligible
-
-        if rbr_alert_eligible(ta):
-            return bool(getattr(settings, "signal_chart_enabled", True))
-        return bool(getattr(settings, "signal_chart_on_watch", False))
-    if tier != "entry":
-        return False
-    if trade_decision and (trade_decision.action or "").lower() != "entry":
-        return False
-    if setup_grade_ok_for_entry(ta, min_grade="B"):
-        return True
-    score = int(getattr(trade_decision, "setup_score", 0) or 0) if trade_decision else 0
-    return score >= int(getattr(settings, "trade_decision_min_entry_score", 62))
+    return bool(getattr(settings, "signal_chart_enabled", True))
 
 
 def should_route_pro_analysis(

@@ -9,8 +9,8 @@ MANUAL_TA_CHART_SOURCES: tuple[str, ...] = ("annotated", "tv_annotated", "annota
 
 
 def manual_ta_use_simple_chart(_chart_source: str | None) -> bool:
-    """Ручной TA всегда рисуется minimal-chart, без PRO/TV-панелей на PNG."""
-    return True
+    """Ручной TA: полная разметка (паттерны, SMC, уровни) — не урезанный minimal."""
+    return False
 MTA_CALLBACK_PREFIX = "mta|"
 MTW_CALLBACK_PREFIX = "mtw|"
 MTC_CALLBACK_PREFIX = "mtc|"

@@ -471,6 +471,7 @@ def decide_trade_action(
     *,
     readiness: tuple[bool, str] | None = None,
     quality_tier: str | None = None,
+    quality_block_reason: str = "",
     watch_allowed: bool = True,
     min_entry_score: int = DEFAULT_MIN_ENTRY_SCORE,
     min_watch_score: int = DEFAULT_MIN_WATCH_SCORE,
@@ -487,7 +488,13 @@ def decide_trade_action(
     from .range_breakdown_retest import rbr_alert_eligible
 
     if qt == "skip" and not rbr_alert_eligible(ta):
-        return TradeDecision("skip", "quality skip", setup_score=0)
+        from .signal_quality_gate import scanner_breakout_quality_relax
+
+        if scanner_breakout_quality_relax(signal):
+            qt = "watch"
+        else:
+            reason = (quality_block_reason or "quality skip").strip() or "quality skip"
+            return TradeDecision("skip", reason[:160], setup_score=0)
     if qt == "skip":
         qt = "watch"
 

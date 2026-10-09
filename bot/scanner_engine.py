@@ -695,12 +695,13 @@ class SignalEngine:
                 )
             if oi_usd_now is None or oi_usd_now < min_liquidity:
                 logger.info(
-                    "Scanner skip %s %s: OI $%s < min $%.0f (%s)",
+                    "Scanner skip %s %s: OI $%s < min $%.0f (%s, tier=%s)",
                     exchange,
                     symbol,
                     f"{oi_usd_now:,.0f}" if oi_usd_now is not None else "?",
                     min_liquidity,
                     candidate.signal_type,
+                    tier.tier.value,
                 )
                 return
 

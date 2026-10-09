@@ -213,13 +213,8 @@ def build_living_analysis_html(
     *,
     symbol: str = "",
 ) -> str:
-    from .channel_discipline import ed_entries_only_enabled
-    from .human_trade_brief import format_manual_ta_no_entry_html, manual_entry_ready
     from .chart_display_policy import ed_minimal_voice_enabled, ed_playbook_v3_enabled
     from .minimal_ed_voice import build_minimal_ed_voice_html
-
-    if ed_entries_only_enabled() and not manual_entry_ready(ta, symbol=symbol):
-        return format_manual_ta_no_entry_html(ta, symbol=symbol)
 
     if ed_playbook_v3_enabled():
         from .core.playbook.cache import get_or_run_playbook
