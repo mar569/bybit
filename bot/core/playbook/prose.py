@@ -48,13 +48,10 @@ def compose_playbook_prose_html(
 
     chunks: list[str] = []
 
-    recent = ""
-    if ta is not None:
-        recent = _strip_html(str(getattr(ta, "recent_price_action_ru", "") or ""))
-    if recent:
-        chunks.append(recent.rstrip(".") + ".")
-    elif situation:
-        chunks.append(situation.rstrip(".") + ".")
+    if situation:
+        sit = _strip_html(situation)
+        if sit and not sit.lower().startswith("последние свечи"):
+            chunks.append(sit.rstrip(".") + ".")
 
     brk = float(getattr(ta, "breakout_level", 0) or 0) if ta else snap.break_up
     brdn = float(getattr(ta, "breakdown_level", 0) or 0) if ta else snap.break_down

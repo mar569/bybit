@@ -44,6 +44,10 @@ def _bar_word(b: KlineBar, *, avg_body: float) -> str:
 
 
 def describe_recent_bars(bars: list[KlineBar], *, count: int = 4) -> str:
+    from .chart_display_policy import ed_telegram_candle_narrative_enabled
+
+    if not ed_telegram_candle_narrative_enabled():
+        return ""
     if not bars or len(bars) < 2:
         return ""
     n = max(2, min(int(count), 6, len(bars)))

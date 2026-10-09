@@ -73,6 +73,23 @@ def ed_chart_trader_canvas_enabled() -> bool:
     return _env_on("ED_CHART_TRADER_CANVAS", default="1")
 
 
+def ed_chart_evidence_canvas_enabled() -> bool:
+    """PNG: один алгоритм — рисуем только подтверждённое TA (паттерн/SMC/канал), без дублей."""
+    if not ed_chart_single_canvas_enabled():
+        return False
+    return _env_on("ED_CHART_EVIDENCE", default="1")
+
+
+def ed_chart_manual_clean_enabled() -> bool:
+    """Устар.: минимальный PNG (только если ED_CHART_EVIDENCE=0)."""
+    return _env_on("ED_CHART_MANUAL_CLEAN", default="0")
+
+
+def ed_chart_scenario_path_enabled() -> bool:
+    """Пунктир «слив/отскок» на PNG — по умолчанию выкл (сценарий в подписи Telegram)."""
+    return _env_on("ED_CHART_SCENARIO_PATH", default="0")
+
+
 def ed_manual_chart_full_history_enabled() -> bool:
     """Ручной /ta: зум = вся загруженная история (импульс/дамп не «обрезать» сверху)."""
     return _env_on("ED_MANUAL_CHART_FULL_HISTORY", default="1")
@@ -87,6 +104,8 @@ def chart_pdf_setup_hint_enabled() -> bool:
     """Одна строка на PNG: что означает разметка (не дубль Telegram)."""
     if not ed_pdf_chart_style_enabled():
         return False
+    if ed_chart_evidence_canvas_enabled() or ed_chart_manual_clean_enabled():
+        return _env_on("ED_CHART_PDF_HINT", default="0")
     return _env_on("ED_CHART_PDF_HINT", default="1")
 
 
@@ -95,6 +114,11 @@ def ed_playbook_minimal_copy_enabled() -> bool:
     if not ed_playbook_v3_enabled():
         return False
     return _env_on("ED_PLAYBOOK_MINIMAL_COPY", default="1")
+
+
+def ed_telegram_candle_narrative_enabled() -> bool:
+    """Пересказ цвета последних свечей в Telegram (по умолчанию выкл — это на PNG)."""
+    return _env_on("ED_TELEGRAM_CANDLE_NARRATIVE", default="0")
 
 
 def ed_playbook_intel_panel_enabled() -> bool:

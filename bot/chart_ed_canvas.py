@@ -13,6 +13,8 @@ from .chart_analysis_text import structure_break_label_ru
 from .chart_display_policy import (
     chart_teaching_tags_enabled,
     chart_pdf_setup_hint_enabled,
+    ed_chart_evidence_canvas_enabled,
+    ed_chart_manual_clean_enabled,
     ed_chart_trader_canvas_enabled,
 )
 from .chart_label_layout import LabelBoard, draw_label_board, format_level_text
@@ -42,7 +44,13 @@ def _visible_x(bars: list[KlineBar], ax: plt.Axes) -> tuple[float, float]:
     return _x(bars, i0), _x(bars, len(bars) - 1)
 
 
-def _seed_level_board(board: LabelBoard, ta: TAAnalysisResult, bars: list[KlineBar]) -> None:
+def _seed_level_board(
+    board: LabelBoard,
+    ta: TAAnalysisResult,
+    bars: list[KlineBar],
+    *,
+    clean: bool = False,
+) -> None:
     cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
     board.reserve(cur)
 
@@ -58,6 +66,17 @@ def _seed_level_board(board: LabelBoard, ta: TAAnalysisResult, bars: list[KlineB
         lv = float(smc.structure_break_level)
         tag = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"), short=True)
         board.add(lv, format_level_text(tag, lv), "#f0c040", priority=88, ref=cur)
+
+    if clean:
+        cons = getattr(ta, "consolidation", None)
+        if cons is not None:
+            top, bot = float(cons.top), float(cons.bottom)
+            if top > bot:
+                if brk <= 0 or abs(top - brk) / max(cur, 1e-9) > 0.002:
+                    board.add(top, format_level_text("боковик ↑", top), "#6e7681", priority=70, ref=cur)
+                if brdn <= 0 or abs(bot - brdn) / max(cur, 1e-9) > 0.002:
+                    board.add(bot, format_level_text("боковик ↓", bot), "#6e7681", priority=70, ref=cur)
+        return
 
     nr = float(getattr(ta, "nearest_resistance", 0) or 0)
     ns = float(getattr(ta, "nearest_support", 0) or 0)
@@ -304,7 +323,12 @@ def _draw_canvas_footer(ax: plt.Axes) -> None:
 
     if os.environ.get("ED_CHART_CANVAS_TAG", "1").strip().lower() not in {"1", "true", "yes"}:
         return
-    tag = "Trader" if ed_chart_trader_canvas_enabled() else "Ed canvas"
+    if ed_chart_evidence_canvas_enabled():
+        tag = "Evidence"
+    elif ed_chart_trader_canvas_enabled():
+        tag = "Trader"
+    else:
+        tag = "Ed canvas"
     ax.text(
         0.012,
         0.02,
@@ -320,16 +344,28 @@ def _draw_canvas_footer(ax: plt.Axes) -> None:
 
 
 def _draw_trader_composite_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    if ed_chart_evidence_canvas_enabled():
+        from .chart_evidence_canvas import draw_evidence_analysis_mpl
+
+        draw_evidence_analysis_mpl(ax, bars, ta)
+        return
+    clean = ed_chart_manual_clean_enabled()
+    if clean:
+        from .chart_composite_layers import draw_composite_manual_clean_mpl
+
+        draw_composite_manual_clean_mpl(ax, bars, ta)
+        return
     from .chart_composite_layers import draw_composite_read_mpl
 
     draw_composite_read_mpl(ax, bars, ta)
-    try:
-        from .chart_renderer import _draw_elliott_from_ta
+    if not ed_chart_evidence_canvas_enabled():
+        try:
+            from .chart_renderer import _draw_elliott_from_ta
 
-        verdict = str(getattr(ta, "verdict", "") or "").upper()
-        _draw_elliott_from_ta(ax, bars, ta, is_wait=(verdict == "WAIT"))
-    except Exception:
-        logger.debug("elliott trader layers skipped", exc_info=True)
+            verdict = str(getattr(ta, "verdict", "") or "").upper()
+            _draw_elliott_from_ta(ax, bars, ta, is_wait=(verdict == "WAIT"))
+        except Exception:
+            logger.debug("elliott trader layers skipped", exc_info=True)
 
 
 def _draw_minimal_ed_layers(
@@ -374,15 +410,22 @@ def draw_ed_analysis_canvas_mpl(
     read = get_or_build_chart_read(ta, bars, symbol=symbol or getattr(ta, "symbol", "") or "")
 
     trader = ed_chart_trader_canvas_enabled()
+    evidence = ed_chart_evidence_canvas_enabled()
+    clean = ed_chart_manual_clean_enabled()
     if trader:
         _draw_trader_composite_layers(ax, bars, ta)
     else:
         _draw_minimal_ed_layers(ax, bars, ta, board)
 
-    if read.levels:
-        seed_board_from_read(board, read, ref=cur)
-    _seed_level_board(board, ta, bars)
-    max_labels = 10 if trader else CANVAS_MAX_LEVELS
+    if evidence:
+        from .chart_evidence_canvas import seed_evidence_level_board
+
+        seed_evidence_level_board(board, ta, bars)
+    else:
+        if read.levels and not clean:
+            seed_board_from_read(board, read, ref=cur)
+        _seed_level_board(board, ta, bars, clean=clean)
+    max_labels = 6 if evidence else (5 if clean else (10 if trader else CANVAS_MAX_LEVELS))
     draw_label_board(ax, bars, board, current=cur, max_labels=max_labels)
     apply_chart_read_to_canvas(ax, bars, ta, read, board)
     _draw_canvas_footer(ax)

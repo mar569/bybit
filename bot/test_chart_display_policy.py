@@ -4,6 +4,9 @@ from .chart_display_policy import (
     chart_entry_zone_tags_enabled,
     chart_plan_glyphs_enabled,
     chart_trade_plan_on_chart_enabled,
+    ed_chart_evidence_canvas_enabled,
+    ed_chart_manual_clean_enabled,
+    ed_chart_scenario_path_enabled,
     ed_chart_trader_canvas_enabled,
 )
 
@@ -12,6 +15,12 @@ def test_trade_plan_off_by_default():
     assert chart_trade_plan_on_chart_enabled() is False
     assert chart_plan_glyphs_enabled() is False
     assert chart_entry_zone_tags_enabled() is False
+
+
+def test_evidence_canvas_defaults() -> None:
+    assert ed_chart_evidence_canvas_enabled() is True
+    assert ed_chart_manual_clean_enabled() is False
+    assert ed_chart_scenario_path_enabled() is False
 
 
 def test_trader_canvas_on_with_single_canvas(monkeypatch):

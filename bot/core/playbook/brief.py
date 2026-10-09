@@ -42,7 +42,7 @@ def format_playbook_brief_html(
     snap: object | None = None,
     ta: object | None = None,
 ) -> str:
-    from ...chart_display_policy import ed_playbook_intel_panel_enabled
+    from ...chart_display_policy import ed_playbook_intel_panel_enabled, ed_playbook_minimal_copy_enabled
     from ...ta_analysis import TAAnalysisResult
     from ..snapshot import MarketSnapshot
     from .prose import compose_playbook_prose_html
@@ -84,7 +84,8 @@ def format_playbook_brief_html(
     if foot:
         blocks.append(foot)
 
-    blocks.append("<i>Уровни и сетап — на графике.</i>")
+    if not ed_playbook_minimal_copy_enabled():
+        blocks.append("<i>Уровни и сетап — на графике.</i>")
     return "\n\n".join(blocks)
 
 

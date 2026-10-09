@@ -18,6 +18,10 @@ from .ta_analysis import TAAnalysisResult, fmt_price
 
 
 def _candles_block(ta: TAAnalysisResult) -> str:
+    from .chart_display_policy import ed_telegram_candle_narrative_enabled
+
+    if not ed_telegram_candle_narrative_enabled():
+        return ""
     replay = str(getattr(ta, "bar_replay_label", "") or "").strip()
     recent = str(getattr(ta, "recent_price_action_ru", "") or "").strip()
     if replay:

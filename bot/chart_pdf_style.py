@@ -275,6 +275,8 @@ def draw_smc_pdf_clean(
     ta: TAAnalysisResult,
     *,
     composite: bool = False,
+    clean: bool = False,
+    evidence: bool = False,
 ) -> int:
     """SMC как в PDF: CHoCH/BOS + свип + OB, без серых «простыней»."""
     smc = getattr(ta, "smc", None)
@@ -292,7 +294,7 @@ def draw_smc_pdf_clean(
     drawn = 0
     cur = float(bars[-1].close)
 
-    if getattr(smc, "structure_break_level", None):
+    if getattr(smc, "structure_break_level", None) and not clean and not evidence:
         lv = float(smc.structure_break_level)
         tag = _structure_tag(str(getattr(smc, "structure_break_kind", "") or "bos"))
         ax.axhline(lv, color="#f0c040", linestyle="-", linewidth=1.35, alpha=0.92, zorder=5)
@@ -306,12 +308,19 @@ def draw_smc_pdf_clean(
         reverse=True,
     )
     seen_kind: set[str] = set()
-    max_markers = 6 if composite else 2
-    if composite:
+    if evidence:
+        max_markers = 3
+        lookback = min(len(bars) - 4, 120)
+    elif clean:
+        max_markers = 2
+        lookback = min(len(bars) - 4, 72)
+    elif composite:
+        max_markers = 6
         from .chart_display_policy import ed_manual_chart_full_history_enabled
 
         lookback = max(88, len(bars) - 6) if ed_manual_chart_full_history_enabled() else 88
     else:
+        max_markers = 2
         lookback = 36
     for marker in markers:
         kind = str(getattr(marker, "kind", "") or "")
@@ -342,7 +351,12 @@ def draw_smc_pdf_clean(
         if len(seen_kind) >= max_markers:
             break
 
-    ob_tail = 5 if composite else 1
+    if evidence:
+        ob_tail = 3
+    elif clean:
+        ob_tail = 2
+    else:
+        ob_tail = 5 if composite else 1
     for ob in list(getattr(smc, "order_blocks", None) or [])[-ob_tail:]:
         try:
             top, bot = float(ob.top), float(ob.bottom)
@@ -365,7 +379,7 @@ def draw_smc_pdf_clean(
             ax.text(x_ob0, top, f"  {tag}", color=col, fontsize=6.5, va="bottom", zorder=6)
         drawn += 1
 
-    liq_n = 4 if composite else 2
+    liq_n = 0 if (clean or evidence) else (4 if composite else 2)
     liqs = sorted(
         [float(lv.price) for lv in list(getattr(smc, "liquidity_levels", None) or []) if float(getattr(lv, "price", 0) or 0) > 0],
         key=lambda p: abs(p - cur),
@@ -377,7 +391,12 @@ def draw_smc_pdf_clean(
         drawn += 1
 
     fvgs = list(getattr(smc, "fvgs", None) or [])
-    fvg_iter = fvgs[-4:] if composite else fvgs[-1:]
+    if evidence:
+        fvg_iter = fvgs[-2:]
+    elif clean:
+        fvg_iter = fvgs[-1:]
+    else:
+        fvg_iter = fvgs[-4:] if composite else fvgs[-1:]
     for gap in fvg_iter:
         if gap is None:
             continue
@@ -389,7 +408,7 @@ def draw_smc_pdf_clean(
         )
         drawn += 1
 
-    if composite and getattr(smc, "equilibrium_50", None):
+    if composite and not clean and getattr(smc, "equilibrium_50", None):
         eq = float(smc.equilibrium_50)
         ax.axhline(eq, color="#8b949e", linestyle=":", linewidth=0.75, alpha=0.65, zorder=3)
         if show:

@@ -85,12 +85,15 @@ def apply_chart_read_to_canvas(
     board: LabelBoard,
 ) -> None:
     cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
-    if read.scenario_waypoints and len(read.scenario_waypoints) >= 2:
-        draw_scenario_waypoints_mpl(ax, bars, read.scenario_waypoints, label=read.scenario_label_ru)
-    else:
-        from ..chart_readable import draw_probable_path
+    from ..chart_display_policy import ed_chart_scenario_path_enabled
 
-        draw_probable_path(ax, bars, ta)
+    if ed_chart_scenario_path_enabled():
+        if read.scenario_waypoints and len(read.scenario_waypoints) >= 2:
+            draw_scenario_waypoints_mpl(ax, bars, read.scenario_waypoints, label=read.scenario_label_ru)
+        else:
+            from ..chart_readable import draw_probable_path
+
+            draw_probable_path(ax, bars, ta)
     draw_entry_bands_if_ready_mpl(ax, bars, ta, read)
     if read.setup_hint_ru:
         from ..chart_display_policy import chart_pdf_setup_hint_enabled

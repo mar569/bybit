@@ -140,10 +140,8 @@ def _sanitize_situation_for_prose(situation: str, phase_ru: str) -> str:
     s = re.sub(r"<[^>]+>", "", s)
     s = re.sub(r"\s*Close\s+[\d.,]+", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip(" .")
-    if not s:
+    if not s or s.lower().startswith("последние свечи"):
         return (phase_ru or "").strip()
-    if s.lower().startswith("последние свечи") and len(s) > 165:
-        s = s[:162].rsplit(" ", 1)[0] + "…"
     return s
 
 
@@ -371,19 +369,39 @@ def _expect_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None, *, stale: str =
 
 
 def _situation_ru(ta: TAAnalysisResult, phase_ru: str) -> str:
-    recent = str(getattr(ta, "recent_price_action_ru", "") or "").strip()
-    if recent:
-        import re
+    """Смысл рынка для текста — не пересказ последних свечей (они на PNG)."""
+    import re
 
-        plain = re.sub(r"<[^>]+>", "", recent)
-        if plain:
-            return plain[:200]
     narrative = str(getattr(ta, "reading_narrative", "") or "").strip()
     if narrative:
-        return narrative.split(".")[0][:180] + "."
+        first = narrative.split(".")[0].strip()
+        if first and not first.lower().startswith("последние свечи"):
+            return first[:180] + ("." if not first.endswith(".") else "")
+
+    rbr = effective_rbr(ta) or get_rbr_from_ta(ta)
+    if rbr:
+        story = str(rbr.get("story_ru") or rbr.get("label_ru") or "").strip()
+        if story and "последние свечи" not in story.lower():
+            return story[:180] + ("." if not story.endswith(".") else "")
+
+    struct = _structure_line(ta)
+    if struct and phase_ru:
+        return f"{phase_ru.rstrip('.')}. Структура: {struct}."[:200]
+    if struct:
+        return f"Структура: {struct}."[:120]
+
+    recent = str(getattr(ta, "recent_price_action_ru", "") or "").strip()
+    if recent:
+        from ..chart_display_policy import ed_telegram_candle_narrative_enabled
+
+        if ed_telegram_candle_narrative_enabled():
+            plain = re.sub(r"<[^>]+>", "", recent)
+            if plain:
+                return plain[:200]
+
     stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
     if stack:
-        return f"{phase_ru} Контекст: {stack[:85]}."
+        return f"{phase_ru.rstrip('.')}. Контекст: {stack[:85]}."
     return phase_ru
 
 

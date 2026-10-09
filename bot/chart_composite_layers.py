@@ -265,3 +265,34 @@ def draw_composite_read_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
         except Exception:
             pass
     return max(drawn, 1)
+
+
+def draw_composite_manual_clean_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> int:
+    """Ручной /ta: диапазон + 1 паттерн + компактный SMC — без swing L1/L2 и дублей уровней."""
+    if not bars:
+        return 0
+    from .chart_pdf_style import _draw_range_pdf, draw_smc_pdf_clean
+
+    drawn = 0
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    if brk > brdn > 0 or getattr(ta, "consolidation", None) is not None:
+        drawn += _draw_range_pdf(ax, bars, ta)
+    drawn += draw_channel_mpl(ax, bars, ta)
+    primary = getattr(ta, "primary_chart_pattern", None)
+    patterns = list(getattr(ta, "chart_patterns", None) or [])
+    if primary or patterns:
+        from .chart_pattern_draw import draw_chart_patterns
+
+        draw_chart_patterns(
+            ax,
+            bars,
+            patterns,
+            max_patterns=1,
+            min_confidence=COMPOSITE_PATTERN_MIN_CONF,
+            force_primary=primary,
+            draw_target_labels=bool(primary),
+        )
+        drawn += 1
+    drawn += draw_smc_pdf_clean(ax, bars, ta, composite=True, clean=True)
+    return max(drawn, 1)
