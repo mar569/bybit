@@ -51,6 +51,14 @@ def try_draw_tv_playbook_layers(
     layers = draw_playbook_spec_tv(ax, mapper, ta)
     layers += draw_playbook_rbr_phase_tv(ax, mapper, ta, spec)
 
+    if spec.rbr_phase:
+        try:
+            from .chart_scenario_tv import draw_rbr_scenario_narrative_tv
+
+            layers += draw_rbr_scenario_narrative_tv(ax, mapper, ta)
+        except Exception:
+            logger.debug("TV RBR scenario narrative skipped", exc_info=True)
+
     if spec.show_primary_pattern:
         draw_primary_pattern_tv_layer(ax, mapper, ta)
         if getattr(ta, "primary_chart_pattern", None):
@@ -90,15 +98,34 @@ def draw_mpl_playbook_layers(
     from ...chart_label_layout import LabelBoard
     from .chart_mpl_spec import draw_mpl_spec_core
 
+    from ...range_breakdown_retest import get_rbr_from_ta
+
+    rbr = get_rbr_from_ta(ta)
+    scenario_rbr = bool(spec.rbr_phase and rbr)
+
     board = LabelBoard()
-    drawn = draw_mpl_spec_core(ax, bars, ta, spec)
+    drawn = draw_mpl_spec_core(ax, bars, ta, spec, levels_only=scenario_rbr)
     if drawn <= 0:
         drawn = 1
 
-    if spec.show_primary_pattern:
-        from ...chart_ed_minimal import draw_pro_teaching_layers
+    if scenario_rbr:
+        try:
+            from ...chart_ed_story import _draw_consolidation_context
+            from ...chart_range_breakdown_draw import draw_range_breakdown_retest_path
 
-        draw_pro_teaching_layers(ax, bars, ta, mode="observation")
+            floor = float(rbr.get("range_bottom") or 0)
+            ceil = float(rbr.get("range_top") or 0)
+            if floor > 0 and ceil > floor:
+                _draw_consolidation_context(ax, bars, ta, floor=floor, ceil=ceil)
+            draw_range_breakdown_retest_path(ax, bars, ta)
+            drawn += 3
+        except Exception:
+            logger.debug("RBR scenario path draw failed", exc_info=True)
+
+    mode = "ed_story" if spec.rbr_phase else "observation"
+    from ...chart_ed_minimal import draw_pro_teaching_layers
+
+    draw_pro_teaching_layers(ax, bars, ta, mode=mode)
 
     if spec.show_smc_fvg:
         try:
@@ -112,10 +139,27 @@ def draw_mpl_playbook_layers(
     from ...chart_ed_minimal import add_minimal_context_labels
     from ...chart_teaching_tags import enrich_teaching_label_board
 
-    mode = "ed_story" if spec.rbr_phase else "observation"
     if chart_teaching_tags_enabled() or not ed_chart_visual_only():
         enrich_teaching_label_board(board, bars, ta, mode=mode)
         if not ed_chart_visual_only():
             add_minimal_context_labels(board, bars, ta, mode=mode)
+
+    if scenario_rbr and chart_teaching_tags_enabled():
+        from ...chart_teaching_tags import story_banner_line
+
+        line = story_banner_line(ta, mode="ed_story")
+        if line:
+            ax.text(
+                0.5,
+                0.04,
+                line,
+                transform=ax.transAxes,
+                va="bottom",
+                ha="center",
+                color="#e6edf3",
+                fontsize=7.0,
+                zorder=12,
+                bbox=dict(boxstyle="round,pad=0.32", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
+            )
     _ = drawn
     return board

@@ -65,15 +65,21 @@ def primary_pattern_tag(ta: TAAnalysisResult) -> str:
 
 
 def story_banner_line(ta: TAAnalysisResult, *, mode: str) -> str:
+    from .ta_analysis import fmt_price
+
     rbr = get_rbr_from_ta(ta)
     if rbr:
         phase = str(rbr.get("phase") or "")
+        floor = fmt_price(float(rbr.get("range_bottom") or 0))
+        ceil = fmt_price(float(rbr.get("range_top") or 0))
         if phase == "fade_top":
-            return "Вынос → отказ → шорт (не в импульс вверх)"
+            return f"У потолка {ceil} — отказ → вниз (входа нет, не в импульс)"
         if phase == "await_break":
-            return "Ждём закреп под полом → retest → шорт"
+            return f"Боковик {floor}–{ceil} — close ниже {floor} → retest → шорт"
         if phase == "retest":
-            return "Retest пола — шорт после подтверждения"
+            return f"Retest пола {floor} — шорт только после отказа"
+        if phase == "broken":
+            return f"Под полом {floor} — retest или продолжение, без догонялки"
     tag = primary_pattern_tag(ta)
     if tag:
         return tag

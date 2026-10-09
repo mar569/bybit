@@ -24,6 +24,8 @@ def draw_mpl_spec_core(
     bars: list[KlineBar],
     ta: TAAnalysisResult,
     spec: ChartSpec,
+    *,
+    levels_only: bool = False,
 ) -> int:
     if not bars:
         return 0
@@ -45,7 +47,7 @@ def draw_mpl_spec_core(
             tag = lv.label[:12]
             ax.text(x0, lv.price, f"  {tag}", color=color, fontsize=7, va="center", zorder=6)
 
-    if spec.show_range and tops and bots:
+    if not levels_only and spec.show_range and tops and bots:
         ax.add_patch(
             Rectangle(
                 (x0, min(bots)),
@@ -59,6 +61,9 @@ def draw_mpl_spec_core(
         drawn += 1
 
     rbr = get_rbr_from_ta(ta)
+    if levels_only:
+        return drawn
+
     if rbr and spec.rbr_phase == "fade_top":
         resistance = max(tops) if tops else float(rbr.get("range_top") or 0)
         if resistance > 0:

@@ -38,6 +38,7 @@ def format_playbook_brief_html(
     expect: str,
     intel_rows: list[tuple[str, str]],
     footer: str = "",
+    rbr: dict | None = None,
 ) -> str:
     head = f"<b>{escape(symbol)}</b> · {escape(state.badge_ru)}"
     body_parts = [escape(situation.rstrip(".") + ".")]
@@ -49,7 +50,12 @@ def format_playbook_brief_html(
     matrix = format_intel_matrix_html_from_rows(intel_rows, mandatory_four=True)
     if matrix:
         blocks.append(matrix)
-    foot = footer or "<i>Структура и уровни — на графике.</i>"
+    if footer:
+        foot = footer
+    else:
+        from .chart_legend import chart_legend_html
+
+        foot = chart_legend_html(rbr)
     blocks.append(foot)
     return "\n\n".join(blocks)
 
@@ -103,6 +109,8 @@ def format_rbr_watch_caption_html(
     if "📊" in body:
         body = body.split("📊", 1)[0].strip()
 
-    note = "<i>Структура и триггеры — на графике (без SL/TP).</i>"
+    from .chart_legend import chart_legend_html
+
+    note = chart_legend_html(rbr)
     parts = [head, stack_short, body, note]
     return "\n".join(p for p in parts if p)

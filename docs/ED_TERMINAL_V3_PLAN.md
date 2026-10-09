@@ -132,8 +132,8 @@ flowchart TB
 
 ### Q4 — Multi-asset
 
-- [~] Liquid.trade: mock + `MarketSession` в `bot/adapters/liquid_trade/` — **не подключено** к ingest/snapshot.
-- [~] Quiver: `quiver_intel_line()` в engine (только если `resolve_asset_flags().quiver_intel`; mock возвращает пусто).
+- [~] Liquid.trade: `HttpLiquidTradeClient` (signed REST, `LIQUID_API_KEY` + `LIQUID_API_SECRET`), `liquid_intel_line()` в engine (строка «Цена»); без ключей — no-op.
+- [~] Quiver: `HttpQuiverClient` (`QUIVER_API_KEY`, `/beta/historical/congresstrading/{ticker}`), `quiver_intel_line()` в engine (OI); без ключа — mock/no-op.
 - [x] Feature flags per asset class (`bot/core/asset_class.py`, meta на ChartSpec).
 - [x] TV + MPL spec-path (`ED_CHART_SPEC_LAYERS=1` по умолчанию при v3).
 
@@ -143,7 +143,7 @@ flowchart TB
 - [~] `dispatch_signal` gates (см. Q3 — не полная замена pipeline).
 - [x] Legacy UX redirects: `enrich_ta_scenario_fields`, `ta_signal_caption_html`, `build_human_trade_brief_html`.
 - [~] Quiver в INTEL (код есть, данных нет без API).
-- [ ] Реальные API Liquid.trade / Quiver.
+- [x] HTTP-клиенты Liquid.trade / Quiver (read-only market + congress intel); MCP/OAuth Co-Invest — не в боте.
 - [ ] Ручной spot-check (BRUSDT/CARVUSDT/BZUSDT/FLOKI) + перезапуск бота в prod.
 
 ---

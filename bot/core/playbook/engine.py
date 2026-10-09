@@ -71,15 +71,27 @@ def _intel_rows_from_snapshot(snap: MarketSnapshot, ta: TAAnalysisResult | None 
             by_label["Liq"] = liq_note[:120]
     try:
         from ..asset_class import resolve_asset_flags
+        from ...adapters.liquid_trade.http_client import liquid_intel_line
         from ...adapters.quiver.client import quiver_intel_line
 
         sym = (getattr(ta, "symbol", "") or "").strip().upper() or snap.symbol
-        if sym and resolve_asset_flags(sym).quiver_intel:
+        if not sym:
+            return [(label, by_label.get(label) or "—") for label in labels]
+        flags = resolve_asset_flags(sym)
+        if flags.quiver_intel:
             qline = quiver_intel_line(sym)
             if qline and "OI" in by_label and by_label.get("OI") == "—":
                 by_label["OI"] = qline
             elif qline and by_label.get("OI") and by_label["OI"] != "—":
                 by_label["OI"] = f"{by_label['OI'][:80]} · {qline[:60]}"
+        if flags.liquid_trade_quotes:
+            lline = liquid_intel_line(sym)
+            if lline:
+                price_prev = by_label.get("Цена") or "—"
+                if price_prev == "—":
+                    by_label["Цена"] = lline
+                else:
+                    by_label["Цена"] = f"{price_prev[:70]} · {lline[:48]}"
     except Exception:
         pass
     return [(label, by_label.get(label) or "—") for label in labels]
@@ -95,6 +107,8 @@ def _situation_ru(snap: MarketSnapshot) -> str:
             return "Боковик: пробоя пола ещё не было."
         if phase == "retest":
             return "Пробой пола был — смотрим retest."
+        if phase == "broken":
+            return "Пробой пола уже есть — цена ниже диапазона."
         story = str(rbr.get("story_ru") or rbr.get("label_ru") or "").strip()
         if story:
             return story[:160]
@@ -119,6 +133,8 @@ def _expect_ru(snap: MarketSnapshot, *, stale_msg: str) -> str:
             return "Ждём отказ сверху и движение вниз — без догонялки."
         if str(rbr.get("phase") or "") == "await_break":
             return "Ждём пробой пола и retest — вход не у потолка."
+        if str(rbr.get("phase") or "") == "broken":
+            return "Не шортим в падение — retest пола или подтверждение продолжения."
         return "Сценарий вниз — только по триггеру на графике."
     if side == "short":
         return "Ждём движение вниз по триггеру."
@@ -142,13 +158,18 @@ def preferred_trade_side_from_snap(snap: MarketSnapshot) -> str:
     return ""
 
 
-def _resolve_state(snap: MarketSnapshot, *, stale: bool, alert_eligible: bool) -> PlaybookState:
+def _resolve_state(snap: MarketSnapshot, *, stale: bool) -> PlaybookState:
     if stale:
         return PlaybookState.NO_TRADE
-    if alert_eligible:
-        return PlaybookState.ARMED
-    if snap.verdict in {"LONG", "SHORT"} and not stale:
-        return PlaybookState.ARMED
+    rbr = snap.rbr
+    if rbr:
+        phase = str(rbr.get("phase") or "")
+        if phase == "retest":
+            return PlaybookState.ARMED
+        if phase in {"fade_top", "await_break", "broken"}:
+            return PlaybookState.WATCH
+    if snap.verdict in {"LONG", "SHORT"}:
+        return PlaybookState.WATCH
     return PlaybookState.OBSERVE
 
 
@@ -156,7 +177,7 @@ def _rbr_watch_eligible(ta: TAAnalysisResult, snap: MarketSnapshot) -> bool:
     rbr = snap.rbr or get_rbr_from_ta(ta)
     if not rbr:
         return False
-    if str(rbr.get("phase") or "") not in {"fade_top", "await_break", "retest"}:
+    if str(rbr.get("phase") or "") not in {"fade_top", "await_break", "retest", "broken"}:
         return False
     if plan_is_stale(ta):
         return False
@@ -203,7 +224,7 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
     stale_msg = plan_staleness_plain(ta)
     stale = bool(stale_msg)
     alert_eligible = _rbr_watch_eligible(ta, snap)
-    state = _resolve_state(snap, stale=stale, alert_eligible=alert_eligible)
+    state = _resolve_state(snap, stale=stale)
     chart_spec = build_chart_spec(snap)
     intel = _intel_rows_from_snapshot(snap, ta)
     situation = _situation_ru(snap)
@@ -212,7 +233,14 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
     from ...human_trade_brief import _symbol_short
 
     sym_short = _symbol_short(snap.symbol) or snap.symbol or "Монета"
-    headline = f"{sym_short} — {state.badge_ru.split(maxsplit=1)[-1] if state != PlaybookState.OBSERVE else 'наблюдение'}"
+    if state == PlaybookState.OBSERVE:
+        headline = f"{sym_short} — наблюдение"
+    elif state == PlaybookState.WATCH:
+        headline = f"{sym_short} — WATCH"
+    elif state == PlaybookState.ARMED:
+        headline = f"{sym_short} — retest"
+    else:
+        headline = f"{sym_short} — без сделки"
     if stale:
         headline = f"{sym_short} — план устарел"
 
@@ -224,6 +252,7 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         situation=situation,
         expect=expect,
         intel_rows=intel,
+        rbr=snap.rbr,
     )
 
     return PlaybookResult(
@@ -231,7 +260,7 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         headline_ru=headline,
         body_html=body_html,
         intel_rows=intel,
-        alert_eligible=alert_eligible and state == PlaybookState.ARMED,
+        alert_eligible=alert_eligible and state in {PlaybookState.WATCH, PlaybookState.ARMED},
         chart_spec=chart_spec,
         block_reason=stale_msg,
         meta={"verdict": snap.verdict, "rbr_phase": chart_spec.rbr_phase},

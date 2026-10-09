@@ -66,8 +66,10 @@ def test_playbook_armed_rbr_fade_top() -> None:
         invalidation_price=1.12,
     )
     result = run_playbook(ta)
-    assert result.state == PlaybookState.ARMED
+    assert result.state == PlaybookState.WATCH
     assert result.alert_eligible
+    assert "На графике" in result.body_html
+    assert "Входа нет" in result.body_html
     assert result.chart_spec.show_range
 
 

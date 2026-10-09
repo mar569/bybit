@@ -117,6 +117,19 @@ def draw_playbook_rbr_phase_tv(
         if cur >= floor * 0.996:
             mapper.rect(ax, i0, len(mapper.bars) - 1, floor, ceil, color="#8b949e", alpha=0.06)  # type: ignore[attr-defined]
             drawn += 1
+            if chart_teaching_tags_enabled():
+                ax.text(
+                    0.5,
+                    0.97,
+                    " БОКОВИК · ждём пробой пола",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="top",
+                    color="#8b949e",
+                    fontsize=7,
+                    zorder=9,
+                )
+                drawn += 1
     elif phase == "fade_top":
         resistance = ceil if ceil > 0 else float(rbr.get("entry_hi") or 0)
         if resistance > 0:
@@ -129,12 +142,25 @@ def draw_playbook_rbr_phase_tv(
                 ax.text(
                     mapper.x_start + 0.008,  # type: ignore[attr-defined]
                     mapper.y(z_hi),  # type: ignore[attr-defined]
-                    " ЗОНА",
+                    " ЗОНА ОТКАЗА",
                     color="#f0c040",
                     fontsize=6.5,
                     va="bottom",
                     zorder=8,
                 )
+            if chart_teaching_tags_enabled():
+                ax.text(
+                    0.5,
+                    0.97,
+                    " FADE · у потолка · без входа",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="top",
+                    color="#f0c040",
+                    fontsize=7,
+                    zorder=9,
+                )
+                drawn += 1
     elif phase == "retest" and floor > 0:
         el = float(rbr.get("entry_lo") or floor * 0.996)
         eh = float(rbr.get("entry_hi") or floor * 1.01)

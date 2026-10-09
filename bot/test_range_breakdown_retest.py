@@ -111,3 +111,21 @@ def test_rbr_fade_top_phase():
     assert setup is not None
     assert setup.phase == "fade_top"
     assert floor in setup.targets or setup.targets[0] <= ceil
+
+
+def test_rbr_fade_top_not_await_break_after_floor_wicks():
+    """Цена у потолка не должна получать «ждём пробой», если в хвосте был wick под пол."""
+    floor, ceil = 1.410, 1.430
+    bars = _consolidation_bars(floor=floor, ceil=ceil, n=36, break_down=True)
+    current = ceil * 0.997
+    bars[-1] = _bar(bars[-1].open_time + 9000, current * 0.996, ceil * 1.004, floor * 1.002, current)
+    setup = evaluate_range_breakdown_retest(
+        bars,
+        consolidation=_Box(top=ceil, bottom=floor),
+        breakdown=floor,
+        breakout=ceil,
+        post_pump=True,
+        current=current,
+    )
+    assert setup is not None
+    assert setup.phase == "fade_top"

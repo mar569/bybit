@@ -220,10 +220,14 @@ def draw_range_breakdown_retest_path(
     phase = str(rbr.get("phase") or "")
     targets = [float(t) for t in (rbr.get("targets") or []) if t]
 
-    if phase in {"fade_top", "await_break"}:
-        _draw_fade_top_resistance_story(ax, bars, floor=floor, ceil=ceil, targets=targets)
+    if phase == "fade_top":
+        _draw_fade_top_resistance_story(ax, bars, floor=floor, ceil=ceil, targets=targets, ed_story=True)
         return
 
+    if tp <= 0 and targets:
+        tp = float(targets[0])
+    if tp <= 0:
+        tp = float(rbr.get("swing_low_target") or 0)
     if tp <= 0:
         return
     _draw_breakdown_retest_path(ax, bars, floor=floor, ceil=ceil, tp=tp)

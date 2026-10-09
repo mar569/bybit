@@ -106,11 +106,23 @@ def evaluate_range_breakdown_retest(
     swing_tp = _swing_low_target(bars, floor)
     broke = _recent_close_below(bars, floor)
     near_retest = broke and floor * 0.992 <= current <= floor * 1.018
+    upper_range = pos >= 0.55 and current >= floor * 1.001
 
     if repeat_spike_dump_risk and pos <= 0.25:
         return None
 
-    if near_retest:
+    if upper_range:
+        phase = "fade_top"
+        entry_lo, entry_hi = ceil * 0.982, ceil * 1.006
+        stop = max(ceil * 1.012, current * 1.015)
+        targets = [floor, swing_tp]
+        label = "шорт от верха боковика"
+        story = (
+            f"Консолидация {fmt_price(floor)}–{fmt_price(ceil)}; "
+            f"цена у потолка — ждём отказ, не market. "
+            f"После закрепа под {fmt_price(floor)} цель ≈ {fmt_price(swing_tp)}."
+        )
+    elif near_retest:
         phase = "retest"
         entry_lo, entry_hi = floor * 0.996, floor * 1.01
         stop = _retest_short_stop(bars, floor=floor, ceil=ceil, current=current)
@@ -121,17 +133,6 @@ def evaluate_range_breakdown_retest(
         story = (
             f"Закрепились под {fmt_price(floor)} — retest пола как сопр.; "
             f"цель у минимума ≈ {fmt_price(swing_tp)}."
-        )
-    elif pos >= 0.62 and not broke:
-        phase = "fade_top"
-        entry_lo, entry_hi = ceil * 0.982, ceil * 1.006
-        stop = max(ceil * 1.012, current * 1.015)
-        targets = [floor, swing_tp]
-        label = "шорт от верха боковика"
-        story = (
-            f"Консолидация {fmt_price(floor)}–{fmt_price(ceil)}; "
-            f"аккуратный шорт у {fmt_price(ceil)} — цели {fmt_price(floor)} и {fmt_price(swing_tp)} "
-            f"после закрепа под {fmt_price(floor)}."
         )
     elif current < floor * 0.998:
         phase = "broken"
