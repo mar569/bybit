@@ -91,6 +91,12 @@ def enrich_ta_for_chart_story(
         from .chart_rbr_refresh import refresh_rbr_for_chart
 
         ta = refresh_rbr_for_chart(ta, bars)
+        try:
+            from .chart_pdf_style import sanitize_rbr_for_pdf
+
+            ta = sanitize_rbr_for_pdf(ta, bars)
+        except Exception:
+            pass
     if bars and not str(getattr(ta, "recent_price_action_ru", "") or "").strip():
         try:
             from .recent_bars_narrative import describe_recent_bars
@@ -100,6 +106,13 @@ def enrich_ta_for_chart_story(
             pass
     if get_rbr_from_ta(ta):
         return ta
+    try:
+        from .chart_display_policy import ed_pdf_chart_style_enabled
+
+        if ed_pdf_chart_style_enabled():
+            return ta
+    except Exception:
+        pass
     synth = build_synthetic_rbr_dict(ta, bars)
     if not synth:
         return ta

@@ -47,6 +47,11 @@ def ed_minimal_voice_enabled() -> bool:
     return _env_on("ED_MINIMAL_VOICE", default="1")
 
 
+def ed_pdf_chart_style_enabled() -> bool:
+    """PNG/TV как docs/.cursor_pdf_pages — паттерн или SMC, без RBR-каши."""
+    return _env_on("ED_PDF_CHART_STYLE", default="1")
+
+
 def ed_playbook_minimal_copy_enabled() -> bool:
     """Без «На графике…», дублей verdict/score, лишних простыней в Telegram."""
     if not ed_playbook_v3_enabled():
