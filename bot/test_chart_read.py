@@ -37,6 +37,72 @@ def test_chart_read_cache_on_ta() -> None:
     assert isinstance(ta.market_metrics.get("chart_read_v1"), dict)
 
 
+def test_prose_no_fake_trigger_on_seek_junk() -> None:
+    ta = _minimal_ta(
+        recent_price_action_ru=(
+            "Последние свечи: зелёная → красная → сейчас: зелёная. Close 0.07252."
+        ),
+        reading_seek_label="слабость продаж на новом лое",
+        market_participation_lines=["OI снижается на закрытии позиций"],
+        action_priority="short",
+        target_prices=[0.06697],
+    )
+    read = build_chart_read(ta, symbol="STRKUSDT")
+    html = read.telegram_prose_html()
+    assert "Триггер:" not in html
+    assert "слабость продаж" not in html
+    assert "Жду:" in html or "0.06697" in html or "0.095" in html
+    assert "Close 0.07252" not in html
+    assert "OI снижается" in html
+
+
+def test_prose_rbr_short_trigger_not_wall() -> None:
+    ta = _minimal_ta(
+        recent_price_action_ru="Последние свечи: красная после отказа сверху. Close 101.05.",
+        market_participation_lines=["CVD buy 8/10"],
+        market_metrics={
+            "range_breakdown_retest": {
+                "phase": "await_break",
+                "direction": "short",
+                "range_top": 104.85,
+                "range_bottom": 96.9615,
+                "targets": [89.2046, 85.0],
+            }
+        },
+        breakout_level=104.85,
+        breakdown_level=96.9615,
+        action_priority="short",
+    )
+    read = build_chart_read(ta, symbol="BZUSDT")
+    html = read.telegram_prose_html()
+    assert "Боковик" not in html or "Жду:" in html
+    assert "96.9615" in html
+    assert "Триггер:" not in html
+    assert ";" not in html
+
+
+def test_scenario_not_short_through_breakout_up() -> None:
+    from bot.bybit_klines import KlineBar
+
+    ta = _minimal_ta(
+        current_price=0.545,
+        breakout_level=0.53316,
+        breakdown_level=0.50469,
+        action_priority="short",
+        target_prices=[0.49],
+    )
+    bars = [
+        KlineBar(open_time=1, open=0.52, high=0.525, low=0.518, close=0.522, volume=1),
+        KlineBar(open_time=2, open=0.522, high=0.548, low=0.52, close=0.545, volume=1),
+    ]
+    from bot.core.chart_read import _scenario_from_ta
+
+    wps, lbl = _scenario_from_ta(ta, bars)
+    assert "↓" not in lbl or "retest" in lbl.lower()
+    assert "↑" in lbl
+    assert wps[1] <= ta.breakout_level * 1.001
+
+
 def test_telegram_prose_html_escapes() -> None:
     read = ChartRead(
         symbol="X",

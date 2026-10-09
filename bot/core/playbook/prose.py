@@ -42,14 +42,6 @@ def compose_playbook_prose_html(
             read = get_or_build_chart_read(ta, symbol=snap.symbol or getattr(ta, "symbol", "") or "")
             prose = read.telegram_prose_html()
             if prose and len(prose) > 24:
-                brk = float(getattr(ta, "breakout_level", 0) or 0) or snap.break_up
-                brdn = float(getattr(ta, "breakdown_level", 0) or 0) or snap.break_down
-                if brk > 0 and brdn > 0 and fmt_price(brdn) not in prose and fmt_price(brk) not in prose:
-                    prose += (
-                        f" Коридор <b>{fmt_price(brdn)}</b>–<b>{fmt_price(brk)}</b>."
-                    )
-                if len(prose) > 520:
-                    prose = prose[:517] + "…"
                 return prose
         except Exception:
             pass

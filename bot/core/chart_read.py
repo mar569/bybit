@@ -76,21 +76,136 @@ class ChartRead:
         )
 
     def telegram_prose_html(self) -> str:
+        """2–3 фразы: что на графике → что ждём → один нюанс потока (без «Триггер:» на мусор)."""
         parts: list[str] = []
-        if self.situation_ru:
-            parts.append(escape(self.situation_ru.rstrip(".") + "."))
-        if self.expect_ru and self.expect_ru not in self.situation_ru:
-            parts.append(escape(self.expect_ru.rstrip(".") + "."))
-        if self.trigger_ru and "Триггер:" not in self.situation_ru:
-            parts.append(f"<b>Триггер:</b> {escape(self.trigger_ru)}")
+
+        opening = _sanitize_situation_for_prose(self.situation_ru, self.phase_ru)
+        if opening:
+            parts.append(escape(opening.rstrip(".") + "."))
+
+        action = self._action_line_html()
+        expect = _humanize_expect_line(self.expect_ru, self.bias)
+        corridor = self._corridor_line_html()
+
+        mid_bits: list[str] = []
+        if action:
+            mid_bits.append(action)
+        if expect and expect not in self.situation_ru:
+            want_expect = not action or any(k in expect.lower() for k in ("цел", "→", "шорт —", "если "))
+            if want_expect and not any(expect[:28] in b for b in mid_bits):
+                mid_bits.append(escape(expect.rstrip(".") + "."))
+        if corridor and corridor not in " ".join(mid_bits):
+            mid_bits.append(corridor)
+
+        if mid_bits:
+            parts.append(" ".join(mid_bits))
+
         if self.flow_hint_ru:
-            parts.append(escape(self.flow_hint_ru))
+            blob = " ".join(parts)
+            if self.flow_hint_ru not in blob and "oi" not in blob.lower():
+                parts.append(escape(self.flow_hint_ru))
+
         if self.pattern_label and self.pattern_confidence >= 0.48:
-            parts.append(f"<i>Фигура:</i> {escape(self.pattern_label)}")
-        text = " ".join(parts[:5])
-        if len(text) > 520:
-            text = text[:517] + "…"
+            fig = f"Фигура: {self.pattern_label}"
+            if fig not in " ".join(parts):
+                parts.append(f"<i>{escape(fig)}</i>")
+
+        text = " ".join(parts[:3])
+        if len(text) > 480:
+            text = text[:477].rsplit(" ", 1)[0] + "…"
         return text
+
+    def _action_line_html(self) -> str:
+        t = (self.trigger_ru or "").strip()
+        if _is_actionable_trigger(t):
+            t = _polish_trigger_phrase(t)
+            return f"<b>Жду:</b> {escape(t.rstrip('.') + '.')}"
+        return ""
+
+    def _corridor_line_html(self) -> str:
+        support = next((lv for lv in self.levels if lv.label == "S"), None)
+        resist = next((lv for lv in self.levels if lv.label == "R"), None)
+        if support and resist and resist.price > support.price:
+            return (
+                f"Коридор <b>{fmt_price(support.price)}</b>–"
+                f"<b>{fmt_price(resist.price)}</b> — без market в середине."
+            )
+        return ""
+
+
+def _sanitize_situation_for_prose(situation: str, phase_ru: str) -> str:
+    import re
+
+    s = (situation or "").strip()
+    s = re.sub(r"<[^>]+>", "", s)
+    s = re.sub(r"\s*Close\s+[\d.,]+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    if not s:
+        return (phase_ru or "").strip()
+    if s.lower().startswith("последние свечи") and len(s) > 165:
+        s = s[:162].rsplit(" ", 1)[0] + "…"
+    return s
+
+
+def _humanize_expect_line(expect: str, bias: str) -> str:
+    ex = (expect or "").strip()
+    if not ex:
+        return ""
+    ex = ex.replace("При шорте ориентир:", "Если пойдёт вниз — цель")
+    ex = ex.replace("При шорте цели:", "Шорт — цели")
+    ex = ex.replace("При лонге ориентир:", "Если вверх — цель")
+    ex = ex.replace("Дальше — по пунктиру на графике (сценарий вероятнее).", "")
+    return ex.strip()
+
+
+def _polish_trigger_phrase(t: str) -> str:
+    out = t.replace("Close ≤", "закреп ниже").replace("Close ≥", "закреп выше")
+    out = out.replace("close ≤", "закреп ниже").replace("close ≥", "закреп выше")
+    if out and out[0].islower():
+        out = out[0].upper() + out[1:]
+    return out
+
+
+def _is_actionable_trigger(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or len(t) > 88:
+        return False
+    low = t.lower()
+    junk = (
+        "слабость",
+        "новом лое",
+        "новом хае",
+        "боковик",
+        "цель ≈",
+        "oi ",
+        "open interest",
+        "лент",
+        "покупател",
+        "продаж на",
+    )
+    if any(x in low for x in junk):
+        return False
+    if ";" in t or t.count("→") >= 2:
+        return False
+    action = (
+        "закреп",
+        "пробой",
+        "retest",
+        "close",
+        "ниже",
+        "выше",
+        "отказ",
+        "под ",
+        "над ",
+        "≤",
+        "≥",
+        "между",
+        "наблюд",
+        "ждём",
+        "шорт —",
+        "лонг —",
+    )
+    return any(a in low for a in action)
 
 
 def _flow_hint(ta: TAAnalysisResult) -> str:
@@ -162,12 +277,6 @@ def _humanize_setup_trigger(trig: str) -> str:
 
 
 def _trigger_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None) -> str:
-    trig = _humanize_setup_trigger(str(getattr(ta, "setup_trigger", "") or ""))
-    if trig and len(trig) < 100:
-        return trig
-    seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
-    if seek:
-        return seek[:90]
     brk = float(getattr(ta, "breakout_level", 0) or 0)
     brdn = float(getattr(ta, "breakdown_level", 0) or 0)
     if rbr:
@@ -175,19 +284,35 @@ def _trigger_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None) -> str:
         floor = float(rbr.get("range_bottom") or brdn or 0)
         ceil = float(rbr.get("range_top") or brk or 0)
         if ph == "await_break" and floor > 0:
-            return f"Close ≤ {fmt_price(floor)}, затем retest — не шорт в импульс."
+            return f"Шорт после закрепа под {fmt_price(floor)} (retest, не в падение)."
         if ph == "fade_top" and ceil > 0:
-            return f"Отказ у {fmt_price(ceil)} — не лонг в зелёную свечу."
+            return f"Шорт после отказа у {fmt_price(ceil)}, не в зелёную свечу."
         if ph == "retest" and floor > 0:
-            return f"Retest зоны {fmt_price(floor)} — вход после подтверждения."
+            return f"Retest {fmt_price(floor)} — вход только после подтверждения."
+        if ph == "broken" and floor > 0:
+            return f"Уже ниже {fmt_price(floor)} — шорт на откатах, не в красный импульс."
+
+    trig = _humanize_setup_trigger(str(getattr(ta, "setup_trigger", "") or ""))
+    if trig and _is_actionable_trigger(trig):
+        return trig
+
+    cur = float(getattr(ta, "current_price", 0) or 0)
+    if brk > 0 and cur > brk * 1.001:
+        return f"Уже выше {fmt_price(brk)} — лонг не в импульс; шорт только на retest от R."
+    if brdn > 0 and cur < brdn * 0.999:
+        return f"Уже ниже {fmt_price(brdn)} — шорт не в падение; ждём retest S."
+
     side = preferred_trade_side(ta)
     if side == "long" and brk > 0:
         return f"Закреп выше {fmt_price(brk)} (close/retest)."
     if side == "short" and brdn > 0:
         return f"Пробой ниже {fmt_price(brdn)} и retest."
+    seek = str(getattr(ta, "reading_seek_label", "") or "").strip()
+    if seek and _is_actionable_trigger(seek):
+        return seek[:88]
     if brk > 0 and brdn > 0:
         return f"Между {fmt_price(brdn)} и {fmt_price(brk)} — только наблюдение."
-    return "Ждём реакцию на уровне с графика."
+    return ""
 
 
 def _expect_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None, *, stale: str = "") -> str:
@@ -198,15 +323,15 @@ def _expect_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None, *, stale: str =
     if rbr and str(rbr.get("direction") or "") == "short":
         tg = [float(x) for x in (rbr.get("targets") or []) if x][:2]
         if tg:
-            return f"При шорте цели: {fmt_price(tg[0])}" + (f" → {fmt_price(tg[1])}" if len(tg) > 1 else "") + "."
+            return f"Шорт — цели {fmt_price(tg[0])}" + (f" → {fmt_price(tg[1])}" if len(tg) > 1 else "") + "."
         ph = str(rbr.get("phase") or "")
         if ph == "await_break":
             return "Ждём пробой пола и retest — вход не у потолка."
         return "Сценарий вниз — только по триггеру на графике."
     if side == "long" and tps:
-        return f"При лонге ориентир: {fmt_price(tps[0])}."
+        return f"Если вверх — цель {fmt_price(tps[0])}."
     if side == "short" and tps:
-        return f"При шорте ориентир: {fmt_price(tps[0])}."
+        return f"Если вниз — цель {fmt_price(tps[0])}."
     cont = getattr(ta, "continuation_path", None)
     if cont and getattr(cont, "label", ""):
         return str(cont.label)[:120]
@@ -261,33 +386,80 @@ def _collect_levels(ta: TAAnalysisResult, *, max_n: int = 5) -> list[ChartReadLe
     return out[:max_n]
 
 
-def _scenario_from_ta(ta: TAAnalysisResult) -> tuple[list[float], str]:
+def _bars_closed_above(bars: list[KlineBar] | None, level: float, *, lookback: int = 4) -> bool:
+    if not bars or level <= 0:
+        return False
+    for b in bars[-lookback:]:
+        if float(b.close) > level * 1.0008:
+            return True
+    return False
+
+
+def _bars_closed_below(bars: list[KlineBar] | None, level: float, *, lookback: int = 4) -> bool:
+    if not bars or level <= 0:
+        return False
+    for b in bars[-lookback:]:
+        if float(b.close) < level * 0.9992:
+            return True
+    return False
+
+
+def _scenario_from_ta(
+    ta: TAAnalysisResult,
+    bars: list[KlineBar] | None = None,
+) -> tuple[list[float], str]:
     cur = float(getattr(ta, "current_price", 0) or 0)
+    if cur <= 0 and bars:
+        cur = float(bars[-1].close)
     if cur <= 0:
         return [], ""
+
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    tps = [float(x) for x in (getattr(ta, "target_prices", None) or []) if x]
+
+    above_r = brk > 0 and (cur > brk * 1.001 or _bars_closed_above(bars, brk))
+    below_s = brdn > 0 and (cur < brdn * 0.999 or _bars_closed_below(bars, brdn))
+
+    if above_r:
+        retest = brk
+        ext = tps[0] if tps and tps[0] > cur else brk * 1.012
+        if ext <= cur:
+            ext = cur * 1.008
+        return [cur, retest, ext], "пробой ↑ · retest R"
+    if below_s:
+        retest = brdn
+        ext = tps[0] if tps and tps[0] < cur else brdn * 0.988
+        if ext >= cur:
+            ext = cur * 0.992
+        return [cur, retest, ext], "пробой ↓ · retest S"
+
     path = getattr(ta, "continuation_path", None)
     if path and list(getattr(path, "waypoints", None) or []):
         wps = [float(x) for x in path.waypoints if x]
         if len(wps) >= 2:
-            return [cur] + wps[:4], str(getattr(path, "label", "") or "продолжение")[:40]
+            label = str(getattr(path, "label", "") or "продолжение")[:40]
+            if below_s and "↑" in label and wps[0] > wps[-1]:
+                pass
+            else:
+                return [cur] + wps[:4], label
     corr = getattr(ta, "correction_path", None)
     if corr and list(getattr(corr, "waypoints", None) or []):
         wps = [float(x) for x in corr.waypoints if x]
         if len(wps) >= 2:
             return [cur] + wps[:4], str(getattr(corr, "label", "") or "откат")[:40]
+
     side = preferred_trade_side(ta)
-    brk = float(getattr(ta, "breakout_level", 0) or 0)
-    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
-    tps = [float(x) for x in (getattr(ta, "target_prices", None) or []) if x]
-    if side == "short" and brdn > 0 and cur > brdn:
-        tgt = tps[0] if tps else brdn * 0.992
-        return [cur, brdn, tgt], "пробой ↓"
-    if side == "long" and brk > 0 and cur < brk:
-        tgt = tps[0] if tps else brk * 1.008
-        return [cur, brk, tgt], "пробой ↑"
-    if brk > 0 and brdn > 0:
+    if side == "short" and brdn > 0 and cur > brdn and brk > 0 and cur < brk * 0.998:
+        tgt = tps[0] if tps and tps[0] < cur else brdn * 0.992
+        return [cur, brdn, tgt], "к полу range"
+    if side == "long" and brk > 0 and cur < brk and brdn > 0 and cur > brdn * 1.002:
+        tgt = tps[0] if tps and tps[0] > cur else brk * 1.008
+        return [cur, brk, tgt], "к потолку range"
+    if brk > 0 and brdn > 0 and brdn < cur < brk:
         mid = (brk + brdn) / 2
-        return [cur, mid, brk if cur < mid else brdn], "к границе range"
+        edge = brk if cur >= mid else brdn
+        return [cur, edge], "к границе range"
     return [], ""
 
 
@@ -409,16 +581,25 @@ def build_chart_read(
     pat_label = format_chart_pattern_compact(primary) if primary else ""
     pat_conf = float(getattr(primary, "confidence", 0) or 0) if primary else 0.0
     levels = _collect_levels(ta)
-    wps, sc_lbl = _scenario_from_ta(ta)
+    wps, sc_lbl = _scenario_from_ta(ta, bars)
     ready, cl_ru = _smc_checklist(ta)
     from ..chart_display_policy import chart_trade_plan_on_chart_enabled
     from ..chart_plan_chart_gate import plan_ok_to_draw_on_chart
 
     draw_entry = ready and chart_trade_plan_on_chart_enabled() and plan_ok_to_draw_on_chart(ta)
-    hint_parts = [struct, trigger[:60] if trigger else ""]
-    if sc_lbl:
-        hint_parts.append(f"сценарий: {sc_lbl}")
-    setup_hint = " · ".join(p for p in hint_parts if p)[:140]
+    setup_hint = ""
+    if bars:
+        try:
+            from ..chart_pdf_style import _pdf_setup_hint
+
+            setup_hint = (_pdf_setup_hint(ta, bars) or "").strip()[:140]
+        except Exception:
+            setup_hint = ""
+    if not setup_hint:
+        hint_parts = [struct, trigger[:60] if trigger else ""]
+        if sc_lbl:
+            hint_parts.append(f"сценарий: {sc_lbl}")
+        setup_hint = " · ".join(p for p in hint_parts if p)[:140]
 
     return ChartRead(
         symbol=sym,
