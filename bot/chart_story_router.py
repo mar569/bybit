@@ -104,6 +104,13 @@ def enrich_ta_for_chart_story(
             ta.recent_price_action_ru = describe_recent_bars(bars, count=4)
         except Exception:
             pass
+    if bars:
+        try:
+            from .core.chart_read import get_or_build_chart_read
+
+            get_or_build_chart_read(ta, bars, symbol=str(getattr(ta, "symbol", "") or ""))
+        except Exception:
+            pass
     if get_rbr_from_ta(ta):
         return ta
     try:

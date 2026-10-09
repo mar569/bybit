@@ -202,12 +202,15 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
             from ...human_trade_brief import _symbol_short
 
             short = _symbol_short(sym) or sym
+            snap_ob = snapshot_from_ta(ta, symbol=symbol)
             body = format_playbook_brief_html(
                 state=PlaybookState.OBSERVE,
                 symbol=short,
                 situation="Класс актива пока без playbook.",
                 expect="Только наблюдение.",
                 intel_rows=[("Цена", "—"), ("OI", "—"), ("CVD", "—"), ("Liq", "—")],
+                snap=snap_ob,
+                ta=ta,
             )
             return PlaybookResult(
                 state=PlaybookState.OBSERVE,
@@ -227,8 +230,12 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
     state = _resolve_state(snap, stale=stale)
     chart_spec = build_chart_spec(snap)
     intel = _intel_rows_from_snapshot(snap, ta)
-    situation = _situation_ru(snap)
-    expect = _expect_ru(snap, stale_msg=stale_msg)
+
+    from ..chart_read import get_or_build_chart_read
+
+    chart_read = get_or_build_chart_read(ta, symbol=sym)
+    situation = chart_read.situation_ru or _situation_ru(snap)
+    expect = chart_read.expect_ru or _expect_ru(snap, stale_msg=stale_msg)
 
     from ...human_trade_brief import _symbol_short
 
@@ -253,6 +260,8 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         expect=expect,
         intel_rows=intel,
         rbr=snap.rbr,
+        snap=snap,
+        ta=ta,
     )
 
     return PlaybookResult(
@@ -263,5 +272,11 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         alert_eligible=alert_eligible and state in {PlaybookState.WATCH, PlaybookState.ARMED},
         chart_spec=chart_spec,
         block_reason=stale_msg,
-        meta={"verdict": snap.verdict, "rbr_phase": chart_spec.rbr_phase},
+        meta={
+            "verdict": snap.verdict,
+            "rbr_phase": chart_spec.rbr_phase,
+            "chart_read_phase": chart_read.phase,
+            "chart_read_bias": chart_read.bias,
+            "smc_pdf_ready": chart_read.smc_ready,
+        },
     )

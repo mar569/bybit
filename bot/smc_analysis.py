@@ -38,6 +38,7 @@ class SmcMarker:
     kind: str  # bos, sweep, expansion, fvg
     label: str
     direction: str  # long / short
+    ref_price: float | None = None  # уровень ликвидности / BOS (линия на графике)
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,32 @@ def detect_liquidity_levels(
     return levels
 
 
+def _sweep_wick_bar(
+    bars: list[KlineBar],
+    *,
+    level: float,
+    start_i: int,
+    end_i: int,
+    take_highs: bool,
+) -> tuple[int | None, float]:
+    """Свеча, которой сняли ликвидность (экстремум фитиля)."""
+    if level <= 0:
+        return None, level
+    best_i: int | None = None
+    best_wick = level
+    for i in range(max(0, start_i), min(end_i, len(bars))):
+        b = bars[i]
+        if take_highs and float(b.high) > level * 1.00025:
+            w = float(b.high)
+            if best_i is None or w >= best_wick:
+                best_i, best_wick = i, w
+        if not take_highs and float(b.low) < level * 0.99975:
+            w = float(b.low)
+            if best_i is None or w <= best_wick:
+                best_i, best_wick = i, w
+    return best_i, best_wick
+
+
 def _detect_liquidity_sweep(
     bars: list[KlineBar],
     swings: list,
@@ -189,43 +216,74 @@ def _detect_liquidity_sweep(
     if len(bars) < 5 or not swings:
         return False, "none", None
     current = bars[-1]
-    lookback = bars[-8:]
+    lb = 24
+    start_i = max(0, len(bars) - lb)
     lows = [s for s in swings if s.kind == "low"]
     highs = [s for s in swings if s.kind == "high"]
     if lows:
         ref_low = lows[-1].price
-        swept = any(b.low < ref_low * 0.9995 for b in lookback[:-1])
-        recovered = current.close > ref_low
+        swept = any(float(b.low) < ref_low * 0.9995 for b in bars[start_i:-1])
+        recovered = float(current.close) > ref_low
         if swept and recovered:
-            idx = len(bars) - 1
+            si, wick = _sweep_wick_bar(bars, level=ref_low, start_i=start_i, end_i=len(bars), take_highs=False)
+            if si is None:
+                si, wick = len(bars) - 1, float(current.low)
             return True, "long", SmcMarker(
-                index=idx, price=ref_low, kind="sweep",
-                label="свип↓", direction="long",
+                index=si,
+                price=wick,
+                kind="sweep",
+                label="свип↓",
+                direction="long",
+                ref_price=ref_low,
             )
     if highs:
         ref_high = highs[-1].price
-        swept = any(b.high > ref_high * 1.0005 for b in lookback[:-1])
-        recovered = current.close < ref_high
+        swept = any(float(b.high) > ref_high * 1.0005 for b in bars[start_i:-1])
+        recovered = float(current.close) < ref_high
         if swept and recovered:
-            idx = len(bars) - 1
+            si, wick = _sweep_wick_bar(bars, level=ref_high, start_i=start_i, end_i=len(bars), take_highs=True)
+            if si is None:
+                si, wick = len(bars) - 1, float(current.high)
             return True, "short", SmcMarker(
-                index=idx, price=ref_high, kind="sweep",
-                label="свип↑", direction="short",
+                index=si,
+                price=wick,
+                kind="sweep",
+                label="свип↑",
+                direction="short",
+                ref_price=ref_high,
             )
     for lv in levels:
         if lv.kind in {"daily_low", "weekly_low", "equal_lows", "nearest_low"}:
-            swept = any(b.low < lv.price * 0.999 for b in lookback[:-1])
-            if swept and current.close > lv.price:
+            swept = any(float(b.low) < lv.price * 0.999 for b in bars[start_i:-1])
+            if swept and float(current.close) > lv.price:
+                si, wick = _sweep_wick_bar(
+                    bars, level=lv.price, start_i=start_i, end_i=len(bars), take_highs=False,
+                )
+                if si is None:
+                    si, wick = len(bars) - 1, float(current.low)
                 return True, "long", SmcMarker(
-                    index=len(bars) - 1, price=lv.price, kind="sweep",
-                    label="свип ликв.", direction="long",
+                    index=si,
+                    price=wick,
+                    kind="sweep",
+                    label="свип ликв.",
+                    direction="long",
+                    ref_price=float(lv.price),
                 )
         if lv.kind in {"daily_high", "weekly_high", "equal_highs", "nearest_high"}:
-            swept = any(b.high > lv.price * 1.001 for b in lookback[:-1])
-            if swept and current.close < lv.price:
+            swept = any(float(b.high) > lv.price * 1.001 for b in bars[start_i:-1])
+            if swept and float(current.close) < lv.price:
+                si, wick = _sweep_wick_bar(
+                    bars, level=lv.price, start_i=start_i, end_i=len(bars), take_highs=True,
+                )
+                if si is None:
+                    si, wick = len(bars) - 1, float(current.high)
                 return True, "short", SmcMarker(
-                    index=len(bars) - 1, price=lv.price, kind="sweep",
-                    label="свип ликв.", direction="short",
+                    index=si,
+                    price=wick,
+                    kind="sweep",
+                    label="свип ликв.",
+                    direction="short",
+                    ref_price=float(lv.price),
                 )
     return False, "none", None
 
@@ -354,8 +412,12 @@ def _detect_reversal_pattern(
                 ready = expansion and in_discount
                 markers = []
                 markers.append(SmcMarker(
-                    index=prior_highs[-1].index, price=bos_level,
-                    kind="bos", label="BOS↑", direction="long",
+                    index=prior_highs[-1].index,
+                    price=bos_level,
+                    kind="bos",
+                    label="BOS↑",
+                    direction="long",
+                    ref_price=bos_level,
                 ))
                 if expansion:
                     markers.append(SmcMarker(
@@ -402,8 +464,12 @@ def _detect_reversal_pattern(
                     stage = "expansion"
                 ready = expansion and in_premium
                 markers = [SmcMarker(
-                    index=prior_lows[-1].index, price=bos_level,
-                    kind="bos", label="BOS↓", direction="short",
+                    index=prior_lows[-1].index,
+                    price=bos_level,
+                    kind="bos",
+                    label="BOS↓",
+                    direction="short",
+                    ref_price=bos_level,
                 )]
                 if expansion:
                     markers.append(SmcMarker(
@@ -507,6 +573,7 @@ def analyze_smc(
                     kind="mss" if break_kind == "mss" else "bos",
                     label="MSS" if break_kind == "mss" else "BOS",
                     direction=m.direction,
+                    ref_price=getattr(m, "ref_price", None) or m.price,
                 )
                 break
 

@@ -323,17 +323,16 @@ def draw_smc_pdf_clean(
             drawn += 1
             continue
         seen_kind.add(kind)
-        ts = _x_mpl(bars, marker.index)
         if kind == "sweep":
-            ax.plot(ts, marker.price, marker="o", mfc="none", mec="#ffd33d", ms=11, mew=2.0, zorder=8)
-            if show:
-                ax.text(ts, marker.price, "  снятие liq", color="#ffd33d", fontsize=6.5, va="bottom", zorder=9)
-        else:
-            col = "#ff7b72" if getattr(marker, "direction", "") == "short" else "#58a6ff"
+            from .chart_event_pins import draw_sweep_pin_mpl
+
+            draw_sweep_pin_mpl(ax, bars, marker)
+        elif kind in {"bos", "mss", "expansion"}:
+            from .chart_event_pins import draw_bos_pin_mpl
+
+            brk_lv = getattr(smc, "structure_break_level", None) if kind != "expansion" else None
             lbl = _structure_tag("mss" if kind == "mss" else "bos")
-            ax.plot(ts, marker.price, marker="*", color=col, ms=10, linestyle="None", zorder=8)
-            if show:
-                ax.text(ts, marker.price, f"  {lbl}", color=col, fontsize=6.5, va="bottom", zorder=9)
+            draw_bos_pin_mpl(ax, bars, marker, break_level=float(brk_lv) if brk_lv else None, kind_label=lbl)
         drawn += 1
         if len(seen_kind) >= max_markers:
             break
@@ -346,10 +345,12 @@ def draw_smc_pdf_clean(
             continue
         if top <= bot:
             continue
-        idx = int(getattr(ob, "index", len(bars) - 8) or len(bars) - 8)
+        idx = int(getattr(ob, "start_idx", None) or getattr(ob, "index", len(bars) - 8) or len(bars) - 8)
+        brk = int(getattr(ob, "break_idx", idx) or idx)
         idx = max(0, min(idx, len(bars) - 1))
-        x_ob0 = _x_mpl(bars, max(0, idx - 2))
-        x_ob1 = _x_mpl(bars, min(len(bars) - 1, idx + 10))
+        brk = max(idx, min(brk, len(bars) - 1))
+        x_ob0 = _x_mpl(bars, idx)
+        x_ob1 = _x_mpl(bars, min(len(bars) - 1, brk + 2))
         col = "#3fb950" if getattr(ob, "direction", "") == "bullish" else "#f85149"
         ax.add_patch(
             Rectangle((x_ob0, bot), max(x_ob1 - x_ob0, w * 0.05), top - bot, facecolor=col, alpha=0.18, edgecolor=col, linewidth=0.9, zorder=3)

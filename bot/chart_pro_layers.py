@@ -297,29 +297,16 @@ def draw_flat_breakout_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisRe
 
 
 def draw_sweep_circles(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    """Кружки на свипах ликвидности у экстремумов / тренда."""
+    """Свип: уровень liq + круг на фитиле свечи."""
     smc = ta.smc
     if smc is None or not bars:
         return
-    ref = bars[-1].close or 1.0
-    w_days = max(0.012, len(bars) * 0.0008)
-    h_price = ref * 0.006
+    from .chart_event_pins import draw_sweep_pin_mpl
 
     for marker in smc.markers:
         if marker.kind != "sweep" or marker.index >= len(bars):
             continue
-        ts = mdates.date2num(_idx_to_date(bars, marker.index))
-        color = "#ffd33d" if marker.direction == "long" else "#ff7b72"
-        ax.add_patch(
-            Ellipse(
-                (ts, marker.price), w_days, h_price,
-                fill=False, edgecolor=color, linewidth=2.0, linestyle="-", zorder=6,
-            )
-        )
-        ax.text(
-            ts, marker.price + h_price * 0.6, " sweep",
-            color=color, fontsize=6, ha="center", va="bottom", fontweight="bold",
-        )
+        draw_sweep_pin_mpl(ax, bars, marker)
 
     if smc.liquidity_sweep and not any(m.kind == "sweep" for m in smc.markers):
         for swing in ta.swings[-4:]:

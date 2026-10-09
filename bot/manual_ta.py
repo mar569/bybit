@@ -64,7 +64,7 @@ def parse_manual_ta_input(text: str) -> tuple[str | None, int | None]:
 
 def pattern_chart_hours(interval_minutes: int) -> int:
     """Окно истории для поиска графических фигур (анализ, не зум экрана)."""
-    return {5: 24, 10: 36, 15: 48, 30: 48, 60: 72}.get(interval_minutes, 24)
+    return {5: 36, 10: 48, 15: 72, 30: 72, 60: 96}.get(interval_minutes, 48)
 
 
 def chart_display_hours(interval_minutes: int, *, configured: int | None = None) -> int:
@@ -72,7 +72,7 @@ def chart_display_hours(interval_minutes: int, *, configured: int | None = None)
     from .chart_display_policy import ed_chart_visible_hours
 
     env_vis = ed_chart_visible_hours()
-    defaults = {5: 18, 10: 24, 15: 48, 30: 48, 60: 48}
+    defaults = {5: 24, 10: 36, 15: 56, 30: 56, 60: 72}
     base = env_vis if env_vis is not None else defaults.get(interval_minutes, 24)
     if configured is None:
         return base
@@ -118,7 +118,7 @@ def manual_ta_hours(interval_minutes: int) -> int:
     env_vis = ed_chart_visible_hours()
     if env_vis is not None:
         return max(env_vis, 12)
-    return {5: 24, 10: 36, 15: 48, 30: 48, 60: 72}.get(interval_minutes, 36)
+    return {5: 36, 10: 48, 15: 72, 30: 72, 60: 96}.get(interval_minutes, 48)
 
 
 def compute_structure_bar_span(ta: object, bars: list) -> int:

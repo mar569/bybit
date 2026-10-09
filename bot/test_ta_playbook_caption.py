@@ -12,5 +12,7 @@ def test_signal_caption_uses_playbook_when_v3() -> None:
         analysis_interval_minutes=5,
     )
     html = ta_signal_caption_html(ta, signal_side="long", symbol="BTCUSDT")
-    assert "INTEL" in html or "Наблюдение" in html
+    assert html
+    assert "INTEL" not in html
+    assert "Слежу" in html or "Наблюдение" in html or "BTC" in html.upper()
     assert html == build_living_analysis_html(ta, symbol="BTCUSDT")

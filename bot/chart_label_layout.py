@@ -107,7 +107,7 @@ def _deconflict_ys(
     *,
     y_min: float,
     y_max: float,
-    min_frac: float = 0.034,
+    min_frac: float = 0.042,
 ) -> list[float]:
     if not prices:
         return []

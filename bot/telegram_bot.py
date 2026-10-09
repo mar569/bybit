@@ -216,6 +216,7 @@ class TelegramBot:
         self._minute_send_times: dict[int, list[float]] = {}
         self._hour_send_times: dict[int, list[float]] = {}
         self._last_proactive_intel_time: dict[str, float] = {}
+        self._last_manual_ta_symbol_time: dict[str, float] = {}
         self._last_trader_deep_analysis_time: dict[str, float] = {}
         self._situation_overview_task: asyncio.Task | None = None
         self._last_situation_overview_post: float = 0.0
@@ -1414,7 +1415,19 @@ class TelegramBot:
         quality_reason: str = "",
     ) -> bool:
         settings = self.settings_manager.settings
+        from .channel_discipline import (
+            manual_ta_blocks_signal_noise,
+            proactive_intel_on_watch_enabled,
+        )
+
+        if not proactive_intel_on_watch_enabled():
+            return
         if not getattr(settings, "signal_intel_watch_enabled", False):
+            return
+        if manual_ta_blocks_signal_noise(
+            signal.symbol, last_manual=self._last_manual_ta_symbol_time,
+        ):
+            logger.info("Skip proactive intel %s — недавний ручной /ta", signal.symbol)
             return False
         chat_id = self.config.effective_analysis_chat_id
         if chat_id is None:
@@ -1493,6 +1506,10 @@ class TelegramBot:
         chat_id = self.config.effective_analysis_chat_id
         if chat_id is None or not settings.analysis_enabled:
             return
+        from .channel_discipline import signal_pro_analysis_chat_enabled
+
+        if not signal_pro_analysis_chat_enabled():
+            return
         if not settings.signal_pro_to_analysis_chat:
             return
         sym_key = signal.symbol.upper()
@@ -1535,6 +1552,10 @@ class TelegramBot:
         settings = self.settings_manager.settings
         chat_id = self.config.effective_analysis_chat_id
         if chat_id is None:
+            return
+        from .channel_discipline import trader_deep_on_signal_enabled
+
+        if not trader_deep_on_signal_enabled():
             return
         if not getattr(settings, "trader_deep_analysis_enabled", True):
             return
@@ -2274,9 +2295,12 @@ class TelegramBot:
         if not sent_any:
             return
 
+        from .channel_discipline import signal_extra_messages_enabled
+
         if (
             sent_any
             and ta_result is not None
+            and signal_extra_messages_enabled()
             and getattr(settings, "signal_alert_reading_snippet_enabled", True)
             and not skip_dedupe
         ):
@@ -2296,6 +2320,7 @@ class TelegramBot:
         if (
             sent_any
             and ta_result is not None
+            and signal_extra_messages_enabled()
             and getattr(settings, "signal_alert_llm_validate_enabled", False)
             and not skip_dedupe
         ):
@@ -2319,7 +2344,7 @@ class TelegramBot:
                     "Alert LLM validate failed for %s", signal.symbol, exc_info=True,
                 )
 
-        if sent_any and ta_result is not None and not skip_dedupe:
+        if sent_any and ta_result is not None and signal_extra_messages_enabled() and not skip_dedupe:
             await self._maybe_send_situational_ai(
                 notify_chat_id,
                 ta_result,
@@ -4183,13 +4208,17 @@ class TelegramBot:
             is_priority=False,
             keyboard=keyboard,
         )
+        self._last_manual_ta_symbol_time[symbol.upper()] = time.time()
         self._cache_manual_ta_result(target_chat_id, symbol, interval_minutes, ta)
-        await self._maybe_send_situational_ai(
-            target_chat_id,
-            ta,
-            symbol=symbol,
-            manual=True,
-        )
+        from .channel_discipline import signal_extra_messages_enabled
+
+        if signal_extra_messages_enabled():
+            await self._maybe_send_situational_ai(
+                target_chat_id,
+                ta,
+                symbol=symbol,
+                manual=True,
+            )
 
         if from_wizard and notify_chat_id is not None and notify_chat_id != target_chat_id:
             if self.application is not None:

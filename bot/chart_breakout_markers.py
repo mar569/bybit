@@ -88,9 +88,12 @@ def _false_break_from_smc(bars: list[KlineBar], ta: TAAnalysisResult) -> Breakou
     )
     if marker is None or not (0 <= marker.index < len(bars)):
         return None
+    from .chart_event_pins import resolve_sweep_geometry
+
+    bar_i, wick, _level = resolve_sweep_geometry(bars, marker)
     return BreakoutRetestEvent(
-        bar_idx=int(marker.index),
-        price=float(marker.price),
+        bar_idx=int(bar_i),
+        price=float(wick),
         kind="false_break",
         label="снятие ликв.",
     )

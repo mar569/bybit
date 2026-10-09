@@ -209,24 +209,12 @@ def _draw_sweep_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) ->
     smc = getattr(ta, "smc", None)
     if smc is None or not mapper.bars:
         return
-    w, h = 0.018, 0.012
+    from .chart_event_pins import draw_sweep_pin_tv
+
     for marker in getattr(smc, "markers", []) or []:
         if getattr(marker, "kind", "") != "sweep" or marker.index >= len(mapper.bars):
             continue
-        if not mapper.bar_visible(marker.index):
-            continue
-        color = "#ffd33d" if getattr(marker, "direction", "") == "long" else "#ff7b72"
-        ax.add_patch(
-            Ellipse(
-                (mapper.x(marker.index), mapper.y(marker.price)),
-                w,
-                h,
-                fill=False,
-                edgecolor=color,
-                linewidth=2.0,
-                zorder=7,
-            )
-        )
+        draw_sweep_pin_tv(ax, mapper, mapper.bars, marker)
 
 
 def _draw_breakout_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
@@ -596,7 +584,18 @@ def compose_tradingview_pro_png(
 
     if drew < 2 or (drew < 4 and not get_rbr_from_ta(ta)):
         plt.close(fig)
-        logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
+        try:
+            from .chart_display_policy import ed_chart_composite_enabled
+
+            if ed_chart_composite_enabled():
+                logger.info(
+                    "TV overlay light (%s layers) — full markup via matplotlib composite",
+                    drew,
+                )
+            else:
+                logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
+        except Exception:
+            logger.warning("TV overlay too sparse (%s layers) — matplotlib fallback", drew)
         return None
     buffer = io.BytesIO()
     fig.savefig(

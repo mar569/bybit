@@ -57,6 +57,17 @@ def draw_mpl_playbook_layers(
     symbol: str = "",
     interval_minutes: int = 15,
 ) -> object | None:
+    from ...chart_display_policy import ed_chart_single_canvas_enabled
+
+    if ed_chart_single_canvas_enabled():
+        from ...chart_story_router import enrich_ta_for_chart_story
+        from ...chart_ed_canvas import draw_ed_analysis_canvas_mpl
+
+        ta = enrich_ta_for_chart_story(ta, bars)
+        return draw_ed_analysis_canvas_mpl(
+            ax, bars, ta, symbol=symbol, interval_minutes=interval_minutes,
+        )
+
     spec = chart_spec_for_ta(ta, symbol=symbol)
     if spec is None:
         return None

@@ -89,11 +89,19 @@ def draw_smc_visuals_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResul
         ts = _x_mpl(bars, marker.index)
         kind = str(getattr(marker, "kind", "") or "")
         if kind == "sweep":
-            color = "#ffd33d"
-            ax.plot(ts, marker.price, marker="o", mfc="none", mec=color, ms=10, mew=2.0, zorder=7)
+            from .chart_event_pins import draw_sweep_pin_mpl
+
+            draw_sweep_pin_mpl(ax, bars, marker)
+            continue
         elif kind in {"bos", "expansion", "mss"}:
-            color = "#58a6ff" if getattr(marker, "direction", "") == "long" else "#ff7b72"
-            ax.plot(ts, marker.price, marker="*", color=color, ms=9, linestyle="None", zorder=7)
+            from .chart_event_pins import draw_bos_pin_mpl
+            from .chart_analysis_text import structure_break_label_ru
+
+            smc = getattr(ta, "smc", None)
+            brk = float(getattr(smc, "structure_break_level", 0) or 0) if smc else 0.0
+            lbl = structure_break_label_ru(kind if kind != "expansion" else "bos", short=True)
+            draw_bos_pin_mpl(ax, bars, marker, break_level=brk or None, kind_label=lbl)
+            continue
         elif kind in {"equal_highs", "equal_lows"}:
             ax.axhline(float(marker.price), color="#d2a8ff", linestyle=":", linewidth=0.8, alpha=0.7, zorder=3)
         if show_text and getattr(marker, "label", "") and kind in {"sweep", "bos", "mss", "expansion"}:
@@ -113,9 +121,15 @@ def draw_order_blocks_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResu
             continue
         if top <= bot:
             continue
+        idx = int(getattr(ob, "start_idx", len(bars) - 6) or len(bars) - 6)
+        brk = int(getattr(ob, "break_idx", idx + 4) or idx + 4)
+        idx = max(0, min(idx, len(bars) - 1))
+        brk = max(idx, min(brk, len(bars) - 1))
+        x_ob0 = _x_mpl(bars, idx)
+        x_ob1 = _x_mpl(bars, brk)
         col = "#3fb950" if getattr(ob, "direction", "") == "bullish" else "#f85149"
         ax.add_patch(
-            Rectangle((x0, bot), x1 - x0, top - bot, facecolor=col, edgecolor=col, alpha=0.13, linewidth=0.8, zorder=2)
+            Rectangle((x_ob0, bot), max(x_ob1 - x_ob0, 0.001), top - bot, facecolor=col, edgecolor=col, alpha=0.13, linewidth=0.8, zorder=2)
         )
         if show_text:
             tag = "OB↑" if col == "#3fb950" else "OB↓"
@@ -183,11 +197,13 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
             if show_tags:
                 from .chart_analysis_text import structure_break_label_ru
 
-                kind = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"))
+                kind = structure_break_label_ru(
+                    str(getattr(smc, "structure_break_kind", "") or "bos"), short=True,
+                )
                 ax.text(
                     mapper.x_start + 0.01,
                     mapper.y(lv),
-                    f" {kind[:10]}",
+                    f" {kind} {fmt_price(lv)}",
                     color="#f0c040",
                     fontsize=6.5,
                     va="bottom",
@@ -209,14 +225,23 @@ def draw_smc_visuals_tv(mapper, ax: plt.Axes, ta: TAAnalysisResult) -> None:
         kind = str(getattr(marker, "kind", "") or "")
         x, y = mapper.x(marker.index), mapper.y(marker.price)
         if kind == "sweep":
-            ax.plot(x, y, marker="o", mfc="none", mec="#ffd33d", ms=9, mew=2.0, zorder=7)
-            if show_tags:
-                ax.text(x + 0.012, y, "SWEEP", color="#ffd33d", fontsize=6.5, va="center", zorder=8)
+            from .chart_event_pins import draw_sweep_pin_tv
+
+            draw_sweep_pin_tv(ax, mapper, mapper.bars, marker)
+            continue
         elif kind in {"bos", "expansion", "mss"}:
+            from .chart_event_pins import resolve_bos_geometry
+
             col = "#58a6ff" if getattr(marker, "direction", "") == "long" else "#ff7b72"
-            ax.plot(x, y, marker="*", color=col, ms=8, linestyle="None", zorder=7)
+            bar_i, _, level = resolve_bos_geometry(
+                mapper.bars, marker, break_level=getattr(smc, "structure_break_level", None),
+            )
+            xb, yb = mapper.x(bar_i), mapper.y(level if level > 0 else marker.price)
+            ax.plot(xb, yb, marker="*", color=col, ms=8, linestyle="None", zorder=7)
             if show_tags:
-                ax.text(x + 0.012, y, "BOS", color=col, fontsize=6.5, va="center", zorder=8)
+                mapper.hline(ax, level, color="#f0c040", lw=1.0, alpha=0.85, ls="-")
+                ax.text(xb + 0.012, yb, "BOS", color=col, fontsize=6.5, va="center", zorder=8)
+            continue
         elif kind in {"equal_highs", "equal_lows"}:
             mapper.hline(ax, float(marker.price), color="#d2a8ff", lw=0.8, alpha=0.65, ls=":")
 

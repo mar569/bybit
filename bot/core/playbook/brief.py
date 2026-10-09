@@ -39,17 +39,32 @@ def format_playbook_brief_html(
     intel_rows: list[tuple[str, str]],
     footer: str = "",
     rbr: dict | None = None,
+    snap: object | None = None,
+    ta: object | None = None,
 ) -> str:
-    head = f"<b>{escape(symbol)}</b> · {escape(state.badge_ru)}"
-    body_parts = [escape(situation.rstrip(".") + ".")]
-    if expect:
-        body_parts.append(escape(expect.rstrip(".") + "."))
-    body = " ".join(body_parts)
+    from ...chart_display_policy import ed_playbook_intel_panel_enabled
+    from ...ta_analysis import TAAnalysisResult
+    from ..snapshot import MarketSnapshot
+    from .prose import compose_playbook_prose_html
 
-    blocks: list[str] = [head, body]
-    matrix = format_intel_matrix_html_from_rows(intel_rows, mandatory_four=True)
-    if matrix:
-        blocks.append(matrix)
+    head = f"<b>{escape(symbol)}</b> · {escape(state.badge_ru)}"
+    blocks: list[str] = [head]
+
+    if isinstance(snap, MarketSnapshot):
+        blocks.append(
+            compose_playbook_prose_html(snap, situation=situation, expect=expect, ta=ta if isinstance(ta, TAAnalysisResult) else None)
+        )
+    else:
+        body_parts = [escape(situation.rstrip(".") + ".")]
+        if expect:
+            body_parts.append(escape(expect.rstrip(".") + "."))
+        blocks.append(" ".join(body_parts))
+
+    if ed_playbook_intel_panel_enabled():
+        matrix = format_intel_matrix_html_from_rows(intel_rows, mandatory_four=True)
+        if matrix:
+            blocks.append(matrix)
+
     if footer:
         foot = footer
     else:
@@ -58,6 +73,8 @@ def format_playbook_brief_html(
         foot = chart_legend_html(rbr)
     if foot:
         blocks.append(foot)
+
+    blocks.append("<i>Уровни и сетап — на графике.</i>")
     return "\n\n".join(blocks)
 
 

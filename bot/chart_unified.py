@@ -37,6 +37,14 @@ def prefer_tradingview_for_pro(
         return False
     if matplotlib_only_for_pro():
         return False
+    if manual_ta_chart or signal_chart:
+        try:
+            from .chart_display_policy import ed_chart_composite_enabled, ed_chart_single_canvas_enabled
+
+            if ed_chart_single_canvas_enabled() or ed_chart_composite_enabled():
+                return False
+        except Exception:
+            pass
     if not tradingview_base_enabled():
         return False
     return True

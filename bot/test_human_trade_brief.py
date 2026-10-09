@@ -116,7 +116,8 @@ def test_manual_html_avoids_abcd_jargon() -> None:
     assert "🧠" not in html
     assert "📍 План" not in html
     assert "📊 <b>Поток</b>" not in html
-    assert "0.083" not in html
+    assert "INTEL" not in html
+    assert "close 15m" not in html
 
 
 def test_ed_range_wait_jup_style() -> None:

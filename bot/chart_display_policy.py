@@ -54,9 +54,16 @@ def ed_pdf_chart_style_enabled() -> bool:
 
 def ed_chart_composite_enabled() -> bool:
     """PNG: паттерны + SMC + уровни + канал на одном графике (не один «режим»)."""
+    if ed_chart_single_canvas_enabled():
+        return False
     if not ed_pdf_chart_style_enabled():
         return False
     return _env_on("ED_CHART_COMPOSITE", default="1")
+
+
+def ed_chart_single_canvas_enabled() -> bool:
+    """Один PNG-пайплайн (chart_ed_canvas): уровни через LabelBoard, без TV/legacy слоёв."""
+    return _env_on("ED_CHART_SINGLE_CANVAS", default="1")
 
 
 def chart_pdf_setup_hint_enabled() -> bool:
@@ -71,6 +78,13 @@ def ed_playbook_minimal_copy_enabled() -> bool:
     if not ed_playbook_v3_enabled():
         return False
     return _env_on("ED_PLAYBOOK_MINIMAL_COPY", default="1")
+
+
+def ed_playbook_intel_panel_enabled() -> bool:
+    """Блок 📊 INTEL (OI/CVD/Liq) в подписи — по умолчанию выкл."""
+    if ed_playbook_minimal_copy_enabled():
+        return _env_on("ED_PLAYBOOK_INTEL", default="0")
+    return _env_on("ED_PLAYBOOK_INTEL", default="0")
 
 
 def ed_chart_visual_only() -> bool:

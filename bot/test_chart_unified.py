@@ -26,8 +26,21 @@ def test_tv_on_for_pro_by_default():
 
     os.environ["ED_CHART_TV"] = "1"
     os.environ.pop("ED_CHART_MPL", None)
+    os.environ.pop("ED_CHART_COMPOSITE", None)
     assert tradingview_experimental_enabled()
-    assert use_tradingview_experimental("annotated", signal_chart=True)
+    # ED_CHART_COMPOSITE=1 по умолчанию — /ta и сигналы на mpl, не TV+2 слоя
+    assert not use_tradingview_experimental("annotated", signal_chart=True)
+    assert not use_tradingview_experimental("annotated", manual_ta_chart=True)
+
+
+def test_tv_pro_when_composite_disabled():
+    import os
+
+    os.environ["ED_CHART_TV"] = "1"
+    os.environ["ED_CHART_COMPOSITE"] = "0"
+    os.environ["ED_CHART_SINGLE_CANVAS"] = "0"
+    os.environ.pop("ED_CHART_MPL", None)
+    assert use_tradingview_experimental("annotated", manual_ta_chart=True)
 
 
 def test_mpl_override():

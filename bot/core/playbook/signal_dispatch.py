@@ -41,15 +41,17 @@ def evaluate_signal_playbook(
 ) -> SignalPlaybookContext | None:
     if not ed_playbook_v3_enabled():
         return None
+    from ...chart_display_policy import ed_playbook_intel_panel_enabled
     from .brief import format_intel_matrix_html
 
     pb = get_or_run_playbook(ta, symbol=symbol)
     stale_block = pb.state == PlaybookState.NO_TRADE and bool(pb.block_reason)
+    intel = format_intel_matrix_html(pb) if ed_playbook_intel_panel_enabled() else ""
     return SignalPlaybookContext(
         result=pb,
         rbr_watch=bool(pb.alert_eligible),
         block_stale_alert=stale_block,
-        intel_html=format_intel_matrix_html(pb),
+        intel_html=intel,
     )
 
 

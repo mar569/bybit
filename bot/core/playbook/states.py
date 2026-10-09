@@ -13,7 +13,7 @@ class PlaybookState(str, Enum):
     def badge_ru(self) -> str:
         return {
             PlaybookState.OBSERVE: "👁 Наблюдение",
-            PlaybookState.WATCH: "📋 WATCH · без входа",
-            PlaybookState.ARMED: "🎯 Retest · триггер",
+            PlaybookState.WATCH: "📋 Слежу · без входа",
+            PlaybookState.ARMED: "🎯 Retest · ждём триггер",
             PlaybookState.NO_TRADE: "⛔ Без сделки",
         }[self]

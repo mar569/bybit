@@ -2667,8 +2667,11 @@ def _render_chart_figure(
 
                 if not ed_chart_visual_only() or chart_teaching_tags_enabled():
                     cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
-                    max_l = 6 if chart_teaching_tags_enabled() else 4
-                    draw_label_board(ax, bars, label_board, current=cur, max_labels=max_l)
+                    from .chart_display_policy import ed_chart_single_canvas_enabled
+
+                    if not ed_chart_single_canvas_enabled():
+                        max_l = 6 if chart_teaching_tags_enabled() else 4
+                        draw_label_board(ax, bars, label_board, current=cur, max_labels=max_l)
         except Exception:
             logger.exception("Pro chart layers failed")
     if urals_price and urals_price > 0 and not clean_chart:

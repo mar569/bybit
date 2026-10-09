@@ -1,7 +1,24 @@
 """Заголовок PNG — только playbook (без LONG 8/10)."""
 from __future__ import annotations
 
+import re
+
 from .ta_analysis import TAAnalysisResult
+
+# Matplotlib в Docker (DejaVu) не рисует emoji — иначе UserWarning Glyph missing
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E0-\U0001F1FF"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _chart_safe_badge(text: str) -> str:
+    plain = _EMOJI_RE.sub("", text or "").strip()
+    return " ".join(plain.split())
 
 
 def pro_chart_title(
@@ -25,7 +42,7 @@ def pro_chart_title(
     tf = f"{interval_minutes}m"
     h = hours_label.strip() or ""
     meta = " · ".join(p for p in (tf, h) if p)
-    badge = pb.state.badge_ru
+    badge = _chart_safe_badge(pb.state.badge_ru)
     if meta:
         return f"{sym or symbol} · {meta} · {badge}"
     return f"{sym or symbol} · {badge}"

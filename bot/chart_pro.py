@@ -66,12 +66,12 @@ def draw_pro_layers(
     from .chart_label_layout import LabelBoard
 
     board = LabelBoard()
-    playbook_composite = False
+    single_canvas = False
     if mode != "legacy_manual":
         try:
-            from .chart_display_policy import ed_chart_composite_enabled, ed_playbook_v3_enabled
+            from .chart_display_policy import ed_chart_single_canvas_enabled, ed_playbook_v3_enabled
 
-            if ed_playbook_v3_enabled():
+            if ed_playbook_v3_enabled() or ed_chart_single_canvas_enabled():
                 from .core.playbook.chart_layers import draw_mpl_playbook_layers
 
                 sym = str(getattr(ta, "symbol", "") or "")
@@ -80,9 +80,12 @@ def draw_pro_layers(
                 )
                 if spec_board is not None:
                     board = spec_board
-                    playbook_composite = ed_chart_composite_enabled()
+                    single_canvas = ed_chart_single_canvas_enabled()
         except Exception:
             logger.debug("mpl playbook layers fallback to legacy pro", exc_info=True)
+
+    if single_canvas:
+        return board
 
     if mode == "legacy_manual":
         from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers
@@ -90,9 +93,7 @@ def draw_pro_layers(
         draw_manual_ta_layers(ax, bars, ta)
         draw_education_overlays(ax, bars, ta, manual_compact=True)
         return board
-    if playbook_composite:
-        pass
-    elif mode == "range_wait":
+    if mode == "range_wait":
         from .chart_range_wait import draw_range_wait_layers_minimal
 
         draw_range_wait_layers_minimal(ax, bars, ta, interval_minutes=interval_minutes, board=board)
