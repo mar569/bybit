@@ -7,8 +7,10 @@ from bot.channel_discipline import (
     ed_channel_discipline_enabled,
     ed_entries_only_enabled,
     manual_ta_blocks_signal_noise,
+    signal_alert_channel_ready,
     signal_extra_messages_enabled,
 )
+from bot.ta_analysis import TAAnalysisResult
 
 
 def test_discipline_defaults() -> None:
@@ -32,6 +34,13 @@ def test_entries_only_env_off() -> None:
         assert not ed_entries_only_enabled(S())
     finally:
         os.environ.pop("ED_ENTRIES_ONLY", None)
+
+
+def test_signal_alert_ready_entry_tier() -> None:
+    ta = TAAnalysisResult(current_price=1.0, verdict="WAIT")
+    assert signal_alert_channel_ready(ta, quality_tier="entry", trade_action="entry")
+    assert not signal_alert_channel_ready(ta, quality_tier="watch", trade_action="watch")
+    assert not signal_alert_channel_ready(ta, quality_tier="entry", trade_action="skip")
 
 
 def test_manual_ta_blocks_intel_window() -> None:

@@ -1989,12 +1989,16 @@ class TelegramBot:
 
                 if getattr(settings, "trade_decision_gate_enabled", True) and not skip_dedupe:
                     watch_ok = _watch_allowed_for_signal(signal, settings, ta_result)
+                    from .channel_discipline import ed_entries_only_enabled
+
+                    # Entry-only режет WATCH в Telegram, но gate должен уметь выставить ENTRY.
+                    gate_watch_ok = watch_ok or ed_entries_only_enabled(settings)
                     trade_decision = decide_trade_action(
                         signal,
                         ta_result,
                         readiness=readiness,
                         quality_tier=quality.tier,
-                        watch_allowed=watch_ok,
+                        watch_allowed=gate_watch_ok,
                         min_entry_score=int(getattr(settings, "trade_decision_min_entry_score", 62)),
                         min_watch_score=int(getattr(settings, "trade_decision_min_watch_score", 36)),
                         chase_range_high_pct=float(
@@ -2044,10 +2048,22 @@ class TelegramBot:
                             cvd_ratio=quality.cvd_ratio,
                             cvd_detail=quality.cvd_detail,
                         )
+                    from .channel_discipline import signal_alert_channel_ready
+
+                    channel_ready = (
+                        ta_result is not None
+                        and signal_alert_channel_ready(
+                            ta_result,
+                            symbol=signal.symbol,
+                            quality_tier=quality.tier,
+                            trade_action=trade_decision.action,
+                        )
+                    )
                     if (
                         trade_decision.action == "skip"
                         and quality.tier != "watch"
                         and not rbr_watch
+                        and not channel_ready
                     ):
                         extra = f" · {quality.block_reason}" if quality.block_reason else ""
                         logger.info(
@@ -2094,22 +2110,22 @@ class TelegramBot:
                         signal, ta_result, png, skip_dedupe=skip_dedupe,
                     )
 
-                if (
-                    getattr(settings, "signal_telegram_entry_only", False)
-                    and not skip_dedupe
-                    and quality is not None
-                ):
-                    from .core.playbook.signal_dispatch import playbook_rbr_watch
+                from .channel_discipline import (
+                    ed_entries_only_enabled,
+                    signal_alert_channel_ready,
+                )
 
+                entry_only = ed_entries_only_enabled(settings) or bool(
+                    getattr(settings, "signal_telegram_entry_only", False)
+                )
+                if entry_only and not skip_dedupe and quality is not None and ta_result is not None:
                     td_act = (trade_decision.action if trade_decision else "") or ""
-                    is_entry = quality.tier == "entry" and td_act in ("", "entry")
-                    is_rbr_watch = (
-                        quality.tier == "watch"
-                        and ta_result is not None
-                        and playbook_rbr_watch(ta_result, playbook_delivery)
-                        and getattr(settings, "signal_rbr_watch_to_alert_channel", True)
-                    )
-                    if not is_entry and not is_rbr_watch:
+                    if not signal_alert_channel_ready(
+                        ta_result,
+                        symbol=signal.symbol,
+                        quality_tier=quality.tier,
+                        trade_action=td_act,
+                    ):
                         logger.info(
                             "Telegram skip %s %s: entry-only (tier=%s decision=%s)",
                             signal.exchange,
@@ -2185,7 +2201,18 @@ class TelegramBot:
                 gate_on = getattr(settings, "trade_decision_gate_enabled", True)
                 enforce_actionable = settings.actionable_signals_only or gate_on
                 watch_ok = _watch_allowed_for_signal(signal, settings, ta_result)
-                if enforce_actionable and not skip_dedupe:
+                from .channel_discipline import signal_alert_channel_ready as _alert_ready
+
+                channel_ready = (
+                    ta_result is not None
+                    and _alert_ready(
+                        ta_result,
+                        symbol=signal.symbol,
+                        quality_tier=quality.tier if quality else None,
+                        trade_action=(trade_decision.action if trade_decision else "") or "",
+                    )
+                )
+                if enforce_actionable and not skip_dedupe and not channel_ready:
                     if quality.tier == "watch" and not watch_ok:
                         logger.info(
                             "Telegram skip %s %s: watch not in allowlist — %s",

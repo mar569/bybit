@@ -158,7 +158,12 @@ def preferred_trade_side_from_snap(snap: MarketSnapshot) -> str:
     return ""
 
 
-def _resolve_state(snap: MarketSnapshot, *, stale: bool) -> PlaybookState:
+def _resolve_state(
+    snap: MarketSnapshot,
+    *,
+    stale: bool,
+    ta: TAAnalysisResult | None = None,
+) -> PlaybookState:
     if stale:
         return PlaybookState.NO_TRADE
     rbr = snap.rbr
@@ -169,8 +174,27 @@ def _resolve_state(snap: MarketSnapshot, *, stale: bool) -> PlaybookState:
         if phase in {"fade_top", "await_break", "broken"}:
             return PlaybookState.WATCH
     if snap.verdict in {"LONG", "SHORT"}:
+        if ta is not None:
+            from ...chart_plan_chart_gate import plan_ok_to_draw_on_chart
+
+            if plan_ok_to_draw_on_chart(ta):
+                return PlaybookState.ARMED
         return PlaybookState.WATCH
     return PlaybookState.OBSERVE
+
+
+def _alert_eligible_for_channel(
+    ta: TAAnalysisResult,
+    snap: MarketSnapshot,
+    state: PlaybookState,
+) -> bool:
+    if state != PlaybookState.ARMED:
+        return False
+    if _rbr_watch_eligible(ta, snap):
+        return True
+    from ...chart_plan_chart_gate import plan_ok_to_draw_on_chart
+
+    return plan_ok_to_draw_on_chart(ta)
 
 
 def _rbr_watch_eligible(ta: TAAnalysisResult, snap: MarketSnapshot) -> bool:
@@ -226,8 +250,8 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
     snap = snapshot_from_ta(ta, symbol=symbol)
     stale_msg = plan_staleness_plain(ta)
     stale = bool(stale_msg)
-    alert_eligible = _rbr_watch_eligible(ta, snap)
-    state = _resolve_state(snap, stale=stale)
+    state = _resolve_state(snap, stale=stale, ta=ta)
+    alert_eligible = _alert_eligible_for_channel(ta, snap, state)
     chart_spec = build_chart_spec(snap)
     intel = _intel_rows_from_snapshot(snap, ta)
 
@@ -269,7 +293,7 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         headline_ru=headline,
         body_html=body_html,
         intel_rows=intel,
-        alert_eligible=alert_eligible and state == PlaybookState.ARMED,
+        alert_eligible=alert_eligible,
         chart_spec=chart_spec,
         block_reason=stale_msg,
         meta={

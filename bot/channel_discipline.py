@@ -47,6 +47,23 @@ def manual_ta_skip_chart_when_no_entry() -> bool:
     return True
 
 
+def signal_alert_channel_ready(
+    ta: object,
+    *,
+    symbol: str = "",
+    quality_tier: str | None = None,
+    trade_action: str | None = None,
+) -> bool:
+    """Можно слать в alert-канал: готовый план (ARMED/LONG/SHORT), не «наблюдение»."""
+    from .human_trade_brief import manual_entry_ready
+
+    if manual_entry_ready(ta, symbol=symbol):  # type: ignore[arg-type]
+        return True
+    tier = (quality_tier or "").lower()
+    act = (trade_action or "").lower()
+    return tier == "entry" and act in {"", "entry"}
+
+
 def ed_entries_only_enabled(settings: object | None = None) -> bool:
     """Только готовые ENTRY в канал; без WATCH/«наблюдение»/RBR-слежения.
 
