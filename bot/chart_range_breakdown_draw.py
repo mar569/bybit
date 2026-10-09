@@ -228,6 +228,11 @@ def draw_range_breakdown_retest_path(
         tp = float(targets[0])
     if tp <= 0:
         tp = float(rbr.get("swing_low_target") or 0)
+    if phase not in {"retest", "broken"}:
+        return
     if tp <= 0:
+        return
+    cur = float(bars[-1].close)
+    if phase == "broken" and cur >= floor * 0.998:
         return
     _draw_breakdown_retest_path(ax, bars, floor=floor, ceil=ceil, tp=tp)

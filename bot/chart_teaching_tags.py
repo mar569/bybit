@@ -27,9 +27,11 @@ def enrich_teaching_label_board(
         ceil = float(rbr.get("range_top") or 0)
         phase = str(rbr.get("phase") or "")
         if floor > 0:
-            board.add(floor, "ПОЛ", "#8b949e", side="right", priority=95, ref=cur, skip_if_reserved=False)
+            from .chart_level_labels import level_tag
+
+            board.add(floor, level_tag("range_bottom", floor), "#8b949e", side="right", priority=95, ref=cur, skip_if_reserved=False)
         if ceil > 0 and phase not in {"broken", "retest"}:
-            board.add(ceil, "ПОТОЛОК", "#f0c040", side="right", priority=94, ref=cur, skip_if_reserved=False)
+            board.add(ceil, level_tag("range_top", ceil), "#f0c040", side="right", priority=94, ref=cur, skip_if_reserved=False)
         from .chart_display_policy import chart_entry_zone_tags_enabled
 
         if chart_entry_zone_tags_enabled() and phase in {"retest", "broken"}:

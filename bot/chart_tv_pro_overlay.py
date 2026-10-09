@@ -306,7 +306,17 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
     if floor > 0 and mapper.price_visible(floor):
         mapper.hline(ax, floor, color="#8b949e", lw=1.0, alpha=0.65, ls="--")
         if chart_teaching_tags_enabled():
-            ax.text(mapper.x_start + 0.008, mapper.y(floor), " ПОЛ", color="#8b949e", fontsize=6.5, va="top", zorder=8)
+            from .chart_level_labels import level_tag
+
+            ax.text(
+                mapper.x_start + 0.008,
+                mapper.y(floor),
+                f" {level_tag('range_bottom', floor)}",
+                color="#8b949e",
+                fontsize=6.5,
+                va="top",
+                zorder=8,
+            )
 
     cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
     if phase == "await_break" and floor > 0 and cur < floor * 0.996:
@@ -320,7 +330,17 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
         i0 = mapper.vis_start
         mapper.rect(ax, i0, len(mapper.bars) - 1, floor, ceil, color="#8b949e", alpha=0.08)
         if mapper.price_visible(ceil) and chart_teaching_tags_enabled():
-            ax.text(mapper.x_start + 0.008, mapper.y(ceil), " ПОТОЛОК", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+            from .chart_level_labels import level_tag
+
+            ax.text(
+                mapper.x_start + 0.008,
+                mapper.y(ceil),
+                f" {level_tag('range_top', ceil)}",
+                color="#f0c040",
+                fontsize=6.5,
+                va="bottom",
+                zorder=8,
+            )
     elif phase == "fade_top" and resistance > 0:
         el = float(rbr.get("entry_lo") or resistance * 0.985)
         eh = float(rbr.get("entry_hi") or resistance * 1.006)
@@ -426,12 +446,32 @@ def _draw_observation_baseline_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAna
     if brk > 0 and mapper.price_visible(brk):
         mapper.hline(ax, brk, color="#f0c040", lw=1.25, alpha=0.82)
         if chart_teaching_tags_enabled():
-            ax.text(mapper.x_start + 0.008, mapper.y(brk), " СОПР", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+            from .chart_level_labels import level_tag
+
+            ax.text(
+                mapper.x_start + 0.008,
+                mapper.y(brk),
+                f" {level_tag('break_up', brk)}",
+                color="#f0c040",
+                fontsize=6.5,
+                va="bottom",
+                zorder=8,
+            )
         layers += 1
     if brdn > 0 and mapper.price_visible(brdn):
         mapper.hline(ax, brdn, color="#3fb950", lw=1.25, alpha=0.82)
         if chart_teaching_tags_enabled():
-            ax.text(mapper.x_start + 0.008, mapper.y(brdn), " ПОДД", color="#3fb950", fontsize=6.5, va="top", zorder=8)
+            from .chart_level_labels import level_tag
+
+            ax.text(
+                mapper.x_start + 0.008,
+                mapper.y(brdn),
+                f" {level_tag('break_down', brdn)}",
+                color="#3fb950",
+                fontsize=6.5,
+                va="top",
+                zorder=8,
+            )
         layers += 1
     return layers
 

@@ -56,7 +56,8 @@ def format_playbook_brief_html(
         from .chart_legend import chart_legend_html
 
         foot = chart_legend_html(rbr)
-    blocks.append(foot)
+    if foot:
+        blocks.append(foot)
     return "\n\n".join(blocks)
 
 
@@ -79,28 +80,9 @@ def format_rbr_watch_caption_html(
         return ""
     result = get_or_run_playbook(ta, symbol=symbol)
     sym = (symbol or getattr(ta, "symbol", "") or "").strip().upper()
-    conf = int(getattr(ta, "verdict_confidence", 0) or 0)
     phase = str(rbr.get("phase") or "")
-    floor = fmt_price(float(rbr.get("range_bottom") or 0))
-    ceil = fmt_price(float(rbr.get("range_top") or 0))
-    badge = result.state.badge_ru.split(maxsplit=1)[-1] if result.state.value != "observe" else "WATCH"
-
-    if phase in {"fade_top", "await_break"}:
-        head = f"📌 <b>{escape(sym)}</b> · {escape(badge)} ({conf}/10) · боковик <b>{floor}–{ceil}</b>"
-    elif phase == "retest":
-        head = f"📌 <b>{escape(sym)}</b> · {escape(badge)} ({conf}/10) · retest пола <b>{floor}</b>"
-    else:
-        head = f"📌 <b>{escape(sym)}</b> · {escape(badge)} ({conf}/10)"
-
-    stack = str(getattr(ta, "reading_tf_stack", "") or "").strip()
-    stack_short = ""
-    if stack:
-        parts = [p.strip() for p in stack.replace("→", "·").split("·") if p.strip()]
-        stack_short = (
-            f"🧭 {escape(parts[0])} … {escape(parts[-1])}"
-            if len(parts) > 3
-            else f"🧭 {escape(stack[:100])}"
-        )
+    badge = result.state.badge_ru
+    head = f"📌 <b>{escape(sym)}</b> · {escape(badge)}"
 
     body = result.body_html
     if sym and body.startswith("<b>"):
@@ -109,8 +91,5 @@ def format_rbr_watch_caption_html(
     if "📊" in body:
         body = body.split("📊", 1)[0].strip()
 
-    from .chart_legend import chart_legend_html
-
-    note = chart_legend_html(rbr)
-    parts = [head, stack_short, body, note]
+    parts = [head, body]
     return "\n".join(p for p in parts if p)

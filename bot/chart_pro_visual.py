@@ -47,6 +47,34 @@ def _draw_trend_lines_limited(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysis
     return len(subset)
 
 
+def _draw_ta_structure_levels(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> int:
+    from .chart_ed_story import _visible_x_span
+    from .chart_level_labels import level_tag
+
+    x0, x1 = _visible_x_span(ax, bars)
+    n = 0
+    for attr, kind, color in (
+        ("breakout_level", "break_up", "#f0c040"),
+        ("breakdown_level", "break_down", "#3fb950"),
+    ):
+        p = float(getattr(ta, attr, 0) or 0)
+        if p <= 0:
+            continue
+        ax.hlines(p, x0, x1, colors=color, linewidth=1.25, alpha=0.85, zorder=4)
+        if chart_teaching_tags_enabled():
+            ax.text(x0, p, f"  {level_tag(kind, p)}  ", color=color, fontsize=6.8, va="center", zorder=5)
+        n += 1
+    if bool(getattr(ta, "post_pump", False)) and bars:
+        hi = max(float(b.high) for b in bars[-min(24, len(bars)) :])
+        ax.hlines(hi, x0, x1, colors="#f85149", linewidth=1.1, alpha=0.75, linestyle="--", zorder=4)
+        if chart_teaching_tags_enabled():
+            from .chart_level_labels import level_tag as lt
+
+            ax.text(x0, hi, f"  local H {lt('structure', hi)}  ", color="#f85149", fontsize=6.8, va="bottom", zorder=5)
+        n += 1
+    return n
+
+
 def _draw_primary_pattern(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
     if not getattr(ta, "reading_accept_pattern", True):
         return False
@@ -96,20 +124,6 @@ def _draw_rbr_phase_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult
             draw_range_breakdown_retest_path(ax, bars, ta)
         except Exception:
             logger.debug("RBR retest path skipped", exc_info=True)
-    elif phase == "await_break" and chart_teaching_tags_enabled():
-        from .chart_ed_story import _visible_x_span
-
-        x0, x1 = _visible_x_span(ax, bars)
-        ax.text(
-            x0 + (x1 - x0) * 0.5,
-            ceil + (ceil - floor) * 0.02,
-            "боковик · ждём пробой",
-            color="#8b949e",
-            fontsize=7,
-            ha="center",
-            va="bottom",
-            zorder=6,
-        )
 
 
 def _draw_plan_horizontal_bands(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> bool:
@@ -194,6 +208,13 @@ def draw_pro_visual_mpl(
         return 0
     drawn = 0
 
+    try:
+        from .chart_market_read import draw_swing_structure_mpl
+
+        drawn += draw_swing_structure_mpl(ax, bars, ta)
+    except Exception:
+        logger.debug("swing structure skipped", exc_info=True)
+
     if spec.show_primary_pattern:
         if _draw_primary_pattern(ax, bars, ta):
             drawn += 1
@@ -205,6 +226,9 @@ def draw_pro_visual_mpl(
     rbr = get_rbr_from_ta(ta)
     scenario_rbr = bool(spec.rbr_phase and rbr)
     drawn += max(draw_mpl_spec_core(ax, bars, ta, spec, levels_only=scenario_rbr), 0)
+
+    if not scenario_rbr:
+        drawn += _draw_ta_structure_levels(ax, bars, ta)
 
     if scenario_rbr:
         _draw_rbr_phase_mpl(ax, bars, ta, spec)

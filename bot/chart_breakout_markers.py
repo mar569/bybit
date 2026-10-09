@@ -133,12 +133,19 @@ def collect_breakout_retest_events(
     rbr = get_rbr_from_ta(ta)
     if rbr:
         floor = float(rbr.get("range_bottom") or 0)
-        if floor > 0:
+        phase = str(rbr.get("phase") or "")
+        inside_range = floor > 0 and cur >= floor * 0.997
+        if floor > 0 and not (phase == "await_break" and inside_range):
             bi, ri = _find_break_down(bars, floor)
-            if bi is not None:
+            if bi is not None and bi >= len(bars) - 28:
                 events.append(BreakoutRetestEvent(bi, floor, "breakout", f"пробой ≤ {fmt_price(floor)}"))
-            if ri is not None and len(events) < max_events:
-                events.append(BreakoutRetestEvent(ri, floor, "retest", "ретест"))
+            if (
+                ri is not None
+                and len(events) < max_events
+                and phase in {"retest", "broken"}
+                and ri >= len(bars) - 20
+            ):
+                events.append(BreakoutRetestEvent(ri, floor, "retest", f"retest {fmt_price(floor)}"))
 
     if len(events) < max_events and side in {"short", "wait"} and brdn > 0:
         bi, ri = _find_break_down(bars, brdn)

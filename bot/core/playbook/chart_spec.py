@@ -46,9 +46,9 @@ def build_chart_spec(snapshot: object, *, display_hours: int | None = None) -> C
         top = float(rbr.get("range_top") or 0)
         floor = float(rbr.get("range_bottom") or 0)
         if top > 0:
-            spec.levels.append(ChartLevel(top, "ПОТОЛОК", "range_top"))
+            spec.levels.append(ChartLevel(top, "R↑", "range_top"))
         if floor > 0:
-            spec.levels.append(ChartLevel(floor, "ПОЛ", "range_bottom"))
+            spec.levels.append(ChartLevel(floor, "R↓", "range_bottom"))
     if snapshot.break_up > 0:
         spec.levels.append(ChartLevel(snapshot.break_up, "пробой ↑", "break_up"))
     if snapshot.break_down > 0:

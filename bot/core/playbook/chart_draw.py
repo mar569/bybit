@@ -13,8 +13,8 @@ from ...ta_analysis import TAAnalysisResult
 logger = logging.getLogger(__name__)
 
 _KIND_STYLE = {
-    "range_top": ("#f0c040", "ПОТОЛОК"),
-    "range_bottom": ("#3fb950", "ПОЛ"),
+    "range_top": ("#f0c040", "R↑"),
+    "range_bottom": ("#3fb950", "R↓"),
     "break_up": ("#58a6ff", "↑"),
     "break_down": ("#ff7b72", "↓"),
 }
@@ -66,8 +66,10 @@ def draw_playbook_spec_tv(ax: plt.Axes, mapper: object, ta: TAAnalysisResult) ->
         color, default_tag = _KIND_STYLE.get(lv.kind, ("#8b949e", lv.label))
         mapper.hline(ax, lv.price, color=color, lw=1.35, alpha=0.88)  # type: ignore[attr-defined]
         drawn += 1
-        if show_tags and lv.label:
-            tag = default_tag if lv.kind in _KIND_STYLE else lv.label[:12]
+        if show_tags:
+            from ...chart_level_labels import level_tag
+
+            tag = level_tag(lv.kind, lv.price) if lv.kind in _KIND_STYLE else (lv.label[:12] or level_tag("structure", lv.price))
             yy = mapper.y(lv.price)  # type: ignore[attr-defined]
             ax.text(
                 mapper.x_start + 0.006,  # type: ignore[attr-defined]

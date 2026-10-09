@@ -47,14 +47,26 @@ def ed_minimal_voice_enabled() -> bool:
     return _env_on("ED_MINIMAL_VOICE", default="1")
 
 
+def ed_playbook_minimal_copy_enabled() -> bool:
+    """Без «На графике…», дублей verdict/score, лишних простыней в Telegram."""
+    if not ed_playbook_v3_enabled():
+        return False
+    return _env_on("ED_PLAYBOOK_MINIMAL_COPY", default="1")
+
+
 def ed_chart_visual_only() -> bool:
     """Без подписей цен, план-текста и label board на PNG."""
     return _env_on("ED_CHART_VISUAL_ONLY", default="1")
 
 
 def chart_teaching_tags_enabled() -> bool:
-    """Короткие метки на PNG: ПОЛ, TP/IN/SL, BOS, паттерн — без цифр."""
+    """Короткие метки на PNG: R↑/R↓, TP/IN/SL, паттерн."""
     return _env_on("ED_CHART_TEACHING_TAGS", default="1")
+
+
+def chart_story_banner_enabled() -> bool:
+    """Нижняя простыня сценария на PNG (дублирует Telegram)."""
+    return _env_on("ED_CHART_STORY_BANNER", default="0")
 
 
 def chart_box_labels_enabled() -> bool:
@@ -85,9 +97,11 @@ def chart_plan_glyphs_enabled() -> bool:
 
 
 def chart_anno_text_enabled() -> bool:
-    """Коридор «пол/сопр», story caption, «ход ↓» на PNG."""
-    if chart_teaching_tags_enabled():
+    """Story caption на PNG — только если явно включён banner."""
+    if chart_story_banner_enabled():
         return True
+    if chart_teaching_tags_enabled():
+        return False
     if ed_chart_visual_only():
         return False
     return _env_on("ED_CHART_ANNO_TEXT", default="0")

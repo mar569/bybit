@@ -4127,29 +4127,37 @@ class TelegramBot:
             except Exception:
                 logger.exception("Failed to forward manual TA reference photo for %s", symbol)
 
-        caption = (
-            f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
-            f"{ta_manual_detailed_html(ta, symbol=symbol)}"
-        )
+        from .chart_display_policy import ed_playbook_v3_enabled
+
+        body = ta_manual_detailed_html(ta, symbol=symbol)
+        if ed_playbook_v3_enabled() and body:
+            caption = f"{body}\n<i>{interval_minutes}m · {hours}ч · Bybit</i>"
+        else:
+            caption = (
+                f"<b>{symbol}</b> · Bybit {interval_minutes}m · {hours}ч\n"
+                f"{body}"
+            )
         try:
             caption += await self._manual_ta_flow_caption_block(symbol, ta)
         except Exception:
             logger.debug("Manual TA flow block failed for %s", symbol, exc_info=True)
-        # Доп. глубина для ручного TA: 24-48ч истории по паттерну spike->dump.
         extra_hours = 24 if interval_minutes <= 10 else 48
+        if ed_playbook_v3_enabled():
+            extra_hours = 0
         per_hour = max(1, 60 // interval_minutes)
         extra_limit = max(48, min(extra_hours * per_hour, 200))
-        try:
-            extra_bars = await self._manual_alert_kline_cache.get_klines(
-                symbol,
-                limit=extra_limit,
-                interval_minutes=interval_minutes,
-            )
-            extra_repeat, extra_note = detect_repeat_spike_dump_risk(extra_bars)
-            if extra_repeat and extra_note:
-                caption += f"\n🧠 <b>Глубокая история {extra_hours}ч:</b> {extra_note}"
-        except Exception:
-            logger.exception("Failed extended repeat-pattern check for %s", symbol)
+        if extra_hours > 0:
+            try:
+                extra_bars = await self._manual_alert_kline_cache.get_klines(
+                    symbol,
+                    limit=extra_limit,
+                    interval_minutes=interval_minutes,
+                )
+                extra_repeat, extra_note = detect_repeat_spike_dump_risk(extra_bars)
+                if extra_repeat and extra_note:
+                    caption += f"\n🧠 <b>Глубокая история {extra_hours}ч:</b> {extra_note}"
+            except Exception:
+                logger.exception("Failed extended repeat-pattern check for %s", symbol)
         self._manual_ta_last[(target_chat_id, symbol, interval_minutes)] = {
             "verdict": ta.verdict,
             "priority": ta.action_priority,

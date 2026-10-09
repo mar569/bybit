@@ -43,8 +43,10 @@ def draw_mpl_spec_core(
             tops.append(lv.price)
         if lv.kind == "range_bottom":
             bots.append(lv.price)
-        if chart_teaching_tags_enabled() and lv.label:
-            tag = lv.label[:12]
+        if chart_teaching_tags_enabled():
+            from ...chart_level_labels import level_tag
+
+            tag = level_tag(lv.kind, lv.price)
             ax.text(x0, lv.price, f"  {tag}", color=color, fontsize=7, va="center", zorder=6)
 
     if not levels_only and spec.show_range and tops and bots:

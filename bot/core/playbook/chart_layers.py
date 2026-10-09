@@ -55,7 +55,10 @@ def try_draw_tv_playbook_layers(
     spec = chart_spec_for_ta(ta, symbol=symbol) or spec
     rbr_active = bool(spec.rbr_phase and get_rbr_from_ta(ta))
 
-    layers = draw_playbook_spec_tv(ax, mapper, ta)
+    from ...chart_market_read import draw_swing_structure_tv
+
+    layers = draw_swing_structure_tv(ax, mapper, bars, ta)
+    layers += draw_playbook_spec_tv(ax, mapper, ta)
     if rbr_active:
         try:
             from .chart_scenario_tv import draw_rbr_scenario_narrative_tv
@@ -85,9 +88,12 @@ def try_draw_tv_playbook_layers(
             layers += 1
         layers += _draw_observation_baseline_tv(ax, mapper, ta)
 
-    mode = "ed_story" if spec.rbr_phase else "observation"
-    _draw_tv_story_banner(ax, ta, mode=mode)
-    layers += 1
+    from ...chart_display_policy import chart_story_banner_enabled
+
+    if chart_story_banner_enabled():
+        mode = "ed_story" if spec.rbr_phase else "observation"
+        _draw_tv_story_banner(ax, ta, mode=mode)
+        layers += 1
     return max(layers, 2)
 
 
@@ -114,23 +120,4 @@ def draw_mpl_playbook_layers(
     board = LabelBoard()
     draw_pro_visual_mpl(ax, bars, ta, spec, interval_minutes=interval_minutes)
 
-    from ...chart_display_policy import chart_teaching_tags_enabled
-
-    if chart_teaching_tags_enabled() and spec.rbr_phase:
-        from ...chart_teaching_tags import story_banner_line
-
-        line = story_banner_line(ta, mode="ed_story")
-        if line:
-            ax.text(
-                0.5,
-                0.04,
-                line,
-                transform=ax.transAxes,
-                va="bottom",
-                ha="center",
-                color="#e6edf3",
-                fontsize=7.0,
-                zorder=12,
-                bbox=dict(boxstyle="round,pad=0.32", facecolor="#161b22ee", edgecolor="#484f58", alpha=0.96),
-            )
     return board

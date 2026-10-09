@@ -2583,21 +2583,47 @@ def _render_chart_figure(
         except Exception:
             logger.debug("UT overlay draw failed", exc_info=True)
     current = bars[-1].close
-    if not story_minimal:
+    from .chart_display_policy import ed_chart_visual_only, ed_playbook_v3_enabled
+
+    show_now = not story_minimal and not (ed_playbook_v3_enabled() and ed_chart_visual_only())
+    if show_now:
         ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
         ax.text(
             _x_after_last_bar(bars, 14), current, f"сейчас {fmt_price(current)}",
             color=accent_color, fontsize=7, va="center", ha="left",
         )
-    if clean_chart:
-        ut_sfx = " · UT" if ut_overlay is not None else ""
+    ut_sfx = " · UT" if (ut_overlay is not None and not story_minimal) else ""
+    pb_title = None
+    if pro_mode or manual_ta_chart or story_minimal:
+        try:
+            from .chart_title_playbook import pro_chart_title
+
+            zoom_h = display_hours if display_hours and display_hours > 0 else None
+            from .manual_ta import chart_display_hours
+
+            zh = int(zoom_h) if zoom_h else chart_display_hours(interval_minutes)
+            pb_title = pro_chart_title(
+                symbol,
+                ta,
+                interval_minutes=interval_minutes,
+                hours_label=f"{zh}ч",
+            )
+        except Exception:
+            pb_title = None
+    if pb_title:
+        ax.set_title(
+            f"{pb_title}{ut_sfx}",
+            color=CHART_STYLE["text"],
+            fontsize=12 if pro_mode else 11,
+            pad=14,
+        )
+    elif clean_chart:
         ax.set_title(
             f"{symbol}  ·  {ta.verdict} {ta_display_score(ta)}/10  ·  {title_suffix}{ut_sfx}",
             color=CHART_STYLE["text"], fontsize=11, pad=14,
         )
     else:
         mode_suffix = " · PRO" if (pro_mode or story_minimal) else ""
-        ut_sfx = " · UT" if (ut_overlay is not None and not story_minimal) else ""
         wait_tag = " · наблюдение" if manual_ta_chart and (ta.verdict or "").upper() == "WAIT" else ""
         from .signal_locale import verdict_ru
 
