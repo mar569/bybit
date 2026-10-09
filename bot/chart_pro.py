@@ -136,51 +136,33 @@ def finalize_pro_viewport(
     ta: TAAnalysisResult,
     mode: ProMode,
 ) -> None:
-    """Ylim: свечи + план, без простирания до далёкого TP."""
+    """Ylim по видимым свечам (xlim), без «обрезания» хая/лоя импульса."""
     if not bars:
         return
-    cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
-    vis_lo = min(float(b.low) for b in bars[-min(120, len(bars)) :])
-    vis_hi = max(float(b.high) for b in bars[-min(120, len(bars)) :])
-    lo, hi = vis_lo, vis_hi
-    pad = max((hi - lo) * 0.08, cur * 0.003)
+    from .chart_display_policy import ed_chart_single_canvas_enabled
+    from .chart_viewport import apply_ylim_to_visible_bars
 
-    from .chart_plan_display import build_display_plan
-    from .chart_position_boxes import plan_for_display
+    extra: list[float] = []
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    for p in (brk, brdn):
+        if p > 0:
+            extra.append(p)
+    from .range_breakdown_retest import get_rbr_from_ta
 
-    plan = plan_for_display(ta)
-    if plan:
-        disp = build_display_plan(
-            side=plan[0],
-            entry=plan[1],
-            entry_lo=plan[2],
-            entry_hi=plan[3],
-            stop=plan[4],
-            tp=plan[5],
-        )
-        prices = [disp.entry_lo, disp.entry_hi, disp.stop, disp.tp, cur]
-        from .range_breakdown_retest import get_rbr_from_ta
+    rbr = get_rbr_from_ta(ta)
+    if rbr:
+        for k in ("range_top", "range_bottom", "stop"):
+            v = float(rbr.get(k) or 0)
+            if v > 0:
+                extra.append(v)
+    smc = getattr(ta, "smc", None)
+    if smc and getattr(smc, "structure_break_level", None):
+        extra.append(float(smc.structure_break_level))
 
-        rbr = get_rbr_from_ta(ta)
-        if rbr:
-            prices.extend(
-                float(rbr[k])
-                for k in ("range_top", "range_bottom")
-                if rbr.get(k)
-            )
-        pmin, pmax = min(prices), max(prices)
-        # Не тянуть Y на далёкий swing — только экранный план
-        cur_band = max(cur * 0.09, (hi - lo) * 0.5)
-        pmin = max(pmin, cur - cur_band)
-        pmax = min(pmax, cur + cur_band * 1.05)
-        lo = min(lo, pmin - pad)
-        hi = max(hi, pmax + pad)
-    else:
-        brk = float(getattr(ta, "breakout_level", 0) or 0)
-        brdn = float(getattr(ta, "breakdown_level", 0) or 0)
-        for p in (brk, brdn):
-            if p > 0:
-                lo = min(lo, p - pad)
-                hi = max(hi, p + pad)
-
-    ax.set_ylim(lo, hi)
+    apply_ylim_to_visible_bars(ax, bars, pad_ratio=0.11, extra_prices=extra)
+    if not ed_chart_single_canvas_enabled() and mode == "legacy_manual":
+        cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
+        lo, hi = ax.get_ylim()
+        pad = max((hi - lo) * 0.04, cur * 0.002)
+        ax.set_ylim(lo - pad * 0.2, hi + pad * 0.2)

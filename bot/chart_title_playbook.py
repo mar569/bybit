@@ -42,7 +42,13 @@ def pro_chart_title(
     tf = f"{interval_minutes}m"
     h = hours_label.strip() or ""
     meta = " · ".join(p for p in (tf, h) if p)
-    badge = _chart_safe_badge(pb.state.badge_ru)
+    from .channel_discipline import ed_entries_only_enabled
+    from .human_trade_brief import manual_entry_ready
+
+    if ed_entries_only_enabled():
+        badge = "вход · план на PNG" if manual_entry_ready(ta, symbol=sym) else "вход не готов"
+    else:
+        badge = _chart_safe_badge(pb.state.badge_ru)
     if meta:
         return f"{sym or symbol} · {meta} · {badge}"
     return f"{sym or symbol} · {badge}"

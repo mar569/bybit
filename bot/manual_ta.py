@@ -178,6 +178,12 @@ def compute_structure_bar_span(ta: object, bars: list) -> int:
             if float(bar.low) <= loc_lo * 1.0005:
                 touch(i)
 
+    if n >= 8:
+        hi_i = max(range(n), key=lambda i: float(bars[i].high))
+        lo_i = min(range(n), key=lambda i: float(bars[i].low))
+        touch(hi_i)
+        touch(lo_i)
+
     return max(0, (n - 1) - earliest)
 
 
@@ -230,7 +236,7 @@ def manual_chart_zoom_hours(
     per_hour = max(1, 60 // max(1, interval_minutes))
     base_bars = base * per_hour
     # Структура занимает большую часть окна — показываем всю загруженную историю
-    if span >= int(base_bars * 0.72):
+    if span >= int(base_bars * 0.55):
         zoom = max(zoom, analysis_hours)
     if phase in {
         "impulse_up",

@@ -306,8 +306,13 @@ def draw_smc_pdf_clean(
         reverse=True,
     )
     seen_kind: set[str] = set()
-    max_markers = 4 if composite else 2
-    lookback = 88 if composite else 36
+    max_markers = 6 if composite else 2
+    if composite:
+        from .chart_display_policy import ed_manual_chart_full_history_enabled
+
+        lookback = max(88, len(bars) - 6) if ed_manual_chart_full_history_enabled() else 88
+    else:
+        lookback = 36
     for marker in markers:
         kind = str(getattr(marker, "kind", "") or "")
         if kind not in {"sweep", "bos", "mss", "expansion", "equal_highs", "equal_lows"}:
@@ -337,7 +342,7 @@ def draw_smc_pdf_clean(
         if len(seen_kind) >= max_markers:
             break
 
-    ob_tail = 3 if composite else 1
+    ob_tail = 5 if composite else 1
     for ob in list(getattr(smc, "order_blocks", None) or [])[-ob_tail:]:
         try:
             top, bot = float(ob.top), float(ob.bottom)
@@ -372,7 +377,7 @@ def draw_smc_pdf_clean(
         drawn += 1
 
     fvgs = list(getattr(smc, "fvgs", None) or [])
-    fvg_iter = fvgs[-2:] if composite else fvgs[-1:]
+    fvg_iter = fvgs[-4:] if composite else fvgs[-1:]
     for gap in fvg_iter:
         if gap is None:
             continue

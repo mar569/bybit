@@ -315,11 +315,35 @@ def _trigger_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None) -> str:
     return ""
 
 
+def _target_for_direction(
+    tps: list[float],
+    cur: float,
+    *,
+    direction: str,
+) -> float | None:
+    if cur <= 0 or not tps:
+        return None
+    if direction == "long":
+        above = [p for p in tps if p > cur * 1.0005]
+        return above[0] if above else None
+    if direction == "short":
+        below = [p for p in tps if p < cur * 0.9995]
+        return below[0] if below else None
+    return tps[0]
+
+
 def _expect_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None, *, stale: str = "") -> str:
     if stale:
         return stale
     side = preferred_trade_side(ta)
+    cur = float(getattr(ta, "current_price", 0) or 0)
     tps = [float(x) for x in (getattr(ta, "target_prices", None) or []) if x]
+    brk = float(getattr(ta, "breakout_level", 0) or 0)
+    brdn = float(getattr(ta, "breakdown_level", 0) or 0)
+    if cur > 0 and brk > cur * 1.001 and side != "short":
+        side = "long"
+    if cur > 0 and brdn > 0 and cur < brdn * 0.999 and side != "long":
+        side = "short"
     if rbr and str(rbr.get("direction") or "") == "short":
         tg = [float(x) for x in (rbr.get("targets") or []) if x][:2]
         if tg:
@@ -328,10 +352,18 @@ def _expect_ru(ta: TAAnalysisResult, rbr: dict[str, Any] | None, *, stale: str =
         if ph == "await_break":
             return "Ждём пробой пола и retest — вход не у потолка."
         return "Сценарий вниз — только по триггеру на графике."
-    if side == "long" and tps:
-        return f"Если вверх — цель {fmt_price(tps[0])}."
-    if side == "short" and tps:
-        return f"Если вниз — цель {fmt_price(tps[0])}."
+    if side == "long":
+        tg = _target_for_direction(tps, cur, direction="long")
+        if tg is None and brk > cur:
+            tg = brk * 1.01
+        if tg:
+            return f"Если вверх — цель {fmt_price(tg)}."
+    if side == "short":
+        tg = _target_for_direction(tps, cur, direction="short")
+        if tg is None and brdn > 0 and brdn < cur:
+            tg = brdn * 0.99
+        if tg:
+            return f"Если вниз — цель {fmt_price(tg)}."
     cont = getattr(ta, "continuation_path", None)
     if cont and getattr(cont, "label", ""):
         return str(cont.label)[:120]
@@ -360,7 +392,7 @@ def _collect_levels(ta: TAAnalysisResult, *, max_n: int = 5) -> list[ChartReadLe
     out: list[ChartReadLevel] = []
 
     def add(p: float, label: str, pri: int) -> None:
-        if p <= 0 or cur > 0 and abs(p - cur) / cur > 0.14:
+        if p <= 0 or cur > 0 and abs(p - cur) / cur > 0.22:
             return
         if any(abs(p - x.price) / max(p, 1e-9) < 0.003 for x in out):
             return

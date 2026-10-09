@@ -81,6 +81,19 @@ def test_prose_rbr_short_trigger_not_wall() -> None:
     assert ";" not in html
 
 
+def test_expect_target_above_price_for_long() -> None:
+    ta = _minimal_ta(
+        current_price=0.073,
+        breakout_level=0.07303,
+        breakdown_level=0.07251,
+        action_priority="long",
+        target_prices=[0.07131, 0.07811],
+    )
+    read = build_chart_read(ta, symbol="STRKUSDT")
+    assert "0.07811" in read.expect_ru or "0.078" in read.expect_ru
+    assert "0.07131" not in read.expect_ru
+
+
 def test_scenario_not_short_through_breakout_up() -> None:
     from bot.bybit_klines import KlineBar
 

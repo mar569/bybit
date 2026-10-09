@@ -66,6 +66,23 @@ def ed_chart_single_canvas_enabled() -> bool:
     return _env_on("ED_CHART_SINGLE_CANVAS", default="1")
 
 
+def ed_chart_trader_canvas_enabled() -> bool:
+    """Единый PNG: полная разметка трейдера (swing, паттерны, SMC/ICT, зоны) через composite."""
+    if not ed_chart_single_canvas_enabled():
+        return False
+    return _env_on("ED_CHART_TRADER_CANVAS", default="1")
+
+
+def ed_manual_chart_full_history_enabled() -> bool:
+    """Ручной /ta: зум = вся загруженная история (импульс/дамп не «обрезать» сверху)."""
+    return _env_on("ED_MANUAL_CHART_FULL_HISTORY", default="1")
+
+
+def ed_chart_rich_manual_layers_enabled() -> bool:
+    """На PNG: зоны, канал, ключевые уровни TA (не только 5 линий)."""
+    return _env_on("ED_CHART_RICH_MANUAL", default="1")
+
+
 def chart_pdf_setup_hint_enabled() -> bool:
     """Одна строка на PNG: что означает разметка (не дубль Telegram)."""
     if not ed_pdf_chart_style_enabled():

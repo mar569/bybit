@@ -39,6 +39,14 @@ def proactive_intel_on_watch_enabled() -> bool:
     return True
 
 
+def manual_ta_skip_chart_when_no_entry() -> bool:
+    """Ручной /ta: без PNG, если вход не готов (только текст)."""
+    raw = os.environ.get("ED_MANUAL_TA_SKIP_CHART_IF_NO_ENTRY")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return True
+
+
 def ed_entries_only_enabled(settings: object | None = None) -> bool:
     """Только готовые ENTRY в канал; без WATCH/«наблюдение»/RBR-слежения.
 

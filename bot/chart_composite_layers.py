@@ -140,7 +140,8 @@ def draw_candle_patterns_mpl(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisR
         idx = int(getattr(pat, "index", -1))
         if idx < 0 or idx >= len(bars):
             continue
-        if idx < len(bars) - 48:
+        visible_tail = min(len(bars) - 1, max(48, int(len(bars) * 0.72)))
+        if idx < len(bars) - visible_tail:
             continue
         bar = bars[idx]
         ts = mdates.date2num(_idx_to_date(bars, idx))

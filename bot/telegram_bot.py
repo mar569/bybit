@@ -859,6 +859,48 @@ class TelegramBot:
                 logger.exception("Failed to send chart to chat %s", chat_id)
                 return False
 
+    async def _deliver_manual_ta_message(
+        self,
+        chat_id: int,
+        png_bytes: bytes,
+        caption: str,
+        *,
+        keyboard: InlineKeyboardMarkup | None,
+        ta: object,
+        symbol: str,
+    ) -> bool:
+        from .channel_discipline import (
+            ed_entries_only_enabled,
+            manual_ta_skip_chart_when_no_entry,
+        )
+        from .human_trade_brief import manual_entry_ready
+
+        if (
+            ed_entries_only_enabled()
+            and manual_ta_skip_chart_when_no_entry()
+            and not manual_entry_ready(ta, symbol=symbol)
+            and self.application is not None
+        ):
+            try:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption[:4000],
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+                self._last_send_time[chat_id] = time.time()
+                return True
+            except Exception:
+                logger.exception("Failed to send manual TA text-only to chat %s", chat_id)
+                return False
+        return await self._send_chart(
+            chat_id,
+            png_bytes,
+            caption,
+            is_priority=False,
+            keyboard=keyboard,
+        )
+
     def _coinglass_link_buttons(
         self,
         symbol: str,
@@ -4205,12 +4247,13 @@ class TelegramBot:
         keyboard = self._manual_ta_result_keyboard(
             symbol, interval_minutes, ta, chat_id=target_chat_id,
         )
-        await self._send_chart(
+        await self._deliver_manual_ta_message(
             target_chat_id,
             png,
             caption,
-            is_priority=False,
             keyboard=keyboard,
+            ta=ta,
+            symbol=symbol,
         )
         self._last_manual_ta_symbol_time[symbol.upper()] = time.time()
         self._cache_manual_ta_result(target_chat_id, symbol, interval_minutes, ta)

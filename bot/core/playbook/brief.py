@@ -47,7 +47,17 @@ def format_playbook_brief_html(
     from ..snapshot import MarketSnapshot
     from .prose import compose_playbook_prose_html
 
-    head = f"<b>{escape(symbol)}</b> · {escape(state.badge_ru)}"
+    from ...channel_discipline import ed_entries_only_enabled
+    from ...human_trade_brief import manual_entry_ready
+
+    if (
+        ed_entries_only_enabled()
+        and isinstance(ta, TAAnalysisResult)
+        and not manual_entry_ready(ta, symbol=symbol)
+    ):
+        head = f"<b>{escape(symbol)}</b> · вход не готов"
+    else:
+        head = f"<b>{escape(symbol)}</b> · {escape(state.badge_ru)}"
     blocks: list[str] = [head]
 
     if isinstance(snap, MarketSnapshot):

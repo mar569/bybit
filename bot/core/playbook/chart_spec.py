@@ -87,7 +87,7 @@ def resolve_chart_zoom_hours(
     configured: int | None,
 ) -> int:
     """Playbook display_hours as configured baseline; structure-aware expansion unchanged."""
-    from ...chart_display_policy import ed_playbook_v3_enabled
+    from ...chart_display_policy import ed_manual_chart_full_history_enabled, ed_playbook_v3_enabled
     from ...manual_ta import manual_chart_zoom_hours
     from ...ta_analysis import TAAnalysisResult
 
@@ -98,13 +98,18 @@ def resolve_chart_zoom_hours(
         spec = get_or_run_playbook(ta, symbol=symbol).chart_spec
         if cfg is None or int(cfg) <= 0:
             cfg = spec.display_hours
-    return manual_chart_zoom_hours(
+    if ed_manual_chart_full_history_enabled():
+        cfg = None
+    zoom = manual_chart_zoom_hours(
         ta,
         bars,
         interval_minutes=interval_minutes,
         analysis_hours=analysis_hours,
         configured=cfg,
     )
+    if ed_manual_chart_full_history_enabled():
+        zoom = max(zoom, int(analysis_hours))
+    return min(int(zoom), int(analysis_hours))
 
 
 def ed_story_zoom_hours_with_playbook(

@@ -10,15 +10,19 @@ from matplotlib.patches import Rectangle
 
 from .bybit_klines import KlineBar
 from .chart_analysis_text import structure_break_label_ru
-from .chart_display_policy import chart_teaching_tags_enabled, chart_pdf_setup_hint_enabled
+from .chart_display_policy import (
+    chart_teaching_tags_enabled,
+    chart_pdf_setup_hint_enabled,
+    ed_chart_trader_canvas_enabled,
+)
 from .chart_label_layout import LabelBoard, draw_label_board, format_level_text
 from .chart_market_read import recent_swings
 from .ta_analysis import TAAnalysisResult, fmt_price
 
 logger = logging.getLogger(__name__)
 
-CANVAS_MAX_LEVELS = 5
-PATTERN_MIN = 0.48
+CANVAS_MAX_LEVELS = 8
+PATTERN_MIN = 0.40
 
 
 def _idx_date(bars: list[KlineBar], idx: int) -> datetime:
@@ -57,10 +61,18 @@ def _seed_level_board(board: LabelBoard, ta: TAAnalysisResult, bars: list[KlineB
 
     nr = float(getattr(ta, "nearest_resistance", 0) or 0)
     ns = float(getattr(ta, "nearest_support", 0) or 0)
-    if nr > 0 and cur > 0 and abs(nr - cur) / cur <= 0.12:
+    if nr > 0 and cur > 0 and abs(nr - cur) / cur <= 0.22:
         board.add(nr, format_level_text("R ближ.", nr), "#8b949e", priority=72, ref=cur)
-    if ns > 0 and cur > 0 and abs(ns - cur) / cur <= 0.12:
+    if ns > 0 and cur > 0 and abs(ns - cur) / cur <= 0.22:
         board.add(ns, format_level_text("S ближ.", ns), "#8b949e", priority=72, ref=cur)
+
+    for kl in list(getattr(ta, "key_levels", None) or [])[:4]:
+        p = float(getattr(kl, "price", 0) or 0)
+        if p <= 0 or cur > 0 and abs(p - cur) / cur > 0.22:
+            continue
+        role = str(getattr(kl, "role", "") or getattr(kl, "label", "") or "ур.")
+        color = "#f85149" if "resist" in role.lower() else "#3fb950"
+        board.add(p, format_level_text(role[:12], p), color, priority=66, ref=cur)
 
     cons = getattr(ta, "consolidation", None)
     if cons is not None:
@@ -118,12 +130,7 @@ def _draw_scenario_path(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult
 
 
 def _draw_trend_lines(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
-    lines = list(getattr(ta, "trend_lines", None) or [])[:2]
-    if not lines and getattr(ta, "channel", None) is not None:
-        from .chart_composite_layers import draw_channel_mpl
-
-        draw_channel_mpl(ax, bars, ta)
-        return
+    lines = list(getattr(ta, "trend_lines", None) or [])[:3]
     last = len(bars) - 1
     for tl in lines:
         color = "#3fb950" if getattr(tl, "kind", "") == "bull" else "#f85149"
@@ -151,10 +158,10 @@ def _draw_pattern(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> N
         ax,
         bars,
         patterns,
-        max_patterns=1,
+        max_patterns=2,
         min_confidence=PATTERN_MIN,
         force_primary=primary,
-        draw_target_labels=False,
+        draw_target_labels=True,
     )
 
 
@@ -174,7 +181,7 @@ def _draw_order_blocks(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult)
         if top <= bot:
             continue
         mid = (top + bot) / 2
-        if cur > 0 and abs(mid - cur) / cur > 0.14:
+        if cur > 0 and abs(mid - cur) / cur > 0.22:
             continue
         idx = int(getattr(ob, "start_idx", len(bars) - 6))
         brk = int(getattr(ob, "break_idx", idx + 3))
@@ -196,16 +203,78 @@ def _draw_smc_pins(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> 
     markers = list(getattr(smc, "markers", None) or [])
     sweeps = [m for m in markers if getattr(m, "kind", "") == "sweep"]
     bos = [m for m in markers if getattr(m, "kind", "") in {"bos", "mss"}]
+    lookback = min(len(bars), max(96, int(len(bars) * 0.85)))
     if sweeps:
         best = max(sweeps, key=lambda m: m.index)
-        if best.index >= len(bars) - 96:
-            draw_sweep_pin_mpl(ax, bars, best, draw_level_line=False)
+        if best.index >= len(bars) - lookback:
+            draw_sweep_pin_mpl(ax, bars, best, draw_level_line=True)
     if bos:
         best = max(bos, key=lambda m: m.index)
-        if best.index >= len(bars) - 120:
+        if best.index >= len(bars) - lookback:
             brk = float(getattr(smc, "structure_break_level", 0) or 0)
             tag = structure_break_label_ru(str(getattr(smc, "structure_break_kind", "") or "bos"), short=True)
-            draw_bos_pin_mpl(ax, bars, best, break_level=brk or None, kind_label=tag, draw_level_line=False)
+            draw_bos_pin_mpl(ax, bars, best, break_level=brk or None, kind_label=tag, draw_level_line=True)
+
+
+def _draw_fvg_zones(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    smc = getattr(ta, "smc", None)
+    if smc is None:
+        return
+    cur = float(bars[-1].close)
+    x0, x1 = _visible_x(bars, ax)
+    shown = 0
+    for gap in reversed(list(getattr(smc, "fvgs", None) or [])):
+        if shown >= 2:
+            break
+        top = float(getattr(gap, "top", 0) or 0)
+        bot = float(getattr(gap, "bottom", 0) or 0)
+        if top <= bot:
+            continue
+        mid = (top + bot) / 2
+        if cur > 0 and abs(mid - cur) / cur > 0.18:
+            continue
+        idx = int(getattr(gap, "start_idx", len(bars) - 8))
+        idx = max(0, min(idx, len(bars) - 1))
+        col = "#58a6ff" if getattr(gap, "direction", "") == "bullish" else "#f85149"
+        ax.add_patch(
+            Rectangle(
+                (_x(bars, idx), bot),
+                max(x1 - _x(bars, idx), 0.001),
+                top - bot,
+                facecolor=col,
+                alpha=0.12,
+                edgecolor=col,
+                linewidth=0.7,
+                linestyle="--",
+                zorder=2,
+            )
+        )
+        shown += 1
+
+
+def _draw_rich_structure_layers(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    board: LabelBoard,
+) -> None:
+    from .chart_display_policy import ed_chart_rich_manual_layers_enabled
+
+    if not ed_chart_rich_manual_layers_enabled():
+        return
+    try:
+        from .chart_readable import collect_structure_labels
+
+        collect_structure_labels(ax, bars, ta, board, draw_zones=True)
+    except Exception:
+        logger.debug("collect_structure_labels skipped", exc_info=True)
+    if getattr(ta, "channel", None) is not None:
+        try:
+            from .chart_composite_layers import draw_channel_mpl
+
+            draw_channel_mpl(ax, bars, ta)
+        except Exception:
+            logger.debug("channel draw skipped", exc_info=True)
 
 
 def _draw_setup_hint(ax: plt.Axes, ta: TAAnalysisResult, bars: list[KlineBar]) -> None:
@@ -235,10 +304,11 @@ def _draw_canvas_footer(ax: plt.Axes) -> None:
 
     if os.environ.get("ED_CHART_CANVAS_TAG", "1").strip().lower() not in {"1", "true", "yes"}:
         return
+    tag = "Trader" if ed_chart_trader_canvas_enabled() else "Ed canvas"
     ax.text(
         0.012,
         0.02,
-        "Ed canvas",
+        tag,
         transform=ax.transAxes,
         ha="left",
         va="bottom",
@@ -247,6 +317,34 @@ def _draw_canvas_footer(ax: plt.Axes) -> None:
         zorder=3,
         alpha=0.85,
     )
+
+
+def _draw_trader_composite_layers(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    from .chart_composite_layers import draw_composite_read_mpl
+
+    draw_composite_read_mpl(ax, bars, ta)
+    try:
+        from .chart_renderer import _draw_elliott_from_ta
+
+        verdict = str(getattr(ta, "verdict", "") or "").upper()
+        _draw_elliott_from_ta(ax, bars, ta, is_wait=(verdict == "WAIT"))
+    except Exception:
+        logger.debug("elliott trader layers skipped", exc_info=True)
+
+
+def _draw_minimal_ed_layers(
+    ax: plt.Axes,
+    bars: list[KlineBar],
+    ta: TAAnalysisResult,
+    board: LabelBoard,
+) -> None:
+    _draw_range_box(ax, bars, ta)
+    _draw_trend_lines(ax, bars, ta)
+    _draw_rich_structure_layers(ax, bars, ta, board)
+    _draw_pattern(ax, bars, ta)
+    _draw_order_blocks(ax, bars, ta)
+    _draw_fvg_zones(ax, bars, ta)
+    _draw_smc_pins(ax, bars, ta)
 
 
 def draw_ed_analysis_canvas_mpl(
@@ -275,16 +373,17 @@ def draw_ed_analysis_canvas_mpl(
     cur = float(getattr(ta, "current_price", 0) or bars[-1].close)
     read = get_or_build_chart_read(ta, bars, symbol=symbol or getattr(ta, "symbol", "") or "")
 
+    trader = ed_chart_trader_canvas_enabled()
+    if trader:
+        _draw_trader_composite_layers(ax, bars, ta)
+    else:
+        _draw_minimal_ed_layers(ax, bars, ta, board)
+
     if read.levels:
         seed_board_from_read(board, read, ref=cur)
-    else:
-        _seed_level_board(board, ta, bars)
-    _draw_range_box(ax, bars, ta)
-    _draw_trend_lines(ax, bars, ta)
-    _draw_pattern(ax, bars, ta)
-    _draw_order_blocks(ax, bars, ta)
-    _draw_smc_pins(ax, bars, ta)
-    draw_label_board(ax, bars, board, current=cur, max_labels=CANVAS_MAX_LEVELS)
+    _seed_level_board(board, ta, bars)
+    max_labels = 10 if trader else CANVAS_MAX_LEVELS
+    draw_label_board(ax, bars, board, current=cur, max_labels=max_labels)
     apply_chart_read_to_canvas(ax, bars, ta, read, board)
     _draw_canvas_footer(ax)
     return board
