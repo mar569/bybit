@@ -425,7 +425,7 @@ def draw_ed_analysis_canvas_mpl(
         if read.levels and not clean:
             seed_board_from_read(board, read, ref=cur)
         _seed_level_board(board, ta, bars, clean=clean)
-    max_labels = 6 if evidence else (5 if clean else (10 if trader else CANVAS_MAX_LEVELS))
+    max_labels = 7 if evidence else (5 if clean else (10 if trader else CANVAS_MAX_LEVELS))
     draw_label_board(ax, bars, board, current=cur, max_labels=max_labels)
     apply_chart_read_to_canvas(ax, bars, ta, read, board)
     _draw_canvas_footer(ax)
