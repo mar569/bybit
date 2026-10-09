@@ -67,10 +67,33 @@ def test_playbook_armed_rbr_fade_top() -> None:
     )
     result = run_playbook(ta)
     assert result.state == PlaybookState.WATCH
-    assert result.alert_eligible
+    assert not result.alert_eligible
     assert "импульс" in result.body_html.lower() or "боковик" in result.body_html.lower()
     assert "На графике" not in result.body_html
     assert result.chart_spec.show_range
+
+
+def test_playbook_armed_retest_alert_eligible() -> None:
+    ta = _ta(
+        current_price=0.94,
+        market_metrics={
+            "range_breakdown_retest": {
+                "phase": "retest",
+                "direction": "short",
+                "range_top": 1.1,
+                "range_bottom": 0.95,
+                "entry_lo": 0.93,
+                "entry_hi": 0.96,
+                "stop": 1.0,
+                "targets": [0.85],
+            }
+        },
+        target_prices=[0.85],
+        invalidation_price=1.0,
+    )
+    result = run_playbook(ta)
+    assert result.state == PlaybookState.ARMED
+    assert result.alert_eligible
 
 
 def test_playbook_cache_reuses_result() -> None:
@@ -100,7 +123,7 @@ def test_playbook_cache_reuses_result() -> None:
 def test_rbr_alert_uses_playbook() -> None:
     from bot.range_breakdown_retest import rbr_alert_eligible
 
-    ta = _ta(
+    watch_ta = _ta(
         current_price=1.06,
         market_metrics={
             "range_breakdown_retest": {
@@ -115,4 +138,23 @@ def test_rbr_alert_uses_playbook() -> None:
             }
         },
     )
-    assert rbr_alert_eligible(ta)
+    assert not rbr_alert_eligible(watch_ta)
+
+    armed_ta = _ta(
+        current_price=0.94,
+        market_metrics={
+            "range_breakdown_retest": {
+                "phase": "retest",
+                "direction": "short",
+                "range_top": 1.1,
+                "range_bottom": 0.95,
+                "entry_lo": 0.93,
+                "entry_hi": 0.96,
+                "stop": 1.0,
+                "targets": [0.85],
+            }
+        },
+        target_prices=[0.85],
+        invalidation_price=1.0,
+    )
+    assert rbr_alert_eligible(armed_ta)

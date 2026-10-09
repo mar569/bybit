@@ -39,6 +39,23 @@ def proactive_intel_on_watch_enabled() -> bool:
     return True
 
 
+def ed_entries_only_enabled(settings: object | None = None) -> bool:
+    """Только готовые ENTRY в канал; без WATCH/«наблюдение»/RBR-слежения.
+
+    ED_ENTRIES_ONLY=0 — смотреть settings (signal_telegram_entry_only, signal_watch_mode_enabled).
+    По умолчанию (env не задан): включено.
+    """
+    raw = os.environ.get("ED_ENTRIES_ONLY")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if settings is not None:
+        if bool(getattr(settings, "signal_telegram_entry_only", False)):
+            return True
+        if not bool(getattr(settings, "signal_watch_mode_enabled", True)):
+            return True
+    return True
+
+
 def manual_ta_blocks_signal_noise(
     symbol: str,
     *,

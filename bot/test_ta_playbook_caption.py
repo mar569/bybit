@@ -4,7 +4,8 @@ from bot.living_analysis import build_living_analysis_html
 from bot.ta_analysis import TAAnalysisResult, ta_signal_caption_html
 
 
-def test_signal_caption_uses_playbook_when_v3() -> None:
+def test_signal_caption_uses_playbook_when_v3(monkeypatch) -> None:
+    monkeypatch.setenv("ED_ENTRIES_ONLY", "0")
     ta = TAAnalysisResult(
         verdict="WAIT",
         post_pump=True,

@@ -113,6 +113,10 @@ def merge_playbook_trade_decision(
     *,
     default_reason: str = "",
 ) -> "TradeDecision | None":
+    from ...channel_discipline import ed_entries_only_enabled
+
+    if ed_entries_only_enabled():
+        return trade_decision
     if delivery is None or not delivery.force_watch_tier or trade_decision is None:
         return trade_decision
     if (trade_decision.action or "").lower() != "skip":

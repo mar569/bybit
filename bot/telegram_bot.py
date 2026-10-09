@@ -163,6 +163,10 @@ def _watch_allowed_for_signal(
     ta: object | None = None,
 ) -> bool:
     """Общий WATCH-режим ИЛИ тип в allowlist (ранние тренды/импульс без спама pulse)."""
+    from .channel_discipline import ed_entries_only_enabled
+
+    if ed_entries_only_enabled(settings):
+        return False
     if ta is not None and getattr(settings, "signal_rbr_watch_to_alert_channel", True):
         from .range_breakdown_retest import rbr_alert_eligible
 

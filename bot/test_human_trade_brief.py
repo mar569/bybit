@@ -90,6 +90,20 @@ def test_human_brief_is_sentences_not_bullet_soup() -> None:
     assert "0.034" not in text
 
 
+def test_entries_only_short_caption_when_not_ready(monkeypatch) -> None:
+    monkeypatch.setenv("ED_ENTRIES_ONLY", "1")
+    ta = TAAnalysisResult(
+        verdict="WAIT",
+        current_price=0.08,
+        breakout_level=0.0835,
+        breakdown_level=0.076,
+    )
+    html = format_manual_ta_human_html(ta, symbol="STRKUSDT")
+    assert "вход не готов" in html
+    assert "Наблюдение" not in html
+    assert "INTEL" not in html
+
+
 def test_manual_html_avoids_abcd_jargon() -> None:
     ta = TAAnalysisResult(
         verdict="WAIT",

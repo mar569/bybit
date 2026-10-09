@@ -13,7 +13,8 @@ class _Cons:
     bottom: float
 
 
-def test_synthetic_rbr_enables_story_chart() -> None:
+def test_synthetic_rbr_enables_story_chart(monkeypatch) -> None:
+    monkeypatch.setenv("ED_PDF_CHART_STYLE", "0")
     ta = TAAnalysisResult(
         verdict="WAIT",
         action_priority="long",
@@ -33,7 +34,9 @@ def test_synthetic_rbr_enables_story_chart() -> None:
     assert ta.action_priority == "short"
 
 
-def test_living_general_wait_has_candles_and_rules() -> None:
+def test_living_general_wait_has_candles_and_rules(monkeypatch) -> None:
+    monkeypatch.setenv("ED_ENTRIES_ONLY", "0")
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
     ta = TAAnalysisResult(
         verdict="WAIT",
         verdict_confidence=6,
@@ -51,7 +54,9 @@ def test_living_general_wait_has_candles_and_rules() -> None:
     assert "📍 План" not in html
 
 
-def test_living_html_oil_style_not_long_chase() -> None:
+def test_living_html_oil_style_not_long_chase(monkeypatch) -> None:
+    monkeypatch.setenv("ED_ENTRIES_ONLY", "0")
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
     ta = TAAnalysisResult(
         verdict="WAIT",
         verdict_confidence=6,

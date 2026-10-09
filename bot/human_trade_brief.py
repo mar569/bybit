@@ -624,14 +624,56 @@ def format_rbr_alert_caption_html(
     return "\n".join(p for p in parts if p)
 
 
+def manual_entry_ready(ta: "TAAnalysisResult", *, symbol: str = "") -> bool:
+    """Готовый сетап: ARMED/retest или LONG/SHORT с валидным планом на графике."""
+    from .chart_plan_chart_gate import plan_ok_to_draw_on_chart
+
+    verdict = (getattr(ta, "verdict", "") or "").upper()
+    if verdict in {"LONG", "SHORT"} and plan_ok_to_draw_on_chart(ta):
+        return True
+    try:
+        from .chart_display_policy import ed_playbook_v3_enabled
+
+        if not ed_playbook_v3_enabled():
+            return False
+        from .core.playbook.cache import get_or_run_playbook
+        from .core.playbook.states import PlaybookState
+
+        pb = get_or_run_playbook(ta, symbol=symbol or getattr(ta, "symbol", "") or "")
+        if pb.state == PlaybookState.ARMED:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def format_manual_ta_no_entry_html(
+    ta: "TAAnalysisResult",
+    *,
+    symbol: str = "",
+) -> str:
+    sym = _symbol_short(symbol or getattr(ta, "symbol", "") or "")
+    trig_line = ""
+    try:
+        from .core.chart_read import get_or_build_chart_read
+
+        read = get_or_build_chart_read(ta, symbol=symbol or getattr(ta, "symbol", "") or "")
+        if read.trigger_ru:
+            trig_line = f"\n<b>Жду:</b> {escape(read.trigger_ru[:120])}"
+    except Exception:
+        pass
+    return (
+        f"<b>{escape(sym)}</b> · <b>вход не готов</b>{trig_line}\n"
+        "<i>Авто-«наблюдения» отключены. Уровни — на графике; алерт только при готовом входе.</i>"
+    )
+
+
 def format_manual_ta_human_html(
     ta: "TAAnalysisResult",
     *,
     symbol: str = "",
 ) -> str:
     """Подпись manual TA: один вердикт, ждём, план уровней, поток — без A/B/C и setup D."""
-    from .range_breakdown_retest import get_rbr_from_ta
-
     from .living_analysis import build_living_analysis_html
 
     return build_living_analysis_html(ta, symbol=symbol) or ""

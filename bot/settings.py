@@ -53,8 +53,10 @@ ACTIVE_PUMP_SCANNER_PRESET: dict[str, Any] = {
     "actionable_signals_only": True,
     "actionable_min_ta_score": 6,
     "actionable_min_signal_score": 2,
-    "signal_watch_mode_enabled": True,
-    "signal_intel_watch_enabled": True,
+    "signal_watch_mode_enabled": False,
+    "signal_intel_watch_enabled": False,
+    "signal_telegram_entry_only": True,
+    "signal_rbr_watch_to_alert_channel": False,
     "signal_intel_main_channel": False,
     "scenario_watch_enabled": False,
     "scenario_watch_push_enabled": False,
@@ -638,9 +640,9 @@ class ScannerSettings:
     situation_overview_interval_seconds: int = 3600
     situation_overview_min_symbols: int = 2
     # В Telegram — только ENTRY; WATCH/intel/обзор не слать (кэш TA остаётся)
-    signal_telegram_entry_only: bool = False
-    # RBR WATCH (зона/реакция) — в канал «Ликвидация и Сигналы», даже при entry_only
-    signal_rbr_watch_to_alert_channel: bool = True
+    signal_telegram_entry_only: bool = True
+    # RBR WATCH — в канал (выкл при entry-only / ED_ENTRIES_ONLY=1)
+    signal_rbr_watch_to_alert_channel: bool = False
     target_watcher_enabled: bool = False
 
     # Качество сигналов v29: CVD, sweep, flow matrix, WATCH/ENTRY
@@ -652,8 +654,8 @@ class ScannerSettings:
     signal_cvd_short_max_ratio: float = 0.42
     signal_cvd_long_min_ratio: float = 0.58
     signal_cvd_lookback_minutes: float = 10.0
-    signal_watch_mode_enabled: bool = True
-    signal_intel_watch_enabled: bool = True
+    signal_watch_mode_enabled: bool = False
+    signal_intel_watch_enabled: bool = False
     signal_intel_main_channel: bool = False
     signal_btc_regime_filter_enabled: bool = True
     signal_btc_block_pct: float = 0.35
@@ -1243,9 +1245,9 @@ class ScannerSettings:
                 base.get("situation_overview_interval_seconds", 3600)
             ),
             situation_overview_min_symbols=int(base.get("situation_overview_min_symbols", 2)),
-            signal_telegram_entry_only=bool(base.get("signal_telegram_entry_only", False)),
+            signal_telegram_entry_only=bool(base.get("signal_telegram_entry_only", True)),
             signal_rbr_watch_to_alert_channel=bool(
-                base.get("signal_rbr_watch_to_alert_channel", True)
+                base.get("signal_rbr_watch_to_alert_channel", False)
             ),
             target_watcher_enabled=bool(base.get("target_watcher_enabled", True)),
             signal_quality_gate_enabled=bool(base.get("signal_quality_gate_enabled", True)),
@@ -1257,8 +1259,8 @@ class ScannerSettings:
             signal_cvd_short_max_ratio=float(base.get("signal_cvd_short_max_ratio", 0.42)),
             signal_cvd_long_min_ratio=float(base.get("signal_cvd_long_min_ratio", 0.58)),
             signal_cvd_lookback_minutes=float(base.get("signal_cvd_lookback_minutes", 10.0)),
-            signal_watch_mode_enabled=bool(base.get("signal_watch_mode_enabled", True)),
-            signal_intel_watch_enabled=bool(base.get("signal_intel_watch_enabled", True)),
+            signal_watch_mode_enabled=bool(base.get("signal_watch_mode_enabled", False)),
+            signal_intel_watch_enabled=bool(base.get("signal_intel_watch_enabled", False)),
             signal_intel_main_channel=bool(base.get("signal_intel_main_channel", False)),
             signal_btc_regime_filter_enabled=bool(
                 base.get("signal_btc_regime_filter_enabled", True)

@@ -269,7 +269,7 @@ def run_playbook(ta: TAAnalysisResult, *, symbol: str = "") -> PlaybookResult:
         headline_ru=headline,
         body_html=body_html,
         intel_rows=intel,
-        alert_eligible=alert_eligible and state in {PlaybookState.WATCH, PlaybookState.ARMED},
+        alert_eligible=alert_eligible and state == PlaybookState.ARMED,
         chart_spec=chart_spec,
         block_reason=stale_msg,
         meta={
