@@ -311,10 +311,16 @@ def build_human_trade_brief_html(
     symbol: str = "",
     conflict_note: str = "",
 ) -> str:
-    from .chart_display_policy import ed_minimal_voice_enabled
-    from .minimal_ed_voice import build_minimal_ed_voice_html
+    from .chart_display_policy import ed_minimal_voice_enabled, ed_playbook_v3_enabled
+
+    if ed_playbook_v3_enabled():
+        from .living_analysis import build_living_analysis_html
+
+        return build_living_analysis_html(ta, symbol=symbol) or ""
 
     if ed_minimal_voice_enabled():
+        from .minimal_ed_voice import build_minimal_ed_voice_html
+
         return build_minimal_ed_voice_html(ta, symbol=symbol)
 
     parts: list[str] = []
@@ -567,13 +573,17 @@ def format_rbr_alert_caption_html(
     *,
     symbol: str = "",
 ) -> str:
-    """WATCH/alert при RBR: текст минимальный — уровни и поток на PNG."""
-    from .chart_display_policy import ed_minimal_voice_enabled
-    from .minimal_ed_voice import build_minimal_ed_voice_html
-    from .range_breakdown_retest import get_rbr_from_ta
+    """WATCH/alert при RBR: playbook brief + watch-шапка."""
+    from .chart_display_policy import ed_playbook_v3_enabled
 
-    if ed_minimal_voice_enabled():
-        return build_minimal_ed_voice_html(ta, symbol=symbol)
+    if ed_playbook_v3_enabled():
+        from .core.playbook.brief import format_rbr_watch_caption_html
+
+        html = format_rbr_watch_caption_html(ta, symbol=symbol)
+        if html:
+            return html
+
+    from .range_breakdown_retest import get_rbr_from_ta
 
     rbr = get_rbr_from_ta(ta)
     if not rbr:
@@ -609,7 +619,7 @@ def format_rbr_alert_caption_html(
         head = f"📌 <b>{escape(sym)}</b> · наблюдение ({conf}/10)"
         action = f"⏳ {label}"
 
-    note = "<i>Уровни, SL/TP и поток — на графике.</i>"
+    note = "<i>Структура и триггеры — на графике (без SL/TP).</i>"
     parts = [head, stack_short, action, note]
     return "\n".join(p for p in parts if p)
 

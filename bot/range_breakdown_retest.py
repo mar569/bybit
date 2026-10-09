@@ -190,6 +190,17 @@ def get_rbr_from_ta(ta: object) -> dict[str, Any] | None:
 
 def rbr_alert_eligible(ta: object) -> bool:
     """Сетап RBR с планом — в алерт-канал WATCH (не только deep в анализах)."""
+    try:
+        from .chart_display_policy import ed_playbook_v3_enabled
+
+        if ed_playbook_v3_enabled():
+            from .core.playbook.cache import get_or_run_playbook
+            from .ta_analysis import TAAnalysisResult
+
+            if isinstance(ta, TAAnalysisResult):
+                return bool(get_or_run_playbook(ta).alert_eligible)
+    except Exception:
+        pass
     rbr = get_rbr_from_ta(ta)
     if not rbr:
         return False

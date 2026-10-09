@@ -65,6 +65,21 @@ def draw_pro_layers(
 ):
     from .chart_label_layout import LabelBoard
 
+    try:
+        from .chart_display_policy import ed_chart_spec_layers_enabled
+
+        if ed_chart_spec_layers_enabled() and mode != "legacy_manual":
+            from .core.playbook.chart_layers import draw_mpl_playbook_layers
+
+            sym = str(getattr(ta, "symbol", "") or "")
+            spec_board = draw_mpl_playbook_layers(
+                ax, bars, ta, symbol=sym, interval_minutes=interval_minutes,
+            )
+            if spec_board is not None:
+                return spec_board
+    except Exception:
+        logger.debug("mpl playbook layers fallback to legacy pro", exc_info=True)
+
     board = LabelBoard()
     if mode == "legacy_manual":
         from .chart_manual_layers import draw_education_overlays, draw_manual_ta_layers

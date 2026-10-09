@@ -49,6 +49,11 @@ def plan_staleness_plain(ta: TAAnalysisResult) -> str:
                 return "Цена уже у первой цели — вход опоздал, только наблюдение."
 
     inv = float(getattr(ta, "invalidation_price", 0) or 0)
+    stop_px = inv
+    if rbr and rbr.get("stop"):
+        stop_px = float(rbr["stop"])
+    if side == "short" and stop_px > 0 and cur >= stop_px * 0.997:
+        return "Стоп-зона уже пробита — сценарий не актуален, только наблюдение."
     if side == "short" and inv > cur * 1.001 and cur >= inv * 0.998:
         return "Стоп-зона уже близко — market-шорт не актуален."
 

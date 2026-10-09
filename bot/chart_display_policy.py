@@ -8,6 +8,25 @@ def _env_on(name: str, *, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def ed_playbook_v3_enabled() -> bool:
+    """Единый PlaybookEngine для подписи и RBR WATCH gate."""
+    return _env_on("ED_PLAYBOOK_V3", default="1")
+
+
+def ed_chart_spec_layers_enabled() -> bool:
+    """TV/mpl слои только из ChartSpec (без дубля ed_story range lines)."""
+    if not ed_playbook_v3_enabled():
+        return _env_on("ED_CHART_SPEC_LAYERS", default="0")
+    return _env_on("ED_CHART_SPEC_LAYERS", default="1")
+
+
+def ed_signal_legacy_reading_enabled() -> bool:
+    """Scenario report / hybrid reading в авто-алертах (legacy)."""
+    if ed_playbook_v3_enabled():
+        return _env_on("ED_SIGNAL_LEGACY_READING", default="0")
+    return _env_on("ED_SIGNAL_LEGACY_READING", default="1")
+
+
 def ed_minimal_voice_enabled() -> bool:
     """1–2 фразы без цифр OI/CVD/уровней в подписи."""
     return _env_on("ED_MINIMAL_VOICE", default="1")
@@ -29,11 +48,25 @@ def chart_box_labels_enabled() -> bool:
     return _env_on("ED_CHART_BOX_LABELS", default="0")
 
 
+def chart_trade_plan_on_chart_enabled() -> bool:
+    """Блоки TP/SL/IN и риск-боксы на PNG — по умолчанию выкл (только структура)."""
+    return _env_on("ED_CHART_TRADE_PLAN", default="0")
+
+
+def chart_entry_zone_tags_enabled() -> bool:
+    """Метка «ВХОД» на горизонтали — только если явно включено."""
+    if not chart_trade_plan_on_chart_enabled():
+        return False
+    return _env_on("ED_CHART_ENTRY_TAGS", default="0")
+
+
 def chart_plan_glyphs_enabled() -> bool:
     """TP / SL / IN на блоке плана — без цен."""
+    if not chart_trade_plan_on_chart_enabled():
+        return False
     if not ed_chart_visual_only():
         return chart_box_labels_enabled()
-    return _env_on("ED_CHART_PLAN_GLYPHS", default="1")
+    return _env_on("ED_CHART_PLAN_GLYPHS", default="0")
 
 
 def chart_anno_text_enabled() -> bool:

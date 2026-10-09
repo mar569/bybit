@@ -437,7 +437,10 @@ def draw_ed_story_layers_pro(
     elif phase == "retest" and floor > 0:
         _draw_floor_corridor(ax, bars, floor=floor, rbr=rbr)
 
-    draw_forward_short_projection(ax, bars, ta, use_xlim=True)
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if chart_trade_plan_on_chart_enabled():
+        draw_forward_short_projection(ax, bars, ta, use_xlim=True)
     from .chart_display_policy import chart_anno_text_enabled, chart_teaching_tags_enabled
 
     if chart_anno_text_enabled() and not chart_teaching_tags_enabled():

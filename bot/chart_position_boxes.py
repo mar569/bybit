@@ -227,6 +227,10 @@ def draw_forward_short_projection(
     use_xlim: bool = False,
 ) -> bool:
     """TV-стиль: блок SL/вход/TP вправо «вперёд» (ожидаемый шорт от зоны)."""
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if not chart_trade_plan_on_chart_enabled():
+        return False
     rbr = get_rbr_from_ta(ta)
     phase = str(rbr.get("phase") or "") if rbr else ""
     if not rbr or phase not in {"fade_top", "await_break", "retest"}:
@@ -286,6 +290,10 @@ def draw_forward_long_projection(
     use_xlim: bool = False,
 ) -> bool:
     """TV-стиль: блок SL/вход/TP вправо «вперёд» (ожидаемый лонг от зоны)."""
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if not chart_trade_plan_on_chart_enabled():
+        return False
     plan = _entry_stop_tp(ta)
     if plan is None:
         return False
@@ -344,9 +352,10 @@ def draw_forward_plan_boxes(
     use_xlim: bool = True,
 ) -> bool:
     """TP/SL/вход справа для любого плана — short или long."""
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
     from .plan_staleness import plan_is_stale
 
-    if plan_is_stale(ta):
+    if not chart_trade_plan_on_chart_enabled() or plan_is_stale(ta):
         return False
     if draw_forward_short_projection(ax, bars, ta, use_xlim=use_xlim):
         return True
@@ -394,6 +403,10 @@ def draw_forward_plan_boxes(
 
 
 def draw_position_risk_boxes(ax: plt.Axes, bars: list[KlineBar], ta: TAAnalysisResult) -> None:
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if not chart_trade_plan_on_chart_enabled():
+        return
     if draw_forward_plan_boxes(ax, bars, ta, use_xlim=True):
         return
     plan = _entry_stop_tp(ta)

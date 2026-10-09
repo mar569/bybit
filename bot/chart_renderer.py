@@ -3566,26 +3566,46 @@ async def render_annotated_chart(
         from .chart_ed_story import ed_story_chart_zoom_hours, use_ed_story_chart
         from .chart_range_wait import range_wait_chart_zoom_hours, use_range_wait_chart
 
+        if ta_chart is not None:
+            try:
+                from .chart_display_policy import ed_playbook_v3_enabled
+
+                if ed_playbook_v3_enabled():
+                    from .core.playbook.cache import get_or_run_playbook
+
+                    get_or_run_playbook(ta_chart, symbol=symbol or "")
+            except Exception:
+                logger.debug("Playbook chart warm-up skipped", exc_info=True)
+
+        from .core.playbook.chart_spec import (
+            ed_story_zoom_hours_with_playbook,
+            range_wait_zoom_hours_with_playbook,
+            resolve_chart_zoom_hours,
+        )
+
         if ta_chart and use_ed_story_chart(ta_chart):
-            zoom_hours = ed_story_chart_zoom_hours(
+            zoom_hours = ed_story_zoom_hours_with_playbook(
                 ta_chart,
                 bars_chart,
+                symbol=symbol or "",
                 interval_minutes=iv_chart,
                 analysis_hours=ah_chart,
                 configured=display_hours,
             )
         elif ta_chart and use_range_wait_chart(ta_chart):
-            zoom_hours = range_wait_chart_zoom_hours(
+            zoom_hours = range_wait_zoom_hours_with_playbook(
                 ta_chart,
                 bars_chart,
+                symbol=symbol or "",
                 interval_minutes=iv_chart,
                 analysis_hours=ah_chart,
                 configured=display_hours,
             )
         else:
-            zoom_hours = manual_chart_zoom_hours(
+            zoom_hours = resolve_chart_zoom_hours(
                 ta_chart,
                 bars_chart,
+                symbol=symbol or "",
                 interval_minutes=iv_chart,
                 analysis_hours=ah_chart,
                 configured=display_hours,

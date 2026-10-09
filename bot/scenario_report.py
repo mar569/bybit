@@ -300,6 +300,19 @@ def enrich_ta_scenario_fields(
     """Пересобрать scenario_report после quality/readiness (сигнал / manual)."""
     from dataclasses import replace
 
+    from .chart_display_policy import ed_playbook_v3_enabled, ed_signal_legacy_reading_enabled
+
+    if ed_playbook_v3_enabled() and not ed_signal_legacy_reading_enabled():
+        from .living_analysis import build_living_analysis_html
+
+        html = build_living_analysis_html(ta, symbol=symbol) or ""
+        return replace(
+            ta,
+            scenario_report_html=html,
+            human_trade_brief_html=html,
+            human_trade_brief=str(getattr(ta, "human_trade_brief", "") or "")[:500],
+        )
+
     report = build_scenario_report(
         ta,
         symbol=symbol,

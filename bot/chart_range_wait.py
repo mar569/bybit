@@ -124,10 +124,13 @@ def draw_range_wait_layers_minimal(
     from .range_breakdown_retest import get_rbr_from_ta
 
     side = preferred_trade_side(ta)
-    if get_rbr_from_ta(ta) or side == "short":
-        draw_forward_short_projection(ax, bars, ta, use_xlim=True)
-    elif side == "long":
-        draw_forward_long_projection(ax, bars, ta, use_xlim=True)
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if chart_trade_plan_on_chart_enabled():
+        if get_rbr_from_ta(ta) or side == "short":
+            draw_forward_short_projection(ax, bars, ta, use_xlim=True)
+        elif side == "long":
+            draw_forward_long_projection(ax, bars, ta, use_xlim=True)
     _draw_range_caption(ax, ta)
 
 

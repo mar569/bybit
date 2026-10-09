@@ -230,7 +230,7 @@ def _draw_sweep_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) ->
 
 
 def _draw_breakout_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
-    events = collect_breakout_retest_events(mapper.bars, ta, max_events=3)
+    events = collect_breakout_retest_events(mapper.bars, ta, max_events=1)
     show_labels = chart_breakout_marker_labels_enabled()
     for ev in events:
         if not mapper.bar_visible(ev.bar_idx):
@@ -267,6 +267,10 @@ def _draw_breakout_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult)
                 zorder=9,
             )
 def _draw_context_zone_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
+    import os
+
+    if os.environ.get("ED_CHART_PDF_ZONES", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
     cur = float(getattr(ta, "current_price", 0) or mapper.bars[-1].close)
     metrics = getattr(ta, "market_metrics", None) or {}
     raw = metrics.get("pdf_zones") if isinstance(metrics, dict) else None
@@ -312,19 +316,23 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
         mapper.hline(ax, el, color="#58a6ff", lw=1.5, alpha=0.9)
         if chart_teaching_tags_enabled():
             ax.text(mapper.x_start + 0.008, mapper.y(eh), " RETEST", color="#58a6ff", fontsize=6.5, va="bottom", zorder=8)
-    elif phase in {"fade_top", "await_break"} and resistance > 0:
+    elif phase == "await_break" and floor > 0 and ceil > floor:
+        i0 = mapper.vis_start
+        mapper.rect(ax, i0, len(mapper.bars) - 1, floor, ceil, color="#8b949e", alpha=0.08)
+        if mapper.price_visible(ceil) and chart_teaching_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(ceil), " ПОТОЛОК", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+    elif phase == "fade_top" and resistance > 0:
         el = float(rbr.get("entry_lo") or resistance * 0.985)
         eh = float(rbr.get("entry_hi") or resistance * 1.006)
         z_lo, z_hi = min(el, resistance * 0.998), max(eh, resistance * 1.002)
-        i0 = max(0, len(mapper.bars) - min(len(mapper.bars), 48))
+        i0 = mapper.vis_start
         mapper.rect(ax, i0, len(mapper.bars) - 1, z_lo, z_hi, color="#f0c040", alpha=0.11)
         mapper.hline(ax, z_hi, color="#f0c040", lw=1.5, alpha=0.9)
         mapper.hline(ax, z_lo, color="#f0c040", lw=1.5, alpha=0.9)
-        if chart_teaching_tags_enabled():
-            from .plan_staleness import plan_is_stale
+        from .chart_display_policy import chart_entry_zone_tags_enabled
 
-            if not plan_is_stale(ta):
-                ax.text(mapper.x_start + 0.008, mapper.y(z_hi), " ВХОД", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
+        if chart_teaching_tags_enabled() and chart_entry_zone_tags_enabled():
+            ax.text(mapper.x_start + 0.008, mapper.y(z_hi), " ЗОНА", color="#f0c040", fontsize=6.5, va="bottom", zorder=8)
     elif phase == "retest" and floor > 0:
         el = float(rbr.get("entry_lo") or floor * 0.996)
         eh = float(rbr.get("entry_hi") or floor * 1.01)
@@ -335,6 +343,10 @@ def _draw_rbr_story_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult
 
 
 def _draw_forward_boxes_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult, rbr: dict | None) -> None:
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
+
+    if not chart_trade_plan_on_chart_enabled():
+        return
     from .chart_plan_display import build_display_plan
     from .chart_position_boxes import plan_for_display
     from .plan_staleness import plan_is_stale
@@ -405,10 +417,11 @@ def _tv_plan_glyphs(
 
 
 def _draw_probable_path_tv(ax: plt.Axes, mapper: TvCoordMapper, ta: TAAnalysisResult) -> None:
+    from .chart_display_policy import chart_trade_plan_on_chart_enabled
     from .plan_staleness import plan_is_stale
     from .pro_invariants import target_matches_side
 
-    if plan_is_stale(ta):
+    if not chart_trade_plan_on_chart_enabled() or plan_is_stale(ta):
         return
     side = str(getattr(ta, "action_priority", "") or "").lower()
     rbr = get_rbr_from_ta(ta)
@@ -565,6 +578,17 @@ def draw_tv_pro_layers(
         interval_minutes=interval_minutes,
         display_hours=display_hours,
     )
+
+    try:
+        from .core.playbook.chart_layers import try_draw_tv_playbook_layers
+
+        spec_layers = try_draw_tv_playbook_layers(
+            ax, mapper, ta, bars, symbol=str(getattr(ta, "symbol", "") or ""),
+        )
+        if spec_layers is not None:
+            return spec_layers
+    except Exception:
+        logger.debug("playbook TV spec layers skipped", exc_info=True)
 
     from .chart_pro import resolve_pro_chart_mode
 

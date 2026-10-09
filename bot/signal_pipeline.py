@@ -136,6 +136,19 @@ def professional_reading_snippet(
     return block
 
 
+def enrich_signal_playbook(
+    signal: "Signal",
+    ta: "TAAnalysisResult",
+) -> object | None:
+    """Single playbook stamp on scanner signal → delivery gates for dispatch."""
+    from .core.playbook.signal_dispatch import delivery_from_context, stamp_playbook_on_signal
+
+    ctx = stamp_playbook_on_signal(ta, signal, symbol=signal.symbol)
+    if ctx is None:
+        return None
+    return delivery_from_context(ctx)
+
+
 def scenario_body_html(
     ta: TAAnalysisResult | None,
     *,
@@ -145,7 +158,14 @@ def scenario_body_html(
     """Разбор в alert: situational (проза) или legacy scenario report."""
     if ta is None:
         return ""
+    from .chart_display_policy import ed_playbook_v3_enabled
     from .living_analysis import build_living_analysis_html
+
+    if ed_playbook_v3_enabled():
+        from .chart_display_policy import ed_signal_legacy_reading_enabled
+
+        if not ed_signal_legacy_reading_enabled():
+            return build_living_analysis_html(ta, symbol=symbol) or ""
 
     living = build_living_analysis_html(ta, symbol=symbol)
     if living:

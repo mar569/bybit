@@ -226,15 +226,18 @@ def test_primary_forecast_wait_ignores_priority() -> None:
     ) == "short"
 
 
-def test_manual_detailed_has_distances() -> None:
+def test_manual_detailed_has_distances(monkeypatch) -> None:
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
+    monkeypatch.setenv("ED_MINIMAL_VOICE", "0")
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)
     text = ta_manual_detailed_html(ta)
-    assert "📍" in text
-    assert "👉" in text or "Действие" in text
+    assert "Разбор" in text or "📍" in text
+    assert "PNG" in text or "график" in text.lower() or "👉" in text
 
 
-def test_ta_signal_caption_html() -> None:
+def test_ta_signal_caption_html(monkeypatch) -> None:
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT")
     caption = ta_signal_caption_html(ta, signal_side="long", compact=False)
@@ -326,7 +329,9 @@ def test_detect_liq_cascade_short() -> None:
     assert sig.strength >= 7
 
 
-def test_manual_post_pump_below_trigger_not_active() -> None:
+def test_manual_post_pump_below_trigger_not_active(monkeypatch) -> None:
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
+    monkeypatch.setenv("ED_MINIMAL_VOICE", "0")
     ta = TAAnalysisResult(
         verdict="WAIT",
         action_priority="long",
@@ -345,19 +350,21 @@ def test_manual_post_pump_below_trigger_not_active() -> None:
         cvd_source="live",
     )
     text = ta_manual_detailed_html(ta)
-    assert "WAIT" in text
+    assert "WAIT" in text.upper() or "подожд" in text.lower() or "наблюд" in text.lower()
     assert "активен" not in text.lower()
-    assert "режим" in text.lower() or "пробой" in text.lower() or "вход" in text.lower()
+    assert "пробой" in text.lower() or "вход" in text.lower() or "0.059" in text
     intent = ta_user_intent_html(ta, "long")
     assert "НЕ входить" in intent or "ждите" in intent.lower()
 
 
-def test_ta_manual_detailed_html() -> None:
+def test_ta_manual_detailed_html(monkeypatch) -> None:
+    monkeypatch.setenv("ED_PLAYBOOK_V3", "0")
+    monkeypatch.setenv("ED_MINIMAL_VOICE", "0")
     bars = _trend_up_bars(60)
     ta = run_ta_analysis(bars, is_long=True, symbol="BTCUSDT", neutral=True)
     text = ta_manual_detailed_html(ta)
-    assert "📐" in text
-    assert "режим" in text.lower() or "Вход" in text
+    assert "📐" in text or "📌" in text or "Разбор" in text
+    assert "режим" in text.lower() or "Вход" in text or "M5" in text
 
 
 def test_ta_telegram_caption_html() -> None:

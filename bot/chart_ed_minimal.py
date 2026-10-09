@@ -222,9 +222,12 @@ def draw_pro_teaching_layers(
     elif mode == "ed_story" and rbr and str(rbr.get("phase") or "") in {"fade_top", "await_break"}:
         pass  # ghost + forward box = путь сценария
     elif mode in {"range_wait", "observation"}:
-        from .chart_readable import draw_probable_path
+        from .chart_display_policy import chart_trade_plan_on_chart_enabled
 
-        draw_probable_path(ax, bars, ta)
+        if chart_trade_plan_on_chart_enabled():
+            from .chart_readable import draw_probable_path
+
+            draw_probable_path(ax, bars, ta)
 
     htf = getattr(ta, "primary_htf_chart_pattern", None)
     if htf and getattr(ta, "reading_accept_htf_pattern", True):

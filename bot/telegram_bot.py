@@ -1770,6 +1770,7 @@ class TelegramBot:
         ta_result = None
         readiness: tuple[bool, str] | None = None
         trade_decision = None
+        playbook_delivery = None
         png: bytes | None = None
         pro_text = ""
         route_pro = False
@@ -1871,6 +1872,15 @@ class TelegramBot:
                     logger.exception("TA-only fetch failed for %s", signal.symbol)
 
             if ta_result is not None:
+                try:
+                    from .chart_display_policy import ed_playbook_v3_enabled
+
+                    if ed_playbook_v3_enabled():
+                        from .signal_pipeline import enrich_signal_playbook
+
+                        playbook_delivery = enrich_signal_playbook(signal, ta_result)
+                except Exception:
+                    logger.debug("Playbook signal stamp failed for %s", signal.symbol, exc_info=True)
                 if (
                     settings.signal_cvd_gate_enabled
                     and signal.details.get("cvd_ratio") is None
@@ -1946,11 +1956,27 @@ class TelegramBot:
                             cvd_ratio=quality.cvd_ratio,
                             cvd_detail=quality.cvd_detail,
                         )
-                    from .range_breakdown_retest import rbr_alert_eligible
-
-                    rbr_watch = bool(
-                        ta_result is not None and rbr_alert_eligible(ta_result)
+                    from .core.playbook.signal_dispatch import (
+                        merge_playbook_trade_decision,
+                        playbook_rbr_watch,
                     )
+
+                    rbr_watch = playbook_rbr_watch(ta_result, playbook_delivery)
+                    trade_decision = merge_playbook_trade_decision(
+                        playbook_delivery,
+                        trade_decision,
+                    ) or trade_decision
+                    if trade_decision.action == "watch" and rbr_watch and quality.tier != "watch":
+                        from .signal_quality_gate import SignalQualityResult
+
+                        quality = SignalQualityResult(
+                            tier="watch",
+                            block_reason=quality.block_reason or trade_decision.reason,
+                            warnings=quality.warnings,
+                            flow_label=quality.flow_label,
+                            cvd_ratio=quality.cvd_ratio,
+                            cvd_detail=quality.cvd_detail,
+                        )
                     if (
                         trade_decision.action == "skip"
                         and quality.tier != "watch"
@@ -1980,23 +2006,6 @@ class TelegramBot:
                                 signal, ta_result, png, skip_dedupe=skip_dedupe,
                             )
                         return
-                    if rbr_watch and trade_decision.action == "skip":
-                        from .trade_decision_gate import TradeDecision
-
-                        trade_decision = TradeDecision(
-                            "watch",
-                            trade_decision.reason or "RBR — ждём реакцию",
-                            location=trade_decision.location,
-                            setup_score=max(trade_decision.setup_score, 32),
-                        )
-                        quality = SignalQualityResult(
-                            tier="watch",
-                            block_reason=quality.block_reason or trade_decision.reason,
-                            warnings=quality.warnings,
-                            flow_label=quality.flow_label,
-                            cvd_ratio=quality.cvd_ratio,
-                            cvd_detail=quality.cvd_detail,
-                        )
 
                 signal.details["quality_tier"] = quality.tier
                 signal.details["quality_block"] = quality.block_reason
@@ -2023,14 +2032,14 @@ class TelegramBot:
                     and not skip_dedupe
                     and quality is not None
                 ):
-                    from .range_breakdown_retest import rbr_alert_eligible
+                    from .core.playbook.signal_dispatch import playbook_rbr_watch
 
                     td_act = (trade_decision.action if trade_decision else "") or ""
                     is_entry = quality.tier == "entry" and td_act in ("", "entry")
                     is_rbr_watch = (
                         quality.tier == "watch"
                         and ta_result is not None
-                        and rbr_alert_eligible(ta_result)
+                        and playbook_rbr_watch(ta_result, playbook_delivery)
                         and getattr(settings, "signal_rbr_watch_to_alert_channel", True)
                     )
                     if not is_entry and not is_rbr_watch:
@@ -2078,11 +2087,11 @@ class TelegramBot:
                     return
 
                 cvd_ratio = quality.cvd_ratio
-                from .range_breakdown_retest import rbr_alert_eligible
+                from .core.playbook.signal_dispatch import playbook_rbr_watch
 
                 rbr_alert_watch = bool(
                     ta_result is not None
-                    and rbr_alert_eligible(ta_result)
+                    and playbook_rbr_watch(ta_result, playbook_delivery)
                     and quality is not None
                     and quality.tier == "watch"
                     and getattr(settings, "signal_rbr_watch_to_alert_channel", True)
@@ -2216,6 +2225,7 @@ class TelegramBot:
                         show_readiness_badge=settings.actionable_show_readiness_badge,
                         compact=settings.signal_ta_compact,
                         signal_type=signal.signal_type,
+                        symbol=signal.symbol,
                     )
                     self._store_signal_watch_ctx(signal, ta_result)
                 chart_caption = build_signal_alert_caption(
@@ -3088,7 +3098,11 @@ class TelegramBot:
         return details
 
     async def _manual_ta_flow_caption_block(self, symbol: str, ta: Any) -> str:
-        """Краткие показатели, синхронизированные с данными на графике."""
+        """INTEL 4-panel или legacy participation lines."""
+        from .chart_display_policy import ed_playbook_v3_enabled
+
+        if ed_playbook_v3_enabled():
+            return ""
         participation = getattr(ta, "market_participation_lines", []) or []
         if len(participation) <= 1:
             return ""

@@ -209,8 +209,13 @@ def build_living_analysis_html(
     *,
     symbol: str = "",
 ) -> str:
-    from .chart_display_policy import ed_minimal_voice_enabled
+    from .chart_display_policy import ed_minimal_voice_enabled, ed_playbook_v3_enabled
     from .minimal_ed_voice import build_minimal_ed_voice_html
+
+    if ed_playbook_v3_enabled():
+        from .core.playbook.cache import get_or_run_playbook
+
+        return get_or_run_playbook(ta, symbol=symbol).body_html or ""
 
     if ed_minimal_voice_enabled():
         return build_minimal_ed_voice_html(ta, symbol=symbol)

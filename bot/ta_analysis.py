@@ -5329,8 +5329,17 @@ def ta_signal_caption_html(
     show_readiness_badge: bool = True,
     compact: bool = True,
     signal_type: str | None = None,
+    symbol: str = "",
 ) -> str:
     """Сигналы: короткий блок для решения (по умолчанию compact)."""
+    from .chart_display_policy import ed_playbook_v3_enabled
+
+    if ed_playbook_v3_enabled():
+        from .living_analysis import build_living_analysis_html
+
+        html = build_living_analysis_html(ta, symbol=symbol)
+        if html:
+            return html
     if not compact:
         return _ta_signal_caption_verbose(ta, signal_side=signal_side, readiness=readiness, show_readiness_badge=show_readiness_badge)
     return ta_signal_caption_compact_html(
