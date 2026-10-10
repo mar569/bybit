@@ -3075,7 +3075,17 @@ def run_ta_analysis(
         risk_notes.append(repeat_spike_dump_note)
     if liq_magnet.plan_hint and liq_magnet.plan_hint not in risk_notes:
         risk_notes.append(liq_magnet.plan_hint)
-    risk_notes = risk_notes[:7]
+    from .analytics.talib_features import compute_talib_snapshot
+
+    _talib_snap = compute_talib_snapshot(bars)
+    for note in _talib_snap.notes:
+        if note not in risk_notes and note not in (reason or ""):
+            risk_notes.append(note)
+    for pat in _talib_snap.candle_patterns:
+        line = f"TA-Lib: {pat}"
+        if line not in risk_notes:
+            risk_notes.append(line)
+    risk_notes = risk_notes[:9]
     professional_summary = _build_professional_summary(
         verdict=verdict,
         market_bias=market_bias,
@@ -3591,6 +3601,11 @@ def run_ta_analysis(
         market_participation_lines=participation_lines,
         market_metrics={
             **dict(market_metrics or {}),
+            **(
+                {"talib": _talib_snap.to_dict()}
+                if _talib_snap.available
+                else {}
+            ),
             **(
                 {"range_breakdown_retest": rbr_setup.to_dict()}
                 if rbr_setup is not None

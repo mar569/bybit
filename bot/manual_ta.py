@@ -111,6 +111,51 @@ def structure_aware_display_hours(
     return max(4, min(need, cap))
 
 
+# Таблица зума нефтяного PNG (`render_oil_chart`) — intraday, читаемые свечи.
+_INTRADAY_CHART_DEFAULT_HOURS = {5: 10, 10: 12, 15: 18, 30: 28, 60: 48}
+_INTRADAY_CHART_MAX_ZOOM = {5: 14, 10: 16, 15: 28, 30: 40, 60: 72}
+
+
+def intraday_chart_zoom_hours(
+    interval_minutes: int,
+    *,
+    analysis_hours: int,
+    configured: int | None = None,
+    drawdown_pct: float = 0.0,
+    bar_count: int = 0,
+) -> int:
+    """Зум экрана как у нефти: 15m ≈ 18ч, без растягивания до 56–72ч."""
+    im = max(5, min(60, int(interval_minutes)))
+    configured_int: int | None = None
+    if configured is not None and int(configured) > 0:
+        configured_int = int(configured)
+    if configured_int is not None and configured_int >= 72:
+        configured_int = None
+    if configured_int is not None and im >= 15 and configured_int < 14:
+        configured_int = None
+
+    base = _INTRADAY_CHART_DEFAULT_HOURS.get(im, 18 if im <= 15 else 36)
+    if configured_int is not None:
+        base = max(8, min(configured_int, 36 if im <= 15 else 72))
+
+    ah_cap = max(4, int(analysis_hours))
+    if bar_count > 0:
+        from_bars = max(base, int(bar_count * im / 60))
+        analysis_h = min(from_bars, 72 if im <= 15 else 120, ah_cap)
+    else:
+        analysis_h = min(max(base, ah_cap), 72 if im <= 15 else 120)
+
+    zoom = structure_aware_display_hours(
+        interval_minutes=im,
+        analysis_hours=analysis_h,
+        configured=base,
+        drawdown_pct=drawdown_pct,
+        max_display_hours=analysis_h,
+    )
+    max_zoom = _INTRADAY_CHART_MAX_ZOOM.get(im, 24)
+    return max(8, min(int(zoom), max_zoom))
+
+
 def manual_ta_hours(interval_minutes: int) -> int:
     """Сколько часов свечей грузим для ручного разбора (больше, чем зум по умолчанию)."""
     from .chart_display_policy import ed_chart_visible_hours

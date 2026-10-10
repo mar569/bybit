@@ -184,6 +184,36 @@ class Config(BaseSettings):
     default_bybit_enabled: bool = Field(True, env="DEFAULT_BYBIT_ENABLED")
     signal_cooldown_seconds: int = Field(60, env="SIGNAL_COOLDOWN_SECONDS")
 
+    hummingbot_api_url: str | None = Field(None, env="HUMMINGBOT_API_URL")
+    hummingbot_api_username: str | None = Field(None, env="HUMMINGBOT_API_USERNAME")
+    hummingbot_api_password: str | None = Field(None, env="HUMMINGBOT_API_PASSWORD")
+
+    @validator("hummingbot_api_url", pre=True)
+    def empty_hummingbot_url(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @validator("hummingbot_api_username", pre=True)
+    def empty_hummingbot_user(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @validator("hummingbot_api_password", pre=True)
+    def empty_hummingbot_password(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        return value
+
+    @property
+    def hummingbot_api_configured(self) -> bool:
+        return bool(
+            self.hummingbot_api_url
+            and self.hummingbot_api_username
+            and self.hummingbot_api_password
+        )
+
     class Config:
         env_file = ENV_PATH
         env_file_encoding = "utf-8"

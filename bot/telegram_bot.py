@@ -282,6 +282,14 @@ class TelegramBot:
         ("oil_news_enabled", "oil", "🛢 Нефть UKOUSD Bybit"),
     )
 
+    def _signal_chart_interval_minutes(self, exchange: str = "") -> int:
+        from .signal_chart_policy import effective_signal_chart_interval_minutes
+
+        return effective_signal_chart_interval_minutes(
+            self.settings_manager.settings,
+            exchange=exchange,
+        )
+
     def _bot_notifications_blocked(self) -> bool:
         return bool(self.settings_manager.settings.bot_paused)
 
@@ -505,6 +513,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("cancel", self.on_cancel))
         self.application.add_handler(CommandHandler("pulse", self.on_pulse))
         self.application.add_handler(CommandHandler("overview", self.on_pulse))
+        self.application.add_handler(CommandHandler("hbot", self.on_hbot))
+        self.application.add_handler(CommandHandler("hummingbot", self.on_hbot))
         self.application.add_handler(CallbackQueryHandler(self.on_callback_query))
         self.application.add_handler(MessageHandler(filters.PHOTO, self.on_manual_ta_photo))
         self.application.add_handler(
@@ -943,7 +953,7 @@ class TelegramBot:
                 chart_url=signal.link,
                 include_copy=True,
                 include_ai=True,
-                interval_minutes=self.settings_manager.settings.signal_chart_interval_minutes,
+                interval_minutes=self._signal_chart_interval_minutes(signal.exchange or ""),
             ),
         ]
         if pro_token:
@@ -1493,7 +1503,7 @@ class TelegramBot:
                         signal.symbol,
                         side=signal.side or "long",
                         hours=settings.signal_chart_hours,
-                        interval_minutes=settings.signal_chart_interval_minutes,
+                        interval_minutes=self._signal_chart_interval_minutes(signal.exchange or ""),
                         oi_bars=oi_bars,
                         chart_source=settings.signal_chart_source,
                         exchange=(signal.exchange or "binance").lower(),
@@ -1864,7 +1874,7 @@ class TelegramBot:
                             signal.symbol,
                             chart_source=settings.signal_chart_source,
                             chart_hours=settings.signal_chart_hours,
-                            chart_interval_minutes=settings.signal_chart_interval_minutes,
+                            chart_interval_minutes=self._signal_chart_interval_minutes(signal.exchange or ""),
                             side=signal.side,
                             structure_warning=warning,
                             probability_percent=float(
@@ -1896,7 +1906,7 @@ class TelegramBot:
                             signal.symbol,
                             side=signal.side,
                             hours=settings.signal_chart_hours,
-                            interval_minutes=settings.signal_chart_interval_minutes,
+                            interval_minutes=self._signal_chart_interval_minutes(signal.exchange or ""),
                             oi_bars=oi_bars,
                             liq_context=liq_context,
                             market_metrics=signal_market_metrics(signal),
@@ -3087,6 +3097,55 @@ class TelegramBot:
             reply_markup=self._settings_keyboard(),
         )
 
+    async def _hummingbot_status_html(self) -> str:
+        from .integrations.hummingbot_api import (
+            HummingbotApiError,
+            client_from_config,
+            format_hbot_status_html,
+        )
+
+        client = client_from_config(self.config)
+        if client is None:
+            return (
+                "<b>🤖 Hummingbot API</b> — не настроен.\n\n"
+                "1) На хосте (не в образе бота): "
+                "<code>curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh | bash</code>\n"
+                "2) В <code>.env</code> бота:\n"
+                "<code>HUMMINGBOT_API_URL=http://host.docker.internal:8000</code>\n"
+                "<code>HUMMINGBOT_API_USERNAME=…</code> · <code>HUMMINGBOT_API_PASSWORD=…</code>\n\n"
+                "<i>Condor — отдельный Telegram-бот для торговли через тот же API "
+                "(condor.hummingbot.org). Наш бот: анализ + мост /hbot.</i>"
+            )
+        try:
+            info = await client.system_info()
+            bots = await client.bots_status()
+            mqtt = await client.mqtt_status()
+            accounts = await client.accounts_distribution()
+            return format_hbot_status_html(
+                info=info,
+                bots=bots,
+                mqtt=mqtt,
+                accounts_dist=accounts,
+            )
+        except HummingbotApiError as exc:
+            return (
+                f"<b>🤖 Hummingbot API</b> — ошибка: {exc}\n"
+                "<i>Проверьте URL (Docker: host.docker.internal:8000), логин/пароль из hummingbot-api/.env</i>"
+            )
+
+    async def on_hbot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update):
+            if update.message:
+                await update.message.reply_text("Нет доступа.")
+            return
+        if update.message is None:
+            return
+        await update.message.reply_text(
+            await self._hummingbot_status_html(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
     async def on_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update):
             await update.message.reply_text("Нет доступа.")
@@ -3659,7 +3718,7 @@ class TelegramBot:
                         watch.symbol,
                         side=watch.side,
                         hours=settings.signal_chart_hours,
-                        interval_minutes=settings.signal_chart_interval_minutes,
+                        interval_minutes=self._signal_chart_interval_minutes(watch.exchange or ""),
                         oi_bars=oi_bars,
                         liq_context=liq_context,
                         chart_source=settings.signal_chart_source,
@@ -5059,6 +5118,7 @@ class TelegramBot:
             "Hot: <b>ENTRY</b> + early WATCH (<code>trend_seed</code>/impulse), pulse у хая молчит\n"
             "/scan — диагностика сканера\n"
             "/pulse (overview) — сводка ситуаций по кэшу TA (импульс, боковик, supply…)\n"
+            "/hbot — статус Hummingbot API (боты MM/PMM, портфель; нужен deploy на хосте)\n"
             "/pause — остановить все каналы\n"
             "/resume — восстановить каналы\n"
             "🎛 <b>Каналы</b> — выборочно вкл/выкл каждое направление\n"
@@ -5578,7 +5638,9 @@ class TelegramBot:
             f"🏷 Бейдж готовности: <b>{'ON' if s.actionable_show_readiness_badge else 'OFF'}</b> "
             f"(по TA, без ⏱ ранности сканера)\n"
             f"📈 TA-график к сигналам: <b>{'ON' if s.signal_chart_enabled else 'OFF'}</b> "
-            f"· режим <b>{s.signal_chart_source}</b> · {s.signal_chart_hours}ч "
+            f"· режим <b>{s.signal_chart_source}</b> · "
+            f"<b>{self._signal_chart_interval_minutes('bybit')}m</b> · "
+            f"{int(getattr(s, 'signal_chart_display_hours', 18) or 18)}ч "
             f"· высота ×<b>{getattr(s, 'signal_chart_height_scale', 1.0):g}</b>\n"
             f"📋 Playbook (Hot): <b>{'ON' if s.signal_playbook_enabled else 'OFF'}</b> · "
             f"Pro → анализ: <b>{'ON' if s.signal_pro_to_analysis_chat else 'OFF'}</b> · "

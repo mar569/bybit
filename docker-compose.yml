@@ -28,3 +28,6 @@ services:
     volumes:
       - ./bot/settings.json:/app/bot/settings.json
     command: python -m bot.main
+    # Hummingbot API на хосте (127.0.0.1:8000) — раскомментируйте при HUMMINGBOT_API_URL:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

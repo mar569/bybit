@@ -9,7 +9,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
-SETTINGS_VERSION = 108
+SETTINGS_VERSION = 109
 MIN_SIGNAL_COOLDOWN_SECONDS = 60
 
 # Активный рынок: пампы/дампы на Binance, WATCH в analysis, без спама ENTRY.
@@ -106,8 +106,10 @@ SITUATIONAL_SCANNER_PRESET: dict[str, Any] = {
     "pattern_min_confidence": 0.62,
     "trade_decision_min_entry_score": 52,
     "trade_decision_min_watch_score": 32,
-    "signal_chart_display_hours": 14,
-    "signal_chart_height_scale": 1.18,
+    "signal_chart_display_hours": 18,
+    "signal_chart_height_scale": 1.35,
+    "signal_chart_interval_minutes": 15,
+    "signal_chart_sync_long_period": True,
     "analysis_max_per_hour": 8,
     "flash_enabled": False,
     "signal_playbook_enabled": False,
@@ -600,7 +602,8 @@ class ScannerSettings:
     signal_chart_source: str = "annotated"
     signal_chart_hours: int = 18
     signal_chart_display_hours: int = 14
-    signal_chart_interval_minutes: int = 5
+    signal_chart_interval_minutes: int = 15
+    signal_chart_sync_long_period: bool = True
     # Множитель высоты PNG (1.0 = стандарт, 1.3 = свечи выше на ~30%)
     signal_chart_height_scale: float = 1.18
 
@@ -1208,7 +1211,8 @@ class ScannerSettings:
             signal_chart_source=str(base.get("signal_chart_source", "annotated")),
             signal_chart_hours=int(base.get("signal_chart_hours", 18)),
             signal_chart_display_hours=int(base.get("signal_chart_display_hours", 12)),
-            signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 5)),
+            signal_chart_interval_minutes=int(base.get("signal_chart_interval_minutes", 15)),
+            signal_chart_sync_long_period=bool(base.get("signal_chart_sync_long_period", True)),
             signal_chart_height_scale=float(base.get("signal_chart_height_scale", 1.0)),
             pattern_detection_enabled=bool(base.get("pattern_detection_enabled", True)),
             pattern_min_confidence=float(base.get("pattern_min_confidence", 0.68)),
@@ -2311,6 +2315,14 @@ class SettingsManager:
                 ):
                     merged[key] = bool(data[key]) if key in data else False
                 merged["signals_enabled"] = bool(data.get("signals_enabled", True))
+            if version < 109:
+                merged.setdefault("signal_chart_sync_long_period", True)
+                chart_iv = int(merged.get("signal_chart_interval_minutes", 5) or 5)
+                long_iv = int(merged.get("long_period_minutes", 15) or 15)
+                if chart_iv <= 5 and long_iv >= 10:
+                    merged["signal_chart_interval_minutes"] = long_iv
+                elif "signal_chart_interval_minutes" not in data:
+                    merged["signal_chart_interval_minutes"] = max(chart_iv, 15)
             merged["settings_version"] = SETTINGS_VERSION
             settings = ScannerSettings.from_dict(merged)
             self.save(settings)

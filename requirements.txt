@@ -3,6 +3,8 @@ aiohttp==3.9.5
 websockets==11.0.3
 python-dotenv==1.0.0
 pydantic==1.10.14
+numpy>=1.26.0,<3
+TA-Lib>=0.6.5
 redis==4.6.0
 matplotlib==3.8.4
 playwright==1.44.0

@@ -17,7 +17,16 @@ def detect_asset_class(symbol: str, *, exchange: str = "") -> AssetClass:
     ex = (exchange or "").strip().lower()
     if not sym:
         return "unknown"
-    if sym in {"WTIUSDT", "BRENTUSDT", "XAUUSDT", "XAGUSDT"} or sym.startswith(("WTI", "BRENT", "XAU", "XAG")):
+    if sym in {
+        "WTIUSDT",
+        "BRENTUSDT",
+        "BZUSDT",
+        "CLUSDT",
+        "XAUUSDT",
+        "XAGUSDT",
+        "UKOUSD",
+        "UKOUSD.S",
+    } or sym.startswith(("WTI", "BRENT", "XAU", "XAG", "UKO")):
         return "commodity"
     if sym.endswith("USDT") or sym.endswith("USDC") or sym.endswith("USD"):
         if ex in {"bybit", "binance", "okx"} or not ex:

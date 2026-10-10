@@ -76,6 +76,14 @@ def test_manual_chart_zoom_expands_for_wide_structure() -> None:
     assert zoom >= 22
 
 
+def test_intraday_chart_zoom_matches_oil_style() -> None:
+    from bot.manual_ta import intraday_chart_zoom_hours
+
+    assert intraday_chart_zoom_hours(15, analysis_hours=72, configured=None) == 18
+    assert intraday_chart_zoom_hours(15, analysis_hours=72, configured=14) == 14
+    assert intraday_chart_zoom_hours(15, analysis_hours=72, configured=80) == 18
+
+
 def test_chart_display_default_12h() -> None:
     from bot.manual_ta import chart_display_hours, structure_aware_display_hours
 

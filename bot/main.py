@@ -315,6 +315,19 @@ async def main() -> None:
             "ON" if ed_entries_only_enabled(s) else "OFF",
             "ON" if ed_breakout_watch_alerts_enabled() else "OFF",
         )
+        from .analytics.talib_features import talib_available
+
+        logger.info("TA-Lib: %s", "ON" if talib_available() else "OFF (pip install TA-Lib)")
+
+        if config.hummingbot_api_configured:
+            logger.info(
+                "Hummingbot API: %s ( /hbot в Telegram )",
+                config.hummingbot_api_url,
+            )
+        else:
+            logger.info(
+                "Hummingbot API: OFF — опционально deploy + HUMMINGBOT_API_* в .env",
+            )
         if getattr(s, "oil_news_enabled", False) and config.oil_news_chat_configured:
             logger.info(
                 "Oil chat=%s · news every %ss · digest every %.0fh · chart=%s",

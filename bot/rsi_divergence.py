@@ -189,7 +189,9 @@ def detect_rsi_divergences(
     closes = [float(b.close) for b in bars]
     highs = [float(b.high) for b in bars]
     lows = [float(b.low) for b in bars]
-    rsi = compute_rsi_wilder(closes, rsi_period)
+    from .analytics.talib_features import compute_rsi_series
+
+    rsi = compute_rsi_series(closes, rsi_period)
     rsi_sma = compute_sma(rsi, rsi_period)
     result.rsi = rsi
     result.rsi_sma = rsi_sma

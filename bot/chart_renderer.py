@@ -30,6 +30,7 @@ from .chart_pro_layers import (
 )
 from .manual_ta import (
     chart_display_hours,
+    intraday_chart_zoom_hours,
     manual_chart_zoom_hours,
     pattern_chart_hours,
     structure_aware_display_hours,
@@ -1327,6 +1328,8 @@ def _draw_essential_oil_overlays(
     ax: plt.Axes,
     bars: list[KlineBar],
     ta: TAAnalysisResult,
+    *,
+    compact: bool = False,
 ) -> None:
     """Лёгкий анализ нефти: PA/EMA/зоны/Fib/фигуры — без боковых панелей."""
     if not bars:
@@ -1340,26 +1343,29 @@ def _draw_essential_oil_overlays(
         logger.debug("oil PA overlays skipped", exc_info=True)
 
     # FVG / SMC кратко
-    try:
-        smc = getattr(ta, "smc", None)
-        if smc is not None:
-            _draw_smc_annotations(ax, bars, ta)
-    except Exception:
-        logger.debug("oil SMC overlays skipped", exc_info=True)
+    if not compact:
+        try:
+            smc = getattr(ta, "smc", None)
+            if smc is not None:
+                _draw_smc_annotations(ax, bars, ta)
+        except Exception:
+            logger.debug("oil SMC overlays skipped", exc_info=True)
 
     # Зоны поддержки/сопротивления + buy/sell flat
-    try:
-        draw_buy_flat_sell_zones(ax, bars, ta)
-    except Exception:
-        logger.debug("buy/flat/sell zones skipped", exc_info=True)
+    if not compact:
+        try:
+            draw_buy_flat_sell_zones(ax, bars, ta)
+        except Exception:
+            logger.debug("buy/flat/sell zones skipped", exc_info=True)
     try:
         _draw_zones(ax, bars, ta)
     except Exception:
         logger.debug("zones skipped", exc_info=True)
-    try:
-        _draw_channel(ax, bars, ta)
-    except Exception:
-        logger.debug("channel skipped", exc_info=True)
+    if not compact:
+        try:
+            _draw_channel(ax, bars, ta)
+        except Exception:
+            logger.debug("channel skipped", exc_info=True)
 
     if ta.breakout_level:
         ax.axhline(
@@ -1375,7 +1381,8 @@ def _draw_essential_oil_overlays(
             linestyle="-", linewidth=0.9, alpha=0.8,
         )
 
-    for lv in (ta.levels or [])[:3]:
+    level_cap = 2 if compact else 3
+    for lv in (ta.levels or [])[:level_cap]:
         color = (
             CHART_STYLE["level_support"]
             if getattr(lv, "kind", "") == "support"
@@ -1383,10 +1390,13 @@ def _draw_essential_oil_overlays(
         )
         ax.axhline(lv.price, color=color, linestyle="-", linewidth=0.85, alpha=0.6)
 
-    # Ключевые Fib — 38.2 / 50 / 61.8
+    # Ключевые Fib — 38.2 / 50 / 61.8 (compact: только 0.618)
     for fl in getattr(ta, "fib_levels", None) or []:
         ratio = float(getattr(fl, "ratio", 0) or 0)
-        if abs(ratio - 0.382) > 0.01 and abs(ratio - 0.5) > 0.01 and abs(ratio - 0.618) > 0.01:
+        if compact:
+            if abs(ratio - 0.618) > 0.01:
+                continue
+        elif abs(ratio - 0.382) > 0.01 and abs(ratio - 0.5) > 0.01 and abs(ratio - 0.618) > 0.01:
             continue
         ax.axhline(
             float(fl.price),
@@ -2540,7 +2550,15 @@ def _render_chart_figure(
 
     ax.set_facecolor(CHART_STYLE["bg"])
     _draw_candles(ax, bars, interval_minutes=interval_minutes, crisp=wide)
-    if manual_ta_chart or signal_chart:
+    from .chart_display_policy import (
+        ed_manual_ta_pa_chart_enabled,
+        ed_signal_chart_pa_analysis_enabled,
+    )
+
+    signal_pa_layers = (
+        signal_chart and ed_signal_chart_pa_analysis_enabled() and not manual_ta_chart
+    ) or (manual_ta_chart and ed_manual_ta_pa_chart_enabled())
+    if (manual_ta_chart or signal_chart) and not signal_pa_layers:
         try:
             from .chart_story_router import enrich_ta_for_chart_story
 
@@ -2548,7 +2566,7 @@ def _render_chart_figure(
         except Exception:
             logger.debug("Chart story enrich skipped", exc_info=True)
     pro_mode_chart: str | None = None
-    if manual_ta_chart or signal_chart:
+    if manual_ta_chart or (signal_chart and not signal_pa_layers):
         try:
             from .chart_pro import resolve_pro_chart_mode, signal_chart_legacy_enabled
 
@@ -2560,14 +2578,25 @@ def _render_chart_figure(
             )
         except Exception:
             pro_mode_chart = "observation"
-    story_minimal = pro_mode_chart is not None and pro_mode_chart != "legacy_manual"
-    if story_minimal:
-        pass
+    story_minimal = (
+        not signal_pa_layers
+        and pro_mode_chart is not None
+        and pro_mode_chart != "legacy_manual"
+    )
+    if signal_pa_layers:
+        try:
+            from .chart_clean_sr import draw_clean_sr_chart
+
+            draw_clean_sr_chart(ax, bars, ta, interval_minutes=interval_minutes)
+        except Exception:
+            logger.debug("clean S/R chart failed", exc_info=True)
     elif clean_chart:
         try:
-            _draw_essential_oil_overlays(ax, bars, ta)
+            _draw_essential_oil_overlays(ax, bars, ta, compact=False)
         except Exception:
             logger.debug("Essential oil overlays failed", exc_info=True)
+    elif story_minimal:
+        pass
     else:
         _draw_clean_market_annotations(ax, bars, ta, signal_chart=signal_chart)
     if not manual_ta_chart and not signal_chart:
@@ -2585,7 +2614,11 @@ def _render_chart_figure(
     current = bars[-1].close
     from .chart_display_policy import ed_chart_visual_only, ed_playbook_v3_enabled
 
-    show_now = not story_minimal and not (ed_playbook_v3_enabled() and ed_chart_visual_only())
+    show_now = (
+        not signal_pa_layers
+        and not story_minimal
+        and not (ed_playbook_v3_enabled() and ed_chart_visual_only())
+    )
     if show_now:
         ax.axhline(current, color=accent_color, linestyle="--", linewidth=0.9, alpha=0.85)
         ax.text(
@@ -2594,14 +2627,16 @@ def _render_chart_figure(
         )
     ut_sfx = " · UT" if (ut_overlay is not None and not story_minimal) else ""
     pb_title = None
-    if pro_mode or manual_ta_chart or story_minimal:
+    zoom_h = display_hours if display_hours and display_hours > 0 else None
+    from .manual_ta import chart_display_hours
+
+    zh = int(zoom_h) if zoom_h else chart_display_hours(interval_minutes)
+    if signal_pa_layers:
+        pb_title = f"{symbol} · {interval_minutes}m · {zh}ч"
+    elif pro_mode or manual_ta_chart or story_minimal:
         try:
             from .chart_title_playbook import pro_chart_title
 
-            zoom_h = display_hours if display_hours and display_hours > 0 else None
-            from .manual_ta import chart_display_hours
-
-            zh = int(zoom_h) if zoom_h else chart_display_hours(interval_minutes)
             pb_title = pro_chart_title(
                 symbol,
                 ta,
@@ -2656,7 +2691,7 @@ def _render_chart_figure(
         set_ylim=True,
     )
     label_board = None
-    if pro_mode_chart:
+    if pro_mode_chart and not signal_pa_layers:
         try:
             from .chart_pro import draw_pro_layers, finalize_pro_viewport
 
@@ -3490,7 +3525,7 @@ async def render_annotated_chart(
     ta_chart = ta
     iv_chart = interval_minutes
     ah_chart = analysis_hours
-    if ta and (manual_ta_chart or signal_chart):
+    if ta and manual_ta_chart:
         from .chart_setup_interval import (
             plan_search_intervals,
             setup_chart_analysis_hours,
@@ -3595,8 +3630,7 @@ async def render_annotated_chart(
             logger.debug("Ed story deep history fetch skipped", exc_info=True)
 
     if manual_ta_chart or signal_chart:
-        from .chart_ed_story import ed_story_chart_zoom_hours, use_ed_story_chart
-        from .chart_range_wait import range_wait_chart_zoom_hours, use_range_wait_chart
+        from .chart_display_policy import ed_manual_chart_full_history_enabled
 
         if ta_chart is not None:
             try:
@@ -3609,39 +3643,53 @@ async def render_annotated_chart(
             except Exception:
                 logger.debug("Playbook chart warm-up skipped", exc_info=True)
 
-        from .core.playbook.chart_spec import (
-            ed_story_zoom_hours_with_playbook,
-            range_wait_zoom_hours_with_playbook,
-            resolve_chart_zoom_hours,
-        )
-
-        if ta_chart and use_ed_story_chart(ta_chart):
-            zoom_hours = ed_story_zoom_hours_with_playbook(
-                ta_chart,
-                bars_chart,
-                symbol=symbol or "",
-                interval_minutes=iv_chart,
+        use_intraday_zoom = signal_chart or not ed_manual_chart_full_history_enabled()
+        if use_intraday_zoom:
+            dd = float(getattr(ta_chart, "drawdown_from_high_pct", 0) or 0) if ta_chart else 0.0
+            cfg = display_hours if display_hours and int(display_hours) > 0 else None
+            zoom_hours = intraday_chart_zoom_hours(
+                iv_chart,
                 analysis_hours=ah_chart,
-                configured=display_hours,
-            )
-        elif ta_chart and use_range_wait_chart(ta_chart):
-            zoom_hours = range_wait_zoom_hours_with_playbook(
-                ta_chart,
-                bars_chart,
-                symbol=symbol or "",
-                interval_minutes=iv_chart,
-                analysis_hours=ah_chart,
-                configured=display_hours,
+                configured=int(cfg) if cfg else None,
+                drawdown_pct=dd,
+                bar_count=len(bars_chart or []),
             )
         else:
-            zoom_hours = resolve_chart_zoom_hours(
-                ta_chart,
-                bars_chart,
-                symbol=symbol or "",
-                interval_minutes=iv_chart,
-                analysis_hours=ah_chart,
-                configured=display_hours,
+            from .chart_ed_story import use_ed_story_chart
+            from .chart_range_wait import use_range_wait_chart
+            from .core.playbook.chart_spec import (
+                ed_story_zoom_hours_with_playbook,
+                range_wait_zoom_hours_with_playbook,
+                resolve_chart_zoom_hours,
             )
+
+            if ta_chart and use_ed_story_chart(ta_chart):
+                zoom_hours = ed_story_zoom_hours_with_playbook(
+                    ta_chart,
+                    bars_chart,
+                    symbol=symbol or "",
+                    interval_minutes=iv_chart,
+                    analysis_hours=ah_chart,
+                    configured=display_hours,
+                )
+            elif ta_chart and use_range_wait_chart(ta_chart):
+                zoom_hours = range_wait_zoom_hours_with_playbook(
+                    ta_chart,
+                    bars_chart,
+                    symbol=symbol or "",
+                    interval_minutes=iv_chart,
+                    analysis_hours=ah_chart,
+                    configured=display_hours,
+                )
+            else:
+                zoom_hours = resolve_chart_zoom_hours(
+                    ta_chart,
+                    bars_chart,
+                    symbol=symbol or "",
+                    interval_minutes=iv_chart,
+                    analysis_hours=ah_chart,
+                    configured=display_hours,
+                )
     else:
         zoom_hours = structure_aware_display_hours(
             interval_minutes=interval_minutes,
@@ -3704,7 +3752,12 @@ async def render_annotated_chart(
             logger.warning("TradingView chart failed for %s — matplotlib fallback", symbol, exc_info=True)
 
     accent = CHART_STYLE["accent_long"] if is_long else CHART_STYLE["accent_short"]
-    pro_mode = False if (manual_ta_chart or signal_chart) else chart_source == "annotated_pro"
+    if manual_ta_chart or signal_chart:
+        pro_mode = True
+    else:
+        pro_mode = chart_source == "annotated_pro"
+    if signal_chart and (height_scale is None or float(height_scale or 0) < 1.25):
+        height_scale = max(1.35, float(height_scale or 1.0))
     title = f"Bybit {iv_chart}m · вид {zoom_hours}ч"
     if ah_chart > zoom_hours:
         title = f"{title} (история {ah_chart}ч)"
@@ -3760,28 +3813,15 @@ def render_oil_chart(
         else CHART_STYLE["warning"]
     )
     # Intraday: чуть отдалить — 15m ≈ 18–20ч, 5m ≈ 10ч (не «слипшиеся» и не микроскоп).
-    oil_defaults = {5: 10, 10: 12, 15: 18, 30: 28, 60: 48}
     im = max(5, min(60, int(interval_minutes)))
-    configured = int(display_hours) if display_hours and int(display_hours) > 0 else None
-    # Старый дефолт 168 / слишком широкий зум — в авто
-    if configured is not None and configured >= 72:
-        configured = None
-    # Старый слишком близкий зум 6ч на 15m — поднимаем
-    if configured is not None and im >= 15 and configured < 14:
-        configured = None
-    base = oil_defaults.get(im, 18 if im <= 15 else 36)
-    if configured is not None:
-        base = max(8, min(configured, 36 if im <= 15 else 72))
-    analysis_h = max(base, int(len(bars) * im / 60))
     drawdown = float(getattr(ta, "drawdown_from_high_pct", 0.0) or 0.0)
-    zoom = structure_aware_display_hours(
-        interval_minutes=im,
-        analysis_hours=min(analysis_h, 72 if im <= 15 else 120),
-        configured=base,
+    zoom = intraday_chart_zoom_hours(
+        im,
+        analysis_hours=min(int(len(bars) * im / 60), 72 if im <= 15 else 120),
+        configured=int(display_hours) if display_hours and int(display_hours) > 0 else None,
         drawdown_pct=drawdown,
+        bar_count=len(bars),
     )
-    max_zoom = {5: 14, 10: 16, 15: 28, 30: 40, 60: 72}.get(im, 24)
-    zoom = max(8, min(int(zoom), max_zoom))
     title = f"OIL · {symbol_label} · {im}m · {zoom}ч"
 
     ut_overlay = None

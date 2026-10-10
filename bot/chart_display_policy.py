@@ -133,6 +133,16 @@ def ed_chart_visual_only() -> bool:
     return _env_on("ED_CHART_VISUAL_ONLY", default="1")
 
 
+def ed_signal_chart_pa_analysis_enabled() -> bool:
+    """Сигналы: PA/EMA/уровни как на нефтяном PNG (не trader+evidence canvas)."""
+    return _env_on("ED_SIGNAL_CHART_PA", default="1")
+
+
+def ed_manual_ta_pa_chart_enabled() -> bool:
+    """Ручной /ta и Ed→анализ: тот же PA-слой, что у сигналов (без trader canvas)."""
+    return _env_on("ED_MANUAL_TA_PA", default="1")
+
+
 def chart_teaching_tags_enabled() -> bool:
     """Короткие метки на PNG: R↑/R↓, TP/IN/SL, паттерн."""
     return _env_on("ED_CHART_TEACHING_TAGS", default="1")
