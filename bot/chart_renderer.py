@@ -2632,7 +2632,8 @@ def _render_chart_figure(
 
     zh = int(zoom_h) if zoom_h else chart_display_hours(interval_minutes)
     if signal_pa_layers:
-        pb_title = f"{symbol} · {interval_minutes}m · {zh}ч"
+        zh_cap = int(display_hours) if display_hours and int(display_hours) > 0 else zh
+        pb_title = f"{symbol} · {interval_minutes}m · {zh_cap}ч"
     elif pro_mode or manual_ta_chart or story_minimal:
         try:
             from .chart_title_playbook import pro_chart_title
@@ -3643,7 +3644,13 @@ async def render_annotated_chart(
             except Exception:
                 logger.debug("Playbook chart warm-up skipped", exc_info=True)
 
-        use_intraday_zoom = signal_chart or not ed_manual_chart_full_history_enabled()
+        from .chart_display_policy import ed_manual_ta_pa_chart_enabled
+
+        use_intraday_zoom = (
+            signal_chart
+            or not ed_manual_chart_full_history_enabled()
+            or (manual_ta_chart and ed_manual_ta_pa_chart_enabled())
+        )
         if use_intraday_zoom:
             dd = float(getattr(ta_chart, "drawdown_from_high_pct", 0) or 0) if ta_chart else 0.0
             cfg = display_hours if display_hours and int(display_hours) > 0 else None

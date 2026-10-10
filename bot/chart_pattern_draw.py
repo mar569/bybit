@@ -497,7 +497,24 @@ def draw_chart_patterns(
         )
     if primary is None:
         return
-    to_draw = [primary]
+    to_draw: list[ChartPattern] = [primary]
+    if max_patterns > 1:
+        seen_kinds = {getattr(primary, "kind", None)}
+        pool = sorted(
+            [p for p in patterns if p is not primary],
+            key=lambda p: float(getattr(p, "confidence", 0) or 0),
+            reverse=True,
+        )
+        for p in pool:
+            if len(to_draw) >= max_patterns:
+                break
+            if float(getattr(p, "confidence", 0) or 0) < min_confidence:
+                continue
+            kind = getattr(p, "kind", None)
+            if kind in seen_kinds:
+                continue
+            to_draw.append(p)
+            seen_kinds.add(kind)
     shown = 0
     for pattern in to_draw:
         style = PATTERN_STYLE.get(pattern.kind, {"color": "#ffa657", "fill_alpha": 0.08})

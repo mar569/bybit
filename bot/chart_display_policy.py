@@ -143,6 +143,15 @@ def ed_manual_ta_pa_chart_enabled() -> bool:
     return _env_on("ED_MANUAL_TA_PA", default="1")
 
 
+def signal_chart_max_patterns() -> int:
+    """Графические фигуры на PNG сигнала (разные kind, по confidence)."""
+    raw = os.environ.get("ED_SIGNAL_CHART_MAX_PATTERNS", "3").strip()
+    try:
+        return max(1, min(int(raw), 5))
+    except ValueError:
+        return 3
+
+
 def chart_teaching_tags_enabled() -> bool:
     """Короткие метки на PNG: R↑/R↓, TP/IN/SL, паттерн."""
     return _env_on("ED_CHART_TEACHING_TAGS", default="1")
